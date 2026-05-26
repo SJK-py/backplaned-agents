@@ -45,25 +45,19 @@ python -m bp_agents.load_acl          # apply the suite ACL (PUT /v1/admin/acl/r
 ### Production — everything in Docker
 
 ```bash
-cp deploy/.env.prod.example deploy/.env.prod    # fill PG / JWT / S3 secrets,
-                                                # GEMINI_API_KEY, SUITE_DB_PASSWORD,
-                                                # BOOTSTRAP_ADMIN_*, SUITE_TELEGRAM_BOT_TOKEN
-# One invitation token per agent — you SET them (no mint→paste round-trip):
-scripts/register-invitations.sh --gen >> deploy/.env.prod
+# 1. Generate deploy/.env.prod — prompts for the few things only you can
+#    provide (domain, admin email/password, GEMINI key, Telegram token) and
+#    random-generates the rest (DB password, JWT/session/metrics secrets,
+#    object-store keys, one invitation token per agent).
+scripts/init-prod-env.sh
 
-C="docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod"
-$C build
-$C up -d postgres redis rustfs                  # infra (creates bp_router + bp_suite)
-$C up migrate suite-migrate                     # one-shot: apply both schemas
-$C up -d router caddy                            # router behind the edge proxy
-
-# Register the pre-supplied tokens with the now-running router, then bring up
-# the agents — they onboard with the SAME tokens (AGENT_INVITATION_TOKEN).
-ROUTER_URL=https://your.domain scripts/register-invitations.sh deploy/.env.prod
-$C --profile search up -d                       # all agents (+ optional SearXNG)
+# 2. Up. Compose runs the schema migrations, then a one-shot `bootstrap`
+#    (registers the invitations + applies the suite ACL once the router is
+#    healthy), then every agent — in dependency order, one command.
+docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
 
-Then apply the suite ACL once (`python -m bp_agents.load_acl` with the admin creds + `ROUTER_URL` in its environment), message the bot, `/register`, and approve it as admin. Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
+Then message the bot on Telegram, send `/register`, and approve it as admin. Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
 ## License
 
