@@ -67,48 +67,51 @@ mint_invite() {
         | "$PYTHON_BIN" -c "import json,sys;print(json.load(sys.stdin)['invitation_token'])"
 }
 
-: "${ORCH_STATE_DIR:=/tmp/bp-suite/orchestrator}"
-: "${CHATBOT_STATE_DIR:=/tmp/bp-suite/chatbot}"
-mkdir -p "$ORCH_STATE_DIR" "$CHATBOT_STATE_DIR"
+# Agent roster: name:provisions_service_user. Only the chatbot owns the
+# service identity (registration submit + per-user mint); the rest are
+# plain agents.
+AGENTS=(
+    "orchestrator:false"
+    "chatbot:true"
+    "history_summarizer:false"
+    "memory:false"
+    "knowledge_base:false"
+    "md_converter:false"
+    "deep_reasoning:false"
+    "research:false"
+    "computer_use:false"
+    "sandbox:false"
+)
 
-ORCH_TOKEN=""
-CHATBOT_TOKEN=""
-if [[ ! -f "$ORCH_STATE_DIR/credentials.json" ]]; then
-    log "orchestrator: minting invitation"
-    ORCH_TOKEN=$(mint_invite "orch-$(date +%s)" false)
-    [[ -n "$ORCH_TOKEN" ]] || fail "orchestrator invitation mint returned empty"
-else
-    log "orchestrator: resuming from persisted creds"
-fi
-if [[ ! -f "$CHATBOT_STATE_DIR/credentials.json" ]]; then
-    log "chatbot: minting service-provisioning invitation"
-    CHATBOT_TOKEN=$(mint_invite "chatbot-$(date +%s)" true)
-    [[ -n "$CHATBOT_TOKEN" ]] || fail "chatbot invitation mint returned empty"
-else
-    log "chatbot: resuming from persisted creds"
-fi
-
+PIDS=()
 cleanup() {
     log "tearing down suite agents"
-    [[ -n "${ORCH_PID:-}" ]] && kill "$ORCH_PID" 2>/dev/null || true
-    [[ -n "${CHATBOT_PID:-}" ]] && kill "$CHATBOT_PID" 2>/dev/null || true
+    for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
 }
 trap cleanup EXIT INT TERM
 
-log "starting orchestrator (state=$ORCH_STATE_DIR)"
-AGENT_INVITATION_TOKEN="$ORCH_TOKEN" \
-    AGENT_ROUTER_URL="$WS_URL" \
-    AGENT_STATE_DIR="$ORCH_STATE_DIR" \
-    "$PYTHON_BIN" -m bp_agents.agents.orchestrator &
-ORCH_PID=$!
+for entry in "${AGENTS[@]}"; do
+    name="${entry%%:*}"
+    prov="${entry##*:}"
+    state="/tmp/bp-suite/$name"
+    mkdir -p "$state"
+    token=""
+    if [[ ! -f "$state/credentials.json" ]]; then
+        log "$name: minting invitation (provisions_service_user=$prov)"
+        token=$(mint_invite "$name-$(date +%s)" "$prov")
+        [[ -n "$token" ]] || fail "$name invitation mint returned empty"
+    else
+        log "$name: resuming from persisted creds"
+    fi
+    log "starting $name (state=$state)"
+    AGENT_INVITATION_TOKEN="$token" \
+        AGENT_ROUTER_URL="$WS_URL" \
+        AGENT_STATE_DIR="$state" \
+        "$PYTHON_BIN" -m "bp_agents.agents.$name" &
+    PIDS+=("$!")
+done
 
-log "starting chatbot (state=$CHATBOT_STATE_DIR)"
-AGENT_INVITATION_TOKEN="$CHATBOT_TOKEN" \
-    AGENT_ROUTER_URL="$WS_URL" \
-    AGENT_STATE_DIR="$CHATBOT_STATE_DIR" \
-    "$PYTHON_BIN" -m bp_agents.agents.chatbot &
-CHATBOT_PID=$!
-
-log "suite running (orchestrator=$ORCH_PID chatbot=$CHATBOT_PID). Ctrl-C to stop."
-log "message the bot on Telegram and send /register to begin (admin approves the registration)."
+log "suite running (${#PIDS[@]} agents). Ctrl-C to stop."
+log "First run only: apply the suite ACL with  python -m bp_agents.load_acl"
+log "Then message the bot on Telegram and send /register (an admin approves it)."
 wait

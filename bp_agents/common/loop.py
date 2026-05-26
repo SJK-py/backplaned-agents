@@ -21,7 +21,7 @@ from bp_agents.common.tools import LocalToolset, peer_tool_specs
 from bp_sdk import LlmCallError, Message, UpstreamError
 
 if TYPE_CHECKING:
-    from bp_sdk import LlmResponse, TaskContext, ToolCall
+    from bp_sdk import LlmResponse, TaskContext, ToolCall, ToolSpec
 
 
 async def _dispatch_tool_call(
@@ -66,6 +66,8 @@ async def run_llm_loop(
     max_tokens: int | None = None,
     max_rounds: int = 8,
     emit_progress: bool = True,
+    extra_tools: list[ToolSpec] | None = None,
+    terminal_tools: set[str] | None = None,
 ) -> LlmResponse:
     """Run the tool-calling loop until the model returns no tool calls
     (or `max_rounds` is reached). **Mutates `messages` in place** —
@@ -75,12 +77,21 @@ async def run_llm_loop(
     and reads `resp.usage` for accounting.
 
     Tools offered to the model = the ACL-filtered peer catalog (when
-    `use_peer_tools`) + `local_tools`. A downstream `LlmCallError` is
+    `use_peer_tools`) + `local_tools` + `extra_tools` (advertised-only
+    specs the loop never dispatches). A downstream `LlmCallError` is
     mapped to `UpstreamError` (status 502) at the boundary.
+
+    `terminal_tools` names tools that **end** the loop instead of being
+    dispatched: when the model calls one, the assistant turn is appended
+    and the response is returned immediately so the caller can act on the
+    call (delegation hand-off `hand_off`, delegate hand-back
+    `end_delegation`). The terminal tool's spec must be supplied via
+    `extra_tools` (or `local_tools`) for the model to see it.
     """
     peer_specs = peer_tool_specs(ctx) if use_peer_tools else []
     local_specs = local_tools.specs() if local_tools is not None else []
-    tools = peer_specs + local_specs
+    tools = peer_specs + local_specs + (extra_tools or [])
+    terminal = terminal_tools or set()
 
     resp: LlmResponse | None = None
     for round_idx in range(max_rounds):
@@ -102,6 +113,11 @@ async def run_llm_loop(
         # thought-signatures) before dispatching tools.
         messages.append(Message.assistant_from_response(resp))
         if not resp.tool_calls:
+            return resp
+
+        # A terminal tool ends the loop — the caller inspects
+        # `resp.tool_calls` and acts (e.g. delegation hand-off/back).
+        if any(tc.name in terminal for tc in resp.tool_calls):
             return resp
 
         for tc in resp.tool_calls:

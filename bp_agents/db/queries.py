@@ -187,6 +187,22 @@ async def demote_incumbent_through(
     return int(status.rsplit(" ", 1)[-1]) if status else 0
 
 
+async def demote_thread(
+    conn: asyncpg.Connection, *, session_id: str, agent_id: str
+) -> int:
+    """Flip `incumbent = false` on ALL of a thread's rows — used when a
+    delegation episode ends ([delegation.md] Phase 3): the orchestrator
+    retires the delegate's whole thread (incl. the `delegate_prompt`
+    seed) on hand-back."""
+    status = await conn.execute(
+        "UPDATE session_history SET incumbent = false "
+        "WHERE session_id = $1 AND agent_id = $2 AND incumbent = true",
+        session_id,
+        agent_id,
+    )
+    return int(status.rsplit(" ", 1)[-1]) if status else 0
+
+
 # ---------------------------------------------------------------------------
 # user_config
 # ---------------------------------------------------------------------------
