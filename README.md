@@ -116,6 +116,7 @@ Then message the bot on Telegram, send `/register`, and approve it as admin. Inv
 
 ## Learn more
 
+- [`.env.example`](./.env.example) — every configurable environment variable (router / agent SDK / suite), grouped with defaults.
 - [`docs/agent-suite/overview.md`](./docs/agent-suite/overview.md) — the suite's architecture and design.
 - [`docs/agent-suite/`](./docs/agent-suite/) — per-area design docs: [agents](./docs/agent-suite/agents.md), [delegation](./docs/agent-suite/delegation.md), [sessions](./docs/agent-suite/sessions.md), [memory](./docs/agent-suite/memory.md), [data model](./docs/agent-suite/data-model.md), [cron](./docs/agent-suite/cron.md), [channel](./docs/agent-suite/channel.md), [ACL](./docs/agent-suite/acl.md).
 - [`docs/overview.md`](./docs/overview.md) — the Backplaned platform.
