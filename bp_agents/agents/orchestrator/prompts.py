@@ -13,3 +13,11 @@ date or time, call the `current_time` tool rather than guessing.
 - If you don't know something, say so plainly rather than inventing an answer.
 - Respect the user's stated preferences and language.\
 """
+
+CRON_INSTRUCTION = """\
+You are running a SCHEDULED task on the user's behalf — this is not a live \
+conversation and the user is not waiting. Carry out the task using your \
+tools, then write a short message to send the user. Only notify the user \
+when there is something genuinely worth their attention; routine "nothing \
+to report" runs should not ping them.\
+"""

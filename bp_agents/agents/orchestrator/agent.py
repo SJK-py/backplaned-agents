@@ -14,10 +14,11 @@ own `assistant` turn.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
-from bp_agents.agents.orchestrator.prompts import GENERAL_INSTRUCTION
+from bp_agents.agents.orchestrator.prompts import CRON_INSTRUCTION, GENERAL_INSTRUCTION
 from bp_agents.common import (
     LocalToolset,
     compose_system_prompt,
@@ -284,6 +285,60 @@ async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     )
 
 
+_REPORT_DECISION = (
+    "You just ran a scheduled task and produced the message below. Decide "
+    "whether it is worth notifying the user right now. Return ONLY JSON: "
+    '{"report": true|false, "reason": "<short reason>"}.'
+)
+
+
+async def run_orchestrator_cron_message(
+    ctx: TaskContext,
+    payload: MessagePayload,
+    *,
+    pool: asyncpg.Pool,
+    settings: SuiteSettings,
+) -> AgentOutput:
+    """Scheduled run ([cron.md] §2): a FRESH context (cron instruction +
+    user-config, no session history), full toolset, never delegates.
+    Returns the message + a `{report, reason}` decision in metadata."""
+    async with pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
+    timezone = cfg.timezone if cfg else settings.default_timezone
+    system = compose_system_prompt(
+        CRON_INSTRUCTION, config_note=user_config_note(cfg) if cfg else "",
+    )
+    messages = [
+        Message(role="system", content=system),
+        Message(role="user", content=payload.prompt),
+    ]
+    # Full toolset, but NO hand_off — a cron never delegates ([cron.md] §2).
+    resp = await run_llm_loop(
+        ctx, messages=messages, preset=preset,
+        local_tools=LocalToolset([make_current_time_tool(timezone)]),
+    )
+
+    # Decide whether to report (the channel's apply step uses this for
+    # case_by_case jobs).
+    report, reason = True, ""
+    try:
+        decision = await ctx.llm.generate(
+            [
+                Message(role="system", content=_REPORT_DECISION),
+                Message(role="user", content=resp.text or "(no output)"),
+            ],
+            preset=(cfg.preset_lite if cfg else settings.default_preset_lite),
+        )
+        parsed = json.loads(decision.text.strip().removeprefix("```json").strip("`").strip())
+        report = bool(parsed.get("report", True))
+        reason = str(parsed.get("reason", ""))
+    except (json.JSONDecodeError, ValueError, KeyError, AttributeError):
+        logger.debug("cron_report_decision_parse_failed", exc_info=True)
+
+    return text_output(resp.text, report=report, reason=reason)
+
+
 @agent.handler(mode="subagent", tool=False)
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
@@ -296,6 +351,14 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
     assert _pool is not None
     return await run_orchestrator_end_delegation(
+        ctx, payload, pool=_pool, settings=_settings
+    )
+
+
+@agent.handler(mode="cron_message", tool=False)
+async def cron_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
+    assert _pool is not None
+    return await run_orchestrator_cron_message(
         ctx, payload, pool=_pool, settings=_settings
     )
 

@@ -73,3 +73,33 @@ class PlatformMappingRow(_Row):
     chat_id: str
     user_id: str
     created_at: datetime
+
+
+class CronJobRow(_Row):
+    """A scheduled job ([data-model.md] §1.4)."""
+
+    cron_id: str
+    user_id: str
+    session_id: str
+    cron_expression: str
+    timezone: str
+    report: str  # always | never | case_by_case
+    cron_message: str
+    status: str  # active | inactive
+    execute_until: datetime | None = None
+    created_at: datetime
+    last_executed_at: datetime | None = None
+
+
+class CronExecutionRow(_Row):
+    """A cron fire-log entry ([data-model.md] §1.5)."""
+
+    id: int
+    cron_id: str
+    user_id: str
+    session_id: str
+    fired_at: datetime
+    reported: bool
+    reason: str | None = None
+    message: str | None = None
+    error: str | None = None

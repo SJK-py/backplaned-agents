@@ -21,6 +21,7 @@ _RULES: list[tuple[str, str, str, str, str]] = [
     ("allow", "*", "channel/*", "l1/*", "user message → delegate"),
     ("allow", "*", "l0/*", "channel/*", "orchestrator → channel push"),
     ("allow", "*", "l1/*", "channel/*", "delegate → channel push"),
+    ("allow", "*", "channel/*", "channel/*", "channel self-dispatch (/cron mode)"),
     # Memory
     ("allow", "*", "*/assistant.*", "l3/memory.retrieval", "assistant recall"),
     ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add"),
