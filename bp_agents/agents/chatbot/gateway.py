@@ -67,6 +67,32 @@ _NO_SESSION = (
 )
 _DISPATCH_FAILED = "Sorry — something went wrong handling that. Please try again."
 
+# Verbose-mode rendering ([channel.md] §5). Directional emoji: outbound to a
+# tool, inbound from it; a thought balloon for the model's own reasoning.
+_FLOW_EMOJI = {"tool_call": "\N{OUTBOX TRAY}", "tool_result": "\N{INBOX TRAY}"}
+_THINKING_EMOJI = "\N{THOUGHT BALLOON}"
+
+
+def _render_progress(lp: dict) -> str:
+    """Format one `LoopProgress` payload into a friendly verbose-mode line.
+
+    - `thinking` heartbeat (no detail) → `💭 Thinking…`; with the model's
+      reasoning → `💭 <reasoning>`.
+    - `tool_call` / `tool_result` → `📤/📥 <tool> (<detail>)`, the `call_`
+      peer-tool prefix stripped for readability.
+    - anything else falls back to its detail or kind.
+    """
+    kind = lp.get("kind", "")
+    detail = lp.get("detail")
+    if kind == "thinking":
+        return f"{_THINKING_EMOJI} {detail}" if detail else f"{_THINKING_EMOJI} Thinking…"
+    if kind in _FLOW_EMOJI:
+        name = (lp.get("tool") or "").removeprefix("call_") or "tool"
+        head = f"{_FLOW_EMOJI[kind]} {name}"
+        return f"{head} ({detail})" if detail else head
+    return detail or kind or "…"
+
+
 
 class RootDispatcher(Protocol):
     """The slice of the SDK `Agent` the gateway needs — root-task
@@ -335,12 +361,7 @@ class ChatbotGateway:
             lp = (pf.metadata or {}).get(LOOP_PROGRESS_KEY)
             if not lp:
                 return
-            bits = [f"… {lp.get('kind', 'working')}"]
-            if lp.get("tool"):
-                bits.append(str(lp["tool"]))
-            if lp.get("detail"):
-                bits.append(f"— {lp['detail']}")
-            await self._telegram.send_message(chat_id=chat_id, text=" ".join(bits))
+            await self._telegram.send_message(chat_id=chat_id, text=_render_progress(lp))
         return _cb
 
     async def _dispatch_turn(
