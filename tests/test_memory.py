@@ -1,0 +1,132 @@
+"""memory agent — 4-phase add (NEW / UPDATE) + decay retrieve.
+
+Scripted stub LLM (`generate` returns queued JSON; `embed` keyword
+vectors) + a real MemoryStore on a tmp LanceDB. No router/provider.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+from bp_agents.agents.memory import (
+    MemAdd,
+    MemRetrieve,
+    run_memory_add,
+    run_memory_retrieve,
+)
+from bp_agents.lance import connect
+from bp_agents.lance.memory import MemoryStore
+from bp_agents.settings import SuiteSettings
+from bp_sdk import LlmResponse  # noqa: E402
+
+_DIM = 8
+
+
+def _kw_vec(text: str) -> list[float]:
+    v = [0.0] * _DIM
+    t = text.lower()
+    idx = 0 if "cat" in t else 1 if "dog" in t else 2 if "paris" in t else 3
+    v[idx] = 1.0
+    return v
+
+
+class _ScriptLlm:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.generate_calls = 0
+
+    async def generate(self, messages, **kw) -> LlmResponse:
+        self.generate_calls += 1
+        text = self._responses.pop(0) if self._responses else "{}"
+        return LlmResponse(text=text, tool_calls=[])
+
+    async def embed(self, texts, *, preset=None):
+        return [_kw_vec(t) for t in texts]
+
+
+class _Ctx:
+    def __init__(self, llm, user_id="usr_a") -> None:
+        self.llm = llm
+        self.user_id = user_id
+
+
+def _settings() -> SuiteSettings:
+    return SuiteSettings(embedding_dim=_DIM)
+
+
+def test_memory_add_new_fact(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        llm = _ScriptLlm([
+            '{"facts": [{"fact": "likes cats", "kind": "preference"}]}',
+            '{"action": "NEW", "related": []}',
+        ])
+        await run_memory_add(
+            _Ctx(llm), MemAdd(user_prompt="i love cats", assistant_response="noted"),
+            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+        )
+        facts = await store.all_facts()
+        assert [f["fact"] for f in facts] == ["likes cats"]
+
+    asyncio.run(_drive())
+
+
+def test_memory_add_updates_existing(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_u"), embedding_dim=_DIM)
+        f0 = await store.insert_fact(
+            fact="likes cats", kind="preference", embedding=_kw_vec("cats")
+        )
+        llm = _ScriptLlm([
+            '{"facts": [{"fact": "likes cats and dogs", "kind": "preference"}]}',
+            '{"action": "UPDATE", "fact_number": 1, "content": "likes cats and dogs"}',
+        ])
+        await run_memory_add(
+            _Ctx(llm, "usr_u"),
+            MemAdd(user_prompt="also dogs now", assistant_response="ok"),
+            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+        )
+        facts = await store.all_facts()
+        assert len(facts) == 1
+        assert facts[0]["uid"] == f0
+        assert facts[0]["fact"] == "likes cats and dogs"
+
+    asyncio.run(_drive())
+
+
+def test_memory_add_extracts_nothing(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_n"), embedding_dim=_DIM)
+        llm = _ScriptLlm(['{"facts": []}'])
+        await run_memory_add(
+            _Ctx(llm, "usr_n"),
+            MemAdd(user_prompt="hi", assistant_response="hello"),
+            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+        )
+        assert await store.all_facts() == []
+        assert llm.generate_calls == 1  # only the extract call
+
+    asyncio.run(_drive())
+
+
+def test_memory_retrieve_with_graph_expansion(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_r"), embedding_dim=_DIM)
+        f0 = await store.insert_fact(
+            fact="likes cats", kind="preference", embedding=_kw_vec("cats")
+        )
+        f1 = await store.insert_fact(
+            fact="lives in Paris", kind="personal_info", embedding=_kw_vec("paris")
+        )
+        await store.add_edge(f0, f1)
+
+        out = await run_memory_retrieve(
+            _Ctx(_ScriptLlm([]), "usr_r"),
+            MemRetrieve(query="cats", count=1, child_count=1),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        # Top hit (cats) + its graph neighbour (Paris) via expansion.
+        assert "likes cats" in out.content
+        assert "lives in Paris" in out.content
+
+    asyncio.run(_drive())

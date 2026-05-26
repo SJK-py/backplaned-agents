@@ -84,6 +84,19 @@ class SuiteSettings(BaseSettings):
     kb_overlap_len: int = Field(default=100, ge=0)
     """Markdown chunking bounds ([data-model.md] §2.1)."""
 
+    # ------------------------------------------------------------------
+    # memory fact-graph ([memory.md])
+    # ------------------------------------------------------------------
+
+    memory_retrieve_pool: int = Field(default=50, ge=1)
+    """Hybrid-search pool size before recency re-rank."""
+    memory_reconcile_candidates: int = Field(default=5, ge=1)
+    """Top-N similar facts enumerated to the reconcile LLM call."""
+    memory_decay_start_days: int = Field(default=30, ge=0)
+    memory_gc_horizon_days: int = Field(default=100, ge=1)
+    memory_decay_floor: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Recency-decay floor for a fact approaching the GC horizon."""
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]
