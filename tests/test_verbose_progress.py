@@ -81,9 +81,9 @@ def test_one_shot_verbose_renders_progress(suite_db_url: str) -> None:
             await gw.handle_update("tg1", "/v do the thing")
             sent = gw._telegram.sent
             assert any("Thinking" in s for s in sent)
-            # The `call_` peer-tool prefix is stripped and the inbound-flow
-            # emoji leads the tool_call line.
-            assert any("memory" in s and "\N{OUTBOX TRAY}" in s for s in sent)
+            # The `call_` peer-tool prefix is stripped and the [Tool] label
+            # leads the tool_call line.
+            assert any("memory" in s and "[Tool]" in s for s in sent)
             assert sent[-1] == "final answer"
         finally:
             await pool.close()
@@ -120,19 +120,23 @@ def test_verbose_default_renders_progress(suite_db_url: str) -> None:
 
 
 def test_render_progress_formats() -> None:
-    # thinking: heartbeat vs reasoning detail
-    assert _render_progress({"kind": "thinking"}) == "\N{THOUGHT BALLOON} Thinking…"
+    # thinking: heartbeat vs reasoning detail (parenthesized, ellipsis lead)
+    assert _render_progress({"kind": "thinking"}) == "Thinking…"
     assert _render_progress(
         {"kind": "thinking", "detail": "so I check the docs"}
-    ) == "\N{THOUGHT BALLOON} so I check the docs"
-    # tool_call / tool_result: directional emoji, call_ stripped, detail parens
+    ) == "(…so I check the docs)"
+    # an already-truncated detail (leading …) isn't double-ellipsised
+    assert _render_progress(
+        {"kind": "thinking", "detail": "…the tail of a long thought"}
+    ) == "(…the tail of a long thought)"
+    # tool_call / tool_result: [Tool]/[Result] labels, call_ stripped, parens
     assert _render_progress(
         {"kind": "tool_call", "tool": "call_knowledge_base", "detail": "looking it up"}
-    ) == "\N{OUTBOX TRAY} knowledge_base (looking it up)"
+    ) == "[Tool] knowledge_base (looking it up)"
     assert _render_progress(
         {"kind": "tool_result", "tool": "call_knowledge_base"}
-    ) == "\N{INBOX TRAY} knowledge_base"
+    ) == "[Result] knowledge_base"
     # a non-peer local tool keeps its name as-is
     assert _render_progress(
         {"kind": "tool_call", "tool": "current_time"}
-    ) == "\N{OUTBOX TRAY} current_time"
+    ) == "[Tool] current_time"
