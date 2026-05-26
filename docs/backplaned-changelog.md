@@ -20,6 +20,18 @@
 
 ## 2026-05-26
 
+### Changed — `bp_router/llm/presets.py`: `claude` alias → Sonnet
+
+- **What:** Repointed the bare `claude` seed preset from `claude-opus-4-7`
+  to **`claude-sonnet-4-6`**, and updated its description ("General-purpose
+  Claude (Sonnet). Open to all tiers."). The version-pinned `claude-opus*` /
+  `claude-sonnet*` / `claude-haiku*` aliases are unchanged.
+- **Why:** Make the catch-all `claude` alias resolve to the
+  general-purpose Sonnet tier rather than top-cost Opus.
+- **Shape:** **Data/seed change** (empty-table first-boot seed only).
+- **Verified:** `tests/test_llm_anthropic_adapter.py` alias-resolution
+  assertion updated (`claude` → sonnet); the rest unchanged.
+
 ### Changed — `bp_router/llm/presets.py`: Gemini default-preset lineup refresh
 
 - **What:** Reworked the **Gemini** entries in `default_presets()`:

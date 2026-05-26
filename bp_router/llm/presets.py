@@ -314,9 +314,9 @@ def default_presets() -> list[Preset]:
         Preset(
             name="claude",
             provider="anthropic",
-            concrete_model="claude-opus-4-7",
+            concrete_model="claude-sonnet-4-6",
             api_key_ref="env://ANTHROPIC_API_KEY",
-            description="Top-tier Claude. Restrict via min_user_level if costly.",
+            description="General-purpose Claude (Sonnet). Open to all tiers.",
         ),
         Preset(
             name="claude-opus",
