@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
 ORCHESTRATOR_AGENT_ID = "orchestrator"
+MEMORY_AGENT_ID = "memory"
 
 # Summarization tuning ([sessions.md] §3): fold the oldest ~70% of the
 # incumbent window once a thread crosses the soft limit, but only when
@@ -91,17 +92,21 @@ class ChatbotGateway:
         telegram: TelegramClient,
         credentials: ChannelCredentials | None = None,
         result_timeout_s: float = 180.0,
+        fire_memory: bool = False,
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
         self._telegram = telegram
         self._credentials = credentials
         self._result_timeout_s = result_timeout_s
+        self._fire_memory = fire_memory
         # Per-`session_id` FIFO serialization ([sessions.md] §4). In-memory
         # (single channel instance); Redis / session-affinity for multi-worker.
         self._session_locks: dict[str, asyncio.Lock] = {}
         # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
         self._current_task: dict[str, tuple[str, str]] = {}
+        # Detached fire-and-forget memory.add tasks (tracked for cleanup).
+        self._memory_tasks: set[asyncio.Task] = set()
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -303,6 +308,34 @@ class ChatbotGateway:
                 else None
             )
             await self._maybe_summarize(session_id, dest, context_tokens)
+
+        # memory.add is per-USER (not per-session) and a multi-LLM-call
+        # extraction, so it runs OUTSIDE the session lock, fire-and-forget
+        # ([overview.md] §2.2). Detached so the next turn isn't blocked.
+        if self._fire_memory and reply:
+            task = asyncio.create_task(
+                self._fire_memory_add(user_id, session_id, text, reply)
+            )
+            self._memory_tasks.add(task)
+            task.add_done_callback(self._memory_tasks.discard)
+
+    async def _fire_memory_add(
+        self, user_id: str, session_id: str, user_prompt: str, reply: str
+    ) -> None:
+        """Spawn `memory.add` for the turn (fire-and-forget — the result
+        is ignored). Best-effort: a memory failure never affects the user."""
+        from bp_agents.common.payloads import MemAdd  # noqa: PLC0415
+
+        try:
+            await self._dispatcher.spawn_root_for_user(
+                MEMORY_AGENT_ID,
+                MemAdd(user_prompt=user_prompt, assistant_response=reply),
+                user_id=user_id, session_id=session_id, mode="add",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "memory_add_failed", extra={"event": "memory_add_failed"}
+            )
 
     async def _maybe_summarize(
         self, session_id: str, agent_id: str, context_tokens: int | None

@@ -23,9 +23,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel
-
 from bp_agents.common import text_output
+from bp_agents.common.payloads import MemAdd, MemRetrieve
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
@@ -72,17 +71,6 @@ An anchor fact was just updated. Given its neighbor facts (numbered), decide \
 per neighbor. Return ONLY JSON: {"decisions": [{"action": "UPDATE|REMOVE|UNRELATE", \
 "fact_number": <int>, "contents": "<text, for UPDATE>"}]}.\
 """
-
-
-class MemAdd(BaseModel):
-    user_prompt: str
-    assistant_response: str
-
-
-class MemRetrieve(BaseModel):
-    query: str
-    count: int = 3
-    child_count: int = 2
 
 
 agent = Agent(
