@@ -9,7 +9,7 @@ restart doesn't reprocess the backlog.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -26,6 +26,8 @@ class Update:
     update_id: int
     chat_id: str
     text: str
+    # (telegram_file_id, filename) for an attached document/photo, if any.
+    attachments: list[tuple[str, str]] = field(default_factory=list)
 
 
 class TelegramClient(Protocol):
@@ -35,6 +37,12 @@ class TelegramClient(Protocol):
 
     async def send_message(self, *, chat_id: str, text: str) -> None: ...
 
+    async def download_file(self, file_id: str) -> bytes: ...
+
+    async def send_document(
+        self, *, chat_id: str, filename: str, data: bytes
+    ) -> None: ...
+
 
 class HttpTelegramClient:
     """Real Telegram Bot API client over httpx long-polling."""
@@ -42,7 +50,9 @@ class HttpTelegramClient:
     def __init__(
         self, token: str, *, base_url: str = "https://api.telegram.org"
     ) -> None:
-        self._base = f"{base_url.rstrip('/')}/bot{token}"
+        base = base_url.rstrip("/")
+        self._base = f"{base}/bot{token}"
+        self._file_base = f"{base}/file/bot{token}"
         # `getUpdates` long-polls up to `timeout_s`; give the HTTP read a
         # margin over that so the poll itself isn't cut short.
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
@@ -75,23 +85,56 @@ class HttpTelegramClient:
         )
         resp.raise_for_status()
 
+    async def download_file(self, file_id: str) -> bytes:
+        meta = await self._client.get(f"{self._base}/getFile", params={"file_id": file_id})
+        meta.raise_for_status()
+        file_path = meta.json()["result"]["file_path"]
+        blob = await self._client.get(f"{self._file_base}/{file_path}")
+        blob.raise_for_status()
+        return blob.content
+
+    async def send_document(
+        self, *, chat_id: str, filename: str, data: bytes
+    ) -> None:
+        resp = await self._client.post(
+            f"{self._base}/sendDocument",
+            data={"chat_id": chat_id},
+            files={"document": (filename, data)},
+        )
+        resp.raise_for_status()
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
 
 def _parse_update(raw: dict[str, Any]) -> Update | None:
-    """Extract a text message update; skip everything else (edited
-    messages, callbacks, channel posts, non-text messages)."""
+    """Extract a text/file message update; skip the rest (edited
+    messages, callbacks, channel posts)."""
     update_id = raw.get("update_id")
     message = raw.get("message")
     if update_id is None or not isinstance(message, dict):
         return None
-    text = message.get("text")
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
-    if text is None or chat_id is None:
+    if chat_id is None:
         return None
-    return Update(update_id=int(update_id), chat_id=str(chat_id), text=str(text))
+    text = message.get("text") or message.get("caption") or ""
+    attachments: list[tuple[str, str]] = []
+    doc = message.get("document")
+    if isinstance(doc, dict) and doc.get("file_id"):
+        attachments.append((doc["file_id"], doc.get("file_name") or doc["file_id"]))
+    photos = message.get("photo")
+    if isinstance(photos, list) and photos:
+        # Largest size is last.
+        biggest = photos[-1]
+        if biggest.get("file_id"):
+            attachments.append((biggest["file_id"], f"{biggest['file_id']}.jpg"))
+    if not text and not attachments:
+        return None
+    return Update(
+        update_id=int(update_id), chat_id=str(chat_id), text=str(text),
+        attachments=attachments,
+    )
 
 
 class FileOffsetStore:

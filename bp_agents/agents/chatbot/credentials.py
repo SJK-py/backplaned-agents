@@ -57,6 +57,17 @@ class ChannelCredentials(Protocol):
 
     async def cancel_task(self, *, user_id: str, task_id: str) -> None: ...
 
+    async def store_named_file(
+        self, *, user_id: str, session_id: str, filename: str, data: bytes,
+        mime_type: str | None = None,
+    ) -> str: ...
+
+    async def resolve_named_file(
+        self, *, user_id: str, session_id: str, name: str
+    ) -> str | None: ...
+
+    async def fetch_file(self, *, user_id: str, file_id: str) -> bytes: ...
+
 
 def _parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -211,4 +222,56 @@ class HttpChannelCredentials:
             headers={"Authorization": f"Bearer {token}"},
         )
         resp.raise_for_status()
+
+    # ------------------------------------------------------------------
+    # Named file store (session-authed; per-user token)
+    # ------------------------------------------------------------------
+
+    async def store_named_file(
+        self, *, user_id: str, session_id: str, filename: str, data: bytes,
+        mime_type: str | None = None,
+    ) -> str:
+        """Upload a blob to the session scope and bind it to `filename`.
+        Returns the ACTUAL saved name (post-dedup)."""
+        token = await self._user_token(user_id)
+        headers = {"Authorization": f"Bearer {token}"}
+        up = await self._client.post(
+            f"{self._http_url}/v1/files",
+            headers=headers,
+            params={"session_id": session_id},
+            files={"file": (filename, data, mime_type or "application/octet-stream")},
+        )
+        up.raise_for_status()
+        sha256 = up.json()["sha256"]
+        bind = await self._client.post(
+            f"{self._http_url}/v1/files/names",
+            headers=headers,
+            json={"name": filename, "sha256": sha256, "session_id": session_id},
+        )
+        bind.raise_for_status()
+        return bind.json()["saved_name"]
+
+    async def resolve_named_file(
+        self, *, user_id: str, session_id: str, name: str
+    ) -> str | None:
+        token = await self._user_token(user_id)
+        resp = await self._client.get(
+            f"{self._http_url}/v1/files/names/resolve",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"name": name, "session_id": session_id},
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()["file_id"]
+
+    async def fetch_file(self, *, user_id: str, file_id: str) -> bytes:
+        token = await self._user_token(user_id)
+        resp = await self._client.get(
+            f"{self._http_url}/v1/files/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.content
 

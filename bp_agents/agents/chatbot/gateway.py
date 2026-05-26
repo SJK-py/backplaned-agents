@@ -120,11 +120,18 @@ class ChatbotGateway:
             self._session_locks[session_id] = lock
         return lock
 
-    async def handle_update(self, chat_id: str, text: str) -> None:
-        """Entry point for one inbound text message."""
+    async def handle_update(
+        self,
+        chat_id: str,
+        text: str,
+        attachments: list[tuple[str, str]] | None = None,
+    ) -> None:
+        """Entry point for one inbound message (text and/or files)."""
         text = text.strip()
         if text.startswith("/"):
             await self._handle_command(chat_id, text)
+            return
+        if not text and not attachments:
             return
 
         async with self._pool.acquire() as conn:
@@ -143,7 +150,9 @@ class ChatbotGateway:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
 
-        await self._dispatch_turn(chat_id, user_id, session_id, text)
+        await self._dispatch_turn(
+            chat_id, user_id, session_id, text, attachments or []
+        )
 
     async def _handle_command(self, chat_id: str, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -278,14 +287,18 @@ class ChatbotGateway:
         await self._telegram.send_message(chat_id=chat_id, text="Stopped.")
 
     async def _dispatch_turn(
-        self, chat_id: str, user_id: str, session_id: str, text: str
+        self,
+        chat_id: str,
+        user_id: str,
+        session_id: str,
+        text: str,
+        attachments: list[tuple[str, str]] | None = None,
     ) -> None:
         """Serialize on the session, write the user turn, inject the task,
         await the result, and relay it."""
         async with self._session_lock(session_id):
             # Routing: the delegate during an active delegation, else the
-            # orchestrator. Phase 1 has no delegation, so `delegated_to`
-            # is always None and this resolves to the orchestrator.
+            # orchestrator.
             async with self._pool.acquire() as conn:
                 info = await queries.get_session_info(conn, session_id)
                 dest = (
@@ -298,20 +311,34 @@ class ChatbotGateway:
                     if info and info.delegated_to
                     else "message"
                 )
-                # The channel is the sole writer of user turns, written
-                # verbatim BEFORE dispatch so the agent's reload sees it.
-                await queries.append_history(
-                    conn,
-                    session_id=session_id,
-                    agent_id=dest,
-                    role="user",
-                    message=text,
+
+            # Inbound files: save to the session stash + record a (T,T)
+            # history row BEFORE dispatch so the agent discovers them
+            # ([channel.md] §7). agent_id = the dispatch target.
+            for tg_file_id, filename in attachments or []:
+                await self._save_inbound_file(
+                    user_id, session_id, dest, tg_file_id, filename
                 )
 
+            async with self._pool.acquire() as conn:
+                # The channel is the sole writer of user turns, written
+                # verbatim BEFORE dispatch so the agent's reload sees it.
+                # (Skip an empty turn for a file-only message — the file
+                # row above is the user input.)
+                if text:
+                    await queries.append_history(
+                        conn,
+                        session_id=session_id,
+                        agent_id=dest,
+                        role="user",
+                        message=text,
+                    )
+
+            prompt = text or "(the user sent a file — see the attached file.)"
             try:
                 task_id = await self._dispatcher.spawn_root_for_user(
                     dest,
-                    MessagePayload(prompt=text),
+                    MessagePayload(prompt=prompt),
                     user_id=user_id,
                     session_id=session_id,
                     mode=mode,
@@ -340,6 +367,12 @@ class ChatbotGateway:
             await self._telegram.send_message(
                 chat_id=chat_id, text=reply or "(no response)"
             )
+
+            # Outbound files: the agent returned file-store NAMES; resolve
+            # each + send the bytes ([channel.md] §7).
+            out_files = list(result.output.files) if result.output else []
+            for name in out_files:
+                await self._send_outbound_file(chat_id, user_id, session_id, name)
 
             # delegated_to maintenance via result-source observation
             # ([delegation.md] §2) — who produced the result vs who we
@@ -382,6 +415,53 @@ class ChatbotGateway:
         except Exception:  # noqa: BLE001
             logger.exception(
                 "memory_add_failed", extra={"event": "memory_add_failed"}
+            )
+
+    async def _save_inbound_file(
+        self, user_id: str, session_id: str, dest: str,
+        tg_file_id: str, filename: str,
+    ) -> None:
+        """Download a Telegram attachment → session stash → (T,T) history
+        row. Best-effort: a file failure never breaks the turn."""
+        if self._credentials is None:
+            return
+        try:
+            data = await self._telegram.download_file(tg_file_id)
+            saved = await self._credentials.store_named_file(
+                user_id=user_id, session_id=session_id, filename=filename, data=data,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "inbound_file_failed", extra={"event": "inbound_file_failed"}
+            )
+            return
+        async with self._pool.acquire() as conn:
+            await queries.append_history(
+                conn, session_id=session_id, agent_id=dest, role="user",
+                message=f"user-attached file saved as {saved}",
+                incumbent=True, hidden=True,
+            )
+
+    async def _send_outbound_file(
+        self, chat_id: str, user_id: str, session_id: str, name: str
+    ) -> None:
+        """Resolve a produced file-store name and send the bytes.
+        Best-effort."""
+        if self._credentials is None:
+            return
+        try:
+            file_id = await self._credentials.resolve_named_file(
+                user_id=user_id, session_id=session_id, name=name,
+            )
+            if file_id is None:
+                return
+            data = await self._credentials.fetch_file(user_id=user_id, file_id=file_id)
+            await self._telegram.send_document(
+                chat_id=chat_id, filename=name.rsplit("/", 1)[-1], data=data,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "outbound_file_failed", extra={"event": "outbound_file_failed"}
             )
 
     async def _update_delegation(self, session_id: str, dest: str, result) -> None:  # noqa: ANN001

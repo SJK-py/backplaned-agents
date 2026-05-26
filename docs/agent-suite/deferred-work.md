@@ -81,12 +81,14 @@
 
 ## Cron / channel file I/O (Phase 4)
 
-- **deferred — channel file I/O** ([channel.md] §7). Inbound (Telegram
-  upload → named store → `(T,T)` history row) and outbound (resolve
-  `result.output.files` names → fetch → send) are NOT wired yet — they
-  need the session-authed named-store HTTP client on
-  `HttpChannelCredentials` (`POST`/`GET /v1/files/names[/resolve]`). The
-  agent-side `ctx.files` path works; only the gateway boundary is missing.
+- **lean — inbound files are stored, not yet fed multimodally**
+  ([channel.md] §7). Inbound (Telegram upload → named store → `(T,T)`
+  history row) and outbound (resolve `result.output.files` → fetch →
+  send) are now wired via the credentials named-store client. *Remaining
+  refinement:* the orchestrator's `message` mode records the file row but
+  doesn't `llm_ref` an attached image/PDF into its own LLM call yet, so it
+  reasons about the file by name/reference rather than seeing its content
+  (cf. the gemini_agent example's `llm_ref` vision path).
 - **deferred — cron C4 fallback** (`chatbot/cron.py::_resolve_session`):
   when both the job's session and the user's default are closed, the
   scheduler should open a fresh session and move the default pointer; it
