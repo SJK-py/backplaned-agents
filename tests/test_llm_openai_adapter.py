@@ -845,8 +845,8 @@ def test_default_aliases_include_openai_family() -> None:
     assert _resolve("gpt-5-5") == ("openai", "gpt-5.5")
     assert _resolve("gpt-5") == ("openai", "gpt-5")
     assert _resolve("gpt-5-4-mini") == ("openai", "gpt-5.4-mini")
-    assert _resolve("gpt-4o") == ("openai", "gpt-4o")
-    assert _resolve("o4-mini") == ("openai", "o4-mini")
+    assert _resolve("gpt-5-4-nano") == ("openai", "gpt-5.4-nano")
+    assert _resolve("gpt-5-nano") == ("openai", "gpt-5-nano")
 
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1392,4 @@ def test_default_aliases_include_embedding_models() -> None:
     )
     assert _resolve("text-embedding-3-large") == (
         "openai-embeddings", "text-embedding-3-large",
-    )
-    assert _resolve("text-embedding-ada-002") == (
-        "openai-embeddings", "text-embedding-ada-002",
     )

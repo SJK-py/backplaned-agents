@@ -862,7 +862,9 @@ class AnthropicAdapter(ProviderAdapter):
     # embed / count_tokens
     # ------------------------------------------------------------------
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         # Anthropic doesn't ship a first-party embeddings API; their
         # docs recommend Voyage AI as the embeddings partner. Wire a
         # separate `voyage` provider if you need this.

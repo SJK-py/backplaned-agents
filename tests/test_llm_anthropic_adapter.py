@@ -533,7 +533,7 @@ def test_default_aliases_include_claude() -> None:
         b = svc._presets[alias]
         return b.provider, b.concrete_model
 
-    assert _resolve("claude") == ("anthropic", "claude-opus-4-7")
+    assert _resolve("claude") == ("anthropic", "claude-sonnet-4-6")
     assert _resolve("claude-opus") == ("anthropic", "claude-opus-4-7")
     assert _resolve("claude-opus-4-7") == ("anthropic", "claude-opus-4-7")
     assert _resolve("claude-sonnet") == ("anthropic", "claude-sonnet-4-6")

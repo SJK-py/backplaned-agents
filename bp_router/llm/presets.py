@@ -267,27 +267,29 @@ def default_presets() -> list[Preset]:
         Preset(
             name="default",
             provider="gemini",
-            concrete_model="gemini-2.5-flash",
+            concrete_model="gemini-3.5-flash",
             api_key_ref="env://GEMINI_API_KEY",
             description="Default fast Gemini model. Open to all tiers.",
+        ),
+        Preset(
+            name="default_embedding",
+            provider="gemini",
+            concrete_model="gemini-embedding-2",
+            api_key_ref="env://GEMINI_API_KEY",
+            description="Default embedding model (Gemini). Open to all tiers.",
+            default_provider_options={"output_dimensionality": 1536},
         ),
         # Preset NAMES use `-` instead of `.` because the
         # `llm_presets.name` CHECK constraint disallows `.`
         # (`^[a-z][a-z0-9_-]{0,63}$`). The `concrete_model`
         # field — which is the actual upstream model identifier
         # the provider SDK sees — keeps the dotted form
-        # (`gemini-2.5-pro` etc.) since that's what google-genai
+        # (`gemini-3.5-flash` etc.) since that's what google-genai
         # expects on the wire.
         Preset(
-            name="gemini-2-5",
+            name="gemini",
             provider="gemini",
-            concrete_model="gemini-2.5-pro",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-2-5-flash",
-            provider="gemini",
-            concrete_model="gemini-2.5-flash",
+            concrete_model="gemini-3.5-flash",
             api_key_ref="env://GEMINI_API_KEY",
         ),
         Preset(
@@ -297,24 +299,39 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://GEMINI_API_KEY",
         ),
         Preset(
-            name="gemini-3",
+            name="gemini-3-5-flash",
             provider="gemini",
-            concrete_model="gemini-3-flash-preview",
+            concrete_model="gemini-3.5-flash",
             api_key_ref="env://GEMINI_API_KEY",
         ),
         Preset(
-            name="gemini-3-flash",
+            name="gemini-3-1-flash-lite",
             provider="gemini",
-            concrete_model="gemini-3-flash-preview",
+            concrete_model="gemini-3.1-flash-lite",
             api_key_ref="env://GEMINI_API_KEY",
+        ),
+        Preset(
+            name="gemini-3-1-pro",
+            provider="gemini",
+            concrete_model="gemini-3.1-pro-preview",
+            api_key_ref="env://GEMINI_API_KEY",
+        ),
+        # Gemini embeddings ride the same provider adapter — its `embed()`
+        # uses `concrete_model`, so no separate embeddings provider is needed.
+        Preset(
+            name="gemini-embedding-2",
+            provider="gemini",
+            concrete_model="gemini-embedding-2",
+            api_key_ref="env://GEMINI_API_KEY",
+            default_provider_options={"output_dimensionality": 1536},
         ),
         # ----- Anthropic / Claude family -----
         Preset(
             name="claude",
             provider="anthropic",
-            concrete_model="claude-opus-4-7",
+            concrete_model="claude-sonnet-4-6",
             api_key_ref="env://ANTHROPIC_API_KEY",
-            description="Top-tier Claude. Restrict via min_user_level if costly.",
+            description="General-purpose Claude (Sonnet). Open to all tiers.",
         ),
         Preset(
             name="claude-opus",
@@ -393,6 +410,12 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://OPENAI_API_KEY",
         ),
         Preset(
+            name="gpt-5-4-nano",
+            provider="openai",
+            concrete_model="gpt-5.4-nano",
+            api_key_ref="env://OPENAI_API_KEY",
+        ),
+        Preset(
             name="gpt-5",
             provider="openai",
             concrete_model="gpt-5",
@@ -405,21 +428,15 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://OPENAI_API_KEY",
         ),
         Preset(
+            name="gpt-5-nano",
+            provider="openai",
+            concrete_model="gpt-5-nano",
+            api_key_ref="env://OPENAI_API_KEY",
+        ),
+        Preset(
             name="gpt-4-1",
             provider="openai",
             concrete_model="gpt-4.1",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-4o",
-            provider="openai",
-            concrete_model="gpt-4o",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="o4-mini",
-            provider="openai",
-            concrete_model="o4-mini",
             api_key_ref="env://OPENAI_API_KEY",
         ),
         # ----- OpenAI embeddings (separate adapter) -----
@@ -433,12 +450,6 @@ def default_presets() -> list[Preset]:
             name="text-embedding-3-large",
             provider="openai-embeddings",
             concrete_model="text-embedding-3-large",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="text-embedding-ada-002",
-            provider="openai-embeddings",
-            concrete_model="text-embedding-ada-002",
             api_key_ref="env://OPENAI_API_KEY",
         ),
     ]

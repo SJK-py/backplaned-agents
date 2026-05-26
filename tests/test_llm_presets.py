@@ -321,30 +321,26 @@ def test_user_level_cache_no_user_id_returns_none() -> None:
 
 
 def test_default_presets_cover_known_aliases() -> None:
-    """The built-in default seed must exactly match the previous
-    pre-preset alias map so legacy `model="..."` callers keep
-    working unchanged after this PR lands."""
+    """The built-in seed must carry the canonical aliases callers rely on.
+    Preset names use `-` instead of `.` (the `llm_presets.name` CHECK regex
+    `^[a-z][a-z0-9_-]{0,63}$` disallows `.`); `concrete_model` keeps the
+    dotted upstream form (upstream-bug #2)."""
     names = {p.name for p in default_presets()}
-    # Preset names use `-` instead of `.` because the
-    # `llm_presets.name` CHECK regex disallows `.`
-    # (`^[a-z][a-z0-9_-]{0,63}$`). `concrete_model` (the upstream
-    # provider model identifier) keeps the dotted form
-    # (upstream-bug #2).
     expected = {
         # Gemini
-        "default", "gemini-2-5", "gemini-2-5-flash", "gemini-2-5-pro",
-        "gemini-3", "gemini-3-flash",
+        "default", "default_embedding", "gemini", "gemini-2-5-pro",
+        "gemini-3-5-flash", "gemini-3-1-flash-lite", "gemini-3-1-pro",
+        "gemini-embedding-2",
         # Anthropic
         "claude", "claude-opus", "claude-opus-4-7",
         "claude-sonnet", "claude-sonnet-4-6",
         "claude-haiku", "claude-haiku-4-5",
         # OpenAI
         "openai", "gpt", "gpt-5-5", "gpt-5-5-pro",
-        "gpt-5-4", "gpt-5-4-mini", "gpt-5", "gpt-5-mini",
-        "gpt-4-1", "gpt-4o", "o4-mini",
+        "gpt-5-4", "gpt-5-4-mini", "gpt-5-4-nano", "gpt-5", "gpt-5-mini",
+        "gpt-5-nano", "gpt-4-1",
         # Embeddings
         "text-embedding-3-small", "text-embedding-3-large",
-        "text-embedding-ada-002",
     }
     missing = expected - names
     assert not missing, f"missing default presets: {missing}"

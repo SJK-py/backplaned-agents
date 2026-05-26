@@ -582,13 +582,18 @@ class LlmService:
         user_level: str | None = None,
     ) -> list[list[float]]:
         async def _attempt(p: Preset) -> tuple[ProviderAdapter, list[list[float]]]:
-            _, adapter, _ = self._resolve_one(
+            resolved, adapter, _ = self._resolve_one(
                 preset=p,
                 temperature=None,
                 max_tokens=None,
                 provider_options=None,
             )
-            return adapter, await adapter.embed(text)
+            # The preset's `default_provider_options` flow through (call-time
+            # None doesn't override) — embedding adapters read e.g.
+            # `output_dimensionality` / `dimensions` from here.
+            return adapter, await adapter.embed(
+                text, provider_options=resolved.provider_options
+            )
 
         _, _, vectors = await self._call_with_fallback(
             preset_name=preset,
