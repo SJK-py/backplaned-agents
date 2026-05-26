@@ -97,6 +97,27 @@ class SuiteSettings(BaseSettings):
     memory_decay_floor: float = Field(default=0.5, ge=0.0, le=1.0)
     """Recency-decay floor for a fact approaching the GC horizon."""
 
+    # ------------------------------------------------------------------
+    # sandbox (shared container, per-uid / per-user workspace)
+    # ------------------------------------------------------------------
+
+    sandbox_root: str = "/home"
+    """Root under which each user's workspace lives (`<root>/<user_id>`)."""
+    sandbox_bash_timeout_s: float = Field(default=120.0, gt=0.0)
+    sandbox_max_inline_output: int = Field(default=8000, ge=1)
+    """stdout above this many chars is saved to a file-store name instead
+    of inlined."""
+
+    # ------------------------------------------------------------------
+    # research web tools
+    # ------------------------------------------------------------------
+
+    searxng_url: str | None = None
+    """Brave-API-compatible search endpoint (e.g. a SearXNG instance).
+    When unset, web_search returns an unavailable notice."""
+    web_fetch_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
+    web_fetch_timeout_s: float = Field(default=150.0, gt=0.0)
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]
