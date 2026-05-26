@@ -10,6 +10,7 @@ is unit-testable without a network or a router.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -66,6 +67,7 @@ _NO_SESSION = (
     "administrator."
 )
 _DISPATCH_FAILED = "Sorry — something went wrong handling that. Please try again."
+_TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under that.
 
 # Verbose-mode rendering ([channel.md] §5).
 _KIND_LABEL = {"tool_call": "[Tool]", "tool_result": "[Result]"}
@@ -239,9 +241,10 @@ class ChatbotGateway:
                 dest, MessagePayload(prompt=prompt),
                 user_id=user_id, session_id=session_id, mode=mode,
             )
-            result = await self._dispatcher.await_root_result(
-                task_id, timeout_s=self._result_timeout_s
-            )
+            async with self._typing(chat_id):
+                result = await self._dispatcher.await_root_result(
+                    task_id, timeout_s=self._result_timeout_s
+                )
         except Exception:  # noqa: BLE001
             logger.exception("command_dispatch_failed",
                              extra={"event": "command_dispatch_failed", "cmd": mode})
@@ -366,6 +369,33 @@ class ChatbotGateway:
             await self._telegram.send_message(chat_id=chat_id, text=_render_progress(lp))
         return _cb
 
+    @contextlib.asynccontextmanager
+    async def _typing(self, chat_id: str):  # noqa: ANN202
+        """Keep Telegram's "typing…" indicator alive while a turn runs. The
+        status auto-clears after ~5s, so a background loop refreshes it.
+        Best-effort: a client without `send_chat_action`, or a transient
+        send error, simply shows no indicator and never breaks the turn."""
+        send = getattr(self._telegram, "send_chat_action", None)
+        if send is None:
+            yield
+            return
+
+        async def _keepalive() -> None:
+            while True:
+                try:
+                    await send(chat_id=chat_id, action="typing")
+                except Exception:  # noqa: BLE001
+                    pass
+                await asyncio.sleep(_TYPING_REFRESH_S)
+
+        task = asyncio.create_task(_keepalive())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async def _dispatch_turn(
         self,
         chat_id: str,
@@ -427,10 +457,11 @@ class ChatbotGateway:
                 )
                 # Record the in-flight task so /stop can cancel it.
                 self._current_task[chat_id] = (user_id, task_id)
-                result = await self._dispatcher.await_root_result(
-                    task_id, timeout_s=self._result_timeout_s,
-                    on_progress=self._progress_callback(chat_id) if verbose else None,
-                )
+                async with self._typing(chat_id):
+                    result = await self._dispatcher.await_root_result(
+                        task_id, timeout_s=self._result_timeout_s,
+                        on_progress=self._progress_callback(chat_id) if verbose else None,
+                    )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "dispatch_failed",

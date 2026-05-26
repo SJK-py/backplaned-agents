@@ -37,6 +37,8 @@ class TelegramClient(Protocol):
 
     async def send_message(self, *, chat_id: str, text: str) -> None: ...
 
+    async def send_chat_action(self, *, chat_id: str, action: str = "typing") -> None: ...
+
     async def download_file(self, file_id: str) -> bytes: ...
 
     async def send_document(
@@ -82,6 +84,15 @@ class HttpTelegramClient:
         resp = await self._client.post(
             f"{self._base}/sendMessage",
             json={"chat_id": chat_id, "text": text},
+        )
+        resp.raise_for_status()
+
+    async def send_chat_action(self, *, chat_id: str, action: str = "typing") -> None:
+        # Shows "typing…" in the chat; the status auto-clears after ~5s, so
+        # the gateway refreshes it while a turn is in flight.
+        resp = await self._client.post(
+            f"{self._base}/sendChatAction",
+            json={"chat_id": chat_id, "action": action},
         )
         resp.raise_for_status()
 

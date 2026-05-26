@@ -140,3 +140,40 @@ def test_render_progress_formats() -> None:
     assert _render_progress(
         {"kind": "tool_call", "tool": "current_time"}
     ) == "[Tool] current_time"
+
+
+def test_typing_indicator_sent_during_turn(suite_db_url: str) -> None:
+    """The gateway keeps Telegram's "typing…" action alive while a turn runs."""
+    class _TgTyping(_FakeTelegram):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actions: list[str] = []
+
+        async def send_chat_action(self, *, chat_id, action="typing") -> None:
+            self.actions.append(action)
+
+    class _SlowDispatcher:
+        async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+            return "t"
+
+        async def await_root_result(self, task_id, *, timeout_s=None, on_progress=None, **kw):
+            await asyncio.sleep(0.05)  # let the typing keepalive fire once
+            return ResultFrame(
+                agent_id="orchestrator", trace_id="0" * 32, span_id="0" * 16,
+                task_id="t", status=TaskStatus.SUCCEEDED, status_code=200,
+                output=AgentOutput(content="done"),
+            )
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool, verbose_default=False)
+            tg = _TgTyping()
+            gw = ChatbotGateway(dispatcher=_SlowDispatcher(), pool=pool, telegram=tg)
+            await gw.handle_update("tg1", "hello")
+            assert "typing" in tg.actions       # indicator was sent
+            assert tg.sent[-1] == "done"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
