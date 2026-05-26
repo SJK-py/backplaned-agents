@@ -13,6 +13,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
+from bp_agents.agents.chatbot.credentials import ChannelCredentials
 from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
@@ -29,12 +30,21 @@ ORCHESTRATOR_AGENT_ID = "orchestrator"
 HELP_TEXT = (
     "I'm your personal assistant. Just send me a message and I'll help.\n\n"
     "Commands:\n"
+    "/register [email] — request access (an admin approves it)\n"
+    "/new — start a fresh conversation\n"
+    "/stop — stop the current in-progress reply\n"
     "/help — show this message"
 )
 REGISTER_PROMPT = (
-    "You're not registered yet. Registration isn't available on this "
-    "channel yet — please check back soon."
+    "You're not registered yet. Send /register (optionally with your "
+    "email) to request access; an administrator will review it."
 )
+_REGISTER_SUBMITTED = (
+    "Thanks — your registration request was submitted. An administrator "
+    "will review it, and I'll be ready once you're approved."
+)
+_ALREADY_REGISTERED = "You're already registered. Just send me a message!"
+_UNAVAILABLE = "That command isn't available right now."
 _NO_SESSION = (
     "Your account has no active conversation yet. Please contact an "
     "administrator."
@@ -72,15 +82,19 @@ class ChatbotGateway:
         dispatcher: RootDispatcher,
         pool: asyncpg.Pool,
         telegram: TelegramClient,
+        credentials: ChannelCredentials | None = None,
         result_timeout_s: float = 180.0,
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
         self._telegram = telegram
+        self._credentials = credentials
         self._result_timeout_s = result_timeout_s
         # Per-`session_id` FIFO serialization ([sessions.md] §4). In-memory
         # (single channel instance); Redis / session-affinity for multi-worker.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
+        self._current_task: dict[str, tuple[str, str]] = {}
 
     def _session_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_locks.get(session_id)
@@ -115,14 +129,99 @@ class ChatbotGateway:
         await self._dispatch_turn(chat_id, user_id, session_id, text)
 
     async def _handle_command(self, chat_id: str, text: str) -> None:
-        cmd = text.split(maxsplit=1)[0].lower()
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
         if cmd in ("/help", "/start"):
             await self._telegram.send_message(chat_id=chat_id, text=HELP_TEXT)
+        elif cmd == "/register":
+            await self._cmd_register(chat_id, arg)
+        elif cmd == "/new":
+            await self._cmd_new(chat_id)
+        elif cmd == "/stop":
+            await self._cmd_stop(chat_id)
+        else:
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="That command isn't supported. Try /help.",
+            )
+
+    async def _resolve_user(self, chat_id: str) -> str | None:
+        async with self._pool.acquire() as conn:
+            return await queries.resolve_user_id(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+
+    async def _cmd_register(self, chat_id: str, email_arg: str) -> None:
+        if await self._resolve_user(chat_id) is not None:
+            await self._telegram.send_message(
+                chat_id=chat_id, text=_ALREADY_REGISTERED
+            )
+            return
+        if self._credentials is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
+            return
+        try:
+            await self._credentials.submit_registration(
+                channel=CHANNEL,
+                external_id=chat_id,
+                requested_email=email_arg or None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "registration_submit_failed",
+                extra={"event": "registration_submit_failed"},
+            )
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Couldn't submit your registration. Please try again.",
+            )
             return
         await self._telegram.send_message(
-            chat_id=chat_id,
-            text="That command isn't supported yet. Try /help.",
+            chat_id=chat_id, text=_REGISTER_SUBMITTED
         )
+
+    async def _cmd_new(self, chat_id: str) -> None:
+        user_id = await self._resolve_user(chat_id)
+        if user_id is None:
+            await self._telegram.send_message(
+                chat_id=chat_id, text=REGISTER_PROMPT
+            )
+            return
+        if self._credentials is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
+            return
+        new_session = await self._credentials.open_session(
+            user_id=user_id,
+            metadata={"kind": CHANNEL, "external_id": chat_id},
+        )
+        async with self._pool.acquire() as conn:
+            await queries.create_session_info(
+                conn, session_id=new_session, user_id=user_id,
+                channel=CHANNEL, chat_id=chat_id,
+            )
+            await queries.set_default_session_id(
+                conn, user_id=user_id, session_id=new_session
+            )
+        await self._telegram.send_message(
+            chat_id=chat_id, text="Started a new conversation."
+        )
+
+    async def _cmd_stop(self, chat_id: str) -> None:
+        current = self._current_task.get(chat_id)
+        if current is None or self._credentials is None:
+            await self._telegram.send_message(
+                chat_id=chat_id, text="Nothing is running right now."
+            )
+            return
+        user_id, task_id = current
+        try:
+            await self._credentials.cancel_task(user_id=user_id, task_id=task_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "cancel_failed", extra={"event": "cancel_failed"}
+            )
+        await self._telegram.send_message(chat_id=chat_id, text="Stopped.")
 
     async def _dispatch_turn(
         self, chat_id: str, user_id: str, session_id: str, text: str
@@ -163,6 +262,8 @@ class ChatbotGateway:
                     session_id=session_id,
                     mode=mode,
                 )
+                # Record the in-flight task so /stop can cancel it.
+                self._current_task[chat_id] = (user_id, task_id)
                 result = await self._dispatcher.await_root_result(
                     task_id, timeout_s=self._result_timeout_s
                 )
@@ -178,6 +279,8 @@ class ChatbotGateway:
                     chat_id=chat_id, text=_DISPATCH_FAILED
                 )
                 return
+            finally:
+                self._current_task.pop(chat_id, None)
 
             reply = (result.output.content if result.output else "") or ""
             await self._telegram.send_message(

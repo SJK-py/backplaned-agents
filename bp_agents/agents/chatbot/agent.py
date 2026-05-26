@@ -14,6 +14,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from bp_agents.agents.chatbot.approval import approval_poll_loop
+from bp_agents.agents.chatbot.credentials import HttpChannelCredentials
 from bp_agents.agents.chatbot.gateway import ChatbotGateway
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
@@ -53,15 +55,39 @@ agent = Agent(
 _settings: SuiteSettings = load_suite_settings()
 _pool: asyncpg.Pool | None = None
 _telegram: HttpTelegramClient | None = None
+_credentials: HttpChannelCredentials | None = None
 _poll_task: asyncio.Task | None = None
+_approval_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
 _stop = asyncio.Event()
 
 
+def _http_url() -> str:
+    """Derive the router's HTTP base from its WS url (for the channel's
+    control-plane client)."""
+    url = agent.config.router_url
+    if url.startswith("wss://"):
+        return "https://" + url[len("wss://") :].split("/v1/")[0]
+    if url.startswith("ws://"):
+        return "http://" + url[len("ws://") :].split("/v1/")[0]
+    return url
+
+
 @agent.on_startup
 async def _startup() -> None:
-    global _pool, _telegram, _poll_task  # noqa: PLW0603 — startup-wired handles
+    global _pool, _telegram, _credentials, _poll_task, _approval_task  # noqa: PLW0603
     _pool = await open_pool(_settings)
+
+    # Control-plane client (registration submit, serviced-session
+    # discovery, per-user session/cancel). Available whenever the
+    # service principal was provisioned at onboarding.
+    if agent.config.service_refresh_token:
+        _credentials = HttpChannelCredentials(
+            http_url=_http_url(), config=agent.config
+        )
+        _approval_task = asyncio.create_task(
+            approval_poll_loop(credentials=_credentials, pool=_pool, stop=_stop)
+        )
 
     if not _settings.telegram_bot_token:
         logger.warning(
@@ -77,6 +103,7 @@ async def _startup() -> None:
         dispatcher=agent,
         pool=_pool,
         telegram=_telegram,
+        credentials=_credentials,
         result_timeout_s=_settings.dispatch_result_timeout_s,
     )
     offset_store = FileOffsetStore(Path(agent.config.state_dir) / "telegram_offset")
@@ -86,12 +113,15 @@ async def _startup() -> None:
 @agent.on_shutdown
 async def _shutdown() -> None:
     _stop.set()
-    if _poll_task is not None:
-        _poll_task.cancel()
+    for t in (_poll_task, _approval_task):
+        if t is not None:
+            t.cancel()
     for t in list(_inflight):
         t.cancel()
     if _telegram is not None:
         await _telegram.aclose()
+    if _credentials is not None:
+        await _credentials.aclose()
     if _pool is not None:
         await _pool.close()
 
