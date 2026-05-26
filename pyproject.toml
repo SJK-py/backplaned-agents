@@ -72,6 +72,8 @@ suite = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     "sqlalchemy[asyncio]>=2.0",
+    # Per-user vector store for the knowledge base + memory fact graph.
+    "lancedb>=0.30",
 ]
 
 # Test + dev tooling.
