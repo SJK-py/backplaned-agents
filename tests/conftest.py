@@ -120,6 +120,17 @@ def test_db_url() -> str:
     return url
 
 
+@pytest.fixture
+def suite_db_url() -> str:
+    """DSN for the agent suite's own Postgres (`bp_agents`). Assumes the
+    suite schema is applied (`alembic -c alembic_suite.ini upgrade head`);
+    suite tests truncate between runs rather than re-migrating."""
+    url = os.environ.get("SUITE_DATABASE_URL")
+    if not url:
+        pytest.skip("SUITE_DATABASE_URL not set; suite DB tests skipped")
+    return url
+
+
 # ---------------------------------------------------------------------------
 # LLM-test helpers (formerly duplicated across test_llm_presets*.py)
 # ---------------------------------------------------------------------------

@@ -47,7 +47,7 @@ Index `(session_id, agent_id, incumbent, created_at)` to serve the reload query 
 | `preset_lite` | text | summarizer / memory / knowledge |
 | `preset_embedding` | text | vector search (distinct from chat presets) |
 | `max_context_token_limit` | int | soft summarization trigger |
-| `verbose` | bool | |
+| `verbose_default` | bool | default verbose mode ([channel.md](./channel.md) §5); `verbose` is a reserved word in Postgres |
 | `language` | text | preference |
 | `sandbox_uid` | int | maps to the container uid / `/home/{user_id}` |
 | `default_session_id` | text null | cron fallback target ([cron.md](./cron.md)) |
