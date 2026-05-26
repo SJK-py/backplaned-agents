@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 from bp_agents.common import LocalTool
+from bp_agents.common.urlsafe import ensure_fetchable_url
 from bp_sdk import ToolSpec
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ async def _default_get_json(url: str, params: dict[str, Any], timeout: float) ->
 
 
 async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
+    await ensure_fetchable_url(url)
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
@@ -52,17 +54,25 @@ async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
 
 
 async def web_search(
-    query: str, *, settings: SuiteSettings, get_json: JsonGetter | None = None
+    query: str, *, settings: SuiteSettings, count: int = 5,
+    time_range: str | None = None, language: str | None = None,
+    get_json: JsonGetter | None = None,
 ) -> str:
     if not settings.searxng_url:
         return "Web search is not configured (no search backend set)."
+    count = min(max(count, 1), 10)
     get = get_json or _default_get_json
+    params: dict[str, Any] = {"q": query, "format": "json"}
+    if time_range:
+        params["time_range"] = time_range
+    if language:
+        params["language"] = language
     data = await get(
         f"{settings.searxng_url.rstrip('/')}/search",
-        {"q": query, "format": "json"},
+        params,
         settings.web_fetch_timeout_s,
     )
-    results = (data.get("results") or [])[:5]
+    results = (data.get("results") or [])[:count]
     if not results:
         return f"No results for {query!r}."
     return "\n\n".join(
@@ -101,7 +111,12 @@ async def web_download(
 
 def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
-        return await web_search(args["query"], settings=settings)
+        return await web_search(
+            args["query"], settings=settings,
+            count=int(args.get("count", 5)),
+            time_range=args.get("time_range"),
+            language=args.get("language"),
+        )
 
     async def _fetch(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await html_fetch(
@@ -120,7 +135,23 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
                 description="Search the web. Returns top results (title, url, snippet).",
                 parameters={
                     "type": "object",
-                    "properties": {"query": {"type": "string"}},
+                    "properties": {
+                        "query": {"type": "string"},
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of results (1-10, default 5).",
+                            "minimum": 1, "maximum": 10,
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "enum": ["day", "week", "month", "year"],
+                            "description": "Restrict results by recency.",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Result language code, e.g. 'en', 'ko'.",
+                        },
+                    },
                     "required": ["query"],
                 },
             ),

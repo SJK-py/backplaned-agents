@@ -9,7 +9,9 @@ MarkItDown is synchronous, so conversions run in `asyncio.to_thread`.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
+import re
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
@@ -18,6 +20,7 @@ import httpx
 from pydantic import BaseModel
 
 from bp_agents.common import text_output
+from bp_agents.common.urlsafe import ensure_fetchable_url
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
 
@@ -64,6 +67,33 @@ def _markitdown_bytes(data: bytes, suffix: str) -> str:
         return _markitdown_file(tmp.name)
 
 
+def _strip_tags(text: str) -> str:
+    text = re.sub(r"<script[\s\S]*?</script>", "", text, flags=re.I)
+    text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    return _html.unescape(text).strip()
+
+
+def _normalize(text: str) -> str:
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f﻿]", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _html_to_text(raw_html: str) -> str:
+    """Regex HTML→text fallback when MarkItDown can't parse a page —
+    preserves headers/lists/paragraph breaks so a bad page still yields
+    something usable instead of failing the fetch."""
+    text = re.sub(
+        r"<h([1-6])[^>]*>([\s\S]*?)</h\1>",
+        lambda m: f"\n{'#' * int(m[1])} {_strip_tags(m[2])}\n", raw_html, flags=re.I,
+    )
+    text = re.sub(r"<li[^>]*>([\s\S]*?)</li>", lambda m: f"\n- {_strip_tags(m[1])}", text, flags=re.I)
+    text = re.sub(r"</(p|div|section|article)>", "\n\n", text, flags=re.I)
+    text = re.sub(r"<(br|hr)\s*/?>", "\n", text, flags=re.I)
+    return _normalize(_strip_tags(text))
+
+
 async def run_convert(ctx: TaskContext, payload: Convert) -> AgentOutput:
     path = await ctx.files.read(payload.name)
     md = await asyncio.to_thread(_markitdown_file, str(path))
@@ -86,12 +116,20 @@ async def run_webpage(
     fetch: Callable[[str], Awaitable[bytes]] | None = None,
 ) -> AgentOutput:
     data = await (fetch(payload.url) if fetch else _default_fetch(payload.url))
-    md = await asyncio.to_thread(_markitdown_bytes, data, ".html")
+    try:
+        md = await asyncio.to_thread(_markitdown_bytes, data, ".html")
+    except Exception:  # noqa: BLE001 — one bad page must not break the fetch
+        logger.warning(
+            "markitdown_webpage_failed_fallback_regex",
+            extra={"event": "markitdown_webpage_failed", "url": payload.url},
+        )
+        md = _html_to_text(data.decode("utf-8", errors="replace"))
     truncate = min(max(payload.truncate, 0), _CONTENT_HARD_CAP)
     return text_output(md[:truncate])
 
 
 async def _default_fetch(url: str) -> bytes:
+    await ensure_fetchable_url(url)
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
