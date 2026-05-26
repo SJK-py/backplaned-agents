@@ -131,22 +131,34 @@ async def append_history(
 
 
 async def reload_incumbent(
-    conn: asyncpg.Connection, *, session_id: str, agent_id: str
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    agent_id: str,
+    up_to_id: int | None = None,
 ) -> list[SessionHistoryRow]:
     """The reload query ([sessions.md] §2.1): incumbent `user`/`assistant`
     rows for one agent's thread, in chronological order. `tool_call` /
     `tool_result` rows are never reloaded — the live loop holds the tool
-    sequence in memory; persisted tool rows exist for render + audit."""
+    sequence in memory; persisted tool rows exist for render + audit.
+
+    `up_to_id` bounds the read to rows with `id <= up_to_id` — the
+    summarizer reads the cutoff window the channel asks it to fold."""
+    args: list[Any] = [session_id, agent_id]
+    bound = ""
+    if up_to_id is not None:
+        args.append(up_to_id)
+        bound = "AND id <= $3"
     rows = await conn.fetch(
-        """
+        f"""
         SELECT * FROM session_history
         WHERE session_id = $1 AND agent_id = $2
           AND incumbent = true
           AND role IN ('user', 'assistant')
+          {bound}
         ORDER BY created_at ASC, id ASC
         """,
-        session_id,
-        agent_id,
+        *args,
     )
     return [SessionHistoryRow.model_validate(dict(r)) for r in rows]
 

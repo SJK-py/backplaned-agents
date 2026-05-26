@@ -68,6 +68,35 @@ class SuiteSettings(BaseSettings):
     """How long the channel waits for an injected turn's result before
     surfacing a failure to the user."""
 
+    # ------------------------------------------------------------------
+    # Per-user LanceDB (knowledge base + memory)
+    # ------------------------------------------------------------------
+
+    lance_root: str = "./suite_lance"
+    """Root dir under which each user's LanceDB lives (`<root>/<user_id>`)."""
+
+    embedding_dim: int = Field(default=1536, ge=1)
+    """Dimension of the embedding preset's vectors (text-embedding-3-small
+    = 1536). Must match the configured `preset_embedding` model."""
+
+    kb_max_chunk_len: int = Field(default=2000, ge=1)
+    kb_min_chunk_len: int = Field(default=1000, ge=1)
+    kb_overlap_len: int = Field(default=100, ge=0)
+    """Markdown chunking bounds ([data-model.md] §2.1)."""
+
+    # ------------------------------------------------------------------
+    # memory fact-graph ([memory.md])
+    # ------------------------------------------------------------------
+
+    memory_retrieve_pool: int = Field(default=50, ge=1)
+    """Hybrid-search pool size before recency re-rank."""
+    memory_reconcile_candidates: int = Field(default=5, ge=1)
+    """Top-N similar facts enumerated to the reconcile LLM call."""
+    memory_decay_start_days: int = Field(default=30, ge=0)
+    memory_gc_horizon_days: int = Field(default=100, ge=1)
+    memory_decay_floor: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Recency-decay floor for a fact approaching the GC horizon."""
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]
