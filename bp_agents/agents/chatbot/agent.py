@@ -179,7 +179,9 @@ async def _poll_loop(
             offset = update.update_id + 1
             offset_store.write(offset)
             task = asyncio.create_task(
-                gateway.handle_update(update.chat_id, update.text)
+                gateway.handle_update(
+                    update.chat_id, update.text, update.attachments
+                )
             )
             _inflight.add(task)
             task.add_done_callback(_inflight.discard)
