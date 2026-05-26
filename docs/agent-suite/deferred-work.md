@@ -79,6 +79,23 @@
   an end-to-end test over a live router (task reassignment + the
   exactly-one-Result drop) is not yet written.
 
+## Cron / channel file I/O (Phase 4)
+
+- **deferred — channel file I/O** ([channel.md] §7). Inbound (Telegram
+  upload → named store → `(T,T)` history row) and outbound (resolve
+  `result.output.files` names → fetch → send) are NOT wired yet — they
+  need the session-authed named-store HTTP client on
+  `HttpChannelCredentials` (`POST`/`GET /v1/files/names[/resolve]`). The
+  agent-side `ctx.files` path works; only the gateway boundary is missing.
+- **deferred — cron C4 fallback** (`chatbot/cron.py::_resolve_session`):
+  when both the job's session and the user's default are closed, the
+  scheduler should open a fresh session and move the default pointer; it
+  currently falls back to the job's `session_id`.
+- **deferred — v2 channel-agnostic cron routing** ([cron.md] §6). The
+  scheduler lives in the chatbot (v1, Telegram-only).
+- **lean — cron report decision** is a second lite LLM call after the
+  cron loop; a single structured-output call would be tidier.
+
 ## ACL
 
 - **operator step — rule-set application**. `python -m bp_agents.load_acl`

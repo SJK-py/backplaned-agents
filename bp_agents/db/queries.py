@@ -11,9 +11,11 @@ cron tables (Phase 4) and their queries land later.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.db.models import (
+    CronJobRow,
     PlatformMappingRow,
     SessionHistoryRow,
     SessionInfoRow,
@@ -354,3 +356,140 @@ async def upsert_platform_mapping(
         user_id,
     )
     return PlatformMappingRow.model_validate(dict(row))
+
+
+# ---------------------------------------------------------------------------
+# cron_jobs / cron_executions  (chatbot scheduler — [cron.md])
+# ---------------------------------------------------------------------------
+
+
+async def create_cron_job(
+    conn: asyncpg.Connection,
+    *,
+    cron_id: str,
+    user_id: str,
+    session_id: str,
+    cron_expression: str,
+    cron_message: str,
+    timezone: str = "UTC",
+    report: str = "case_by_case",
+    execute_until: datetime | None = None,
+) -> CronJobRow:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO cron_jobs (
+            cron_id, user_id, session_id, cron_expression, cron_message,
+            timezone, report, execute_until
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *
+        """,
+        cron_id, user_id, session_id, cron_expression, cron_message,
+        timezone, report, execute_until,
+    )
+    return CronJobRow.model_validate(dict(row))
+
+
+async def get_cron_job(
+    conn: asyncpg.Connection, cron_id: str
+) -> CronJobRow | None:
+    row = await conn.fetchrow("SELECT * FROM cron_jobs WHERE cron_id = $1", cron_id)
+    return CronJobRow.model_validate(dict(row)) if row else None
+
+
+async def list_cron_jobs(
+    conn: asyncpg.Connection, *, user_id: str, status: str | None = None
+) -> list[CronJobRow]:
+    if status is None:
+        rows = await conn.fetch(
+            "SELECT * FROM cron_jobs WHERE user_id = $1 ORDER BY created_at", user_id
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM cron_jobs WHERE user_id = $1 AND status = $2 "
+            "ORDER BY created_at",
+            user_id, status,
+        )
+    return [CronJobRow.model_validate(dict(r)) for r in rows]
+
+
+async def list_active_cron_jobs(conn: asyncpg.Connection) -> list[CronJobRow]:
+    """Active jobs that haven't expired — the scheduler's scan set."""
+    rows = await conn.fetch(
+        "SELECT * FROM cron_jobs WHERE status = 'active' "
+        "AND (execute_until IS NULL OR execute_until > now())"
+    )
+    return [CronJobRow.model_validate(dict(r)) for r in rows]
+
+
+_CRON_MUTABLE = frozenset(
+    {"session_id", "cron_expression", "timezone", "report", "cron_message",
+     "status", "execute_until"}
+)
+
+
+async def update_cron_job(
+    conn: asyncpg.Connection, cron_id: str, **fields: Any
+) -> None:
+    cols = {k: v for k, v in fields.items() if k in _CRON_MUTABLE}
+    unknown = set(fields) - _CRON_MUTABLE
+    if unknown:
+        raise ValueError(f"update_cron_job: non-mutable columns {sorted(unknown)}")
+    if not cols:
+        return
+    set_clause = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+    await conn.execute(
+        f"UPDATE cron_jobs SET {set_clause} WHERE cron_id = $1",
+        cron_id, *cols.values(),
+    )
+
+
+async def remove_cron_job(conn: asyncpg.Connection, cron_id: str) -> int:
+    status = await conn.execute("DELETE FROM cron_jobs WHERE cron_id = $1", cron_id)
+    return int(status.rsplit(" ", 1)[-1]) if status else 0
+
+
+async def claim_cron_job(
+    conn: asyncpg.Connection, *, cron_id: str, due: datetime, now: datetime
+) -> bool:
+    """Atomic claim ([cron.md] §1): set `last_executed_at = now` iff the
+    job is active and hasn't already been claimed for this `due` window.
+    Only one worker wins — no double-fire."""
+    row = await conn.fetchrow(
+        """
+        UPDATE cron_jobs SET last_executed_at = $2
+        WHERE cron_id = $1 AND status = 'active'
+          AND (last_executed_at IS NULL OR last_executed_at < $3)
+        RETURNING cron_id
+        """,
+        cron_id, now, due,
+    )
+    return row is not None
+
+
+async def deactivate_cron_job(conn: asyncpg.Connection, cron_id: str) -> None:
+    await conn.execute(
+        "UPDATE cron_jobs SET status = 'inactive' WHERE cron_id = $1", cron_id
+    )
+
+
+async def record_cron_execution(
+    conn: asyncpg.Connection,
+    *,
+    cron_id: str,
+    user_id: str,
+    session_id: str,
+    reported: bool,
+    reason: str | None = None,
+    message: str | None = None,
+    error: str | None = None,
+) -> int:
+    return await conn.fetchval(
+        """
+        INSERT INTO cron_executions
+            (cron_id, user_id, session_id, reported, reason, message, error)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        cron_id, user_id, session_id, reported, reason, message, error,
+    )

@@ -28,6 +28,8 @@ PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
 ORCHESTRATOR_AGENT_ID = "orchestrator"
 MEMORY_AGENT_ID = "memory"
+CONFIG_AGENT_ID = "config"
+CHATBOT_AGENT_ID = "chatbot"
 
 # Summarization tuning ([sessions.md] §3): fold the oldest ~70% of the
 # incumbent window once a thread crosses the soft limit, but only when
@@ -42,6 +44,8 @@ HELP_TEXT = (
     "/register [email] — request access (an admin approves it)\n"
     "/new — start a fresh conversation\n"
     "/stop — stop the current in-progress reply\n"
+    "/config [text] — view or change your settings\n"
+    "/cron [text] — manage scheduled reminders/tasks\n"
     "/help — show this message"
 )
 REGISTER_PROMPT = (
@@ -153,11 +157,48 @@ class ChatbotGateway:
             await self._cmd_new(chat_id)
         elif cmd == "/stop":
             await self._cmd_stop(chat_id)
+        elif cmd == "/config":
+            await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "message",
+                                  arg or "Show my current settings.")
+        elif cmd == "/cron":
+            await self._cmd_agent(chat_id, CHATBOT_AGENT_ID, "cron",
+                                  arg or "List my scheduled jobs.")
         else:
             await self._telegram.send_message(
                 chat_id=chat_id,
                 text="That command isn't supported. Try /help.",
             )
+
+    async def _cmd_agent(
+        self, chat_id: str, dest: str, mode: str, prompt: str
+    ) -> None:
+        """Route a slash command to an agent (config / cron), bypassing the
+        orchestrator and the conversation thread, and relay the reply."""
+        user_id = await self._resolve_user(chat_id)
+        if user_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
+            return
+        async with self._pool.acquire() as conn:
+            cfg = await queries.get_user_config(conn, user_id)
+        session_id = cfg.default_session_id if cfg else None
+        if session_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
+            return
+        try:
+            task_id = await self._dispatcher.spawn_root_for_user(
+                dest, MessagePayload(prompt=prompt),
+                user_id=user_id, session_id=session_id, mode=mode,
+            )
+            result = await self._dispatcher.await_root_result(
+                task_id, timeout_s=self._result_timeout_s
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("command_dispatch_failed",
+                             extra={"event": "command_dispatch_failed", "cmd": mode})
+            await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
+            return
+        reply = (result.output.content if result.output else "") or "Done."
+        await self._telegram.send_message(chat_id=chat_id, text=reply)
 
     async def _resolve_user(self, chat_id: str) -> str | None:
         async with self._pool.acquire() as conn:

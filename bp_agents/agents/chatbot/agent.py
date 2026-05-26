@@ -16,15 +16,18 @@ from typing import TYPE_CHECKING
 
 from bp_agents.agents.chatbot.approval import approval_poll_loop
 from bp_agents.agents.chatbot.credentials import HttpChannelCredentials
+from bp_agents.agents.chatbot.cron import CronScheduler, run_cron_management
 from bp_agents.agents.chatbot.gateway import ChatbotGateway
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
 )
+from bp_agents.common.payloads import MessagePayload
+from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
-from bp_protocol.types import AgentInfo
-from bp_sdk import Agent
+from bp_protocol.types import AgentInfo, AgentOutput
+from bp_sdk import Agent, TaskContext
 
 if TYPE_CHECKING:
     import asyncpg
@@ -58,6 +61,7 @@ _telegram: HttpTelegramClient | None = None
 _credentials: HttpChannelCredentials | None = None
 _poll_task: asyncio.Task | None = None
 _approval_task: asyncio.Task | None = None
+_cron_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
 _stop = asyncio.Event()
 
@@ -110,11 +114,20 @@ async def _startup() -> None:
     offset_store = FileOffsetStore(Path(agent.config.state_dir) / "telegram_offset")
     _poll_task = asyncio.create_task(_poll_loop(gateway, offset_store))
 
+    # Cron scheduler (v1 lives in the chatbot). Shares the gateway's
+    # per-session lock so the apply step serializes with user turns.
+    scheduler = CronScheduler(
+        dispatcher=agent, pool=_pool, settings=_settings, telegram=_telegram,
+        session_lock=gateway._session_lock,
+    )
+    global _cron_task  # noqa: PLW0603
+    _cron_task = asyncio.create_task(scheduler.run_loop(_stop))
+
 
 @agent.on_shutdown
 async def _shutdown() -> None:
     _stop.set()
-    for t in (_poll_task, _approval_task):
+    for t in (_poll_task, _approval_task, _cron_task):
         if t is not None:
             t.cancel()
     for t in list(_inflight):
@@ -125,6 +138,17 @@ async def _shutdown() -> None:
         await _credentials.aclose()
     if _pool is not None:
         await _pool.close()
+
+
+@agent.handler(mode="cron", tool=False)
+async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
+    """Cron job management (add/list/remove/modify) — reached via the
+    channel's `/cron` command."""
+    assert _pool is not None
+    async with _pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    preset = cfg.preset_lite if cfg else _settings.default_preset_lite
+    return await run_cron_management(ctx, payload, pool=_pool, preset=preset)
 
 
 async def _poll_loop(
