@@ -72,10 +72,11 @@ The system runs as a **router** (the Backplaned platform) plus a fleet of **suit
 uv venv && source .venv/bin/activate
 uv pip install -e ".[router,suite,dev,llm-gemini]"
 
-# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite) + Redis.
+# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
+#    SearXNG, and rustfs(S3) are opt-in profiles (single-worker dev needs none):
+#    docker compose -f docker-compose.dev.yml up -d
+#    # extras: … --profile redis --profile search --profile s3 up -d
 docker compose -f docker-compose.dev.yml up -d
-#    Optional research web search:
-#    docker compose -f docker-compose.dev.yml --profile search up -d
 
 # 2. Router — generates ./.env (and prints a bootstrap admin password),
 #    migrates bp_router. Set your LLM key, then boot it.
