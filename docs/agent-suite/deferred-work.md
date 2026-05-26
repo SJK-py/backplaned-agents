@@ -56,26 +56,26 @@
 
 ## Knowledge base
 
-- **deferred — LLM metadata generation on `store`** (title from filename
-  today vs [agents.md]'s head/tail LLM-gen).
-  *Why:* **bounded-scope** — sensible defaults land documents now; LLM
-  metadata is polish that adds an extra structured call per store.
-- **deferred — `modify` mode** (store/retrieve/list/remove built).
-  *Why:* **bounded-scope** — the recall milestone ("answer from stored
-  docs") needs store + retrieve; modify is additive management.
-- **deferred — non-text ingest routing** through `md_converter.convert`.
-  *Why:* **bounded-scope / ordering** — md_converter shipped after KB in
-  Phase 2; the call isn't wired into KB `store` yet (text/Markdown ingest
-  works today).
-- **lean — retrieval is vector + Python-side filters** (vs the [data-model.md
-  §2.1] hybrid vector+BM25 index).
-  *Why:* **bounded-scope + test-robustness** — vector + filters is
-  deterministic and version-independent; LanceDB FTS/hybrid fusion is
-  version-finicky and was deferred to keep the path reliable.
-- **lean — Markdown chunker** is paragraph-accumulating within
-  `[min,max]`+overlap (vs the full header→…→char fallback chain).
-  *Why:* **bounded-scope** — the simple splitter is adequate for ingest;
-  the full chain is a fidelity refinement.
+- **done — LLM metadata generation on `store`** ([agents.md]). Missing
+  `title` / `tags` / `description` are LLM-generated from the document's
+  head (8k) + tail (2k chars, env-configurable) via the user's lite preset;
+  supplied fields are respected, and `title` still falls back to the
+  filename stem if generation yields none
+  (`knowledge_base/agent.py::_generate_metadata`).
+- **done — `modify` mode**. Re-files / retitles / re-tags a document and its
+  denormalized chunk metadata (`KnowledgeStore.modify_document`).
+- **done — non-text ingest routing** through `md_converter.convert`. A
+  non-text source is converted to Markdown (full content via a `.md` stash
+  file) before chunking; content-addressed dedup is over the *original*
+  bytes (`knowledge_base/agent.py::_to_markdown`).
+- **done — hybrid / bm25 retrieval** ([data-model.md] §2.1). `search_type`
+  selects `vector`, `bm25` (LanceDB native FTS over `content`), or `hybrid`
+  (reciprocal-rank fusion of both legs, Python-side — no LanceDB reranker,
+  so version-independent). Metadata filters stay Python-side.
+- **done — Markdown chunker fallback chain**. Recursive split on
+  header → blank line → newline → sentence → word → character, recursing
+  into oversized spans, then accumulating into `[min,max]` with overlap
+  (`knowledge_base/chunking.py`).
 
 ## Memory
 
@@ -83,15 +83,18 @@
   *Why:* **spec-marks-optional** — [memory.md §3] designates relate-out /
   update-propagation as "enhancement, safe to skip"; phases 1–2 (the facts
   + edges that matter) are robust.
-- **lean — retrieve uses vector + recency decay** (no BM25 leg; neighbours
-  outside the pool ranked by recency alone).
-  *Why:* **bounded-scope** — same hybrid-search deferral as the KB; the
-  decay + 1-hop expansion is the load-bearing behaviour.
-- **deferred — GC scheduling**. `MemoryStore.gc()` exists + cascades, but
-  nothing runs the periodic sweep.
-  *Why:* **bounded-scope** — GC is a background maintenance loop; the
-  decay path already keeps surfaced facts alive, so the sweep is
-  non-urgent and best added with the same scheduler treatment as cron.
+- **done — hybrid retrieve (vector + BM25) → recency-decay re-rank**
+  ([memory.md] §4, [data-model.md] §2.2). The pool is reciprocal-rank
+  fusion of the vector leg and a BM25 leg over `fact` (LanceDB native FTS,
+  `MemoryStore.search_bm25`); the fused relevance is then multiplied by the
+  recency decay and re-ranked, feeding the unchanged 1-hop graph expansion.
+  The BM25 leg is best-effort (an FTS parse error degrades to vector-only).
+- **done — GC scheduling**. The memory agent launches a background sweep on
+  startup (same shape as the cron scheduler: run a pass, wait
+  `memory_gc_interval_s` (default daily) or until stopped). Each pass
+  iterates every user with an existing fact graph and runs `gc()` under
+  that user's lock — serialized against `add`
+  (`memory/agent.py::gc_sweep` / `gc_sweep_loop`).
 
 ## Delegation / l1 specialists
 
@@ -101,10 +104,10 @@
   *Why:* **bounded-scope** — it's a large, agent-specific sub-loop;
   deep_reasoning works as a standard l1 (subagent + delegation) without
   it, so it was separated from the delegation-core milestone.
-- **lean — l1 `current_time` uses the default timezone**, not the user's.
-  *Why:* **bounded-scope** — minor; the orchestrator's `message` mode
-  already uses the user tz, and threading the per-user tz into the l1
-  local-tools factory is a small follow-up.
+- **done — l1 `current_time` uses the user's timezone**. The per-user tz is
+  threaded into the l1 local-tools factory (`L1Config.local_tools` now takes
+  `(ctx, settings, timezone)`); `run_subagent` / `run_delegated_turn`
+  resolve it from `user_config` (falling back to the default).
 - **done** — file-capable loop agents now register the SDK `file_tools`
   ([agents.md] — orchestrator/l1 caps `file.full` + `llm.multimodal.image`).
   `run_llm_loop` takes a `file_tools` bundle and dispatches the calls via

@@ -53,6 +53,29 @@ def test_memory_store_graph_ops(tmp_path) -> None:
     asyncio.run(_drive())
 
 
+def test_memory_store_bm25(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_b"), embedding_dim=_DIM)
+        await store.insert_fact(fact="likes cats", kind="preference", embedding=_vec(0))
+        await store.insert_fact(
+            fact="rides a bicycle", kind="event", embedding=_vec(1)
+        )
+        # BM25 over `fact` text — the keyword surfaces the matching fact even
+        # with an unrelated query vector.
+        hits = await store.search_bm25(query="bicycle", limit=5)
+        assert hits and hits[0]["fact"] == "rides a bicycle"
+
+    asyncio.run(_drive())
+
+
+def test_memory_store_bm25_empty(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_e"), embedding_dim=_DIM)
+        assert await store.search_bm25(query="anything", limit=5) == []
+
+    asyncio.run(_drive())
+
+
 def test_memory_store_degree_cap(tmp_path) -> None:
     async def _drive() -> None:
         store = MemoryStore(await connect(tmp_path, "usr_d"), embedding_dim=_DIM)

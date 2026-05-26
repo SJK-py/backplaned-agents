@@ -28,6 +28,7 @@ from bp_agents.common.payloads import MemAdd, MemRetrieve
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
+from bp_agents.lance.base import user_db_path
 from bp_agents.lance.memory import MemoryStore
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
@@ -86,6 +87,8 @@ _settings: SuiteSettings = load_suite_settings()
 _pool: asyncpg.Pool | None = None
 # Per-user lock — at most one structural mutation (add / GC) per user.
 _user_locks: dict[str, asyncio.Lock] = {}
+_stop = asyncio.Event()
+_gc_task: asyncio.Task | None = None
 
 
 def _user_lock(user_id: str) -> asyncio.Lock:
@@ -98,14 +101,55 @@ def _user_lock(user_id: str) -> asyncio.Lock:
 
 @agent.on_startup
 async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — startup-wired handle
+    global _pool, _gc_task  # noqa: PLW0603 — startup-wired handles
     _pool = await open_pool(_settings)
+    _stop.clear()
+    _gc_task = asyncio.create_task(
+        gc_sweep_loop(_pool, _settings, stop=_stop)
+    )
 
 
 @agent.on_shutdown
 async def _shutdown() -> None:
+    _stop.set()
+    if _gc_task is not None:
+        await _gc_task
     if _pool is not None:
         await _pool.close()
+
+
+async def gc_sweep_loop(
+    pool: asyncpg.Pool, settings: SuiteSettings, *, stop: asyncio.Event
+) -> None:
+    """Periodic GC sweep ([memory.md] §5). Same scheduler shape as cron:
+    run a pass, then wait `memory_gc_interval_s` (or until stopped)."""
+    while not stop.is_set():
+        try:
+            await gc_sweep(pool, settings)
+        except Exception:  # noqa: BLE001
+            logger.exception("memory_gc_error", extra={"event": "memory_gc_error"})
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.memory_gc_interval_s)
+        except TimeoutError:
+            pass
+
+
+async def gc_sweep(pool: asyncpg.Pool, settings: SuiteSettings) -> int:
+    """One sweep over every user with an existing fact graph. Each user's
+    GC runs under that user's lock (serialized against `add`). Returns the
+    number of facts swept."""
+    async with pool.acquire() as conn:
+        user_ids = await queries.list_user_ids(conn)
+    total = 0
+    for user_id in user_ids:
+        # Skip users with no LanceDB yet — don't materialize empty stores.
+        if not user_db_path(settings.lance_root, user_id).exists():
+            continue
+        async with _user_lock(user_id):
+            db = await connect(settings.lance_root, user_id)
+            store = MemoryStore(db, embedding_dim=settings.embedding_dim)
+            total += await store.gc(horizon_days=settings.memory_gc_horizon_days)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +227,32 @@ async def run_memory_retrieve(
     if embed_preset is None:
         _lite, embed_preset = await _presets(ctx, settings)
 
+    limit = settings.memory_retrieve_pool
     qv = (await ctx.llm.embed([payload.query], preset=embed_preset))[0]
-    pool = await store.search(query_vector=qv, limit=settings.memory_retrieve_pool)
-    if not pool:
+    vec_pool = await store.search(query_vector=qv, limit=limit)
+    try:
+        bm_pool = await store.search_bm25(query=payload.query, limit=limit)
+    except Exception:  # noqa: BLE001 — recall must survive an FTS parse error
+        logger.debug("memory_bm25_failed", exc_info=True)
+        bm_pool = []
+    if not vec_pool and not bm_pool:
         return text_output("No relevant memories.")
 
-    def _score(f: dict[str, Any]) -> float:
-        sim = 1.0 / (1.0 + float(f.get("_distance", 0.0)))
-        return sim * _decay(f["last_used_at"], settings)
+    # Hybrid pool ([memory.md] §4): reciprocal-rank fusion of the vector and
+    # BM25 legs gives each fact a base relevance, which recency decay then
+    # re-ranks. (Version-independent — no LanceDB reranker.)
+    relevance: dict[str, float] = {}
+    for rows in (vec_pool, bm_pool):
+        for rank, f in enumerate(rows):
+            relevance[f["uid"]] = relevance.get(f["uid"], 0.0) + 1.0 / (60 + rank + 1)
+    by_uid = {f["uid"]: f for f in (*vec_pool, *bm_pool)}
 
-    ranked = sorted(pool, key=_score, reverse=True)
+    def _score(f: dict[str, Any]) -> float:
+        return relevance[f["uid"]] * _decay(f["last_used_at"], settings)
+
+    ranked = sorted(by_uid.values(), key=_score, reverse=True)
     top = ranked[: payload.count]
     top_uids = {f["uid"] for f in top}
-    by_uid = {f["uid"]: f for f in pool}
 
     # 1-hop graph expansion: neighbors of the top, excluding the top.
     expansion: list[dict[str, Any]] = []
