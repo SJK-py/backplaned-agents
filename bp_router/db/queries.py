@@ -1031,6 +1031,48 @@ async def remove_from_serviced_by(
         return False
 
 
+async def list_serviced_sessions(
+    conn: asyncpg.Connection,
+    *,
+    service_user_id: str,
+    channel: str | None = None,
+    since: datetime | None = None,
+    limit: int = 200,
+) -> list[Any]:
+    """Sessions belonging to users serviced by `service_user_id`, newest-
+    open last (ascending `opened_at` for cursor paging).
+
+    Backs the `require_service` discovery endpoint a channel uses to learn
+    which of its serviced users have been provisioned (admin approval
+    opens a session whose `metadata.external_id` is the channel-native
+    id). Scoped strictly to the caller's serviced users — never the whole
+    table. `channel` filters on `metadata->>'kind'`; `since` returns only
+    sessions opened strictly after the cursor.
+    """
+    clauses = ["$1 = ANY(u.serviced_by)", "u.deleted_at IS NULL"]
+    args: list[Any] = [service_user_id]
+    if channel is not None:
+        args.append(channel)
+        clauses.append(f"s.metadata->>'kind' = ${len(args)}")
+    if since is not None:
+        args.append(since)
+        clauses.append(f"s.opened_at > ${len(args)}")
+    args.append(limit)
+    where = " AND ".join(clauses)
+    return await conn.fetch(
+        f"""
+        SELECT s.session_id, s.user_id, s.opened_at, s.closed_at,
+               s.metadata
+        FROM sessions s
+        JOIN users u ON u.user_id = s.user_id
+        WHERE {where}
+        ORDER BY s.opened_at ASC
+        LIMIT ${len(args)}
+        """,
+        *args,
+    )
+
+
 async def sweep_serviced_by_references(
     conn: asyncpg.Connection,
     service_user_id: str,
