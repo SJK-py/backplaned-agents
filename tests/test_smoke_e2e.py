@@ -30,14 +30,16 @@ def test_echo_handler_round_trip(test_db_url: str, tmp_path) -> None:
     that, this is a real integration test against a live router."""
 
     async def _drive() -> None:
+        # No `accepts_schema` pin: the router now reads `accepts_schema`
+        # as a per-mode map `{mode: schema|null}`, so a flat single
+        # schema would be parsed as mode names (`type`, `properties`)
+        # and admit would reject with `schema_mismatch`. Leaving it
+        # unset lets the SDK auto-derive `{"LLMData": <schema>}` from
+        # the handler's payload model — the shape real agents publish.
         info = AgentInfo(
             agent_id="echo_uppercaser",
             description="Echoes the prompt back, in uppercase.",
             capabilities=["text.transform.uppercase"],
-            accepts_schema={
-                "type": "object",
-                "properties": {"prompt": {"type": "string"}},
-            },
         )
 
         user_state_dir = tmp_path / "agent_state"
