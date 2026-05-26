@@ -48,6 +48,16 @@ ADMIN_PASSWORD=$(grep '^ROUTER_BOOTSTRAP_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 [[ -n "${SUITE_TELEGRAM_BOT_TOKEN:-}" ]] || \
     log "WARNING: SUITE_TELEGRAM_BOT_TOKEN unset — the chatbot will connect but won't poll Telegram"
 
+# Apply the suite schema (idempotent; skip with SKIP_SUITE_MIGRATE=1). The
+# `bp_suite` database itself is created by docker-compose.dev.yml on first
+# init — if this fails with "database bp_suite does not exist", recreate the
+# dev Postgres volume (`down -v`) or `createdb ... bp_suite`.
+if [[ "${SKIP_SUITE_MIGRATE:-0}" != "1" ]]; then
+    log "applying suite schema (alembic -c alembic_suite.ini upgrade head)"
+    "${ALEMBIC:-alembic}" -c alembic_suite.ini upgrade head | sed 's/^/  /' || \
+        fail "suite migration failed (is bp_suite created + reachable at SUITE_DATABASE_URL?)"
+fi
+
 curl -sf "$ROUTER_URL/healthz" >/dev/null || fail "router not reachable at $ROUTER_URL"
 
 log "logging in as $ADMIN_EMAIL"

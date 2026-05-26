@@ -1,15 +1,22 @@
-# Local-development Postgres for the bp_router test fixture.
+# Local-development external dependencies for the router + agent suite.
+#
+# Brings up Postgres (with BOTH databases — `bp_router` and `bp_suite`),
+# Redis, and (optionally) SearXNG for the research agent's web search.
+# The router and the suite agents themselves run from source on the host
+# (scripts/dev-up.sh boots the router; scripts/run-suite.sh boots the
+# agents) — this file is only the backing services.
 #
 # Bring up:    docker compose -f docker-compose.dev.yml up -d
-# Tear down:   docker compose -f docker-compose.dev.yml down -v
+#   + search:  docker compose -f docker-compose.dev.yml --profile search up -d
+# Tear down:   docker compose -f docker-compose.dev.yml down        (keep data)
+#   + volumes: docker compose -f docker-compose.dev.yml down -v     (wipe data)
 #
-# After it's running:
-#   export ROUTER_DB_URL=postgresql://postgres:bp@localhost:5432/bp_router
-#   alembic upgrade head
+# `bp_suite` is created by deploy/postgres-init/ on FIRST init (empty
+# volume). If you added the suite to an existing dev volume, run
+# `down -v` once to recreate, or `createdb -U postgres -h localhost bp_suite`.
 #
 # This file is for developer machines and CI only — production deployments
-# should use a managed Postgres or a separate compose file with proper
-# secret management and persistent volumes.
+# use docker-compose.prod.yml (managed secrets, persistent volumes, TLS).
 
 services:
   postgres:
@@ -24,6 +31,8 @@ services:
       - "5432:5432"
     volumes:
       - bp_pg_data:/var/lib/postgresql/data
+      # Creates the `bp_suite` database (+ role) on first init.
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d bp_router"]
       interval: 5s
@@ -41,6 +50,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Optional web-search backend for the research agent. Off by default;
+  # enable with `--profile search`. Point SUITE_SEARXNG_URL at
+  # http://localhost:8888 (or an external Brave-API-compatible endpoint).
+  searxng:
+    image: searxng/searxng:latest
+    container_name: bp-searxng
+    profiles: ["search"]
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8888/
+    ports:
+      - "8888:8080"
 
 volumes:
   bp_pg_data:
