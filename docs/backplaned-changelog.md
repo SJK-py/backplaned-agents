@@ -20,6 +20,25 @@
 
 ## 2026-05-26
 
+### Changed — local file-store default dir renamed (drop `proxyfiles` relic)
+
+- **What:** The `LocalFileStore` default path (used when
+  `ROUTER_FILE_STORE_OPTIONS` has no `path`) was renamed from `./proxyfiles`
+  to `./router_files` (`bp_router/storage/local.py`); the `TestRouter`
+  harness default likewise `./.test_proxyfiles` → `./.test_router_files`
+  (`bp_sdk/testing.py`).
+- **Why:** `proxyfiles` was vestigial naming from the predecessor
+  `ProxyFile` file model, which the router-managed file store
+  ([`docs/design/router-managed-file-store.md`](./design/router-managed-file-store.md))
+  replaced. The dead name was confusing in `.env.example` and the code.
+- **Shape:** **Behavior change (default only).** A `file_store=local`
+  deployment that relied on the *implicit* default now reads/writes
+  `./router_files` — existing files under `./proxyfiles` would appear
+  missing until the dir is moved or `path` is set explicitly. Anyone who
+  already set `ROUTER_FILE_STORE_OPTIONS.path` (incl. the prod compose,
+  which uses S3) is unaffected. Acceptable pre-release (no back-compat).
+- **Verified:** no test pinned `./proxyfiles`; suite + storage tests green.
+
 ### Added — `bp_router/llm`: embedding output-dimension via `provider_options`
 
 - **What:** Plumbed an embedding vector-width control through the embed
@@ -211,13 +230,15 @@
 ## Completeness
 
 As of this date, the suite-driven footprint on vendored platform code is:
-`bp_sdk/agent.py`; `bp_router/db/migrations/env.py`;
+`bp_sdk/agent.py`; `bp_sdk/testing.py`; `bp_router/db/migrations/env.py`;
 `bp_router/api/admin.py` + `bp_router/db/queries.py`;
 `bp_router/llm/presets.py` (seed lineup refresh + `default_embedding`);
-and the **embedding output-dimension** change across
+the **embedding output-dimension** change across
 `bp_router/llm/service.py` + `bp_router/llm/providers/`
 (`base.py`, `gemini.py`, `openai.py`, `openai_compatible.py`,
-`anthropic.py`). Platform tests touched: `tests/test_smoke_e2e.py`,
+`anthropic.py`); and the `proxyfiles`-relic rename in
+`bp_router/storage/local.py` + `bp_sdk/testing.py` (default dirs).
+Platform tests touched: `tests/test_smoke_e2e.py`,
 `tests/conftest.py`, `tests/test_llm_provider_options.py`,
 `tests/test_upstream_bugs_boot_blockers.py`,
 `tests/test_llm_openai_adapter.py`, `tests/test_llm_anthropic_adapter.py`,
