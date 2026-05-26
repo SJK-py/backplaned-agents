@@ -20,6 +20,34 @@
 
 ## 2026-05-26
 
+### Added — `bp_router`: `GET /v1/admin/serviced-sessions` (service-principal discovery)
+
+- **What:** A new `require_service` endpoint
+  (`bp_router/api/admin.py::serviced_sessions`) backed by
+  `queries.list_serviced_sessions`, returning the sessions of users the
+  **calling service principal** services — `{user_id, session_id,
+  external_id, channel, opened_at}`, with `channel` + `since` filters.
+- **Why:** The suite's manual-approval flow had no path for a
+  **service-level** channel to learn its approved users. Admin approval
+  creates the user (`serviced_by=[channel]`) and opens a session whose
+  `metadata.external_id` is the channel-native id, then **deletes** the
+  pending row and returns the result to the *admin*. But
+  `GET /v1/admin/registrations` is `require_admin` (a channel can't call
+  it), the only `require_service` endpoint was the token mint (needs a
+  `user_id` the channel doesn't have yet), and there was no
+  `external_id → user_id` resolution. So the channel could not populate
+  `suite_platform_mappings` / `user_config` after approval. This endpoint
+  closes that gap, matching the design's "use `serviced_by` rights"
+  intent ([`agent-suite/channel.md` §2](./agent-suite/channel.md),
+  [`agent-suite/overview.md` §2.1](./agent-suite/overview.md)).
+- **Shape:** **Additive** + **security-scoped** — `require_service` plus a
+  `$1 = ANY(u.serviced_by)` filter, so a principal sees only its own
+  serviced users' sessions, never the whole table. No existing surface
+  changed.
+- **Verified:** `tests/test_serviced_sessions_discovery.py` — scoping
+  (excludes un-serviced users), `channel` + `since` filters, `external_id`
+  surfaced from session metadata.
+
 ### Added — `bp_sdk/agent.py`: B1 root-task injection helper
 
 - **What:** Two new `Agent` methods — `spawn_root_for_user(dest, payload,

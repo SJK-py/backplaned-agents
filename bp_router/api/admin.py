@@ -1118,6 +1118,63 @@ async def delete_user(
 
 
 # ---------------------------------------------------------------------------
+# Service-principal discovery: sessions of the caller's serviced users
+# ---------------------------------------------------------------------------
+
+
+class ServicedSessionView(BaseModel):
+    user_id: str
+    session_id: str
+    external_id: str | None = None
+    channel: str | None = None
+    opened_at: datetime
+    closed_at: datetime | None = None
+
+
+@router.get("/serviced-sessions", response_model=list[ServicedSessionView])
+async def serviced_sessions(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_service),
+    channel: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[ServicedSessionView]:
+    """List sessions of users the calling service principal services.
+
+    A channel/gateway uses this to learn which of its serviced users have
+    been provisioned by admin approval — approval opens a session whose
+    `metadata.external_id` is the channel-native id (e.g. the Telegram
+    chat). The channel reconciles `(external_id → user_id, session_id)`
+    into its own store from the result. Strictly scoped to the caller's
+    serviced users (`require_service` + `serviced_by` filter); `since`
+    cursors on `opened_at` for incremental polling.
+    """
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await queries.list_serviced_sessions(
+            conn,
+            service_user_id=principal.user_id,
+            channel=channel,
+            since=since,
+            limit=limit,
+        )
+    out: list[ServicedSessionView] = []
+    for r in rows:
+        md = r["metadata"] or {}
+        out.append(
+            ServicedSessionView(
+                user_id=r["user_id"],
+                session_id=r["session_id"],
+                external_id=md.get("external_id"),
+                channel=md.get("kind"),
+                opened_at=r["opened_at"],
+                closed_at=r["closed_at"],
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # F7: pending user registrations — admin approve/reject queue
 # ---------------------------------------------------------------------------
 
