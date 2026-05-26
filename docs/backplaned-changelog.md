@@ -38,7 +38,8 @@
   - **dropped** `gemini-2-5`, `gemini-2-5-flash`, `gemini-3`;
   - **renamed** `gemini-3-flash` → **`gemini-3-5-flash`** (`concrete_model`
     `gemini-3-flash-preview` → `gemini-3.5-flash`);
-  - **added** `gemini-3-1-flash-lite` (`gemini-3.1-flash-lite`),
+  - **added** the bare `gemini` alias (`gemini-3.5-flash`),
+    `gemini-3-1-flash-lite` (`gemini-3.1-flash-lite`),
     `gemini-3-1-pro` (`gemini-3.1-pro-preview`), and the embedding preset
     `gemini-embedding-2` (`gemini-embedding-2`);
   - **repointed** `default` from `gemini-2.5-flash` → **`gemini-3.5-flash`**.

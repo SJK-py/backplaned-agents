@@ -279,6 +279,12 @@ def default_presets() -> list[Preset]:
         # (`gemini-3.5-flash` etc.) since that's what google-genai
         # expects on the wire.
         Preset(
+            name="gemini",
+            provider="gemini",
+            concrete_model="gemini-3.5-flash",
+            api_key_ref="env://GEMINI_API_KEY",
+        ),
+        Preset(
             name="gemini-2-5-pro",
             provider="gemini",
             concrete_model="gemini-2.5-pro",
