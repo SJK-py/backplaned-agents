@@ -267,7 +267,7 @@ def default_presets() -> list[Preset]:
         Preset(
             name="default",
             provider="gemini",
-            concrete_model="gemini-2.5-flash",
+            concrete_model="gemini-3.5-flash",
             api_key_ref="env://GEMINI_API_KEY",
             description="Default fast Gemini model. Open to all tiers.",
         ),
@@ -276,20 +276,8 @@ def default_presets() -> list[Preset]:
         # (`^[a-z][a-z0-9_-]{0,63}$`). The `concrete_model`
         # field — which is the actual upstream model identifier
         # the provider SDK sees — keeps the dotted form
-        # (`gemini-2.5-pro` etc.) since that's what google-genai
+        # (`gemini-3.5-flash` etc.) since that's what google-genai
         # expects on the wire.
-        Preset(
-            name="gemini-2-5",
-            provider="gemini",
-            concrete_model="gemini-2.5-pro",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-2-5-flash",
-            provider="gemini",
-            concrete_model="gemini-2.5-flash",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
         Preset(
             name="gemini-2-5-pro",
             provider="gemini",
@@ -297,15 +285,29 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://GEMINI_API_KEY",
         ),
         Preset(
-            name="gemini-3",
+            name="gemini-3-5-flash",
             provider="gemini",
-            concrete_model="gemini-3-flash-preview",
+            concrete_model="gemini-3.5-flash",
             api_key_ref="env://GEMINI_API_KEY",
         ),
         Preset(
-            name="gemini-3-flash",
+            name="gemini-3-1-flash-lite",
             provider="gemini",
-            concrete_model="gemini-3-flash-preview",
+            concrete_model="gemini-3.1-flash-lite",
+            api_key_ref="env://GEMINI_API_KEY",
+        ),
+        Preset(
+            name="gemini-3-1-pro",
+            provider="gemini",
+            concrete_model="gemini-3.1-pro-preview",
+            api_key_ref="env://GEMINI_API_KEY",
+        ),
+        # Gemini embeddings ride the same provider adapter — its `embed()`
+        # uses `concrete_model`, so no separate embeddings provider is needed.
+        Preset(
+            name="gemini-embedding-2",
+            provider="gemini",
+            concrete_model="gemini-embedding-2",
             api_key_ref="env://GEMINI_API_KEY",
         ),
         # ----- Anthropic / Claude family -----

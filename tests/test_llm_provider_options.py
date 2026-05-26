@@ -198,9 +198,11 @@ def test_default_aliases_include_gemini_3() -> None:
     # Preset names use `-` (the DB CHECK constraint disallows `.`);
     # `concrete_model` keeps the dotted form upstream providers
     # expect on the wire (upstream-bug #2).
-    assert _resolve_concrete(svc, "default") == ("gemini", "gemini-2.5-flash")
-    assert _resolve_concrete(svc, "gemini-2-5") == ("gemini", "gemini-2.5-pro")
-    assert _resolve_concrete(svc, "gemini-2-5-flash") == ("gemini", "gemini-2.5-flash")
+    assert _resolve_concrete(svc, "default") == ("gemini", "gemini-3.5-flash")
     assert _resolve_concrete(svc, "gemini-2-5-pro") == ("gemini", "gemini-2.5-pro")
-    assert _resolve_concrete(svc, "gemini-3") == ("gemini", "gemini-3-flash-preview")
-    assert _resolve_concrete(svc, "gemini-3-flash") == ("gemini", "gemini-3-flash-preview")
+    assert _resolve_concrete(svc, "gemini-3-5-flash") == ("gemini", "gemini-3.5-flash")
+    assert _resolve_concrete(svc, "gemini-3-1-flash-lite") == (
+        "gemini", "gemini-3.1-flash-lite"
+    )
+    assert _resolve_concrete(svc, "gemini-3-1-pro") == ("gemini", "gemini-3.1-pro-preview")
+    assert _resolve_concrete(svc, "gemini-embedding-2") == ("gemini", "gemini-embedding-2")

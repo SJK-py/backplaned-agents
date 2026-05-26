@@ -115,7 +115,7 @@ def test_bug2_concrete_models_keep_dotted_form() -> None:
     presets = {p.name: p for p in default_presets()}
     # Spot-check the renames: name uses `-`, concrete_model uses `.`.
     assert presets["gemini-2-5-pro"].concrete_model == "gemini-2.5-pro"
-    assert presets["gemini-2-5-flash"].concrete_model == "gemini-2.5-flash"
+    assert presets["gemini-3-5-flash"].concrete_model == "gemini-3.5-flash"
     assert presets["gpt-5-5"].concrete_model == "gpt-5.5"
     assert presets["gpt-5-5-pro"].concrete_model == "gpt-5.5-pro"
     assert presets["gpt-5-4"].concrete_model == "gpt-5.4"

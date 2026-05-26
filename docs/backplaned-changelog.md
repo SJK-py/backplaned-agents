@@ -20,6 +20,29 @@
 
 ## 2026-05-26
 
+### Changed — `bp_router/llm/presets.py`: Gemini default-preset lineup refresh
+
+- **What:** Reworked the **Gemini** entries in `default_presets()`:
+  - **dropped** `gemini-2-5`, `gemini-2-5-flash`, `gemini-3`;
+  - **renamed** `gemini-3-flash` → **`gemini-3-5-flash`** (`concrete_model`
+    `gemini-3-flash-preview` → `gemini-3.5-flash`);
+  - **added** `gemini-3-1-flash-lite` (`gemini-3.1-flash-lite`),
+    `gemini-3-1-pro` (`gemini-3.1-pro-preview`), and the embedding preset
+    `gemini-embedding-2` (`gemini-embedding-2`);
+  - **repointed** `default` from `gemini-2.5-flash` → **`gemini-3.5-flash`**.
+- **Why:** Refresh the seeded model lineup to the current Gemini family the
+  deployment targets. The embedding preset rides `provider="gemini"` (the
+  adapter's `embed()` already uses `concrete_model`), so no new provider
+  was needed. `gemini-2-5-pro` and the Anthropic/OpenAI families are
+  unchanged.
+- **Shape:** **Data/seed change** — only seeded into an *empty*
+  `llm_presets` table on first boot; existing deployments are unaffected
+  until they reseed. Preset NAMES keep the `-`-for-`.` slug form (DB CHECK);
+  `concrete_model` keeps the dotted upstream id.
+- **Verified:** `tests/test_llm_provider_options.py` (alias resolutions
+  updated) and `tests/test_upstream_bugs_boot_blockers.py` (dotted-form
+  spot-check) updated to the new lineup; preset suite green.
+
 ### Added — `bp_router`: `GET /v1/admin/serviced-sessions` (service-principal discovery)
 
 - **What:** A new `require_service` endpoint
@@ -121,10 +144,12 @@
 ## Completeness
 
 As of this date, the **entire** suite-driven footprint on vendored
-platform code is the four entries above: `bp_sdk/agent.py`,
-`bp_router/db/migrations/env.py`, `bp_router/api/admin.py` +
-`bp_router/db/queries.py`, and the two platform-test files
-(`tests/test_smoke_e2e.py`, `tests/conftest.py`). `bp_protocol/` and
+platform code is: `bp_sdk/agent.py`, `bp_router/db/migrations/env.py`,
+`bp_router/api/admin.py` + `bp_router/db/queries.py`,
+`bp_router/llm/presets.py` (Gemini seed refresh), and the platform-test
+files (`tests/test_smoke_e2e.py`, `tests/conftest.py`,
+`tests/test_llm_provider_options.py`,
+`tests/test_upstream_bugs_boot_blockers.py`). `bp_protocol/` and
 `bp_admin/` are unmodified; the suite's own Alembic config lives in a
 separate `alembic_suite.ini` (not a change to the router's `alembic.ini`).
 Verified by `git diff <template-baseline>..HEAD -- bp_protocol bp_sdk
