@@ -46,17 +46,20 @@ python -m bp_agents.load_acl          # apply the suite ACL (PUT /v1/admin/acl/r
 
 ```bash
 cp deploy/.env.prod.example deploy/.env.prod    # fill PG / JWT / S3 secrets,
-                                                # GEMINI_API_KEY, SUITE_DB_PASSWORD, …
-C="docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod"
+                                                # GEMINI_API_KEY, SUITE_DB_PASSWORD,
+                                                # BOOTSTRAP_ADMIN_*, SUITE_TELEGRAM_BOT_TOKEN
+# One invitation token per agent — you SET them (no mint→paste round-trip):
+scripts/register-invitations.sh --gen >> deploy/.env.prod
 
+C="docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod"
 $C build
 $C up -d postgres redis rustfs                  # infra (creates bp_router + bp_suite)
 $C up migrate suite-migrate                     # one-shot: apply both schemas
 $C up -d router caddy                            # router behind the edge proxy
 
-# Mint one admin invitation per agent (the chatbot's with
-# provisions_service_user=true), add them to deploy/.env.prod
-# (CHATBOT_INVITATION=..., ORCHESTRATOR_INVITATION=..., ...), then:
+# Register the pre-supplied tokens with the now-running router, then bring up
+# the agents — they onboard with the SAME tokens (AGENT_INVITATION_TOKEN).
+ROUTER_URL=https://your.domain scripts/register-invitations.sh deploy/.env.prod
 $C --profile search up -d                       # all agents (+ optional SearXNG)
 ```
 
