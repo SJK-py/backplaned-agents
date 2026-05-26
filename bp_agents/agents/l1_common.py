@@ -180,7 +180,7 @@ async def run_delegated_turn(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
         extra_tools=[END_DELEGATION_SPEC], terminal_tools={END_DELEGATION_TOOL},
-        file_tools=config.file_tools,
+        file_tools=config.file_tools, detail_chars=settings.verbose_detail_chars,
     )
 
     end_call = next(
