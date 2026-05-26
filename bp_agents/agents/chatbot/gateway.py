@@ -47,6 +47,7 @@ HELP_TEXT = (
     "/stop — stop the current in-progress reply\n"
     "/config [text] — view or change your settings\n"
     "/cron [text] — manage scheduled reminders/tasks\n"
+    "/password — get a one-time link to set a web password\n"
     "/v <message> — show step-by-step progress for this turn\n"
     "/help — show this message"
 )
@@ -176,6 +177,8 @@ class ChatbotGateway:
             await self._cmd_new(chat_id)
         elif cmd == "/stop":
             await self._cmd_stop(chat_id)
+        elif cmd == "/password":
+            await self._cmd_password(chat_id)
         elif cmd == "/config":
             await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "message",
                                   arg or "Show my current settings.")
@@ -295,6 +298,35 @@ class ChatbotGateway:
                 "cancel_failed", extra={"event": "cancel_failed"}
             )
         await self._telegram.send_message(chat_id=chat_id, text="Stopped.")
+
+    async def _cmd_password(self, chat_id: str) -> None:
+        """Mint a one-time password-setup token for the user ([channel.md] §6)
+        so they can set a password for the (future) web app login."""
+        user_id = await self._resolve_user(chat_id)
+        if user_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
+            return
+        if self._credentials is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
+            return
+        try:
+            token = await self._credentials.mint_password_reset_token(user_id=user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "password_mint_failed", extra={"event": "password_mint_failed"}
+            )
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text="Couldn't create a password-setup link. Please try again.",
+            )
+            return
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=(
+                "Your one-time password-setup token (expires shortly):\n"
+                f"{token}"
+            ),
+        )
 
     def _progress_callback(self, chat_id: str):  # noqa: ANN202
         """A per-frame renderer for verbose mode — one Telegram message per

@@ -23,6 +23,7 @@ from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, LLMData, TaskStatus
 from bp_sdk import LlmResponse, ToolCall  # noqa: E402
+from bp_sdk.peers import SpawnRejected
 
 _L1 = "deep_reasoning"
 _CATALOG = {
@@ -119,6 +120,56 @@ def test_orchestrator_hand_off(suite_db_url: str) -> None:
                 )
             assert rows and rows[0].role == "user"
             assert "reason about X" in rows[0].message
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+class _RejectingPeers(_StubPeers):
+    """delegate() admit fails — exercises the F1 hand-off fallback."""
+
+    async def delegate(self, dest, payload, *, mode=None, **kw) -> None:
+        self.delegations.append((dest, payload, mode))
+        raise SpawnRejected("router rejected delegate: unavailable", reason="unavailable")
+
+
+def test_orchestrator_hand_off_fallback_on_admit_failure(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            peers = _RejectingPeers()
+            # First call elects hand-off; the re-run (after the failed admit)
+            # answers the user directly.
+            llm = _StubLlm([
+                LlmResponse(text="", tool_calls=[ToolCall(
+                    id="c1", name="hand_off",
+                    args={"agent_id": _L1, "instruction": "reason about X"},
+                )]),
+                LlmResponse(text="Here's my direct answer."),
+            ])
+            ctx = _Ctx(llm, peers)
+            out = await run_orchestrator_message(
+                ctx, MessagePayload(prompt="help me think"),
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            # F1: the orchestrator produced a real (non-empty) Result itself.
+            assert out.content == "Here's my direct answer."
+            assert len(peers.delegations) == 1  # one (failed) attempt
+
+            async with pool.acquire() as conn:
+                # The orchestrator persisted its own assistant turn.
+                orch_rows = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="orchestrator"
+                )
+                # The orphan seed row in the l1 thread was retired.
+                l1_rows = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id=_L1
+                )
+            assert [r.role for r in orch_rows][-1] == "assistant"
+            assert orch_rows[-1].message == "Here's my direct answer."
+            assert l1_rows == []
         finally:
             await pool.close()
 
