@@ -20,6 +20,33 @@
 
 ## 2026-05-26
 
+### Added — `bp_router/llm`: embedding output-dimension via `provider_options`
+
+- **What:** Plumbed an embedding vector-width control through the embed
+  path. `ProviderAdapter.embed` (`providers/base.py`) gains a keyword
+  `provider_options`; `LlmService.embed` forwards the resolved preset
+  `provider_options` to it. `GeminiAdapter.embed` reads
+  `output_dimensionality` (passed as a dict `config` to `embed_content`),
+  and the OpenAI / OpenAI-compatible embeddings adapters read `dimensions`.
+  The other adapters (chat OpenAI / Anthropic / openai-compatible chat)
+  take the new kwarg but still raise (no embeddings surface). Seeded
+  `default_embedding` + `gemini-embedding-2` carry
+  `default_provider_options={"output_dimensionality": 1536}` to match the
+  suite's `embedding_dim`.
+- **Why:** Gemini's embedding models default to 3072-wide vectors; without
+  requesting `output_dimensionality` they wouldn't fit the suite's
+  1536-wide LanceDB column. The preset now pins the width, and the adapter
+  honours it. (`provider_options` is the existing preset passthrough — the
+  preset defaults flow through `_resolve` when call-time options are None,
+  so no SDK call-signature change was needed.)
+- **Shape:** **Additive** — `embed()` gains an optional keyword; existing
+  callers/behaviour unchanged when it's absent. Crosses the embed adapters
+  + service + the two embedding presets.
+- **Verified:** `tests/test_llm_embed_dimensions.py` (Gemini sends the
+  `output_dimensionality` config + width; OpenAI sends `dimensions`;
+  `default_embedding` requests 1536); existing alias/preset tests updated
+  for the refreshed lineup.
+
 ### Added — `bp_router/llm/presets.py`: `default_embedding` seed preset
 
 - **What:** A canonical `default_embedding` seed preset → `provider="gemini"`,
@@ -183,14 +210,20 @@
 
 ## Completeness
 
-As of this date, the **entire** suite-driven footprint on vendored
-platform code is: `bp_sdk/agent.py`, `bp_router/db/migrations/env.py`,
-`bp_router/api/admin.py` + `bp_router/db/queries.py`,
-`bp_router/llm/presets.py` (Gemini seed refresh), and the platform-test
-files (`tests/test_smoke_e2e.py`, `tests/conftest.py`,
-`tests/test_llm_provider_options.py`,
-`tests/test_upstream_bugs_boot_blockers.py`). `bp_protocol/` and
-`bp_admin/` are unmodified; the suite's own Alembic config lives in a
-separate `alembic_suite.ini` (not a change to the router's `alembic.ini`).
-Verified by `git diff <template-baseline>..HEAD -- bp_protocol bp_sdk
-bp_router bp_admin`.
+As of this date, the suite-driven footprint on vendored platform code is:
+`bp_sdk/agent.py`; `bp_router/db/migrations/env.py`;
+`bp_router/api/admin.py` + `bp_router/db/queries.py`;
+`bp_router/llm/presets.py` (seed lineup refresh + `default_embedding`);
+and the **embedding output-dimension** change across
+`bp_router/llm/service.py` + `bp_router/llm/providers/`
+(`base.py`, `gemini.py`, `openai.py`, `openai_compatible.py`,
+`anthropic.py`). Platform tests touched: `tests/test_smoke_e2e.py`,
+`tests/conftest.py`, `tests/test_llm_provider_options.py`,
+`tests/test_upstream_bugs_boot_blockers.py`,
+`tests/test_llm_openai_adapter.py`, `tests/test_llm_anthropic_adapter.py`,
+`tests/test_llm_presets.py`, and the new
+`tests/test_llm_embed_dimensions.py`. `bp_protocol/` and `bp_admin/` are
+unmodified; the suite's own Alembic config lives in a separate
+`alembic_suite.ini` (not a change to the router's `alembic.ini`). Verified
+by `git diff <template-baseline>..HEAD -- bp_protocol bp_sdk bp_router
+bp_admin`.

@@ -584,13 +584,25 @@ class GeminiAdapter(ProviderAdapter):
     # embed / count_tokens
     # ------------------------------------------------------------------
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         client = self._get_client()
         if isinstance(text, str):
             text = [text]
+        # `output_dimensionality` (from the preset's provider_options) picks
+        # the vector width — Gemini embeddings support 128–3072 (MRL) and
+        # otherwise return the model's full default size. It must match the
+        # suite's `embedding_dim` / the stored vector column. A plain dict is
+        # accepted as the `config` (the SDK coerces it to EmbedContentConfig).
+        config = None
+        dim = (provider_options or {}).get("output_dimensionality")
+        if dim is not None:
+            config = {"output_dimensionality": dim}
         result = await client.aio.models.embed_content(
             model=self.concrete_model,
             contents=text,
+            config=config,
         )
         # google-genai returns Embeddings — extract the .values lists.
         return [list(e.values) for e in result.embeddings]

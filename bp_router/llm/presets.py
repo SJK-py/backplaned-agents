@@ -277,6 +277,7 @@ def default_presets() -> list[Preset]:
             concrete_model="gemini-embedding-2",
             api_key_ref="env://GEMINI_API_KEY",
             description="Default embedding model (Gemini). Open to all tiers.",
+            default_provider_options={"output_dimensionality": 1536},
         ),
         # Preset NAMES use `-` instead of `.` because the
         # `llm_presets.name` CHECK constraint disallows `.`
@@ -322,6 +323,7 @@ def default_presets() -> list[Preset]:
             provider="gemini",
             concrete_model="gemini-embedding-2",
             api_key_ref="env://GEMINI_API_KEY",
+            default_provider_options={"output_dimensionality": 1536},
         ),
         # ----- Anthropic / Claude family -----
         Preset(

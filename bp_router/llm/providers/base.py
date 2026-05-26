@@ -40,7 +40,7 @@ class ProviderAdapter(Protocol):
         ...
 
     async def embed(
-        self, text: str | list[str]
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
     ) -> list[list[float]]:
         ...
 

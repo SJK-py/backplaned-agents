@@ -575,7 +575,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     # embed / count_tokens
     # ------------------------------------------------------------------
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         # Embeddings live on the sibling adapter — agents pick the right
         # provider. Routing here would conflate two different
         # `concrete_model` namespaces (chat vs embedding model ids).
@@ -678,11 +680,19 @@ class OpenAICompatibleEmbeddingsAdapter(ProviderAdapter):
             "route chat requests to an openai-compatible preset instead."
         )
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         client = self._get_client()
         inputs: list[str] = [text] if isinstance(text, str) else list(text)
+        # `dimensions` (preset provider_options) — honoured by servers that
+        # implement the OpenAI embeddings `dimensions` param; omitted → native.
+        kwargs: dict[str, Any] = {}
+        dim = (provider_options or {}).get("dimensions")
+        if dim is not None:
+            kwargs["dimensions"] = dim
         resp = await client.embeddings.create(
-            model=self.concrete_model, input=inputs
+            model=self.concrete_model, input=inputs, **kwargs
         )
         return [item.embedding for item in resp.data]
 

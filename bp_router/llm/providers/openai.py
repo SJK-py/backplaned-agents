@@ -705,7 +705,9 @@ class OpenAIAdapter(ProviderAdapter):
     # embed / count_tokens
     # ------------------------------------------------------------------
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         # OpenAI exposes a separate `/v1/embeddings` endpoint
         # (`client.embeddings.create`). It doesn't share the Responses
         # API surface this adapter wraps, so the right place for
@@ -1001,15 +1003,24 @@ class OpenAIEmbeddingsAdapter(ProviderAdapter):
             "chat / Responses requests to a `gpt-*` alias instead."
         )
 
-    async def embed(self, text: str | list[str]) -> list[list[float]]:
+    async def embed(
+        self, text: str | list[str], *, provider_options: dict[str, Any] | None = None
+    ) -> list[list[float]]:
         client = self._get_client()
         if isinstance(text, str):
             inputs: list[str] = [text]
         else:
             inputs = list(text)
+        # `dimensions` (preset provider_options) trims the vector for the
+        # text-embedding-3-* models; omitted → the model's native size.
+        kwargs: dict[str, Any] = {}
+        dim = (provider_options or {}).get("dimensions")
+        if dim is not None:
+            kwargs["dimensions"] = dim
         result = await client.embeddings.create(
             input=inputs,
             model=self.concrete_model,
+            **kwargs,
         )
         return [list(d.embedding) for d in result.data]
 
