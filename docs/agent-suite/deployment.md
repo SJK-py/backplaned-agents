@@ -32,11 +32,16 @@ alembic -c alembic_suite.ini upgrade head     # suite   (suite-migrate service)
 
 ## Invitations (one per agent)
 
-Each agent onboards with its own admin-issued invitation. Mint them after
-the router is up (admin `POST /v1/admin/invitations`); the **chatbot's**
-must be flagged `provisions_service_user: true` (it bootstraps the
-`usr_service_chatbot` principal used for registration + per-user minting).
-Supply each via the matching compose env var:
+Each agent onboards with its own admin-issued invitation. There's **no
+mint → paste round-trip**: `POST /v1/admin/invitations` accepts a
+caller-supplied `token`, so you set one token per agent in the env file and
+register those same values. `scripts/register-invitations.sh` does both —
+`--gen` prints one `<AGENT>_INVITATION=<token>` line per agent (append to
+`deploy/.env.prod`), and a normal run logs in as admin and registers each
+(the **chatbot's** with `provisions_service_user: true` automatically — it
+bootstraps the `usr_service_chatbot` principal used for registration +
+per-user minting). It's idempotent (re-runs are safe). The same env vars
+feed the agent containers:
 
 | env var | agent | notes |
 | --- | --- | --- |
@@ -96,11 +101,12 @@ backend behind the same agent interface is future work
 ## Bring-up order
 
 ```
+scripts/register-invitations.sh --gen >> deploy/.env.prod   # one token per agent
 docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d postgres redis rustfs
 docker compose -f docker-compose.prod.yml up migrate suite-migrate   # one-shots
 docker compose -f docker-compose.prod.yml up -d router caddy
-# mint invitations (admin), put them in the env, then:
+ROUTER_URL=https://your.domain scripts/register-invitations.sh deploy/.env.prod
 docker compose -f docker-compose.prod.yml --profile search up -d
 python -m bp_agents.load_acl
 ```
