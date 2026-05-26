@@ -336,6 +336,43 @@ def test_run_llm_loop_file_tools_absent_when_disabled() -> None:
     assert files.reads == []
 
 
+def test_run_llm_loop_populates_progress_detail() -> None:
+    long_reason = "z" * 250  # last paragraph, exceeds the 100-char cap
+    round1 = LlmResponse(
+        text="Looking up the budget now.",
+        tool_calls=[ToolCall(id="c1", name="current_time", args={})],
+        thought_summary=f"first paragraph\n\n{long_reason}",
+    )
+    round2 = LlmResponse(text="all done", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    progress = _StubProgress()
+    ctx = _StubCtx(llm, _StubPeers(), progress)
+    messages: list[Message] = [Message(role="user", content="go")]
+    local = LocalToolset([make_current_time_tool("UTC")])
+
+    asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", local_tools=local,
+            use_peer_tools=False, detail_chars=100,
+        )
+    )
+
+    frames = [md[LOOP_PROGRESS_KEY] for _e, _c, md in progress.events if LOOP_PROGRESS_KEY in md]
+    by_kind: dict[str, list[dict]] = {}
+    for f in frames:
+        by_kind.setdefault(f["kind"], []).append(f)
+
+    # thinking detail = last paragraph of thought_summary, trimmed to the
+    # last 100 chars (ellipsis-prefixed because it overflowed).
+    think_details = [f["detail"] for f in by_kind["thinking"] if f.get("detail")]
+    assert think_details == ["…" + long_reason[-100:]]
+    # tool_call detail = the accompanying assistant message (short → verbatim).
+    assert by_kind["tool_call"][0]["detail"] == "Looking up the budget now."
+    # tool_result detail = the tool's output (current_time → carries the tz).
+    assert "UTC" in by_kind["tool_result"][0]["detail"]
+
+
 def test_loop_progress_model() -> None:
     lp = LoopProgress(kind="tool_call", round=2, tool="call_echo", detail="x")
     dumped = lp.model_dump()

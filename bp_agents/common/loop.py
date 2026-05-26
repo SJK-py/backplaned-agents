@@ -68,6 +68,25 @@ async def _dispatch_tool_call(
     )
 
 
+def _detail_tail(text: str | None, limit: int) -> str | None:
+    """The verbose-progress `detail`: the last non-empty paragraph of
+    `text`, trimmed to its last `limit` characters (prefixed with `…` when
+    truncated). `None` when there's nothing to show or detail is disabled."""
+    if not text or limit <= 0:
+        return None
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+    tail = blocks[-1] if blocks else text.strip()
+    if not tail:
+        return None
+    return f"…{tail[-limit:]}" if len(tail) > limit else tail
+
+
+def _message_text(msg: Message) -> str | None:
+    """The plain-text body of a tool-response message, or `None` when it's
+    multimodal/structured (e.g. a `read_file` `file_ref` part)."""
+    return msg.content if isinstance(msg.content, str) else None
+
+
 async def run_llm_loop(
     ctx: TaskContext,
     *,
@@ -83,6 +102,7 @@ async def run_llm_loop(
     extra_tools: list[ToolSpec] | None = None,
     terminal_tools: set[str] | None = None,
     file_tools: str | None = None,
+    detail_chars: int = 100,
 ) -> LlmResponse:
     """Run the tool-calling loop until the model returns no tool calls
     (or `max_rounds` is reached). **Mutates `messages` in place** —
@@ -134,6 +154,13 @@ async def run_llm_loop(
         # Round-trip the assistant turn verbatim (reasoning blocks +
         # thought-signatures) before dispatching tools.
         messages.append(Message.assistant_from_response(resp))
+        # Surface the model's reasoning (when the provider exposes a
+        # thought summary) as a detailed `thinking` line.
+        if emit_progress and resp.thought_summary:
+            await emit_loop_progress(
+                ctx, kind="thinking", round=round_idx + 1,
+                detail=_detail_tail(resp.thought_summary, detail_chars),
+            )
         if not resp.tool_calls:
             return resp
 
@@ -142,17 +169,22 @@ async def run_llm_loop(
         if any(tc.name in terminal for tc in resp.tool_calls):
             return resp
 
+        # The assistant's spoken message accompanying the tool call(s).
+        accompanying = _detail_tail(resp.text, detail_chars)
         for tc in resp.tool_calls:
             if emit_progress:
                 await emit_loop_progress(
-                    ctx, kind="tool_call", round=round_idx + 1, tool=tc.name
+                    ctx, kind="tool_call", round=round_idx + 1, tool=tc.name,
+                    detail=accompanying,
                 )
-            messages.append(await _dispatch_tool_call(
+            result_msg = await _dispatch_tool_call(
                 ctx, tc, local_tools, file_tools_enabled=bool(file_tools)
-            ))
+            )
+            messages.append(result_msg)
             if emit_progress:
                 await emit_loop_progress(
-                    ctx, kind="tool_result", round=round_idx + 1, tool=tc.name
+                    ctx, kind="tool_result", round=round_idx + 1, tool=tc.name,
+                    detail=_detail_tail(_message_text(result_msg), detail_chars),
                 )
 
     # Exhausted max_rounds with tool calls still pending — return the

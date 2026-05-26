@@ -56,6 +56,11 @@ class SuiteSettings(BaseSettings):
     # chatbot channel (Telegram)
     # ------------------------------------------------------------------
 
+    verbose_detail_chars: int = Field(default=100, ge=0)
+    """Verbose-mode progress `detail` cap: the last paragraph of the model's
+    reasoning / tool message / tool result is trimmed to this many trailing
+    characters (0 disables detail, leaving the bare kind + tool name)."""
+
     telegram_bot_token: str | None = None
     """Telegram bot token. When unset the chatbot connects but the poll
     loop is not launched (useful for tests / dry runs)."""

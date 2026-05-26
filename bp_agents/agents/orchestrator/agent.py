@@ -167,7 +167,7 @@ async def run_orchestrator_message(
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset, local_tools=local_tools,
         extra_tools=extra, terminal_tools={_HAND_OFF_TOOL} if extra else None,
-        file_tools="full",
+        file_tools="full", detail_chars=settings.verbose_detail_chars,
     )
 
     hand_off = next(

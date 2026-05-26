@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from bp_agents.agents.chatbot.gateway import ChatbotGateway
+from bp_agents.agents.chatbot.gateway import ChatbotGateway, _render_progress
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -80,8 +80,10 @@ def test_one_shot_verbose_renders_progress(suite_db_url: str) -> None:
             gw = _gw(pool)
             await gw.handle_update("tg1", "/v do the thing")
             sent = gw._telegram.sent
-            assert any("thinking" in s for s in sent)
-            assert any("call_memory" in s for s in sent)
+            assert any("Thinking" in s for s in sent)
+            # The `call_` peer-tool prefix is stripped and the [Tool] label
+            # leads the tool_call line.
+            assert any("memory" in s and "[Tool]" in s for s in sent)
             assert sent[-1] == "final answer"
         finally:
             await pool.close()
@@ -115,3 +117,26 @@ def test_verbose_default_renders_progress(suite_db_url: str) -> None:
             await pool.close()
 
     asyncio.run(_drive())
+
+
+def test_render_progress_formats() -> None:
+    # thinking: heartbeat vs reasoning detail (parenthesized, ellipsis lead)
+    assert _render_progress({"kind": "thinking"}) == "Thinking…"
+    assert _render_progress(
+        {"kind": "thinking", "detail": "so I check the docs"}
+    ) == "(…so I check the docs)"
+    # an already-truncated detail (leading …) isn't double-ellipsised
+    assert _render_progress(
+        {"kind": "thinking", "detail": "…the tail of a long thought"}
+    ) == "(…the tail of a long thought)"
+    # tool_call / tool_result: [Tool]/[Result] labels, call_ stripped, parens
+    assert _render_progress(
+        {"kind": "tool_call", "tool": "call_knowledge_base", "detail": "looking it up"}
+    ) == "[Tool] knowledge_base (looking it up)"
+    assert _render_progress(
+        {"kind": "tool_result", "tool": "call_knowledge_base"}
+    ) == "[Result] knowledge_base"
+    # a non-peer local tool keeps its name as-is
+    assert _render_progress(
+        {"kind": "tool_call", "tool": "current_time"}
+    ) == "[Tool] current_time"
