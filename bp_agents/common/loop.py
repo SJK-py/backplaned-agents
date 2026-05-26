@@ -18,7 +18,14 @@ from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.progress import emit_loop_progress
 from bp_agents.common.tools import LocalToolset, peer_tool_specs
-from bp_sdk import LlmCallError, Message, UpstreamError
+from bp_sdk import (
+    LlmCallError,
+    Message,
+    UpstreamError,
+    dispatch_file_tool,
+    is_file_tool,
+)
+from bp_sdk import file_tools as sdk_file_tools
 
 if TYPE_CHECKING:
     from bp_sdk import LlmResponse, TaskContext, ToolCall, ToolSpec
@@ -28,12 +35,19 @@ async def _dispatch_tool_call(
     ctx: TaskContext,
     tool_call: ToolCall,
     local_tools: LocalToolset | None,
+    *,
+    file_tools_enabled: bool = False,
 ) -> Message:
-    """Route one model tool call to a local tool or a peer agent, and
-    return the tool-response `Message`. A peer-call failure is fed back
-    as the result so the model can recover instead of the turn dying."""
+    """Route one model tool call to a local tool, a file-store tool, or a
+    peer agent, and return the tool-response `Message`. A peer-call failure
+    is fed back as the result so the model can recover instead of the turn
+    dying. A `read_file` call returns a name `file_ref` part that the router
+    resolves into multimodal content on the next `generate` ([sessions.md]
+    §2)."""
     if local_tools is not None and local_tools.has(tool_call.name):
         return await local_tools.dispatch(ctx, tool_call)
+    if file_tools_enabled and is_file_tool(tool_call.name):
+        return await dispatch_file_tool(ctx.files, tool_call)
     if tool_call.name.startswith("call_"):
         try:
             child = await ctx.peers.spawn_from_tool_call(tool_call)
@@ -68,6 +82,7 @@ async def run_llm_loop(
     emit_progress: bool = True,
     extra_tools: list[ToolSpec] | None = None,
     terminal_tools: set[str] | None = None,
+    file_tools: str | None = None,
 ) -> LlmResponse:
     """Run the tool-calling loop until the model returns no tool calls
     (or `max_rounds` is reached). **Mutates `messages` in place** —
@@ -87,10 +102,17 @@ async def run_llm_loop(
     call (delegation hand-off `hand_off`, delegate hand-back
     `end_delegation`). The terminal tool's spec must be supplied via
     `extra_tools` (or `local_tools`) for the model to see it.
+
+    `file_tools` (a `file_tools` bundle name — `"read_only"` or `"full"`)
+    exposes the SDK file-store tools so the model can list / read / write
+    stash files. `read_file` shows a file to the model multimodally (the
+    bytes attach on the next turn, router-resolved). Only file-capable
+    agents (those with `ctx.files`) should pass it.
     """
     peer_specs = peer_tool_specs(ctx) if use_peer_tools else []
     local_specs = local_tools.specs() if local_tools is not None else []
-    tools = peer_specs + local_specs + (extra_tools or [])
+    file_specs = sdk_file_tools(file_tools) if file_tools else []
+    tools = peer_specs + local_specs + file_specs + (extra_tools or [])
     terminal = terminal_tools or set()
 
     resp: LlmResponse | None = None
@@ -125,7 +147,9 @@ async def run_llm_loop(
                 await emit_loop_progress(
                     ctx, kind="tool_call", round=round_idx + 1, tool=tc.name
                 )
-            messages.append(await _dispatch_tool_call(ctx, tc, local_tools))
+            messages.append(await _dispatch_tool_call(
+                ctx, tc, local_tools, file_tools_enabled=bool(file_tools)
+            ))
             if emit_progress:
                 await emit_loop_progress(
                     ctx, kind="tool_result", round=round_idx + 1, tool=tc.name
