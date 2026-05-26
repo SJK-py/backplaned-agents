@@ -105,17 +105,16 @@
   *Why:* **bounded-scope** — minor; the orchestrator's `message` mode
   already uses the user tz, and threading the per-user tz into the l1
   local-tools factory is a small follow-up.
-- **deferred — agent-loop agents can't view attached files multimodally**
-  ([agents.md] — orchestrator caps `llm.multimodal.image` + `file.full`).
-  No suite agent registers the SDK `file_tools` (`read_file` → next-turn
-  `file_ref` attachment) or calls `ctx.files.llm_ref(name)`, so the model
-  sees only the *"user-attached file saved as `{name}`"* history row, not
-  the bytes. (The channel side is complete and correct by design — it's a
-  gateway with no `ctx.files` and never feeds the LLM ([channel.md] §7);
-  this is purely an orchestrator/l1 loop concern.)
-  *Why:* **bounded-scope** — text ingest is the v1 path; wiring `read_file`
-  / `llm_ref` into the orchestrator + l1 loops is additive (the
-  `gemini_agent` example shows the vision path to copy).
+- **done** — file-capable loop agents now register the SDK `file_tools`
+  ([agents.md] — orchestrator/l1 caps `file.full` + `llm.multimodal.image`).
+  `run_llm_loop` takes a `file_tools` bundle and dispatches the calls via
+  `dispatch_file_tool(ctx.files, …)`; the orchestrator (all loop paths) and
+  the three l1s (`deep_reasoning` / `computer_use` / `research`) pass
+  `"full"`. `read_file` returns a name `file_ref` the router resolves into
+  multimodal content on the next turn, so the model can view user-attached
+  / produced images & PDFs — not just the *"file saved as `{name}`"* row.
+  (The channel stays a gateway with no `ctx.files`, by design ([channel.md]
+  §7).)
 - **done (Phase 5)** — router-level delegation e2e (`test_delegation_e2e`):
   real orchestrator → deep_reasoning hand-off over a live `TestRouter`
   (task reassignment + the exactly-one-Result drop).

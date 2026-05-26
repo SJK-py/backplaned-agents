@@ -64,11 +64,29 @@ class _StubPeers:
         return self._spawn_result
 
 
+class _StubFiles:
+    """Minimal FileStash stand-in for the file-tool dispatch path."""
+
+    def __init__(self) -> None:
+        self.reads: list[str] = []
+
+    def llm_ref(self, name: str) -> dict:
+        self.reads.append(name)
+        return {"file_ref": {"name": name}}
+
+    async def list(self, *, persistent=False, query=None):
+        return []
+
+    async def write(self, name, text, *, persistent=False):
+        return name
+
+
 class _StubCtx:
-    def __init__(self, llm, peers, progress) -> None:
+    def __init__(self, llm, peers, progress, files=None) -> None:
         self.llm = llm
         self.peers = peers
         self.progress = progress
+        self.files = files
 
 
 def _result_frame(content: str, files=None) -> ResultFrame:
@@ -261,6 +279,61 @@ def test_run_llm_loop_unknown_tool_feeds_error_back() -> None:
     assert resp.text == "recovered"
     tool_msg = next(m for m in messages if m.role == "tool")
     assert "unknown tool" in tool_msg.content
+
+
+def test_run_llm_loop_file_tools_offered_and_read_feeds_multimodal() -> None:
+    # Round 1: the model calls read_file. Round 2: it answers.
+    round1 = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="read_file", args={"name": "chart.png"})]
+    )
+    round2 = LlmResponse(text="I can see the chart.", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    files = _StubFiles()
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress(), files=files)
+    messages: list[Message] = [Message(role="user", content="describe chart.png")]
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, local_tools=None, use_peer_tools=False,
+            file_tools="full",
+        )
+    )
+
+    assert resp.text == "I can see the chart."
+    # The full bundle was advertised to the model.
+    offered = {t.name for t in llm.calls[0]["tools"]}
+    assert {"list_session_file", "read_file", "write_file", "delete_file"} <= offered
+    # read_file produced a multimodal file_ref tool result (router resolves
+    # the bytes on the next turn) — not a text echo.
+    tool_msg = next(m for m in messages if m.role == "tool")
+    assert tool_msg.content == [{"file_ref": {"name": "chart.png"}}]
+    assert files.reads == ["chart.png"]
+
+
+def test_run_llm_loop_file_tools_absent_when_disabled() -> None:
+    # Without file_tools, a file-tool name is unknown (no dispatch, not
+    # advertised) — same as any other unknown tool.
+    round1 = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="read_file", args={"name": "x"})]
+    )
+    round2 = LlmResponse(text="recovered", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    files = _StubFiles()
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress(), files=files)
+    messages: list[Message] = [Message(role="user", content="go")]
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, local_tools=None, use_peer_tools=False,
+        )
+    )
+    assert resp.text == "recovered"
+    assert llm.calls[0].get("tools") is None
+    tool_msg = next(m for m in messages if m.role == "tool")
+    assert "unknown tool" in tool_msg.content
+    assert files.reads == []
 
 
 def test_loop_progress_model() -> None:

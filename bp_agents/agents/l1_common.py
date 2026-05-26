@@ -90,6 +90,10 @@ class L1Config:
     delegation_system: str
     preset_field: str = "preset_balanced"
     local_tools: LocalToolsFactory | None = None
+    # SDK file-tools bundle ("read_only" / "full") for file-capable l1s;
+    # None disables file tools. `read_file` feeds a file to the model
+    # multimodally on the next turn.
+    file_tools: str | None = None
 
 
 def _preset(cfg, settings: SuiteSettings, field: str) -> str:
@@ -134,6 +138,7 @@ async def run_subagent(
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
+        file_tools=config.file_tools,
     )
     return text_output(resp.text)
 
@@ -170,6 +175,7 @@ async def run_delegated_turn(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
         extra_tools=[END_DELEGATION_SPEC], terminal_tools={END_DELEGATION_TOOL},
+        file_tools=config.file_tools,
     )
 
     end_call = next(

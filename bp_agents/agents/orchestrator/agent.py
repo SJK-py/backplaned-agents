@@ -167,6 +167,7 @@ async def run_orchestrator_message(
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset, local_tools=local_tools,
         extra_tools=extra, terminal_tools={_HAND_OFF_TOOL} if extra else None,
+        file_tools="full",
     )
 
     hand_off = next(
@@ -261,7 +262,7 @@ async def _run_hand_off_fallback(
         name=_HAND_OFF_TOOL,
         response="The specialist is unavailable right now. Answer the user directly.",
     ))
-    resp = await run_llm_loop(ctx, messages=messages, preset=preset)
+    resp = await run_llm_loop(ctx, messages=messages, preset=preset, file_tools="full")
     async with pool.acquire() as conn:
         await queries.append_history(
             conn,
@@ -297,6 +298,7 @@ async def run_orchestrator_subagent(
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset,
         local_tools=LocalToolset([make_current_time_tool(timezone)]),
+        file_tools="full",
     )
     return text_output(resp.text)
 
@@ -378,6 +380,7 @@ async def run_orchestrator_cron_message(
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset,
         local_tools=LocalToolset([make_current_time_tool(timezone)]),
+        file_tools="full",
     )
 
     # Decide whether to report (the channel's apply step uses this for

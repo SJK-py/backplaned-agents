@@ -41,6 +41,7 @@ _CONFIG = L1Config(
     delegation_system=_DELEGATION_SYSTEM,
     preset_field="preset_balanced",
     local_tools=_tools,
+    file_tools="full",
 )
 
 
