@@ -164,6 +164,34 @@ services:
     networks: [backend]
     restart: "no"
 
+  bootstrap:                       # one-shot: register invitations + apply ACL
+    # Runs once the router is healthy: registers each agent's pre-supplied
+    # invitation token (POST /v1/admin/invitations accepts the token) and
+    # applies the suite ACL. Agents depend on this completing, so a single
+    # `docker compose up -d` onboards the whole roster — no manual steps.
+    image: backplaned-suite:latest
+    build: {context: ., dockerfile: Dockerfile.suite}
+    command: ["python", "-m", "bp_agents.bootstrap"]
+    depends_on:
+      router: {condition: service_healthy}
+    environment:
+      ROUTER_URL: http://router:8000
+      ROUTER_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local.test}
+      ROUTER_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set a strong value}
+      CHATBOT_INVITATION: ${CHATBOT_INVITATION:?}
+      ORCHESTRATOR_INVITATION: ${ORCHESTRATOR_INVITATION:?}
+      HISTORY_SUMMARIZER_INVITATION: ${HISTORY_SUMMARIZER_INVITATION:?}
+      MEMORY_INVITATION: ${MEMORY_INVITATION:?}
+      KNOWLEDGE_BASE_INVITATION: ${KNOWLEDGE_BASE_INVITATION:?}
+      MD_CONVERTER_INVITATION: ${MD_CONVERTER_INVITATION:?}
+      CONFIG_INVITATION: ${CONFIG_INVITATION:?}
+      DEEP_REASONING_INVITATION: ${DEEP_REASONING_INVITATION:?}
+      RESEARCH_INVITATION: ${RESEARCH_INVITATION:?}
+      COMPUTER_USE_INVITATION: ${COMPUTER_USE_INVITATION:?}
+      SANDBOX_INVITATION: ${SANDBOX_INVITATION:?}
+    networks: [agents]
+    restart: "no"
+
   # Common config shared by every suite agent. Each service sets
   # SUITE_AGENT + its own AGENT_INVITATION_TOKEN.
   x-suite-agent: &suite-agent
@@ -173,6 +201,7 @@ services:
     depends_on:
       router: {condition: service_started}
       suite-migrate: {condition: service_completed_successfully}
+      bootstrap: {condition: service_completed_successfully}
     environment: &suite-env
       AGENT_ROUTER_URL: ws://router:8000/v1/agent
       AGENT_STATE_DIR: /state

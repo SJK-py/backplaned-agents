@@ -101,15 +101,18 @@ backend behind the same agent interface is future work
 ## Bring-up order
 
 ```
-scripts/register-invitations.sh --gen >> deploy/.env.prod   # one token per agent
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml up -d postgres redis rustfs
-docker compose -f docker-compose.prod.yml up migrate suite-migrate   # one-shots
-docker compose -f docker-compose.prod.yml up -d router caddy
-ROUTER_URL=https://your.domain scripts/register-invitations.sh deploy/.env.prod
-docker compose -f docker-compose.prod.yml --profile search up -d
-python -m bp_agents.load_acl
+scripts/init-prod-env.sh                                     # generates deploy/.env.prod
+docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
+
+`compose up` resolves the whole order via `depends_on`: `postgres` →
+`migrate` + `suite-migrate` (schemas) → `router` (healthy) → `bootstrap`
+(`python -m bp_agents.bootstrap` — registers the pre-supplied invitation
+tokens + applies the ACL) → the agents. The migrations stay one-shot init
+services (never on agent start), so scaling an agent never races the schema.
+Add `--profile search` to bring up the bundled SearXNG. To run the steps
+manually instead (e.g. `register-invitations.sh` + `load_acl`), see the
+sections above.
 
 Then message the Telegram bot and send `/register` (an admin approves the
 registration; the chatbot's approval poller maps the chat to the new user).
