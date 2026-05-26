@@ -77,6 +77,7 @@ AGENTS=(
     "memory:false"
     "knowledge_base:false"
     "md_converter:false"
+    "config:false"
     "deep_reasoning:false"
     "research:false"
     "computer_use:false"
