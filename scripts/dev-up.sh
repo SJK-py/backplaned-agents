@@ -88,6 +88,9 @@ ROUTER_ADMIN_SESSION_SECRET=$SESS
 ROUTER_REDIS_URL=redis://localhost:6379/0
 ROUTER_DEPLOYMENT_ENV=dev
 ROUTER_LOG_LEVEL=INFO
+# LLM provider key for the router's seeded presets (the suite's `default`
+# preset resolves env://GEMINI_API_KEY). Set this before booting the router.
+GEMINI_API_KEY=
 EOF
     if [[ $BOOTSTRAP_ADMIN -eq 1 ]]; then
         # RFC-2606 example.com — Pydantic EmailStr rejects .test / .invalid
@@ -126,3 +129,7 @@ log ""
 log "Then in another shell:"
 log "    curl http://127.0.0.1:8000/healthz"
 log "    open http://127.0.0.1:8000/admin/login"
+log ""
+log "To run the agent suite (migrates bp_suite + launches all agents):"
+log "    SUITE_TELEGRAM_BOT_TOKEN=... scripts/run-suite.sh"
+log "    python -m bp_agents.load_acl     # first run only (suite ACL)"
