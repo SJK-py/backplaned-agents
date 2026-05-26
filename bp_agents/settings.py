@@ -52,6 +52,22 @@ class SuiteSettings(BaseSettings):
     lite helpers / embeddings). Default to the router's seeded
     `default` preset until per-tier presets are configured."""
 
+    # ------------------------------------------------------------------
+    # chatbot channel (Telegram)
+    # ------------------------------------------------------------------
+
+    telegram_bot_token: str | None = None
+    """Telegram bot token. When unset the chatbot connects but the poll
+    loop is not launched (useful for tests / dry runs)."""
+
+    telegram_base_url: str = "https://api.telegram.org"
+    telegram_poll_timeout_s: int = Field(default=25, ge=0)
+    """Long-poll `getUpdates` timeout."""
+
+    dispatch_result_timeout_s: float = Field(default=180.0, gt=0.0)
+    """How long the channel waits for an injected turn's result before
+    surfacing a failure to the user."""
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]
