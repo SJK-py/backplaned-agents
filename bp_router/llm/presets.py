@@ -401,6 +401,12 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://OPENAI_API_KEY",
         ),
         Preset(
+            name="gpt-5-4-nano",
+            provider="openai",
+            concrete_model="gpt-5.4-nano",
+            api_key_ref="env://OPENAI_API_KEY",
+        ),
+        Preset(
             name="gpt-5",
             provider="openai",
             concrete_model="gpt-5",
@@ -413,21 +419,15 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://OPENAI_API_KEY",
         ),
         Preset(
+            name="gpt-5-nano",
+            provider="openai",
+            concrete_model="gpt-5-nano",
+            api_key_ref="env://OPENAI_API_KEY",
+        ),
+        Preset(
             name="gpt-4-1",
             provider="openai",
             concrete_model="gpt-4.1",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-4o",
-            provider="openai",
-            concrete_model="gpt-4o",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="o4-mini",
-            provider="openai",
-            concrete_model="o4-mini",
             api_key_ref="env://OPENAI_API_KEY",
         ),
         # ----- OpenAI embeddings (separate adapter) -----
@@ -441,12 +441,6 @@ def default_presets() -> list[Preset]:
             name="text-embedding-3-large",
             provider="openai-embeddings",
             concrete_model="text-embedding-3-large",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="text-embedding-ada-002",
-            provider="openai-embeddings",
-            concrete_model="text-embedding-ada-002",
             api_key_ref="env://OPENAI_API_KEY",
         ),
     ]

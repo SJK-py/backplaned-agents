@@ -20,6 +20,18 @@
 
 ## 2026-05-26
 
+### Changed — `bp_router/llm/presets.py`: OpenAI lineup trim + nano tiers
+
+- **What:** In `default_presets()` for the OpenAI families:
+  - **dropped** `gpt-4o`, `o4-mini` (chat) and `text-embedding-ada-002`
+    (embeddings);
+  - **added** `gpt-5-4-nano` (`gpt-5.4-nano`) and `gpt-5-nano` (`gpt-5-nano`).
+  - The `openai` / `gpt` bare aliases (→ `gpt-5.5`) and the remaining
+    `gpt-5*` / `gpt-4-1` / `text-embedding-3-*` entries are unchanged.
+- **Why:** Drop retired models and add the nano tiers to the seeded lineup.
+- **Shape:** **Data/seed change** (empty-table first-boot seed only). No
+  test pinned the dropped names, so no platform-test change was needed.
+
 ### Changed — `bp_router/llm/presets.py`: `claude` alias → Sonnet
 
 - **What:** Repointed the bare `claude` seed preset from `claude-opus-4-7`
