@@ -83,10 +83,12 @@
   *Why:* **spec-marks-optional** — [memory.md §3] designates relate-out /
   update-propagation as "enhancement, safe to skip"; phases 1–2 (the facts
   + edges that matter) are robust.
-- **lean — retrieve uses vector + recency decay** (no BM25 leg; neighbours
-  outside the pool ranked by recency alone).
-  *Why:* **bounded-scope** — same hybrid-search deferral as the KB; the
-  decay + 1-hop expansion is the load-bearing behaviour.
+- **done — hybrid retrieve (vector + BM25) → recency-decay re-rank**
+  ([memory.md] §4, [data-model.md] §2.2). The pool is reciprocal-rank
+  fusion of the vector leg and a BM25 leg over `fact` (LanceDB native FTS,
+  `MemoryStore.search_bm25`); the fused relevance is then multiplied by the
+  recency decay and re-ranked, feeding the unchanged 1-hop graph expansion.
+  The BM25 leg is best-effort (an FTS parse error degrades to vector-only).
 - **done — GC scheduling**. The memory agent launches a background sweep on
   startup (same shape as the cron scheduler: run a pass, wait
   `memory_gc_interval_s` (default daily) or until stopped). Each pass

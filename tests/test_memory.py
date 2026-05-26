@@ -135,6 +135,39 @@ def test_memory_retrieve_with_graph_expansion(tmp_path) -> None:
     asyncio.run(_drive())
 
 
+class _FixedEmbedLlm:
+    """Embeds every text to the same (fact-orthogonal) vector, so the vector
+    leg ties and the BM25 leg breaks it — proving hybrid fusion is live."""
+
+    async def generate(self, messages, **kw) -> LlmResponse:
+        return LlmResponse(text="{}", tool_calls=[])
+
+    async def embed(self, texts, *, preset=None):
+        return [[0.0] * (_DIM - 1) + [1.0] for _ in texts]
+
+
+def test_memory_retrieve_hybrid_bm25_leg(tmp_path) -> None:
+    async def _drive() -> None:
+        store = MemoryStore(await connect(tmp_path, "usr_h"), embedding_dim=_DIM)
+        await store.insert_fact(
+            fact="likes cats", kind="preference", embedding=_kw_vec("cats")
+        )
+        await store.insert_fact(
+            fact="rides a bicycle", kind="event", embedding=_kw_vec("dog")
+        )
+        out = await run_memory_retrieve(
+            _Ctx(_FixedEmbedLlm(), "usr_h"),
+            MemRetrieve(query="bicycle", count=1, child_count=0),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        # The vector leg can't distinguish the two facts; BM25 surfaces the
+        # keyword match as the top result.
+        assert "bicycle" in out.content
+        assert "cats" not in out.content
+
+    asyncio.run(_drive())
+
+
 def test_memory_gc_sweep(suite_db_url: str, tmp_path) -> None:
     """The background sweep GCs every user with an existing fact graph,
     keyed off `user_config`. A user with no LanceDB dir is skipped."""

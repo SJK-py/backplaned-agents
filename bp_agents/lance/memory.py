@@ -101,6 +101,16 @@ class MemoryStore:
     ) -> list[dict[str, Any]]:
         return self._facts().search(query_vector).limit(limit).to_list()
 
+    def _bm25_sync(self, query: str, limit: int) -> list[dict[str, Any]]:
+        tbl = self._facts()
+        if tbl.count_rows() == 0:
+            return []
+        # (Re)build the BM25/FTS index over `fact` on this handle, then
+        # search it — rebuilt at query time so it always covers current rows
+        # (per-user graphs are modest, so staleness is impossible).
+        tbl.create_fts_index("fact", use_tantivy=False, replace=True)
+        return tbl.search(query, query_type="fts").limit(limit).to_list()
+
     def _touch_sync(self, uids: list[str]) -> None:
         if not uids:
             return
@@ -187,6 +197,10 @@ class MemoryStore:
         self, *, query_vector: list[float], limit: int
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._search_sync, query_vector, limit)
+
+    async def search_bm25(self, *, query: str, limit: int) -> list[dict[str, Any]]:
+        """BM25/full-text leg over `fact` ([data-model.md] §2.2)."""
+        return await asyncio.to_thread(self._bm25_sync, query, limit)
 
     async def neighbors(self, uid: str) -> list[str]:
         edges = await asyncio.to_thread(self._all_edges_sync)

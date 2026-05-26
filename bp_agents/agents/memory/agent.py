@@ -227,19 +227,32 @@ async def run_memory_retrieve(
     if embed_preset is None:
         _lite, embed_preset = await _presets(ctx, settings)
 
+    limit = settings.memory_retrieve_pool
     qv = (await ctx.llm.embed([payload.query], preset=embed_preset))[0]
-    pool = await store.search(query_vector=qv, limit=settings.memory_retrieve_pool)
-    if not pool:
+    vec_pool = await store.search(query_vector=qv, limit=limit)
+    try:
+        bm_pool = await store.search_bm25(query=payload.query, limit=limit)
+    except Exception:  # noqa: BLE001 — recall must survive an FTS parse error
+        logger.debug("memory_bm25_failed", exc_info=True)
+        bm_pool = []
+    if not vec_pool and not bm_pool:
         return text_output("No relevant memories.")
 
-    def _score(f: dict[str, Any]) -> float:
-        sim = 1.0 / (1.0 + float(f.get("_distance", 0.0)))
-        return sim * _decay(f["last_used_at"], settings)
+    # Hybrid pool ([memory.md] §4): reciprocal-rank fusion of the vector and
+    # BM25 legs gives each fact a base relevance, which recency decay then
+    # re-ranks. (Version-independent — no LanceDB reranker.)
+    relevance: dict[str, float] = {}
+    for rows in (vec_pool, bm_pool):
+        for rank, f in enumerate(rows):
+            relevance[f["uid"]] = relevance.get(f["uid"], 0.0) + 1.0 / (60 + rank + 1)
+    by_uid = {f["uid"]: f for f in (*vec_pool, *bm_pool)}
 
-    ranked = sorted(pool, key=_score, reverse=True)
+    def _score(f: dict[str, Any]) -> float:
+        return relevance[f["uid"]] * _decay(f["last_used_at"], settings)
+
+    ranked = sorted(by_uid.values(), key=_score, reverse=True)
     top = ranked[: payload.count]
     top_uids = {f["uid"] for f in top}
-    by_uid = {f["uid"]: f for f in pool}
 
     # 1-hop graph expansion: neighbors of the top, excluding the top.
     expansion: list[dict[str, Any]] = []
