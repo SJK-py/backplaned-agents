@@ -542,6 +542,155 @@ class Agent:
             if value is not None:
                 setattr(self.info, field, value)
 
+    async def spawn_root_for_user(
+        self,
+        destination_agent_id: str,
+        payload: BaseModel | dict[str, Any],
+        *,
+        user_id: str,
+        session_id: str,
+        mode: str | None = None,
+        priority: Any | None = None,
+        idempotency_key: str | None = None,
+        deadline: Any | None = None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+        ack_timeout_s: float | None = None,
+    ) -> str:
+        """Admit a *parentless* root task on behalf of an end user (B1).
+
+        A gateway / channel agent uses this to inject a user turn as a
+        task carrying the END USER's `(user_id, session_id)` — not its
+        own identity. `peers.spawn` can't do this: it is handler-bound
+        and always inherits `parent_task_id = ctx.task_id` from the
+        running task. Here there is no surrounding task, so the frame
+        is parentless and the router admits it on the root-task path
+        (lineage + spawn-depth checks are skipped when
+        `parent_task_id is None`; the ACL is evaluated at the *session
+        principal's* level, derived from `user_id`, not the gateway's
+        `service` level).
+
+        Returns the assigned `task_id` *before* the (possibly
+        minutes-long) result — the admit/await split so the caller can
+        record the id (e.g. to cancel it later) and then call
+        `await_root_result(task_id, ...)`. The asserted `user_id` is a
+        data-integrity check only; the router re-validates that
+        `(user_id, session_id)` is a real, open, owned session (which it
+        is when the gateway minted it).
+
+        Raises `AckTimeout` if the router never acks, `SpawnRejected`
+        if admit is refused (ACL / schema / quota / unknown session or
+        destination), `UnexpectedResponse` if the ack carries no
+        `task_id`, and `RuntimeError` if the agent isn't connected yet.
+        """
+        import secrets  # noqa: PLC0415
+
+        from bp_protocol.frames import AckFrame, NewTaskFrame  # noqa: PLC0415
+        from bp_protocol.types import TaskPriority  # noqa: PLC0415
+        from bp_sdk.peers import (  # noqa: PLC0415
+            AckTimeout,
+            SpawnRejected,
+            UnexpectedResponse,
+        )
+
+        if self._dispatcher is None:
+            raise RuntimeError(
+                "agent.spawn_root_for_user called before run_async() — "
+                "agent is not connected to the router yet"
+            )
+
+        payload_dict = (
+            payload.model_dump()
+            if isinstance(payload, BaseModel)
+            else dict(payload)
+        )
+        frame = NewTaskFrame(
+            agent_id=self.info.agent_id,
+            # Root of a fresh trace — no surrounding span to inherit.
+            # 128-bit trace / 64-bit span, W3C-shaped; caller may pass
+            # explicit ids when it already holds an active span.
+            trace_id=trace_id or secrets.token_hex(16),
+            span_id=span_id or secrets.token_hex(8),
+            task_id=None,  # spawn — router assigns + acks the id
+            parent_task_id=None,  # ROOT — admit skips lineage/depth checks
+            destination_agent_id=destination_agent_id,
+            user_id=user_id,
+            session_id=session_id,
+            priority=priority or TaskPriority.NORMAL,
+            deadline=deadline,
+            idempotency_key=idempotency_key,
+            input_mode=mode,
+            payload=payload_dict,
+        )
+        # No owning handler context (task_id=None) → the ack future
+        # falls back to the correlation reaper's timeout path rather
+        # than the per-task drain. Mirrors `peers.spawn`'s ack round-trip.
+        ack_fut = self._dispatcher.register_for_task(
+            self._dispatcher.pending_acks,
+            frame.correlation_id,
+            None,
+            timeout_s=ack_timeout_s,
+        )
+        await self._dispatcher.transport.send(frame)
+        try:
+            ack = await ack_fut
+        except TimeoutError as exc:
+            raise AckTimeout("root-task admit ack timed out") from exc
+        if not isinstance(ack, AckFrame) or not ack.accepted:
+            reason = ack.reason if isinstance(ack, AckFrame) else "unknown"
+            raise SpawnRejected(
+                f"router rejected root task: {reason}", reason=reason
+            )
+        if ack.task_id is None:
+            raise UnexpectedResponse(
+                "router accepted root task but did not assign task_id"
+            )
+        return ack.task_id
+
+    async def await_root_result(
+        self,
+        task_id: str,
+        *,
+        timeout_s: float | None = None,
+        on_progress: Callable[[Any], Any] | None = None,
+    ) -> Any:
+        """Await the terminal `ResultFrame` of a root task admitted via
+        `spawn_root_for_user`, optionally invoking `on_progress` per
+        `ProgressFrame` (sync or async callback).
+
+        The router fans Progress + Result frames for the task back to
+        this agent (the admitting caller); this drives them through the
+        dispatcher's `open_spawn_stream` — the supported out-of-context
+        entry point, with the same cancellation-safe subscription
+        cleanup the in-handler `peers.spawn(stream=True)` path uses.
+
+        Raises `ResultTimeout` if no terminal frame arrives within
+        `timeout_s` (falls back to the dispatcher's configured
+        `pending_results` timeout when `None`), and `RuntimeError` if
+        the agent isn't connected yet.
+        """
+        if self._dispatcher is None:
+            raise RuntimeError(
+                "agent.await_root_result called before run_async() — "
+                "agent is not connected to the router yet"
+            )
+
+        stream = self._dispatcher.open_spawn_stream(task_id, timeout_s=timeout_s)
+        async with stream:
+            if on_progress is None:
+                # No subscriber callback — don't iterate the queue (a
+                # result that raced ahead of our subscribe lives in the
+                # result future, not the queue); just await the result.
+                return await stream.result(timeout_s=timeout_s)
+            # Verbose path: drain Progress frames as they arrive,
+            # terminating when the terminal Result lands. The documented
+            # streaming idiom — see docs/sdk/core.md §7.
+            async for pf in stream:
+                res = on_progress(pf)
+                if inspect.isawaitable(res):
+                    await res
+            return await stream.result(timeout_s=timeout_s)
+
     def run(self) -> None:
         """Blocking run loop for external agents. Installs SIGINT/SIGTERM.
 
