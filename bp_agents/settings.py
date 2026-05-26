@@ -47,10 +47,11 @@ class SuiteSettings(BaseSettings):
     default_preset_pro: str = "default"
     default_preset_balanced: str = "default"
     default_preset_lite: str = "default"
-    default_preset_embedding: str = "default"
+    default_preset_embedding: str = "default_embedding"
     """Router LLM-preset names per tier (deep_reasoning / orchestrator /
-    lite helpers / embeddings). Default to the router's seeded
-    `default` preset until per-tier presets are configured."""
+    lite helpers / embeddings). The three chat tiers default to the router's
+    seeded `default` chat preset; embeddings default to `default_embedding`
+    (a real embedding model — `default` is chat-only and can't embed)."""
 
     # ------------------------------------------------------------------
     # chatbot channel (Telegram)

@@ -234,7 +234,7 @@ async def create_user_config(
     preset_pro: str = "default",
     preset_balanced: str = "default",
     preset_lite: str = "default",
-    preset_embedding: str = "default",
+    preset_embedding: str = "default_embedding",
     max_context_token_limit: int = 120_000,
     verbose_default: bool = False,
     language: str = "en",
