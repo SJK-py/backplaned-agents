@@ -109,6 +109,28 @@ def test_web_search_formats_results() -> None:
     asyncio.run(_drive())
 
 
+def test_web_search_count_and_filters() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _get_json(url, params, timeout):
+            captured["params"] = params
+            return {"results": [
+                {"title": f"t{i}", "url": "u", "content": "c"} for i in range(10)
+            ]}
+
+        out = await web_search(
+            "cats", settings=SuiteSettings(searxng_url="http://s"),
+            count=3, time_range="week", language="en", get_json=_get_json,
+        )
+        # SearXNG filter params forwarded; results capped at `count`.
+        assert captured["params"]["time_range"] == "week"
+        assert captured["params"]["language"] == "en"
+        assert "3. t2" in out and "4. t3" not in out
+
+    asyncio.run(_drive())
+
+
 def test_html_fetch_routes_to_md_converter() -> None:
     async def _drive() -> None:
         peers = _StubPeers("# Page\n\nbody")

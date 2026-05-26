@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 
 from bp_agents.agents.md_converter import Convert, Webpage, run_convert, run_webpage
+from bp_agents.agents.md_converter.agent import _html_to_text
 
 
 class _StubFiles:
@@ -65,3 +66,15 @@ def test_webpage_with_stub_fetch() -> None:
         assert "world page" in out.content
 
     asyncio.run(_drive())
+
+
+def test_html_to_text_regex_fallback() -> None:
+    # The fallback used when MarkItDown can't parse a page.
+    raw = (
+        "<html><body><h2>Title</h2><p>Hello <b>world</b></p>"
+        "<ul><li>one</li><li>two</li></ul></body></html>"
+    )
+    out = _html_to_text(raw)
+    assert "## Title" in out
+    assert "Hello world" in out
+    assert "- one" in out and "- two" in out
