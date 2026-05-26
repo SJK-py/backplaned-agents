@@ -143,60 +143,112 @@ services:
     # Not published directly — the edge proxy fronts it.
 
   # ======================================================================
-  # AGENT SUITE — wire-up CONTRACT (images come from the suite repo).
-  # Uncomment / fill in once those images exist. Each agent onboards with
-  # its OWN admin-issued invitation; the chatbot's is flagged
-  # `provisions_service_user`. NONE of these hold provider / S3 / JWT
-  # secrets — they call ctx.llm and the router's file endpoints. Per-box
-  # config + the secret-scoping table are in docs/deployment.md.
+  # AGENT SUITE. One image (Dockerfile.suite); each service selects its
+  # agent via $SUITE_AGENT and onboards with its OWN admin-issued
+  # invitation (the chatbot's flagged `provisions_service_user`). NONE
+  # hold provider / S3 / JWT secrets — they call ctx.llm and the router's
+  # file endpoints. The suite schema is applied once by `suite-migrate`.
+  # Apply the ACL rule set once after first boot:
+  #   docker compose run --rm -e ... suite-acl
+  # See docs/agent-suite/deployment.md.
   # ======================================================================
 
-  # chatbot:                       # docker 5 — gateway (+ webapp in v2)
-  #   image: ${SUITE_IMAGE}        # entrypoint selects agent=chatbot
-  #   restart: unless-stopped
-  #   depends_on: [router, postgres, redis]
-  #   environment:
-  #     AGENT_ROUTER_URL: ws://router:8000/v1/agent
-  #     AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION}      # provisions_service_user
-  #     AGENT_STATE_DIR: /state
-  #     SUITE_DB_URL: postgresql://bp_suite:${SUITE_DB_PASSWORD}@postgres:5432/bp_suite
-  #     SUITE_REDIS_URL: redis://redis:6379/1
-  #     TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-  #   volumes: [chatbot_state:/state]
-  #   networks: [edge, agents, suite]
+  suite-migrate:                   # one-shot: apply the suite DB schema
+    image: backplaned-suite:latest
+    build: {context: ., dockerfile: Dockerfile.suite}
+    command: ["alembic", "-c", "alembic_suite.ini", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
+    networks: [backend]
+    restart: "no"
 
-  # sandbox:                       # docker 6 — UNTRUSTED code execution
-  #   image: ${SANDBOX_IMAGE}
-  #   restart: unless-stopped
-  #   depends_on: [router]
-  #   environment:
-  #     AGENT_ROUTER_URL: ws://router:8000/v1/agent
-  #     AGENT_INVITATION_TOKEN: ${SANDBOX_INVITATION}
-  #     AGENT_STATE_DIR: /state
-  #   security_opt: ["no-new-privileges:true"]
-  #   cap_drop: ["ALL"]
-  #   read_only: true              # + a writable per-user workspace mount
-  #   # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc
-  #   # Resource caps: cpus, mem_limit, pids_limit. Egress off/allowlisted.
-  #   networks: [agents]           # router WS ONLY — no db/redis/s3/web
+  # Common config shared by every suite agent. Each service sets
+  # SUITE_AGENT + its own AGENT_INVITATION_TOKEN.
+  x-suite-agent: &suite-agent
+    image: backplaned-suite:latest
+    build: {context: ., dockerfile: Dockerfile.suite}
+    restart: unless-stopped
+    depends_on:
+      router: {condition: service_started}
+      suite-migrate: {condition: service_completed_successfully}
+    environment: &suite-env
+      AGENT_ROUTER_URL: ws://router:8000/v1/agent
+      AGENT_STATE_DIR: /state
+      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
+      SUITE_LANCE_ROOT: /lancedb
+    networks: [agents, suite]
 
-  # reasoning:                     # docker 7 — orchestrator (l0) + l1
-  #   image: ${SUITE_IMAGE}        # supervisor runs orchestrator,
-  #   #                            # computer_use, research, deep_reasoning
-  #   #                            # — each its own process + invitation
-  #   networks: [agents, suite]
+  chatbot:                         # gateway + session manager + scheduler
+    <<: *suite-agent
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: chatbot
+      AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION:?provisions_service_user invite}
+      SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
+    volumes: [chatbot_state:/state]
+    networks: [edge, agents, suite]
 
-  # stores:                        # knowledge_base + memory (CO-LOCATED)
-  #   image: ${SUITE_IMAGE}
-  #   volumes: [lancedb_data:/lancedb]    # the shared per-user LanceDB
-  #   networks: [agents, suite]
-  #   # memory's per-user lock is in-process here; back it with Redis if
-  #   # this box ever scales beyond one replica.
+  orchestrator:
+    <<: *suite-agent
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: orchestrator
+      AGENT_INVITATION_TOKEN: ${ORCHESTRATOR_INVITATION:?}
 
-  # helpers:                       # config + history_summarizer + md_converter
-  #   image: ${SUITE_IMAGE}
-  #   networks: [agents, suite]
+  deep_reasoning:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: deep_reasoning, AGENT_INVITATION_TOKEN: "${DEEP_REASONING_INVITATION:?}"}
 
-  # searxng:                       # docker 9 (optional) — web search backend
-  #   image: searxng/searxng:latest
-  #   networks: [agents]           # research queries it; it alone has web egress
+  research:
+    <<: *suite-agent
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: research
+      AGENT_INVITATION_TOKEN: ${RESEARCH_INVITATION:?}
+      # Point at the bundled SearXNG (search profile) or an external one.
+      SUITE_SEARXNG_URL: ${SUITE_SEARXNG_URL:-http://searxng:8080}
+
+  computer_use:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: computer_use, AGENT_INVITATION_TOKEN: "${COMPUTER_USE_INVITATION:?}"}
+
+  # knowledge_base + memory share the per-user LanceDB volume.
+  knowledge_base:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: knowledge_base, AGENT_INVITATION_TOKEN: "${KNOWLEDGE_BASE_INVITATION:?}"}
+    volumes: [lancedb_data:/lancedb]
+
+  memory:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: memory, AGENT_INVITATION_TOKEN: "${MEMORY_INVITATION:?}"}
+    volumes: [lancedb_data:/lancedb]
+    # memory's per-user lock is in-process; back it with Redis to scale
+    # this service beyond one replica.
+
+  history_summarizer:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: history_summarizer, AGENT_INVITATION_TOKEN: "${HISTORY_SUMMARIZER_INVITATION:?}"}
+
+  md_converter:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: md_converter, AGENT_INVITATION_TOKEN: "${MD_CONVERTER_INVITATION:?}"}
+
+  config:
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: config, AGENT_INVITATION_TOKEN: "${CONFIG_INVITATION:?}"}
+
+  sandbox:                         # UNTRUSTED code execution — hardened
+    <<: *suite-agent
+    environment: {<<: *suite-env, SUITE_AGENT: sandbox, AGENT_INVITATION_TOKEN: "${SANDBOX_INVITATION:?}"}
+    security_opt: ["no-new-privileges:true"]
+    # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
+    # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
+    networks: [agents]             # router WS only — no db/redis/web
+
+  searxng:                         # optional web-search backend (profile)
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    profiles: ["search"]
+    networks: [agents]             # research queries it; it alone has web egress

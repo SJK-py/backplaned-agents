@@ -76,6 +76,8 @@ suite = [
     "lancedb>=0.30",
     # File / webpage → Markdown for md_converter (+ KB ingest).
     "markitdown>=0.0.1",
+    # DST-aware cron evaluation for the scheduler.
+    "croniter>=2.0",
 ]
 
 # Test + dev tooling.

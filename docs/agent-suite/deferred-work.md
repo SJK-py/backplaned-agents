@@ -73,11 +73,10 @@
   later refinement.
 - **lean — l1 `current_time` uses the default timezone**, not the user's
   (the orchestrator's `message` mode already uses the user tz).
-- **deferred — full router-level delegation integration test**. The
-  lifecycle is unit-tested (hand-off seed + delegate, l1 end_delegation
-  hand-back, orchestrator recap/retire, channel delegated_to incl. F2);
-  an end-to-end test over a live router (task reassignment + the
-  exactly-one-Result drop) is not yet written.
+- **done (Phase 5)** — router-level delegation e2e: `test_delegation_e2e`
+  drives a real orchestrator → deep_reasoning hand-off over a live
+  `TestRouter` (task reassignment + the exactly-one-Result drop), in
+  addition to the lifecycle unit tests.
 
 ## Cron / channel file I/O (Phase 4)
 
