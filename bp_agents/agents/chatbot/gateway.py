@@ -17,6 +17,7 @@ from bp_agents.agents.chatbot.credentials import ChannelCredentials
 from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
+from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
     import asyncpg
@@ -299,6 +300,11 @@ class ChatbotGateway:
                 chat_id=chat_id, text=reply or "(no response)"
             )
 
+            # delegated_to maintenance via result-source observation
+            # ([delegation.md] §2) — who produced the result vs who we
+            # dispatched to. Channel-owned (session.management).
+            await self._update_delegation(session_id, dest, result)
+
             # Post-turn summarization check, still inside the session lock
             # so it serializes with the next turn ([sessions.md] §3.1). The
             # agent measured `context_tokens` while building its context.
@@ -336,6 +342,33 @@ class ChatbotGateway:
             logger.exception(
                 "memory_add_failed", extra={"event": "memory_add_failed"}
             )
+
+    async def _update_delegation(self, session_id: str, dest: str, result) -> None:  # noqa: ANN001
+        """Maintain `delegated_to` from the result source ([delegation.md] §2).
+
+        - dispatched orchestrator but a delegate produced the result ⇒
+          hand-off ⇒ set `delegated_to = <delegate>`.
+        - dispatched a delegate but orchestrator produced the result ⇒
+          hand-back ⇒ clear.
+        - a delegated turn FAILED (F2) ⇒ revert to the orchestrator so the
+          session isn't stuck routing to a broken delegate.
+        """
+        producer = result.agent_id
+        failed = result.status != TaskStatus.SUCCEEDED
+        update: tuple[str | None] | None = None  # (value,) when a change applies
+        if failed and dest != ORCHESTRATOR_AGENT_ID:
+            update = (None,)  # F2: broken delegate → back to orchestrator
+        elif dest == ORCHESTRATOR_AGENT_ID and producer not in (
+            ORCHESTRATOR_AGENT_ID, "router",
+        ):
+            update = (producer,)  # hand-off
+        elif dest != ORCHESTRATOR_AGENT_ID and producer == ORCHESTRATOR_AGENT_ID:
+            update = (None,)  # hand-back
+        if update is not None:
+            async with self._pool.acquire() as conn:
+                await queries.update_session_info(
+                    conn, session_id, delegated_to=update[0]
+                )
 
     async def _maybe_summarize(
         self, session_id: str, agent_id: str, context_tokens: int | None

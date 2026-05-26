@@ -31,8 +31,8 @@ from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
-from bp_protocol.types import AgentInfo, AgentOutput
-from bp_sdk import Agent, Message, TaskContext
+from bp_protocol.types import AgentInfo, AgentOutput, LLMData
+from bp_sdk import Agent, Message, TaskContext, ToolSpec
 
 if TYPE_CHECKING:
     import asyncpg
@@ -40,6 +40,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ORCHESTRATOR_AGENT_ID = "orchestrator"
+_HAND_OFF_TOOL = "hand_off"
+
+
+def _l1_destinations(ctx: TaskContext) -> list[str]:
+    """Visible l1 specialist agent_ids the orchestrator may hand off to."""
+    return [
+        aid
+        for aid, entry in ctx.peers.visible().items()
+        if "l1" in (entry.get("groups") or [])
+    ]
+
+
+def _hand_off_spec(destinations: list[str]) -> ToolSpec:
+    return ToolSpec(
+        name=_HAND_OFF_TOOL,
+        description=(
+            "Hand this conversation off to a specialist who will take over "
+            "until the task is done. Use when a request is squarely in one "
+            "specialist's domain. The specialist hands control back when "
+            "finished."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "enum": destinations},
+                "instruction": {
+                    "type": "string",
+                    "description": "What the specialist should accomplish.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Relevant background for the specialist.",
+                },
+            },
+            "required": ["agent_id", "instruction"],
+        },
+    )
 
 
 agent = Agent(
@@ -121,9 +158,21 @@ async def run_orchestrator_message(
     context_tokens = estimate_context_tokens(messages)
 
     local_tools = LocalToolset([make_current_time_tool(timezone)])
+    destinations = _l1_destinations(ctx)
+    extra = [_hand_off_spec(destinations)] if destinations else []
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset, local_tools=local_tools
+        ctx, messages=messages, preset=preset, local_tools=local_tools,
+        extra_tools=extra, terminal_tools={_HAND_OFF_TOOL} if extra else None,
     )
+
+    hand_off = next(
+        (tc for tc in resp.tool_calls if tc.name == _HAND_OFF_TOOL), None
+    )
+    if hand_off is not None and hand_off.args.get("agent_id") in destinations:
+        await _do_hand_off(ctx, pool, payload.prompt, hand_off.args)
+        # The delegate produces the terminal Result; the router drops
+        # this (now non-active) agent's Result.
+        return AgentOutput()
 
     async with pool.acquire() as conn:
         await queries.append_history(
@@ -137,10 +186,116 @@ async def run_orchestrator_message(
     return text_output(resp.text, context_tokens=context_tokens)
 
 
+async def _do_hand_off(
+    ctx: TaskContext, pool: asyncpg.Pool, user_prompt: str, args: dict
+) -> None:
+    """Phase 1 of delegation ([delegation.md]): write the `delegate_prompt`
+    seed row into the delegate's thread, then reassign the task via
+    `delegate(mode=on_delegation)`."""
+    dest = args["agent_id"]
+    instruction = args.get("instruction", "")
+    context = args.get("context") or ""
+    seed = f"## Delegated task\n{instruction}"
+    if context:
+        seed += f"\n\n## Context\n{context}"
+    seed += f"\n\n## User request\n{user_prompt}"
+    async with pool.acquire() as conn:
+        await queries.append_history(
+            conn, session_id=ctx.session_id, agent_id=dest,
+            role="user", message=seed, incumbent=True,
+        )
+    await ctx.peers.delegate(
+        dest,
+        LLMData(prompt=user_prompt, agent_instruction=instruction, context=context),
+        mode="on_delegation",
+    )
+
+
+async def run_orchestrator_subagent(
+    ctx: TaskContext,
+    payload: LLMData,
+    *,
+    pool: asyncpg.Pool,
+    settings: SuiteSettings,
+) -> AgentOutput:
+    """Generic subagent execution (e.g. deep_reasoning's execute_step).
+    Stateless — no session history; full toolset."""
+    async with pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
+    timezone = cfg.timezone if cfg else settings.default_timezone
+    system = GENERAL_INSTRUCTION
+    if payload.agent_instruction:
+        system = f"{system}\n\n{payload.agent_instruction}"
+    user = (f"## Context\n{payload.context}\n\n" if payload.context else "") + payload.prompt
+    messages = [
+        Message(role="system", content=system),
+        Message(role="user", content=user),
+    ]
+    resp = await run_llm_loop(
+        ctx, messages=messages, preset=preset,
+        local_tools=LocalToolset([make_current_time_tool(timezone)]),
+    )
+    return text_output(resp.text)
+
+
+async def run_orchestrator_end_delegation(
+    ctx: TaskContext,
+    payload: dict,
+    *,
+    pool: asyncpg.Pool,
+    settings: SuiteSettings,
+) -> AgentOutput:
+    """Phase 3 of delegation: the hand-back target. Append a recap to the
+    main thread, retire the delegate episode, and optionally continue the
+    loop on a follow-up prompt."""
+    delegate = ctx.delegating_agent_id or "a specialist"
+    summary = payload.get("delegation_summary", "")
+    reason = payload.get("exit_reason", "")
+    user_prompt = payload.get("user_prompt")
+    recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
+    async with pool.acquire() as conn:
+        await queries.append_history(
+            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+            role="user", message=recap, incumbent=True, hidden=True,
+        )
+        # Retire the whole delegate episode (incl. the seed row).
+        if ctx.delegating_agent_id:
+            await queries.demote_thread(
+                conn, session_id=ctx.session_id, agent_id=ctx.delegating_agent_id
+            )
+    if user_prompt:
+        async with pool.acquire() as conn:
+            await queries.append_history(
+                conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                role="user", message=user_prompt,
+            )
+        return await run_orchestrator_message(
+            ctx, MessagePayload(prompt=user_prompt), pool=pool, settings=settings
+        )
+    return text_output("")
+
+
 @agent.handler(mode="message", tool=False)
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None, "orchestrator pool not initialised (on_startup)"
     return await run_orchestrator_message(
+        ctx, payload, pool=_pool, settings=_settings
+    )
+
+
+@agent.handler(mode="subagent", tool=False)
+async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
+    assert _pool is not None
+    return await run_orchestrator_subagent(
+        ctx, payload, pool=_pool, settings=_settings
+    )
+
+
+@agent.handler(mode="end_delegation", tool=False)
+async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
+    assert _pool is not None
+    return await run_orchestrator_end_delegation(
         ctx, payload, pool=_pool, settings=_settings
     )
 

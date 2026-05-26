@@ -64,6 +64,21 @@
 - **deferred — GC scheduling**. `MemoryStore.gc()` exists and cascades
   edges, but nothing schedules the periodic sweep yet.
 
+## Delegation / l1 specialists
+
+- **deferred — deep_reasoning `plan_mode`** ([agents.md]). deep_reasoning
+  ships the standard l1 modes (subagent / on_delegation /
+  delegated_message); the bespoke fresh-loop step planner (`add_step` /
+  `execute_step` → `orchestrator(subagent)` / `quit_and_report`) is a
+  later refinement.
+- **lean — l1 `current_time` uses the default timezone**, not the user's
+  (the orchestrator's `message` mode already uses the user tz).
+- **deferred — full router-level delegation integration test**. The
+  lifecycle is unit-tested (hand-off seed + delegate, l1 end_delegation
+  hand-back, orchestrator recap/retire, channel delegated_to incl. F2);
+  an end-to-end test over a live router (task reassignment + the
+  exactly-one-Result drop) is not yet written.
+
 ## ACL
 
 - **operator step — rule-set application**. `python -m bp_agents.load_acl`
