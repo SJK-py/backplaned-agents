@@ -20,6 +20,21 @@
 
 ## 2026-05-26
 
+### Added — `bp_router/llm/presets.py`: `default_embedding` seed preset
+
+- **What:** A canonical `default_embedding` seed preset → `provider="gemini"`,
+  `concrete_model="gemini-embedding-2"`, mirroring `default` (chat) as the
+  catch-all embedding preset.
+- **Why:** Give the suite a real embeddings default to point
+  `default_preset_embedding` at — `default` is a *chat* model and can't
+  embed (the `embed()` path needs an embedding-capable model; see the
+  provider split). Gemini serves both chat and embeddings through one
+  adapter, so this rides `provider="gemini"`.
+- **Shape:** **Additive data/seed change** (empty-table first-boot seed
+  only). Name uses `_` (allowed by the `name` CHECK).
+- **Verified:** `tests/test_llm_provider_options.py` resolves
+  `default_embedding` → `("gemini", "gemini-embedding-2")`.
+
 ### Changed — `bp_router/llm/presets.py`: OpenAI lineup trim + nano tiers
 
 - **What:** In `default_presets()` for the OpenAI families:

@@ -271,6 +271,13 @@ def default_presets() -> list[Preset]:
             api_key_ref="env://GEMINI_API_KEY",
             description="Default fast Gemini model. Open to all tiers.",
         ),
+        Preset(
+            name="default_embedding",
+            provider="gemini",
+            concrete_model="gemini-embedding-2",
+            api_key_ref="env://GEMINI_API_KEY",
+            description="Default embedding model (Gemini). Open to all tiers.",
+        ),
         # Preset NAMES use `-` instead of `.` because the
         # `llm_presets.name` CHECK constraint disallows `.`
         # (`^[a-z][a-z0-9_-]{0,63}$`). The `concrete_model`
