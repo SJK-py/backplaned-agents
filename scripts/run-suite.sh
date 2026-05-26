@@ -122,7 +122,16 @@ for entry in "${AGENTS[@]}"; do
     PIDS+=("$!")
 done
 
-log "suite running (${#PIDS[@]} agents). Ctrl-C to stop."
-log "First run only: apply the suite ACL with  python -m bp_agents.load_acl"
-log "Then message the bot on Telegram and send /register (an admin approves it)."
+log "suite running (${#PIDS[@]} agents)."
+
+# Apply the suite ACL automatically (idempotent; skip with SKIP_ACL=1). Reuses
+# the same admin creds + router; replaces the old "remember to run load_acl"
+# manual step.
+if [[ "${SKIP_ACL:-0}" != "1" ]]; then
+    log "applying suite ACL (python -m bp_agents.load_acl)"
+    ROUTER_URL="$ROUTER_URL" "$PYTHON_BIN" -m bp_agents.load_acl | sed 's/^/  /' || \
+        log "WARNING: load_acl failed — apply it manually with python -m bp_agents.load_acl"
+fi
+
+log "Ctrl-C to stop. Message the bot on Telegram and send /register (an admin approves it)."
 wait

@@ -85,13 +85,11 @@ set -a && . ./.env && set +a
 python -m bp_router                   # serves http://127.0.0.1:8000 — leave running
 
 # 3. Suite — migrates bp_suite, mints each agent's invitation, launches all
-#    11 agents. Run in a second shell with the venv active.
+#    11 agents, and applies the suite ACL. Run in a second shell (venv active).
 set -a && . ./.env && set +a
 SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
 
-# 4. Initial configuration (first run only)
-python -m bp_agents.load_acl          # apply the suite ACL (PUT /v1/admin/acl/rules)
-#    Then message your bot on Telegram and send /register, and approve it at
+# 4. Message your bot on Telegram and send /register, then approve it at
 #    http://127.0.0.1:8000/admin/login  (admin creds were printed in step 2).
 ```
 

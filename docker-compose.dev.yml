@@ -64,5 +64,24 @@ services:
     ports:
       - "8888:8080"
 
+  # Optional S3-compatible object store. Off by default — dev uses the
+  # router's `local` file store (no extra service). Enable with
+  # `--profile s3` to exercise the S3 backend, then point the router at it:
+  #   ROUTER_FILE_STORE=s3
+  #   ROUTER_FILE_STORE_OPTIONS={"bucket":"bp-files","endpoint_url":"http://localhost:9000","region_name":"us-east-1","access_key_id":"devkey","secret_access_key":"devsecret"}
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: bp-rustfs
+    profiles: ["s3"]
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: devkey
+      RUSTFS_SECRET_KEY: devsecret
+    ports:
+      - "9000:9000"
+    volumes:
+      - bp_rustfs_data:/data
+
 volumes:
   bp_pg_data:
+  bp_rustfs_data:
