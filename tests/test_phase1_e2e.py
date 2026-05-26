@@ -107,6 +107,9 @@ def test_phase1_message_round_trip(
                 ),
             )
 
+            # Reset the shared module-global agent's stop event (a prior
+            # e2e in the same process may have set it on aclose).
+            orchestrator_agent._stop_event = asyncio.Event()
             orch_run = asyncio.create_task(orchestrator_agent.run_async())
             chan_run = asyncio.create_task(channel.run_async())
             try:

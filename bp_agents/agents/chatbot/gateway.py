@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from bp_agents.agents.chatbot.credentials import ChannelCredentials
 from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.common.payloads import MessagePayload
+from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 from bp_protocol.types import TaskStatus
 
@@ -46,6 +47,7 @@ HELP_TEXT = (
     "/stop — stop the current in-progress reply\n"
     "/config [text] — view or change your settings\n"
     "/cron [text] — manage scheduled reminders/tasks\n"
+    "/v <message> — show step-by-step progress for this turn\n"
     "/help — show this message"
 )
 REGISTER_PROMPT = (
@@ -128,6 +130,12 @@ class ChatbotGateway:
     ) -> None:
         """Entry point for one inbound message (text and/or files)."""
         text = text.strip()
+        # `/v` one-shot verbose prefix, stripped BEFORE slash handling so
+        # `/v /register` still routes to /register ([channel.md] §6).
+        one_shot_verbose = False
+        if text == "/v" or text.startswith("/v "):
+            one_shot_verbose = True
+            text = text[3:].strip()
         if text.startswith("/"):
             await self._handle_command(chat_id, text)
             return
@@ -150,8 +158,10 @@ class ChatbotGateway:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
 
+        # Effective verbose: /v one-shot > user_config.verbose_default > false.
+        verbose = one_shot_verbose or bool(cfg and cfg.verbose_default)
         await self._dispatch_turn(
-            chat_id, user_id, session_id, text, attachments or []
+            chat_id, user_id, session_id, text, attachments or [], verbose=verbose
         )
 
     async def _handle_command(self, chat_id: str, text: str) -> None:
@@ -286,6 +296,21 @@ class ChatbotGateway:
             )
         await self._telegram.send_message(chat_id=chat_id, text="Stopped.")
 
+    def _progress_callback(self, chat_id: str):  # noqa: ANN202
+        """A per-frame renderer for verbose mode — one Telegram message per
+        structured `LoopProgress` frame ([channel.md] §5)."""
+        async def _cb(pf) -> None:  # noqa: ANN001
+            lp = (pf.metadata or {}).get(LOOP_PROGRESS_KEY)
+            if not lp:
+                return
+            bits = [f"… {lp.get('kind', 'working')}"]
+            if lp.get("tool"):
+                bits.append(str(lp["tool"]))
+            if lp.get("detail"):
+                bits.append(f"— {lp['detail']}")
+            await self._telegram.send_message(chat_id=chat_id, text=" ".join(bits))
+        return _cb
+
     async def _dispatch_turn(
         self,
         chat_id: str,
@@ -293,6 +318,8 @@ class ChatbotGateway:
         session_id: str,
         text: str,
         attachments: list[tuple[str, str]] | None = None,
+        *,
+        verbose: bool = False,
     ) -> None:
         """Serialize on the session, write the user turn, inject the task,
         await the result, and relay it."""
@@ -346,7 +373,8 @@ class ChatbotGateway:
                 # Record the in-flight task so /stop can cancel it.
                 self._current_task[chat_id] = (user_id, task_id)
                 result = await self._dispatcher.await_root_result(
-                    task_id, timeout_s=self._result_timeout_s
+                    task_id, timeout_s=self._result_timeout_s,
+                    on_progress=self._progress_callback(chat_id) if verbose else None,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(

@@ -1,0 +1,33 @@
+# Agent-suite image. One image, many agents — the process selects its
+# agent at start via $SUITE_AGENT (e.g. orchestrator, chatbot, memory).
+#
+# Build (from repo root):  docker build -f Dockerfile.suite -t backplaned-suite:latest .
+# Run one agent:           docker run -e SUITE_AGENT=orchestrator ... backplaned-suite
+#
+# Suite agents hold NO provider / S3 / JWT secrets — they call ctx.llm
+# and the router's file endpoints. The suite DB schema is applied once via
+# the `suite-migrate` one-shot (alembic -c alembic_suite.ini), never on
+# container start, so scaling an agent never races the schema.
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    SUITE_AGENT=orchestrator
+
+RUN useradd --create-home --uid 10002 bp
+WORKDIR /app
+
+COPY . .
+# `suite` brings asyncpg/alembic/sqlalchemy/lancedb/markitdown/croniter;
+# the SDK + protocol come with the package. No router/provider extras —
+# agents reach the LLM through the router's LlmService.
+RUN pip install ".[suite]"
+
+USER bp
+
+# `python -m bp_agents.agents.<name>` is the per-agent entrypoint; the
+# agent name is chosen at runtime so one image serves the whole roster.
+CMD ["sh", "-c", "python -m bp_agents.agents.$SUITE_AGENT"]
