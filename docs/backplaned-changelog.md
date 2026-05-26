@@ -107,3 +107,25 @@
   `accepts_schema` moved to the per-mode shape); surfaced while running
   the suite's regression subset.
 - **Verified:** `tests/test_smoke_e2e.py` passes.
+
+### Added — `tests/conftest.py`: `suite_db_url` fixture
+
+- **What:** A `suite_db_url` pytest fixture (reads `SUITE_DATABASE_URL`,
+  skips when unset), alongside the existing `test_db_url`.
+- **Why:** Suite DB tests need their own DSN (the suite keeps its own
+  Postgres). Purely **additive** to the shared test-infra file — no
+  existing fixture or behaviour changed.
+
+---
+
+## Completeness
+
+As of this date, the **entire** suite-driven footprint on vendored
+platform code is the four entries above: `bp_sdk/agent.py`,
+`bp_router/db/migrations/env.py`, `bp_router/api/admin.py` +
+`bp_router/db/queries.py`, and the two platform-test files
+(`tests/test_smoke_e2e.py`, `tests/conftest.py`). `bp_protocol/` and
+`bp_admin/` are unmodified; the suite's own Alembic config lives in a
+separate `alembic_suite.ini` (not a change to the router's `alembic.ini`).
+Verified by `git diff <template-baseline>..HEAD -- bp_protocol bp_sdk
+bp_router bp_admin`.
