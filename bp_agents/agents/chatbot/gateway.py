@@ -27,6 +27,13 @@ PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
 ORCHESTRATOR_AGENT_ID = "orchestrator"
 
+# Summarization tuning ([sessions.md] §3): fold the oldest ~70% of the
+# incumbent window once a thread crosses the soft limit, but only when
+# there's a meaningful number of turns to compress.
+_SUMMARIZE_FRACTION = 0.7
+_MIN_ROWS_TO_SUMMARIZE = 6
+_DEFAULT_CONTEXT_LIMIT = 120_000
+
 HELP_TEXT = (
     "I'm your personal assistant. Just send me a message and I'll help.\n\n"
     "Commands:\n"
@@ -285,4 +292,79 @@ class ChatbotGateway:
             reply = (result.output.content if result.output else "") or ""
             await self._telegram.send_message(
                 chat_id=chat_id, text=reply or "(no response)"
+            )
+
+            # Post-turn summarization check, still inside the session lock
+            # so it serializes with the next turn ([sessions.md] §3.1). The
+            # agent measured `context_tokens` while building its context.
+            context_tokens = (
+                result.output.metadata.get("context_tokens")
+                if result.output
+                else None
+            )
+            await self._maybe_summarize(session_id, dest, context_tokens)
+
+    async def _maybe_summarize(
+        self, session_id: str, agent_id: str, context_tokens: int | None
+    ) -> None:
+        """If the thread's context is over the user's soft limit, fold its
+        oldest ~70% of incumbent turns into the rolling summary and demote
+        them. Best-effort — a summarizer failure never breaks the turn."""
+        if not context_tokens:
+            return
+        async with self._pool.acquire() as conn:
+            info = await queries.get_session_info(conn, session_id)
+            if info is None:
+                return
+            cfg = await queries.get_user_config(conn, info.user_id)
+            limit = (
+                cfg.max_context_token_limit
+                if cfg
+                else _DEFAULT_CONTEXT_LIMIT
+            )
+            if context_tokens <= limit:
+                return
+            rows = await queries.reload_incumbent(
+                conn, session_id=session_id, agent_id=agent_id
+            )
+        if len(rows) < _MIN_ROWS_TO_SUMMARIZE:
+            return
+
+        # Fold the oldest ~70% of the incumbent window.
+        cutoff_idx = max(1, int(len(rows) * _SUMMARIZE_FRACTION))
+        up_to = rows[cutoff_idx - 1].id
+        is_main = agent_id == ORCHESTRATOR_AGENT_ID
+        previous = info.history_summary if is_main else info.delegate_summary
+
+        try:
+            from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
+                HISTORY_SUMMARIZER_AGENT_ID,
+                SummarizeIncumbent,
+            )
+
+            task_id = await self._dispatcher.spawn_root_for_user(
+                HISTORY_SUMMARIZER_AGENT_ID,
+                SummarizeIncumbent(
+                    agent_id=agent_id, up_to=up_to, previous_summary=previous
+                ),
+                user_id=info.user_id,
+                session_id=session_id,
+                mode="summarize_incumbent",
+            )
+            result = await self._dispatcher.await_root_result(
+                task_id, timeout_s=self._result_timeout_s
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "summarize_failed",
+                extra={"event": "summarize_failed", "bp.session_id": session_id},
+            )
+            return
+
+        new_summary = (result.output.content if result.output else "") or ""
+        field = "history_summary" if is_main else "delegate_summary"
+        async with self._pool.acquire() as conn:
+            await queries.update_session_info(conn, session_id, **{field: new_summary})
+            await queries.demote_incumbent_through(
+                conn, session_id=session_id, agent_id=agent_id, up_to_id=up_to
             )
