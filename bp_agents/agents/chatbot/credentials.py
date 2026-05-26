@@ -57,6 +57,8 @@ class ChannelCredentials(Protocol):
 
     async def cancel_task(self, *, user_id: str, task_id: str) -> None: ...
 
+    async def mint_password_reset_token(self, *, user_id: str) -> str: ...
+
     async def store_named_file(
         self, *, user_id: str, session_id: str, filename: str, data: bytes,
         mime_type: str | None = None,
@@ -222,6 +224,18 @@ class HttpChannelCredentials:
             headers={"Authorization": f"Bearer {token}"},
         )
         resp.raise_for_status()
+
+    async def mint_password_reset_token(self, *, user_id: str) -> str:
+        """Mint a single-use password-setup token for a serviced user (the
+        `/password` command, [channel.md §6]). Uses `serviced_by` rights via
+        the service principal; the router gates it (F9)."""
+        token = await self._service_token()
+        resp = await self._client.post(
+            f"{self._http_url}/v1/admin/users/{user_id}/password-reset-tokens",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        return resp.json()["reset_token"]
 
     # ------------------------------------------------------------------
     # Named file store (session-authed; per-user token)

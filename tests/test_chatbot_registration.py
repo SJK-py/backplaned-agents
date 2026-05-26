@@ -15,6 +15,7 @@ from bp_agents.agents.chatbot.credentials import ServicedSession
 from bp_agents.agents.chatbot.gateway import (
     _ALREADY_REGISTERED,
     _REGISTER_SUBMITTED,
+    REGISTER_PROMPT,
     ChatbotGateway,
 )
 from bp_agents.db import queries
@@ -52,6 +53,7 @@ class _FakeCredentials:
         self.registrations: list[tuple] = []
         self.opened: list[tuple] = []
         self.cancels: list[tuple] = []
+        self.reset_mints: list[str] = []
         self._new_session = new_session
 
     async def submit_registration(
@@ -69,6 +71,10 @@ class _FakeCredentials:
 
     async def cancel_task(self, *, user_id, task_id) -> None:
         self.cancels.append((user_id, task_id))
+
+    async def mint_password_reset_token(self, *, user_id) -> str:
+        self.reset_mints.append(user_id)
+        return "rst_token_xyz"
 
 
 async def _truncate(pool) -> None:
@@ -193,6 +199,46 @@ def test_new_opens_session_and_moves_default(suite_db_url: str) -> None:
                 assert cfg.default_session_id == "ses_new"
                 assert await queries.get_session_info(conn, "ses_new") is not None
             assert tg.sent == [("tg1", "Started a new conversation.")]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_password_mints_token_for_mapped_user(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _truncate(pool)
+            async with pool.acquire() as conn:
+                await queries.upsert_platform_mapping(
+                    conn, platform="telegram", chat_id="tg1", user_id="usr_a"
+                )
+            tg = _FakeTelegram()
+            creds = _FakeCredentials()
+            gw = _gateway(pool, creds=creds, tg=tg)
+
+            await gw.handle_update("tg1", "/password")
+            assert creds.reset_mints == ["usr_a"]
+            assert len(tg.sent) == 1
+            assert "rst_token_xyz" in tg.sent[0][1]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_password_prompts_unmapped_chat_to_register(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _truncate(pool)
+            tg = _FakeTelegram()
+            creds = _FakeCredentials()
+            gw = _gateway(pool, creds=creds, tg=tg)
+            await gw.handle_update("tg1", "/password")
+            assert creds.reset_mints == []
+            assert tg.sent == [("tg1", REGISTER_PROMPT)]
         finally:
             await pool.close()
 

@@ -43,6 +43,16 @@
   case) is built; the hard-window inline fallback is a rare-edge guard
   that adds a blocking inline summarize, deferred until a real provider
   window is wired.
+- **deferred — `tool_call` / `tool_result` render/audit history rows**
+  ([sessions.md §2.1/§2.2]). Agents persist only the terminal `assistant`
+  turn; the live loop emits `ProgressFrame`s but writes no hidden `tool_*`
+  rows. The `session_history.role` CHECK already admits them, so this is
+  purely additive.
+  *Why:* **v2 / bounded-scope** — these rows are *never reloaded* (the loop
+  holds the tool sequence in memory), so v1 correctness is unaffected; they
+  exist only for the webapp's activity render + audit trail, which lands
+  with the webapp (v1 is Telegram-only and uses verbose `ProgressFrame`s
+  for live activity).
 
 ## Knowledge base
 
@@ -98,6 +108,12 @@
 - **done (Phase 5)** — router-level delegation e2e (`test_delegation_e2e`):
   real orchestrator → deep_reasoning hand-off over a live `TestRouter`
   (task reassignment + the exactly-one-Result drop).
+- **done** — F1 hand-off fallback ([delegation.md] §4). On a failed
+  `delegate` admit (rejected / ack-timeout / disconnected) the orchestrator
+  now retires the orphan `delegate_prompt` seed row and re-runs its loop
+  (no hand-off tool) to answer the turn directly, producing a real Result
+  instead of surfacing a generic dispatch error
+  (`orchestrator/agent.py::_run_hand_off_fallback`).
 
 ## Cron / channel files
 
@@ -119,6 +135,18 @@
 - **lean — cron report decision** is a second lite LLM call after the loop.
   *Why:* **bounded-scope** — works; a single structured-output call would
   be tidier/cheaper.
+- **deferred — chatbot `message_to_user` / `file_to_user` push modes**
+  ([agents.md]). The channel registers only the `cron` handler mode; the
+  two *proactive*-push modes (out-of-band "push text to chat" / "send a
+  stash file") are not wired.
+  *Why:* **bounded-scope** — the docs flag both as proactive-only ("the
+  common path never calls them"); v1's request/reply + cron paths never
+  invoke them. Additive when an out-of-band push trigger exists.
+- **done** — `/password` slash command ([channel.md] §6). The gateway now
+  mints a one-time password-setup token for the mapped user via the service
+  principal's `serviced_by` rights (router F9 endpoint
+  `POST /v1/admin/users/{id}/password-reset-tokens`); see
+  `gateway.py::_cmd_password` + `credentials.py::mint_password_reset_token`.
 
 ## ACL
 

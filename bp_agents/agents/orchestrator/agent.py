@@ -34,9 +34,12 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
 from bp_sdk import Agent, Message, TaskContext, ToolSpec
+from bp_sdk.peers import PeerCallError
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from bp_sdk import ToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +173,23 @@ async def run_orchestrator_message(
         (tc for tc in resp.tool_calls if tc.name == _HAND_OFF_TOOL), None
     )
     if hand_off is not None and hand_off.args.get("agent_id") in destinations:
-        await _do_hand_off(ctx, pool, payload.prompt, hand_off.args)
+        try:
+            await _do_hand_off(ctx, pool, payload.prompt, hand_off.args)
+        except PeerCallError as exc:
+            # F1 ([delegation.md] §4): the delegate admit failed (rejected /
+            # ack-timeout / disconnected), so the task was NOT reassigned and
+            # this orchestrator is still the active executor. Don't let the
+            # raise surface as a generic dispatch error — answer the turn
+            # directly and produce a real fallback Result.
+            logger.warning(
+                "hand_off_failed_fallback",
+                extra={"event": "hand_off_failed", "dest": hand_off.args.get("agent_id"),
+                       "reason": str(exc)},
+            )
+            return await _run_hand_off_fallback(
+                ctx, pool, messages, hand_off, preset=preset,
+                context_tokens=context_tokens,
+            )
         # The delegate produces the terminal Result; the router drops
         # this (now non-active) agent's Result.
         return AgentOutput()
@@ -201,15 +220,57 @@ async def _do_hand_off(
         seed += f"\n\n## Context\n{context}"
     seed += f"\n\n## User request\n{user_prompt}"
     async with pool.acquire() as conn:
-        await queries.append_history(
+        seed_id = await queries.append_history(
             conn, session_id=ctx.session_id, agent_id=dest,
             role="user", message=seed, incumbent=True,
         )
-    await ctx.peers.delegate(
-        dest,
-        LLMData(prompt=user_prompt, agent_instruction=instruction, context=context),
-        mode="on_delegation",
-    )
+    try:
+        await ctx.peers.delegate(
+            dest,
+            LLMData(prompt=user_prompt, agent_instruction=instruction, context=context),
+            mode="on_delegation",
+        )
+    except PeerCallError:
+        # The reassignment never happened, so the seed row we just wrote is
+        # an orphan incumbent on a thread that won't run. Retire it before
+        # propagating so the delegate thread isn't polluted (F1 fallback
+        # routes the turn back through the orchestrator).
+        async with pool.acquire() as conn:
+            await queries.demote_incumbent_through(
+                conn, session_id=ctx.session_id, agent_id=dest, up_to_id=seed_id
+            )
+        raise
+
+
+async def _run_hand_off_fallback(
+    ctx: TaskContext,
+    pool: asyncpg.Pool,
+    messages: list[Message],
+    hand_off: ToolCall,
+    *,
+    preset: str | None,
+    context_tokens: int,
+) -> AgentOutput:
+    """F1 fallback: the elected hand-off couldn't be admitted, so answer the
+    turn directly. The loop left a dangling `hand_off` tool_call (it's a
+    terminal tool, so no tool-response was appended); satisfy it with an
+    error response, then re-run the loop with no hand-off tool so the model
+    answers inline instead of trying to delegate again."""
+    messages.append(Message.tool_response(
+        tool_call_id=hand_off.id,
+        name=_HAND_OFF_TOOL,
+        response="The specialist is unavailable right now. Answer the user directly.",
+    ))
+    resp = await run_llm_loop(ctx, messages=messages, preset=preset)
+    async with pool.acquire() as conn:
+        await queries.append_history(
+            conn,
+            session_id=ctx.session_id,
+            agent_id=ORCHESTRATOR_AGENT_ID,
+            role="assistant",
+            message=resp.text,
+        )
+    return text_output(resp.text, context_tokens=context_tokens)
 
 
 async def run_orchestrator_subagent(
