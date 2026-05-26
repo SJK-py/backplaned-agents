@@ -105,6 +105,17 @@
   *Why:* **bounded-scope** — minor; the orchestrator's `message` mode
   already uses the user tz, and threading the per-user tz into the l1
   local-tools factory is a small follow-up.
+- **deferred — agent-loop agents can't view attached files multimodally**
+  ([agents.md] — orchestrator caps `llm.multimodal.image` + `file.full`).
+  No suite agent registers the SDK `file_tools` (`read_file` → next-turn
+  `file_ref` attachment) or calls `ctx.files.llm_ref(name)`, so the model
+  sees only the *"user-attached file saved as `{name}`"* history row, not
+  the bytes. (The channel side is complete and correct by design — it's a
+  gateway with no `ctx.files` and never feeds the LLM ([channel.md] §7);
+  this is purely an orchestrator/l1 loop concern.)
+  *Why:* **bounded-scope** — text ingest is the v1 path; wiring `read_file`
+  / `llm_ref` into the orchestrator + l1 loops is additive (the
+  `gemini_agent` example shows the vision path to copy).
 - **done (Phase 5)** — router-level delegation e2e (`test_delegation_e2e`):
   real orchestrator → deep_reasoning hand-off over a live `TestRouter`
   (task reassignment + the exactly-one-Result drop).
@@ -117,13 +128,6 @@
 
 ## Cron / channel files
 
-- **lean — inbound files stored, not fed multimodally** ([channel.md] §7).
-  Inbound save → `(T,T)` row and outbound resolve→fetch→send are wired;
-  the orchestrator records the file row but doesn't `llm_ref` an attached
-  image/PDF into its own LLM call.
-  *Why:* **bounded-scope** — the file-flow milestone (both directions) is
-  met; multimodal feed-to-LLM is an additive enhancement (the
-  gemini_agent example shows the `llm_ref` vision path to copy).
 - **deferred — cron C4 fallback** (`cron.py::_resolve_session`): open a
   fresh session when both the job + default sessions are closed.
   *Why:* **bounded-scope (rare edge)** — falls back to the job's
