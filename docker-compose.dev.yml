@@ -1,13 +1,18 @@
 # Local-development external dependencies for the router + agent suite.
 #
-# Brings up Postgres (with BOTH databases — `bp_router` and `bp_suite`),
-# Redis, and (optionally) SearXNG for the research agent's web search.
-# The router and the suite agents themselves run from source on the host
+# Brings up Postgres (with BOTH databases — `bp_router` and `bp_suite`).
+# Everything else is opt-in via a profile — single-worker dev runs fine
+# without them:
+#   --profile redis   Redis (else the router uses its per-process fallback
+#                     for JWT revocation + rate-limit quotas — fine single-worker)
+#   --profile search  SearXNG for the research agent's web search
+#   --profile s3      rustfs (S3) to exercise the non-local file store
+# The router and the suite agents run from source on the host
 # (scripts/dev-up.sh boots the router; scripts/run-suite.sh boots the
 # agents) — this file is only the backing services.
 #
 # Bring up:    docker compose -f docker-compose.dev.yml up -d
-#   + search:  docker compose -f docker-compose.dev.yml --profile search up -d
+#   + extras:  docker compose -f docker-compose.dev.yml --profile redis --profile search --profile s3 up -d
 # Tear down:   docker compose -f docker-compose.dev.yml down        (keep data)
 #   + volumes: docker compose -f docker-compose.dev.yml down -v     (wipe data)
 #
@@ -39,9 +44,13 @@ services:
       timeout: 5s
       retries: 10
 
+  # Optional. Off by default — the router falls back to per-process state
+  # (correct for single-worker dev). Enable with `--profile redis` and set
+  # ROUTER_REDIS_URL=redis://localhost:6379/0.
   redis:
     image: redis:7-alpine
     container_name: bp-redis
+    profiles: ["redis"]
     restart: unless-stopped
     ports:
       - "6379:6379"

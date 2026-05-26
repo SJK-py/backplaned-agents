@@ -3,7 +3,7 @@
 # scripts/dev-up.sh — bring up the dev stack from a fresh clone.
 #
 # Steps:
-#   1. Start Postgres + Redis via docker-compose.dev.yml.
+#   1. Start Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs opt-in).
 #   2. Wait for Postgres healthcheck.
 #   3. Generate ./.env from .env.example with fresh secrets if it
 #      doesn't exist yet (idempotent — won't overwrite an existing one).
@@ -54,7 +54,7 @@ if [[ "${BP_SKIP_COMPOSE:-0}" != "1" ]]; then
         warn "docker not found; set BP_SKIP_COMPOSE=1 to use a host-managed Postgres+Redis"
         exit 1
     fi
-    log "starting Postgres + Redis via docker-compose.dev.yml"
+    log "starting Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs are opt-in profiles)"
     docker compose -f docker-compose.dev.yml up -d
 else
     log "BP_SKIP_COMPOSE=1 — assuming Postgres+Redis are already running"
@@ -85,9 +85,12 @@ ROUTER_DB_URL=postgresql://postgres:bp@127.0.0.1:5432/bp_router
 ROUTER_PUBLIC_URL=http://localhost:8000
 ROUTER_JWT_SECRET=$JWT
 ROUTER_ADMIN_SESSION_SECRET=$SESS
-ROUTER_REDIS_URL=redis://localhost:6379/0
 ROUTER_DEPLOYMENT_ENV=dev
 ROUTER_LOG_LEVEL=INFO
+# Redis is opt-in for dev (single-worker uses the per-process fallback).
+# To enable: docker compose -f docker-compose.dev.yml --profile redis up -d
+# and uncomment the next line.
+# ROUTER_REDIS_URL=redis://localhost:6379/0
 # LLM provider key for the router's seeded presets (the suite's `default`
 # preset resolves env://GEMINI_API_KEY). Set this before booting the router.
 GEMINI_API_KEY=
