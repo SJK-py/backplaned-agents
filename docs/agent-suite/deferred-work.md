@@ -4,109 +4,134 @@
 > and known caveats** accumulated while building the suite phase-by-phase
 > (see [`build-plan.md`](./build-plan.md)). Each item is implemented in a
 > leaner form than the design docs' full spec, or not yet wired, and is
-> safe to revisit later. This is suite-scoped; platform-code modifications
-> are tracked separately in [`../backplaned-changelog.md`](../backplaned-changelog.md).
+> safe to revisit later. Each entry states **why** it was deferred. This
+> is suite-scoped; platform-code modifications are tracked separately in
+> [`../backplaned-changelog.md`](../backplaned-changelog.md).
 >
 > Status legend: **deferred** (planned, not built) · **lean** (built, but
 > simpler than spec) · **unverified** (built, not yet exercised end-to-end).
+> Deferral reasons fall into a few buckets: *needs-live-stack* (can't be
+> exercised in CI without a router + provider key + external service),
+> *spec-marks-optional* (the design doc itself designates it an
+> enhancement), *bounded-scope* (correct lean cut chosen to land the
+> milestone; full fidelity is additive), and *operator/v2* (a deploy step
+> or a v2-gated feature).
 
 ## Verification gaps
 
 - **unverified — `HttpChannelCredentials` HTTP paths** (`agents/chatbot/credentials.py`).
-  The service-token refresh/rotation, per-user mint, registration submit,
-  serviced-session poll, session open, and task cancel are unit-shaped but
-  have **not** been run against a live router. Exercise via the dev
-  launcher with a real Telegram bot + an LLM-key'd router.
-- **unverified — `scripts/run-suite.sh`** — the dev launcher is not run in
-  CI (needs a running router, a Telegram token, and an LLM key in the
-  router env).
+  Service-token refresh/rotation, per-user mint, registration submit,
+  serviced-session poll, session open/cancel, and the named-file store
+  client are unit-shaped but not run against a live router.
+  *Why:* **needs-live-stack** — exercising them requires a running router
+  with admin creds + a real Telegram bot; the logic is covered by fakes,
+  and the one router-side seam (`serviced-sessions`) has its own test.
+- **unverified — `scripts/run-suite.sh`** dev launcher.
+  *Why:* **needs-live-stack** — needs a router, a Telegram token, and an
+  LLM key; bash glue with no unit surface. Syntax-checked only.
 
 ## Sessions / summarization
 
 - **lean — summarization runs inside the session lock**
-  (`agents/chatbot/gateway.py::_maybe_summarize`). [sessions.md §3.1]
-  permits this ("a user message arriving during the summarize op waits
-  behind it"), but the documented optimization — run the summarizer
-  **loop outside** the queue and serialize only the **apply** step — is
-  deferred.
-- **deferred — hard-limit inline guard** ([sessions.md §3.2]). A turn that
-  would breach the provider's *hard* window should summarize inline before
-  running. Only the soft-limit proactive path is built.
+  (`gateway.py::_maybe_summarize`).
+  *Why:* **spec-marks-optional** — [sessions.md §3.1] explicitly permits
+  the in-lock wait ("a user message arriving during the summarize op waits
+  behind it"). The loop-outside-queue / apply-only-inside optimization is
+  a latency nicety, not correctness.
+- **deferred — hard-limit inline guard** ([sessions.md §3.2]).
+  *Why:* **bounded-scope** — the soft-limit proactive path (the common
+  case) is built; the hard-window inline fallback is a rare-edge guard
+  that adds a blocking inline summarize, deferred until a real provider
+  window is wired.
 
 ## Knowledge base
 
-- **deferred — LLM metadata generation on `store`**. Missing
-  `title`/`tags`/`description` are currently defaulted (title from the
-  filename); [agents.md] specifies LLM-generated metadata from the head/tail
-  of the document.
-- **deferred — `modify` mode**. `store`/`retrieve`/`list`/`remove` are
-  built; `modify` (re-title / move collection / re-tag) is not.
-- **deferred — non-text ingest routing**. `store` ingests Markdown/text
-  directly; non-`.md` files should route through `md_converter.convert`
-  first (the agent exists; the call is not yet wired into KB `store`).
-- **lean — retrieval is vector + Python-side filters**. [data-model.md
-  §2.1] specifies a hybrid vector + BM25 index; the current path is vector
-  search with collection/title/tag filtering in Python. FTS/hybrid fusion
-  is deferred.
-- **lean — Markdown chunker** (`knowledge_base/chunking.py`) is a
-  paragraph-accumulating splitter within `[min,max]`+overlap; the full
-  header→…→char fallback chain is a refinement.
+- **deferred — LLM metadata generation on `store`** (title from filename
+  today vs [agents.md]'s head/tail LLM-gen).
+  *Why:* **bounded-scope** — sensible defaults land documents now; LLM
+  metadata is polish that adds an extra structured call per store.
+- **deferred — `modify` mode** (store/retrieve/list/remove built).
+  *Why:* **bounded-scope** — the recall milestone ("answer from stored
+  docs") needs store + retrieve; modify is additive management.
+- **deferred — non-text ingest routing** through `md_converter.convert`.
+  *Why:* **bounded-scope / ordering** — md_converter shipped after KB in
+  Phase 2; the call isn't wired into KB `store` yet (text/Markdown ingest
+  works today).
+- **lean — retrieval is vector + Python-side filters** (vs the [data-model.md
+  §2.1] hybrid vector+BM25 index).
+  *Why:* **bounded-scope + test-robustness** — vector + filters is
+  deterministic and version-independent; LanceDB FTS/hybrid fusion is
+  version-finicky and was deferred to keep the path reliable.
+- **lean — Markdown chunker** is paragraph-accumulating within
+  `[min,max]`+overlap (vs the full header→…→char fallback chain).
+  *Why:* **bounded-scope** — the simple splitter is adequate for ingest;
+  the full chain is a fidelity refinement.
 
 ## Memory
 
-- **lean — phases 3 & 4 are best-effort** (`agents/memory/agent.py`).
-  Extract + reconcile (phases 1–2) land facts + relate edges robustly;
-  relate-out / update-propagation (phases 3–4) are implemented but wrapped
-  best-effort, as [memory.md §3] designates them.
-- **lean — retrieve uses vector + recency decay** (no BM25 leg yet);
-  graph-expansion neighbours not in the search pool are ranked by recency
-  decay alone (similarity unknown without re-embedding).
-- **deferred — GC scheduling**. `MemoryStore.gc()` exists and cascades
-  edges, but nothing schedules the periodic sweep yet.
+- **lean — phases 3 & 4 are best-effort** (`memory/agent.py`).
+  *Why:* **spec-marks-optional** — [memory.md §3] designates relate-out /
+  update-propagation as "enhancement, safe to skip"; phases 1–2 (the facts
+  + edges that matter) are robust.
+- **lean — retrieve uses vector + recency decay** (no BM25 leg; neighbours
+  outside the pool ranked by recency alone).
+  *Why:* **bounded-scope** — same hybrid-search deferral as the KB; the
+  decay + 1-hop expansion is the load-bearing behaviour.
+- **deferred — GC scheduling**. `MemoryStore.gc()` exists + cascades, but
+  nothing runs the periodic sweep.
+  *Why:* **bounded-scope** — GC is a background maintenance loop; the
+  decay path already keeps surfaced facts alive, so the sweep is
+  non-urgent and best added with the same scheduler treatment as cron.
 
 ## Delegation / l1 specialists
 
-- **deferred — deep_reasoning `plan_mode`** ([agents.md]). deep_reasoning
-  ships the standard l1 modes (subagent / on_delegation /
-  delegated_message); the bespoke fresh-loop step planner (`add_step` /
-  `execute_step` → `orchestrator(subagent)` / `quit_and_report`) is a
-  later refinement.
-- **lean — l1 `current_time` uses the default timezone**, not the user's
-  (the orchestrator's `message` mode already uses the user tz).
-- **done (Phase 5)** — router-level delegation e2e: `test_delegation_e2e`
-  drives a real orchestrator → deep_reasoning hand-off over a live
-  `TestRouter` (task reassignment + the exactly-one-Result drop), in
-  addition to the lifecycle unit tests.
+- **deferred — deep_reasoning `plan_mode`** ([agents.md]) — the bespoke
+  fresh-loop step planner (`add_step`/`execute_step`→`orchestrator(subagent)`/
+  `quit_and_report`).
+  *Why:* **bounded-scope** — it's a large, agent-specific sub-loop;
+  deep_reasoning works as a standard l1 (subagent + delegation) without
+  it, so it was separated from the delegation-core milestone.
+- **lean — l1 `current_time` uses the default timezone**, not the user's.
+  *Why:* **bounded-scope** — minor; the orchestrator's `message` mode
+  already uses the user tz, and threading the per-user tz into the l1
+  local-tools factory is a small follow-up.
+- **done (Phase 5)** — router-level delegation e2e (`test_delegation_e2e`):
+  real orchestrator → deep_reasoning hand-off over a live `TestRouter`
+  (task reassignment + the exactly-one-Result drop).
 
-## Cron / channel file I/O (Phase 4)
+## Cron / channel files
 
-- **lean — inbound files are stored, not yet fed multimodally**
-  ([channel.md] §7). Inbound (Telegram upload → named store → `(T,T)`
-  history row) and outbound (resolve `result.output.files` → fetch →
-  send) are now wired via the credentials named-store client. *Remaining
-  refinement:* the orchestrator's `message` mode records the file row but
-  doesn't `llm_ref` an attached image/PDF into its own LLM call yet, so it
-  reasons about the file by name/reference rather than seeing its content
-  (cf. the gemini_agent example's `llm_ref` vision path).
-- **deferred — cron C4 fallback** (`chatbot/cron.py::_resolve_session`):
-  when both the job's session and the user's default are closed, the
-  scheduler should open a fresh session and move the default pointer; it
-  currently falls back to the job's `session_id`.
-- **deferred — v2 channel-agnostic cron routing** ([cron.md] §6). The
-  scheduler lives in the chatbot (v1, Telegram-only).
-- **lean — cron report decision** is a second lite LLM call after the
-  cron loop; a single structured-output call would be tidier.
+- **lean — inbound files stored, not fed multimodally** ([channel.md] §7).
+  Inbound save → `(T,T)` row and outbound resolve→fetch→send are wired;
+  the orchestrator records the file row but doesn't `llm_ref` an attached
+  image/PDF into its own LLM call.
+  *Why:* **bounded-scope** — the file-flow milestone (both directions) is
+  met; multimodal feed-to-LLM is an additive enhancement (the
+  gemini_agent example shows the `llm_ref` vision path to copy).
+- **deferred — cron C4 fallback** (`cron.py::_resolve_session`): open a
+  fresh session when both the job + default sessions are closed.
+  *Why:* **bounded-scope (rare edge)** — falls back to the job's
+  `session_id` today; the open-fresh-and-move-pointer path is an
+  uncommon-case refinement.
+- **deferred — v2 channel-agnostic cron routing** ([cron.md] §6).
+  *Why:* **v2** — only matters once `webapp` exists (v1 is Telegram-only,
+  every session is reachable).
+- **lean — cron report decision** is a second lite LLM call after the loop.
+  *Why:* **bounded-scope** — works; a single structured-output call would
+  be tidier/cheaper.
 
 ## ACL
 
-- **operator step — rule-set application**. `python -m bp_agents.load_acl`
-  applies the suite rule set, but it is a manual/deploy step (not run
-  automatically). Tier-gating deny rules ([acl.md §5]) are not included in
-  the default set.
+- **operator step — rule-set application** via `python -m bp_agents.load_acl`
+  (not auto-run); tier-gating deny rules ([acl.md §5]) not in the default set.
+  *Why:* **operator** — ACL is admin-managed by design (the router owns
+  the rule list); the loader is a deliberate deploy step, and tier gating
+  is deployment-specific policy.
 
 ## Known unrelated platform test
 
 - `tests/test_docs_cleanup.py::test_acl_doc_pseudocode_includes_admin_service_branch`
-  fails in this environment (a pre-existing platform doc test —
-  `FileNotFoundError`, fails independently of the suite changes). Not a
-  suite caveat; noted here only so it isn't mistaken for a regression.
+  fails in this environment (a **pre-existing** platform doc test —
+  `FileNotFoundError`, fails independently of the suite changes, confirmed
+  by stashing the suite work). Not a suite caveat; noted only so it isn't
+  mistaken for a regression.
