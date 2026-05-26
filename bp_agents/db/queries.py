@@ -1,0 +1,328 @@
+"""bp_agents.db.queries — async query functions over the suite Postgres.
+
+Every function takes an asyncpg connection (or pool-acquired conn) as
+its first argument; callers own transaction scope. Row results are
+parsed into the `models` types. Mutable-column allowlists guard the
+few dynamic-SQL paths so column names can never come from caller input.
+
+These cover the core read/write paths the channel + worker agents need;
+cron tables (Phase 4) and their queries land later.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from bp_agents.db.models import (
+    PlatformMappingRow,
+    SessionHistoryRow,
+    SessionInfoRow,
+    UserConfigRow,
+)
+
+if TYPE_CHECKING:
+    import asyncpg
+
+
+# ---------------------------------------------------------------------------
+# session_info  (channel-owned — session.management)
+# ---------------------------------------------------------------------------
+
+
+async def get_session_info(
+    conn: asyncpg.Connection, session_id: str
+) -> SessionInfoRow | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM session_info WHERE session_id = $1", session_id
+    )
+    return SessionInfoRow.model_validate(dict(row)) if row else None
+
+
+async def create_session_info(
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    user_id: str,
+    channel: str,
+    chat_id: str | None = None,
+) -> SessionInfoRow:
+    """Insert a session_info row. Idempotent — an existing row for the
+    session is returned unchanged (the channel may re-resolve a session
+    it already tracks)."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO session_info (session_id, user_id, channel, chat_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (session_id) DO NOTHING
+        RETURNING *
+        """,
+        session_id,
+        user_id,
+        channel,
+        chat_id,
+    )
+    if row is None:
+        existing = await get_session_info(conn, session_id)
+        assert existing is not None
+        return existing
+    return SessionInfoRow.model_validate(dict(row))
+
+
+_SESSION_INFO_MUTABLE = frozenset(
+    {"chat_id", "delegated_to", "history_summary", "delegate_summary"}
+)
+
+
+async def update_session_info(
+    conn: asyncpg.Connection, session_id: str, **fields: Any
+) -> None:
+    """Patch channel-owned session_info columns (also bumps
+    `updated_at`). Only `_SESSION_INFO_MUTABLE` columns are accepted —
+    the column names are a fixed allowlist, never caller input, so the
+    interpolated SET clause carries no injection surface. `None` values
+    write SQL NULL (e.g. `delegated_to=None` clears the delegate on
+    hand-back)."""
+    cols = {k: v for k, v in fields.items() if k in _SESSION_INFO_MUTABLE}
+    unknown = set(fields) - _SESSION_INFO_MUTABLE
+    if unknown:
+        raise ValueError(f"update_session_info: non-mutable columns {sorted(unknown)}")
+    if not cols:
+        return
+    set_clause = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+    await conn.execute(
+        f"UPDATE session_info SET {set_clause}, updated_at = now() "
+        "WHERE session_id = $1",
+        session_id,
+        *cols.values(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# session_history  (channel writes user rows + summaries; agents write
+# their own assistant/tool rows — all within the per-session queue)
+# ---------------------------------------------------------------------------
+
+
+async def append_history(
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    agent_id: str,
+    role: str,
+    message: str,
+    incumbent: bool = True,
+    hidden: bool = False,
+) -> int:
+    """Append one conversation row; returns its `id`."""
+    return await conn.fetchval(
+        """
+        INSERT INTO session_history
+            (session_id, agent_id, role, message, incumbent, hidden)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        """,
+        session_id,
+        agent_id,
+        role,
+        message,
+        incumbent,
+        hidden,
+    )
+
+
+async def reload_incumbent(
+    conn: asyncpg.Connection, *, session_id: str, agent_id: str
+) -> list[SessionHistoryRow]:
+    """The reload query ([sessions.md] §2.1): incumbent `user`/`assistant`
+    rows for one agent's thread, in chronological order. `tool_call` /
+    `tool_result` rows are never reloaded — the live loop holds the tool
+    sequence in memory; persisted tool rows exist for render + audit."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM session_history
+        WHERE session_id = $1 AND agent_id = $2
+          AND incumbent = true
+          AND role IN ('user', 'assistant')
+        ORDER BY created_at ASC, id ASC
+        """,
+        session_id,
+        agent_id,
+    )
+    return [SessionHistoryRow.model_validate(dict(r)) for r in rows]
+
+
+async def demote_incumbent_through(
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    agent_id: str,
+    up_to_id: int,
+) -> int:
+    """Flip `incumbent = false` on a thread's rows with `id <= up_to_id`
+    — the summarization apply step ([sessions.md] §3.1). Returns the
+    number of rows demoted."""
+    status = await conn.execute(
+        """
+        UPDATE session_history SET incumbent = false
+        WHERE session_id = $1 AND agent_id = $2
+          AND id <= $3 AND incumbent = true
+        """,
+        session_id,
+        agent_id,
+        up_to_id,
+    )
+    # asyncpg returns e.g. "UPDATE 5"
+    return int(status.rsplit(" ", 1)[-1]) if status else 0
+
+
+# ---------------------------------------------------------------------------
+# user_config
+# ---------------------------------------------------------------------------
+
+
+async def get_user_config(
+    conn: asyncpg.Connection, user_id: str
+) -> UserConfigRow | None:
+    row = await conn.fetchrow(
+        "SELECT * FROM user_config WHERE user_id = $1", user_id
+    )
+    return UserConfigRow.model_validate(dict(row)) if row else None
+
+
+async def create_user_config(
+    conn: asyncpg.Connection,
+    *,
+    user_id: str,
+    full_name: str = "",
+    timezone: str = "UTC",
+    preset_pro: str = "default",
+    preset_balanced: str = "default",
+    preset_lite: str = "default",
+    preset_embedding: str = "default",
+    max_context_token_limit: int = 120_000,
+    verbose_default: bool = False,
+    language: str = "en",
+    sandbox_uid: int | None = None,
+    default_session_id: str | None = None,
+    custom_note: str = "",
+) -> UserConfigRow:
+    """Create a user_config row (defaults seeded from `SuiteSettings` at
+    the call site). Idempotent — an existing row is returned unchanged."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO user_config (
+            user_id, full_name, timezone,
+            preset_pro, preset_balanced, preset_lite, preset_embedding,
+            max_context_token_limit, verbose_default, language,
+            sandbox_uid, default_session_id, custom_note
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING *
+        """,
+        user_id,
+        full_name,
+        timezone,
+        preset_pro,
+        preset_balanced,
+        preset_lite,
+        preset_embedding,
+        max_context_token_limit,
+        verbose_default,
+        language,
+        sandbox_uid,
+        default_session_id,
+        custom_note,
+    )
+    if row is None:
+        existing = await get_user_config(conn, user_id)
+        assert existing is not None
+        return existing
+    return UserConfigRow.model_validate(dict(row))
+
+
+async def set_default_session_id(
+    conn: asyncpg.Connection, *, user_id: str, session_id: str | None
+) -> None:
+    """Move the per-user cron-fallback pointer ([cron.md] §4)."""
+    await conn.execute(
+        "UPDATE user_config SET default_session_id = $2, updated_at = now() "
+        "WHERE user_id = $1",
+        user_id,
+        session_id,
+    )
+
+
+_USER_CONFIG_MUTABLE = frozenset(
+    {
+        "full_name",
+        "timezone",
+        "preset_pro",
+        "preset_balanced",
+        "preset_lite",
+        "preset_embedding",
+        "max_context_token_limit",
+        "verbose_default",
+        "language",
+        "sandbox_uid",
+        "default_session_id",
+        "custom_note",
+    }
+)
+
+
+async def update_user_config(
+    conn: asyncpg.Connection, user_id: str, **fields: Any
+) -> None:
+    """Patch user_config columns (config agent / channel). Column names
+    are a fixed allowlist — no injection surface in the SET clause."""
+    cols = {k: v for k, v in fields.items() if k in _USER_CONFIG_MUTABLE}
+    unknown = set(fields) - _USER_CONFIG_MUTABLE
+    if unknown:
+        raise ValueError(f"update_user_config: non-mutable columns {sorted(unknown)}")
+    if not cols:
+        return
+    set_clause = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
+    await conn.execute(
+        f"UPDATE user_config SET {set_clause}, updated_at = now() "
+        "WHERE user_id = $1",
+        user_id,
+        *cols.values(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# suite_platform_mappings  (inbound identity — chat_id → user_id)
+# ---------------------------------------------------------------------------
+
+
+async def resolve_user_id(
+    conn: asyncpg.Connection, *, platform: str, chat_id: str
+) -> str | None:
+    """The inbound entry point: `(platform, chat_id) → user_id`. `None`
+    ⇒ an unmapped chat (→ the `/register` prompt — [channel.md] §2)."""
+    return await conn.fetchval(
+        "SELECT user_id FROM suite_platform_mappings "
+        "WHERE platform = $1 AND chat_id = $2",
+        platform,
+        chat_id,
+    )
+
+
+async def upsert_platform_mapping(
+    conn: asyncpg.Connection, *, platform: str, chat_id: str, user_id: str
+) -> PlatformMappingRow:
+    """Bind a channel-native chat to a user (the admin approve-registration
+    flow). Re-binding a chat updates the `user_id`."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO suite_platform_mappings (platform, chat_id, user_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (platform, chat_id) DO UPDATE SET user_id = EXCLUDED.user_id
+        RETURNING *
+        """,
+        platform,
+        chat_id,
+        user_id,
+    )
+    return PlatformMappingRow.model_validate(dict(row))

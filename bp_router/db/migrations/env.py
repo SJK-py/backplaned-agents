@@ -98,6 +98,15 @@ async def run_async_migrations() -> None:
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
+        # Explicit commit: under SQLAlchemy 2.0 + asyncpg an
+        # `AsyncConnection` is commit-as-you-go and the `async with`
+        # block ROLLS BACK on exit unless we commit. Alembic's
+        # `begin_transaction()` runs on the sync facade and, with this
+        # driver/version combo (alembic 1.18 / SQLAlchemy 2.0.50), does
+        # not surface a commit to the outer async connection — so
+        # without this the migration "succeeds" (exit 0) but no DDL
+        # lands and `alembic_version` is never stamped.
+        await connection.commit()
     await connectable.dispose()
 
 
