@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Users — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">Users</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      Identity, principal level, and lifecycle state.
+    </p>
+  </div>
+  <a href="/admin/users/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + New user
+  </a>
+</header>
+
+<section class="bg-white border border-brand-500/10 rounded-md p-4 shadow-sm">
+  <form class="flex flex-wrap items-end gap-3"
+        hx-get="/admin/users"
+        hx-target="#users-table"
+        hx-swap="outerHTML"
+        hx-trigger="change from:select, change from:input[type=checkbox], submit"
+        hx-push-url="true">
+    <div>
+      <label for="level" class="block text-xs font-medium text-brand-700 mb-1">
+        Level
+      </label>
+      <select id="level" name="level"
+              class="rounded border border-brand-500/20 px-3 py-1.5 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        <option value="">All</option>
+        {% for opt in level_options %}
+          <option value="{{ opt }}" {% if opt == level_filter %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <label class="flex items-center gap-1.5 text-xs font-medium text-brand-700 pb-1.5">
+      <input type="checkbox" name="include_deleted" value="true"
+             {% if include_deleted %}checked{% endif %}
+             class="rounded border-brand-500/40"/>
+      Show deleted users
+    </label>
+    <span class="htmx-indicator text-xs text-brand-500">loading…</span>
+  </form>
+</section>
+
+{% include "users/_table_body.html" %}
+{% endblock %}

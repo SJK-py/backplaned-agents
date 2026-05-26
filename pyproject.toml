@@ -1,0 +1,103 @@
+[project]
+name = "backplaned"
+version = "0.1.0"
+description = "Multi-user agent router with WebSocket transport, Postgres backend, and a typed Python SDK."
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+readme = "README.md"
+
+dependencies = [
+    # Wire protocol + shared types
+    "pydantic>=2.12",
+    "pydantic-settings>=2.5",
+
+    # Agent SDK transport
+    "httpx>=0.28",
+    "websockets>=16.0",
+
+    # JSON logging hooks (used by both router and SDK)
+    "prometheus-client>=0.21",
+]
+
+[project.optional-dependencies]
+# Reworked router (bp_router): Postgres, Redis, Alembic, argon2, JWT,
+# Prometheus, OpenTelemetry, YAML, email validation.
+router = [
+    "fastapi>=0.135",
+    "uvicorn[standard]>=0.42",
+    "python-multipart>=0.0.22",
+    "asyncpg>=0.30",
+    "redis>=5.0",
+    "alembic>=1.14",
+    "sqlalchemy[asyncio]>=2.0",  # alembic env requires SQLAlchemy
+    "argon2-cffi>=23.1",
+    "pyjwt[crypto]>=2.9",
+    "PyYAML>=6.0",
+    "email-validator>=2.2",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "jsonschema>=4.21",
+]
+
+# LLM provider adapters (only what's wired today; add more as adapters land).
+llm-gemini = [
+    "google-genai>=1.14",
+]
+
+# Optional S3-compatible file storage backend (AWS S3, R2, MinIO).
+storage-s3 = [
+    "aioboto3>=14.0",
+]
+
+# Admin web UI (bp_admin) — Jinja2 templating + Starlette
+# SessionMiddleware. `itsdangerous` is required by SessionMiddleware
+# for cookie signing; Starlette ≥1.0 dropped it from base requirements
+# (now a soft dep) so we declare it explicitly here. Static assets
+# (HTMX, Alpine, SortableJS, Tailwind) load via CDN, so there's no
+# JS build pipeline at install time. python-multipart is needed for
+# Form() handling on the login route (already present in `router`,
+# repeated here so the admin extra is independently installable).
+admin = [
+    "jinja2>=3.1",
+    "python-multipart>=0.0.22",
+    "itsdangerous>=2.2",
+]
+
+# Test + dev tooling.
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    # In-process Redis simulator with EVAL / EXPIRE support. Used by
+    # tests/test_redis_*.py to validate the JTI revocation round-trip
+    # and the TokenBucket Lua script against a real Redis-protocol
+    # server so contract drift is caught at unit time (no live
+    # container required for CI).
+    "fakeredis>=2.26",
+]
+
+[project.scripts]
+bp-router = "bp_router.__main__:main"
+bp-admin = "bp_admin.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bp_admin", "bp_protocol", "bp_router", "bp_sdk"]
+artifacts = ["bp_admin/templates/**", "bp_admin/static/**"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "PLC", "PLE", "PLW"]
+ignore = ["E501"]

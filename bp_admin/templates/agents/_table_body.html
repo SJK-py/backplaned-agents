@@ -1,0 +1,75 @@
+{# HTMX swaps this whole div via hx-swap=outerHTML on the parent form. #}
+<div id="agents-table" class="mt-6 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if agents %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Agent</th>
+          <th class="px-4 py-2 text-left font-medium">Kind</th>
+          <th class="px-4 py-2 text-left font-medium">Status</th>
+          <th class="px-4 py-2 text-left font-medium">Groups</th>
+          <th class="px-4 py-2 text-left font-medium">Capabilities</th>
+          <th class="px-4 py-2 text-left font-medium">Last seen</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for a in agents %}
+          <tr class="hover:bg-brand-50/50 cursor-pointer"
+              data-href="/admin/agents/{{ a.agent_id }}">
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ a.agent_id }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ a.kind }}</td>
+            <td class="px-4 py-2">
+              {% with value = a.status %}{% include "_partials/agent_status_badge.html" %}{% endwith %}
+            </td>
+            <td class="px-4 py-2 text-brand-700">
+              {% if a.groups %}
+                <div class="flex flex-wrap gap-1">
+                  {% for g in a.groups %}
+                    <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                                 text-xs text-brand-700 ring-1 ring-inset ring-brand-500/20">
+                      {{ g }}
+                    </span>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <span class="text-brand-500/70 text-xs">—</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-brand-700">
+              {% if a.capabilities %}
+                <div class="flex flex-wrap gap-1">
+                  {% for c in a.capabilities[:3] %}
+                    <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                                 text-xs text-brand-700 ring-1 ring-inset ring-brand-500/20">
+                      {{ c }}
+                    </span>
+                  {% endfor %}
+                  {% if a.capabilities|length > 3 %}
+                    <span class="text-xs text-brand-500/70">+{{ a.capabilities|length - 3 }}</span>
+                  {% endif %}
+                </div>
+              {% else %}
+                <span class="text-brand-500/70 text-xs">—</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">
+              {{ (a.last_seen_at | dt) or "never" }}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      {% if status_filter %}
+        No agents with status <code class="text-brand-700">{{ status_filter }}</code>.
+      {% else %}
+        No agents have onboarded yet.
+        <a href="/admin/invitations" class="text-brand-700 hover:text-brand-900 underline ml-1">
+          Issue an invitation
+        </a>
+        to get started.
+      {% endif %}
+    </div>
+  {% endif %}
+</div>

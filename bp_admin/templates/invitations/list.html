@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Invitations — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">Invitations</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      One-time tokens that bootstrap an agent at a given principal level.
+      The raw token is shown <em>only once</em> at issue time; the router
+      stores only its SHA-256 hash.
+    </p>
+  </div>
+  <a href="/admin/invitations/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + Issue invitation
+  </a>
+</header>
+
+{% if flash %}
+  <div class="mb-4 rounded border border-brand-500/20 bg-white px-3 py-2 text-sm text-brand-700">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<section class="bg-white border border-brand-500/10 rounded-md p-4 shadow-sm">
+  <form class="flex flex-wrap items-end gap-3"
+        hx-get="/admin/invitations"
+        hx-target="#invitations-table"
+        hx-swap="outerHTML"
+        hx-trigger="change from:select, submit"
+        hx-push-url="true">
+    <div>
+      <label for="status" class="block text-xs font-medium text-brand-700 mb-1">
+        Status
+      </label>
+      <select id="status" name="status"
+              class="rounded border border-brand-500/20 px-3 py-1.5 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        <option value="">All</option>
+        {% for opt in status_options %}
+          <option value="{{ opt }}" {% if opt == status_filter %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <span class="htmx-indicator text-xs text-brand-500">loading…</span>
+  </form>
+</section>
+
+{% include "invitations/_table_body.html" %}
+{% endblock %}

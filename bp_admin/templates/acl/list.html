@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}ACL rules — bp_admin{% endblock %}
+
+{% block head_extra %}
+<!-- SortableJS for drag-drop reorder. -->
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">ACL rules</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      Firewall-style ordered rules. First match wins; default-deny when
+      no rule matches. Drag a row by its handle to reorder — the server
+      re-normalises ords to 0, 10, 20, …
+    </p>
+  </div>
+  <a href="/admin/acl/rules/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + New rule
+  </a>
+</header>
+
+{% if flash %}
+  <div class="mb-4 rounded border border-brand-500/20 bg-white px-3 py-2 text-sm text-brand-700">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+  <!-- Rules table (drag-drop) -->
+  <div class="lg:col-span-2">
+    {% include "acl/_table_body.html" %}
+    <p class="mt-2 text-xs text-brand-500/80">
+      Pattern grammar: <code class="text-brand-700">&lt;group&gt;/&lt;cap&gt;</code>
+      with <code class="text-brand-700">*</code> wildcards, or
+      <code class="text-brand-700">@&lt;agent_id&gt;</code> for a literal
+      agent. See <code class="text-brand-700">docs/acl.md</code> for full
+      details.
+    </p>
+  </div>
+
+  <!-- Simulate panel -->
+  <aside class="lg:col-span-1">
+    <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm">
+      <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+        Simulate
+      </h2>
+      <p class="mt-1 text-xs text-brand-500">
+        Dry-run an ACL evaluation against the live rule set. Caller and
+        callee must be onboarded agents (literal IDs).
+      </p>
+      <form class="mt-3 space-y-3"
+            hx-post="/admin/acl/rules/simulate"
+            hx-target="#simulate-result"
+            hx-swap="outerHTML">
+        <div>
+          <label for="sim-caller" class="block text-xs font-medium text-brand-700 mb-1">
+            Caller agent_id
+          </label>
+          <input id="sim-caller" name="caller_id" required
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+        </div>
+        <div>
+          <label for="sim-callee" class="block text-xs font-medium text-brand-700 mb-1">
+            Callee agent_id
+          </label>
+          <input id="sim-callee" name="callee_id" required
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+        </div>
+        <div>
+          <label for="sim-level" class="block text-xs font-medium text-brand-700 mb-1">
+            User level
+          </label>
+          <select id="sim-level" name="user_level"
+                  class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                         focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+            {% for opt in sim_user_levels %}
+              <option value="{{ opt }}" {% if opt == "tier0" %}selected{% endif %}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit"
+                class="w-full rounded bg-brand-900 hover:bg-brand-700 text-white
+                       text-sm font-medium px-3 py-2">
+          Simulate
+        </button>
+        <span class="htmx-indicator block text-xs text-brand-500">running…</span>
+      </form>
+
+      {% include "acl/_simulate_result.html" with context %}
+    </div>
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts_extra %}
+<script>
+  (function () {
+    function initRulesSortable() {
+      const tbody = document.getElementById('rules-tbody');
+      if (!tbody || typeof Sortable === 'undefined') return;
+      if (tbody._sortable) tbody._sortable.destroy();
+      tbody._sortable = Sortable.create(tbody, {
+        handle: '.drag-handle',
+        animation: 150,
+        ghostClass: 'opacity-50',
+        chosenClass: 'bg-brand-50',
+        onEnd: async () => {
+          const ids = Array.from(
+            tbody.querySelectorAll('tr[data-rule-id]'),
+            el => el.dataset.ruleId,
+          );
+          const fd = new FormData();
+          ids.forEach(id => fd.append('rule_ids', id));
+          const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+          const headers = { 'HX-Request': 'true' };
+          if (csrfMeta && csrfMeta.content) headers['X-CSRF-Token'] = csrfMeta.content;
+          try {
+            const r = await fetch('/admin/acl/rules/reorder', {
+              method: 'POST',
+              body: fd,
+              headers,
+            });
+            if (!r.ok) throw new Error('reorder ' + r.status);
+            const html = await r.text();
+            const target = document.getElementById('rules-table');
+            if (target) {
+              target.outerHTML = html;
+              initRulesSortable();
+            }
+          } catch (e) {
+            console.error(e);
+            alert('Reorder failed — reloading.');
+            window.location.reload();
+          }
+        },
+      });
+    }
+    document.addEventListener('DOMContentLoaded', initRulesSortable);
+    // Re-init after any HTMX swap that could replace the table.
+    document.body.addEventListener('htmx:afterSwap', initRulesSortable);
+  })();
+</script>
+{% endblock %}

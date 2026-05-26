@@ -1,0 +1,123 @@
+{# HTMX swap target. Renders three modes:
+   - empty (no submit yet)
+   - error (admit failed or upstream returned non-2xx)
+   - result (success — status/output/error fields from upstream)
+
+   Status colour map:
+     succeeded  → emerald
+     failed     → red
+     timed_out  → orange
+     cancelled  → slate
+#}
+<div id="test-result"
+     class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm space-y-4">
+  <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Result</h2>
+
+  {% if error %}
+    <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      <div class="flex items-center justify-between gap-2">
+        <span class="font-semibold">Failed to admit task</span>
+        {% if error.status_code %}
+          <span class="text-xs font-mono">HTTP {{ error.status_code }}</span>
+        {% endif %}
+      </div>
+      {% if error.code %}
+        <div class="mt-1 text-xs">
+          <span class="text-red-700/70">code:</span>
+          <code class="text-red-900">{{ error.code }}</code>
+        </div>
+      {% endif %}
+      <div class="mt-1 text-xs">{{ error.message }}</div>
+      {% if submitted_destination %}
+        <div class="mt-1 text-xs text-red-700/70">
+          destination: <code class="text-red-900">{{ submitted_destination }}</code>
+        </div>
+      {% endif %}
+    </div>
+
+  {% elif result %}
+    {# Sync (wait=true) responses carry `status`. Async returns IDs only. #}
+    {% if result.status %}
+      {% set badge = {
+        'succeeded': 'bg-emerald-100 text-emerald-800 ring-emerald-600/20',
+        'failed':    'bg-red-100 text-red-800 ring-red-600/20',
+        'timed_out': 'bg-orange-100 text-orange-800 ring-orange-600/20',
+        'cancelled': 'bg-slate-100 text-slate-700 ring-slate-600/20',
+      }.get(result.status, 'bg-slate-100 text-slate-700 ring-slate-600/20') %}
+      <div class="flex items-center gap-2">
+        <span class="inline-flex items-center rounded-md px-2 py-0.5
+                     text-xs font-medium ring-1 ring-inset {{ badge }}">
+          {{ result.status }}
+        </span>
+        {% if result.status_code is not none %}
+          <span class="text-xs text-brand-500/80">
+            status_code <code class="text-brand-700">{{ result.status_code }}</code>
+          </span>
+        {% endif %}
+        {% if result.duration_s is not none %}
+          <span class="text-xs text-brand-500/80 ml-auto">
+            {{ result.duration_s }}s
+          </span>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="rounded border border-brand-500/20 bg-brand-50/40 px-3 py-2 text-xs text-brand-700">
+        Task admitted in async mode — no terminal result will be returned
+        here. Follow it via <code class="text-brand-900">GET /v1/admin/agents/{{ submitted_destination }}/tasks</code>
+        or the
+        <a href="/admin/agents/{{ submitted_destination }}"
+           class="text-brand-700 hover:text-brand-900 underline underline-offset-2">agent detail page</a>.
+      </div>
+    {% endif %}
+
+    <dl class="grid grid-cols-1 gap-y-1 text-xs">
+      <div class="flex justify-between gap-3">
+        <dt class="text-brand-500">task_id</dt>
+        <dd class="font-mono text-brand-900 truncate" title="{{ result.task_id }}">
+          {{ result.task_id }}
+        </dd>
+      </div>
+      <div class="flex justify-between gap-3">
+        <dt class="text-brand-500">session_id</dt>
+        <dd class="font-mono text-brand-700 truncate" title="{{ result.session_id }}">
+          {{ result.session_id }}
+        </dd>
+      </div>
+      <div class="flex justify-between gap-3">
+        <dt class="text-brand-500">acted as</dt>
+        <dd class="font-mono text-brand-700">
+          {{ result.caller_user_id }}
+          <span class="text-brand-500/70">({{ result.caller_user_level }})</span>
+        </dd>
+      </div>
+    </dl>
+
+    {% if result.output_json %}
+      <div>
+        <div class="text-xs uppercase tracking-wide text-brand-500 mb-1">Output</div>
+        <pre class="rounded bg-brand-900 text-brand-50 px-3 py-2 text-xs
+                    font-mono whitespace-pre-wrap overflow-x-auto">{{ result.output_json }}</pre>
+      </div>
+    {% endif %}
+
+    {% if result.error_json %}
+      <div>
+        <div class="text-xs uppercase tracking-wide text-brand-500 mb-1">Error</div>
+        <pre class="rounded bg-red-50 text-red-900 ring-1 ring-inset ring-red-200
+                    px-3 py-2 text-xs font-mono whitespace-pre-wrap overflow-x-auto">{{ result.error_json }}</pre>
+      </div>
+    {% endif %}
+
+    <div class="pt-2 text-xs text-brand-500/80">
+      Submitted to
+      <a href="/admin/agents/{{ submitted_destination }}"
+         class="text-brand-700 hover:text-brand-900 underline underline-offset-2 font-mono">{{ submitted_destination }}</a>.
+    </div>
+
+  {% else %}
+    <p class="text-sm text-brand-500/80">
+      Send a task to see the result here. Sync mode renders the terminal
+      output inline; async mode returns the task_id immediately.
+    </p>
+  {% endif %}
+</div>

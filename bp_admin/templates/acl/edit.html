@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Edit ACL rule — bp_admin{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/acl/rules" class="hover:text-brand-900 underline underline-offset-2">ACL rules</a>
+  <span class="mx-1">/</span>
+  <span>edit</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Edit ACL rule</h1>
+  <p class="text-xs text-brand-500/80 mt-1 font-mono">{{ rule.rule_id }}</p>
+</header>
+
+{% set form_action = "/admin/acl/rules/" ~ rule.rule_id ~ "/edit" %}
+{% set submit_label = "Save changes" %}
+{% include "acl/_form.html" %}
+{% endblock %}

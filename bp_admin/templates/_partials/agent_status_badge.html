@@ -1,0 +1,12 @@
+{# Renders an agent status as a coloured badge. Pass `value`. #}
+{% set classes = {
+    "active":    "bg-emerald-100 text-emerald-800 ring-emerald-600/20",
+    "suspended": "bg-orange-100 text-orange-800 ring-orange-600/20",
+    "removed":   "bg-red-100 text-red-800 ring-red-600/20",
+    "pending":   "bg-slate-100 text-slate-700 ring-slate-600/20",
+} %}
+<span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium
+             ring-1 ring-inset
+             {{ classes.get(value, 'bg-slate-100 text-slate-700 ring-slate-600/20') }}">
+  {{ value }}
+</span>

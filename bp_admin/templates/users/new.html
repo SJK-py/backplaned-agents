@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}New user — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">New user</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Create a user with an explicit principal level. Optionally seed an
+    initial password — leave blank to create an api-key user (no
+    password login).
+  </p>
+</header>
+
+<form method="post" action="/admin/users/new"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-md">
+  {% include "_partials/csrf.html" %}
+  {% if error %}
+    <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <div>
+    <label for="email" class="block text-xs font-medium text-brand-700 mb-1">Email</label>
+    <input id="email" name="email" type="email" required autofocus
+           value="{{ form.email or '' }}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+  </div>
+
+  <div>
+    <label for="level" class="block text-xs font-medium text-brand-700 mb-1">Level</label>
+    <select id="level" name="level"
+            class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+      {% for opt in level_options %}
+        <option value="{{ opt }}" {% if opt == form.level %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+    <p class="mt-1 text-xs text-brand-500">
+      Lower number = more privileged. <code class="text-brand-700">tier0</code> is most
+      privileged among non-admin levels.
+    </p>
+  </div>
+
+  <div>
+    <label for="initial_password" class="block text-xs font-medium text-brand-700 mb-1">
+      Initial password
+      <span class="font-normal text-brand-500">(optional)</span>
+    </label>
+    <input id="initial_password" name="initial_password" type="password"
+           autocomplete="new-password"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      Create user
+    </button>
+    <a href="/admin/users"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

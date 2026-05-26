@@ -1,0 +1,30 @@
+/* bp_admin — minimal custom styles on top of Tailwind.
+ *
+ * Most of the styling is handled by utility classes in templates.
+ * Add to this file only when a Tailwind utility doesn't fit (custom
+ * animations, third-party widget overrides, print styles, etc.).
+ */
+
+/* HTMX request indicator — fade in the .htmx-indicator while a request
+   is in flight. */
+.htmx-indicator {
+    opacity: 0;
+    transition: opacity 200ms ease-in;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+    opacity: 1;
+}
+
+/* Slim scrollbar for table panels. */
+.thin-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(45, 55, 72, 0.25);
+    border-radius: 4px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(45, 55, 72, 0.4);
+}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Invitation issued — bp_admin{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Invitation issued</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    The raw token below is shown <em>once</em>. The router never stored
+    it — only its SHA-256 hash. If you lose it, revoke and re-issue.
+  </p>
+</header>
+
+<section class="rounded-md border border-amber-300 bg-amber-50 p-4 mb-6">
+  <h2 class="text-sm font-semibold text-amber-900 mb-1">⚠ Save this token now</h2>
+  <p class="text-xs text-amber-800">
+    Once you leave this page, you cannot recover the token. Hand it to
+    the agent operator securely (e.g., a password manager or encrypted
+    channel).
+  </p>
+</section>
+
+<section class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-5"
+         x-data="{ copied: false }">
+  <div>
+    <div class="text-xs font-medium text-brand-700 mb-1">Level</div>
+    {% with value = level %}{% include "_partials/level_badge.html" %}{% endwith %}
+  </div>
+
+  <div>
+    <div class="text-xs font-medium text-brand-700 mb-1">Expires at</div>
+    <div class="text-sm text-brand-900">{{ expires_at | dt }}</div>
+    <div class="text-xs text-brand-500/80">TTL: {{ ttl_s }} seconds</div>
+  </div>
+
+  <div>
+    <div class="flex items-center justify-between mb-1">
+      <span class="text-xs font-medium text-brand-700">Invitation token</span>
+      <button type="button"
+              x-on:click="
+                navigator.clipboard.writeText($refs.token.textContent.trim())
+                  .then(() => { copied = true; setTimeout(() => copied = false, 1500); });
+              "
+              class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2">
+        <span x-show="!copied">Copy to clipboard</span>
+        <span x-show="copied" x-cloak class="text-emerald-700">Copied!</span>
+      </button>
+    </div>
+    <pre x-ref="token"
+         class="rounded bg-brand-900 text-brand-50 px-3 py-3 font-mono text-xs
+                whitespace-pre-wrap break-all select-all">{{ invitation_token }}</pre>
+  </div>
+
+  <div class="border-t border-brand-500/10 pt-4 flex items-center gap-3">
+    <a href="/admin/invitations"
+       class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      I've saved it — back to invitations
+    </a>
+    <a href="/admin/invitations/new"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Issue another
+    </a>
+  </div>
+</section>
+{% endblock %}

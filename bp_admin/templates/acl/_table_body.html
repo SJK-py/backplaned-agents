@@ -1,0 +1,74 @@
+{# Rendered standalone by /reorder (HTMX swap) and included by list.html.
+   The outer `<div id="rules-table">` is what the reorder handler swaps. #}
+<div id="rules-table" class="bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if rules %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="w-8 px-2 py-2"></th>
+          <th class="w-12 px-2 py-2 text-left font-medium">#</th>
+          <th class="px-3 py-2 text-left font-medium">Effect</th>
+          <th class="px-3 py-2 text-left font-medium">User level</th>
+          <th class="px-3 py-2 text-left font-medium">Caller → Callee</th>
+          <th class="px-3 py-2 text-left font-medium">Name</th>
+          <th class="px-3 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rules-tbody" class="divide-y divide-brand-500/10">
+        {% for r in rules %}
+          <tr data-rule-id="{{ r.rule_id }}" class="hover:bg-brand-50/50">
+            <td class="px-2 py-2 align-middle">
+              <span class="drag-handle cursor-grab select-none text-brand-500/60 hover:text-brand-700"
+                    title="Drag to reorder" aria-label="Drag to reorder">⋮⋮</span>
+            </td>
+            <td class="px-2 py-2 font-mono text-xs text-brand-500">{{ r.ord }}</td>
+            <td class="px-3 py-2">
+              {% with value = r.effect %}{% include "_partials/effect_badge.html" %}{% endwith %}
+            </td>
+            <td class="px-3 py-2 font-mono text-xs text-brand-700">{{ r.user_level }}</td>
+            <td class="px-3 py-2 font-mono text-xs text-brand-900">
+              <span class="text-brand-700">{{ r.caller_pattern }}</span>
+              <span class="text-brand-500/70 mx-1">→</span>
+              <span class="text-brand-700">{{ r.callee_pattern }}</span>
+            </td>
+            <td class="px-3 py-2 text-brand-700">
+              {% if r.name %}
+                <span class="text-brand-900">{{ r.name }}</span>
+                {% if r.description %}
+                  <div class="text-xs text-brand-500/80">{{ r.description }}</div>
+                {% endif %}
+              {% else %}
+                <span class="text-brand-500/50 text-xs">—</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-right whitespace-nowrap">
+              <a href="/admin/acl/rules/{{ r.rule_id }}/edit"
+                 class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2">
+                Edit
+              </a>
+              <span class="text-brand-500/30 mx-1">·</span>
+              <form method="post"
+                    action="/admin/acl/rules/{{ r.rule_id }}/delete"
+                    class="inline"
+                    onsubmit="return confirm('Delete this rule? This cannot be undone.');">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                  Delete
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No ACL rules. Default-deny is in effect — no agent-to-agent calls
+      are allowed.
+      <a href="/admin/acl/rules/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+        Add the first rule
+      </a>.
+    </div>
+  {% endif %}
+</div>

@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if mode == "new" %}New MCP server{% else %}Edit MCP server — {{ server.server_id }}{% endif %} — bp_admin
+{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/mcp-servers" class="hover:text-brand-900 underline underline-offset-2">MCP servers</a>
+  <span class="mx-1">/</span>
+  <span>{% if mode == "new" %}New{% else %}{{ form.server_id }}{% endif %}</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">
+    {% if mode == "new" %}Add MCP server{% else %}Edit {{ form.server_id }}{% endif %}
+  </h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Phase 10a: configuration only. The bridge process (Phase 10b/c)
+    reads this row and onboards per-tool agents under
+    <code class="text-brand-700">mcp_{{ form.server_id or '&lt;server_id&gt;' }}_&lt;tool&gt;</code>.
+    Tools are auto-derived from the MCP server's
+    <code class="text-brand-700">tools/list</code> on connect.
+  </p>
+</header>
+
+{% if error %}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    {{ error }}
+  </div>
+{% endif %}
+
+<form method="post"
+      action="{% if mode == 'new' %}/admin/mcp-servers/new{% else %}/admin/mcp-servers/{{ form.server_id }}/edit{% endif %}"
+      x-data="{ authKind: {{ form.auth_kind | tojson }} }"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
+  {% include "_partials/csrf.html" %}
+
+  <div>
+    <label for="server_id" class="block text-xs font-medium text-brand-700 mb-1">
+      Server ID <span class="text-red-700">*</span>
+    </label>
+    <input id="server_id" name="server_id" type="text" required
+           pattern="[a-z][a-z0-9_]+"
+           value="{{ form.server_id }}"
+           {% if mode == "edit" %}readonly{% endif %}
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                  {% if mode == 'edit' %}bg-brand-50 text-brand-500{% endif %}
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    <p class="text-xs text-brand-500 mt-1">
+      Lowercase + digits + underscores. Becomes the
+      <code>mcp_&lt;server_id&gt;_&lt;tool&gt;</code> agent_id prefix.
+      {% if mode == "edit" %}Immutable after creation.{% endif %}
+    </p>
+  </div>
+
+  <div>
+    <label for="description" class="block text-xs font-medium text-brand-700 mb-1">
+      Description
+    </label>
+    <input id="description" name="description" type="text"
+           value="{{ form.description }}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+  </div>
+
+  <div>
+    <label for="url" class="block text-xs font-medium text-brand-700 mb-1">
+      URL <span class="text-red-700">*</span>
+    </label>
+    <input id="url" name="url" type="url" required
+           pattern="https?://.+"
+           value="{{ form.url }}"
+           placeholder="https://mcp.example.com/sse"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    <p class="text-xs text-brand-500 mt-1">
+      Endpoint of the upstream MCP server. http(s):// only.
+    </p>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="transport" class="block text-xs font-medium text-brand-700 mb-1">
+        Transport
+      </label>
+      <select id="transport" name="transport"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for opt in transport_options %}
+          <option value="{{ opt }}" {% if opt == form.transport %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label for="auth_kind" class="block text-xs font-medium text-brand-700 mb-1">
+        Auth kind
+      </label>
+      <select id="auth_kind" name="auth_kind" x-model="authKind"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for opt in auth_kind_options %}
+          <option value="{{ opt }}" {% if opt == form.auth_kind %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div x-show="authKind !== 'none'" x-cloak class="space-y-4">
+    <div>
+      <label for="auth_value_ref" class="block text-xs font-medium text-brand-700 mb-1">
+        Auth value reference <span class="text-red-700">*</span>
+      </label>
+      <input id="auth_value_ref" name="auth_value_ref" type="text"
+             pattern="(env|secret)://.+"
+             value="{{ form.auth_value_ref }}"
+             placeholder="env://MCP_FILESYSTEM_TOKEN  or  secret://kv/mcp/filesystem"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+      <p class="text-xs text-brand-500 mt-1">
+        Reference to where the bridge resolves the credential at
+        connect time. <code>env://VAR</code> reads from the bridge
+        process's environment; <code>secret://path</code> reads from
+        the configured secret store. Raw secrets in this field are
+        refused.
+      </p>
+    </div>
+
+    <div x-show="authKind === 'header'" x-cloak>
+      <label for="auth_header_name" class="block text-xs font-medium text-brand-700 mb-1">
+        Custom header name <span class="text-red-700">*</span>
+      </label>
+      <input id="auth_header_name" name="auth_header_name" type="text"
+             value="{{ form.auth_header_name }}"
+             placeholder="X-API-Key"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+      <p class="text-xs text-brand-500 mt-1">
+        Header name that carries the resolved value. For
+        <code>auth_kind=bearer</code> the bridge uses
+        <code>Authorization: Bearer &lt;value&gt;</code> implicitly.
+      </p>
+    </div>
+  </div>
+
+  <div>
+    <label for="groups" class="block text-xs font-medium text-brand-700 mb-1">
+      Groups (comma-separated)
+    </label>
+    <input id="groups" name="groups" type="text"
+           value="{{ form.groups }}"
+           placeholder="mcp_bridge, llm_tools"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    <p class="text-xs text-brand-500 mt-1">
+      Derived per-tool agents inherit these groups for ACL targeting
+      via <code>&lt;group&gt;/&lt;cap&gt;</code> rules.
+    </p>
+  </div>
+
+  <div class="border-t border-brand-500/10 pt-3">
+    <label class="flex items-start gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="expose_to_llm" value="on"
+             {% if form.expose_to_llm %}checked{% endif %}
+             class="mt-0.5 rounded border-brand-500/40"/>
+      <span>
+        Expose derived agents to <code>build_tools</code>
+        <span class="font-normal text-brand-500/80">
+          (uncheck if this server has many tools and you don't want
+          them all in every LLM agent's tool schema)
+        </span>
+      </span>
+    </label>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      {% if mode == "new" %}Create{% else %}Save changes{% endif %}
+    </button>
+    <a href="/admin/mcp-servers"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

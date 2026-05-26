@@ -1,0 +1,113 @@
+{# Shared form body for new/edit. Caller sets `form_action` (URL) and
+   optionally `submit_label`. #}
+<form method="post" action="{{ form_action }}"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
+  {% include "_partials/csrf.html" %}
+  {% if error %}
+    <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="effect" class="block text-xs font-medium text-brand-700 mb-1">Effect</label>
+      <select id="effect" name="effect"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for opt in effects %}
+          <option value="{{ opt }}" {% if opt == form.effect %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div>
+      <label for="user_level" class="block text-xs font-medium text-brand-700 mb-1">User level</label>
+      <select id="user_level" name="user_level"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for opt in rule_user_levels %}
+          <option value="{{ opt }}" {% if opt == form.user_level %}selected{% endif %}>{{ opt }}</option>
+        {% endfor %}
+      </select>
+      <p class="mt-1 text-xs text-brand-500">
+        <code class="text-brand-700">*</code> matches any level. Tier
+        matching is "this tier or stricter" (lower number).
+      </p>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="caller_pattern" class="block text-xs font-medium text-brand-700 mb-1">
+        Caller pattern
+      </label>
+      <input id="caller_pattern" name="caller_pattern" required
+             value="{{ form.caller_pattern }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+
+    <div>
+      <label for="callee_pattern" class="block text-xs font-medium text-brand-700 mb-1">
+        Callee pattern
+      </label>
+      <input id="callee_pattern" name="callee_pattern" required
+             value="{{ form.callee_pattern }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+  </div>
+
+  <p class="-mt-2 text-xs text-brand-500">
+    Pattern grammar: <code class="text-brand-700">&lt;group&gt;/&lt;cap&gt;</code>
+    (with <code class="text-brand-700">*</code> wildcards) or
+    <code class="text-brand-700">@&lt;agent_id&gt;</code> for a literal agent.
+    Examples: <code class="text-brand-700">analytics/*</code>,
+    <code class="text-brand-700">*/summarise</code>,
+    <code class="text-brand-700">@billing-svc</code>.
+  </p>
+
+  <div>
+    <label for="ord" class="block text-xs font-medium text-brand-700 mb-1">Ord</label>
+    <input id="ord" name="ord" type="number" min="0" required
+           value="{{ form.ord }}"
+           class="w-32 rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    <p class="mt-1 text-xs text-brand-500">
+      Position in the rule list. Lower runs first. Must be unique; the
+      reorder action re-normalises to multiples of 10.
+    </p>
+  </div>
+
+  <div>
+    <label for="name" class="block text-xs font-medium text-brand-700 mb-1">
+      Name <span class="font-normal text-brand-500">(optional)</span>
+    </label>
+    <input id="name" name="name"
+           value="{{ form.name }}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+  </div>
+
+  <div>
+    <label for="description" class="block text-xs font-medium text-brand-700 mb-1">
+      Description <span class="font-normal text-brand-500">(optional)</span>
+    </label>
+    <textarea id="description" name="description" rows="2"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+    >{{ form.description }}</textarea>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      {{ submit_label or "Save rule" }}
+    </button>
+    <a href="/admin/acl/rules"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>

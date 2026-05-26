@@ -1,0 +1,4 @@
+{# Hidden CSRF field for raw HTML forms. Always include inside any
+   form that POSTs to a /admin/ endpoint. The middleware also accepts
+   the same value via the X-CSRF-Token header (HTMX/fetch path). #}
+<input type="hidden" name="csrf_token" value="{{ request.session.csrf_token or '' }}" />

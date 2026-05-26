@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}LLM presets — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">LLM presets</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      Named bundles of (provider, model, sampling defaults, provider
+      options) that agents reference via
+      <code class="text-brand-700">ctx.llm.generate(preset="...")</code>.
+      Each preset's <strong>min user level</strong> gates which
+      callers may use it.
+    </p>
+  </div>
+  <a href="/admin/llm/presets/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + New preset
+  </a>
+</header>
+
+{% if flash %}
+  <div class="mb-4 rounded border border-brand-500/20 bg-white px-3 py-2 text-sm text-brand-700">
+    {{ flash }}
+  </div>
+{% endif %}
+
+{% include "llm_presets/_table_body.html" %}
+
+<p class="mt-3 text-xs text-brand-500/80">
+  <strong>Min user level grammar:</strong>
+  <code class="text-brand-700">*</code> (any),
+  <code class="text-brand-700">admin</code>,
+  <code class="text-brand-700">service</code>, or
+  <code class="text-brand-700">tierN</code> (tier-or-stricter; lower
+  number = more privileged). See
+  <code class="text-brand-700">docs/sdk/services.md</code> for full
+  semantics.
+</p>
+{% endblock %}

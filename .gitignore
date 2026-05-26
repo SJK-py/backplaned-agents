@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Dependency lockfile — intentionally untracked in this environment
+uv.lock
+
+# Environment and secrets
+.env
+*.pem
+*.key
+
+# Generated runtime data
+agent_state/
+proxyfiles/
+.test_proxyfiles/
+
+# Credentials persisted by the SDK on first run
+**/credentials.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prod compose env (filled-in copy of deploy/.env.prod.example)
+deploy/.env.prod
+.env.prod

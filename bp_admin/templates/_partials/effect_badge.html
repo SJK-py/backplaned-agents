@@ -1,0 +1,10 @@
+{# Renders an ACL rule effect as a coloured badge. Pass `value`. #}
+{% set classes = {
+    "allow": "bg-emerald-100 text-emerald-800 ring-emerald-600/20",
+    "deny":  "bg-red-100 text-red-800 ring-red-600/20",
+} %}
+<span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium
+             ring-1 ring-inset
+             {{ classes.get(value, 'bg-slate-100 text-slate-700 ring-slate-600/20') }}">
+  {{ value }}
+</span>

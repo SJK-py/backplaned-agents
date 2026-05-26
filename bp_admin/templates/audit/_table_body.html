@@ -1,0 +1,98 @@
+{# HTMX swaps this whole div via hx-swap=outerHTML on the parent form. #}
+<div id="audit-table" class="mt-6 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if rows %}
+    <div class="px-4 py-2 border-b border-brand-500/10 text-xs text-brand-500 flex items-center justify-between">
+      <span>{{ rows|length }} event{{ rows|length != 1 and 's' or '' }} (newest first)</span>
+      <span class="text-brand-500/70">click a row to expand payload</span>
+    </div>
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-3 py-2 text-left font-medium w-44">When</th>
+          <th class="px-3 py-2 text-left font-medium">Event</th>
+          <th class="px-3 py-2 text-left font-medium">Actor</th>
+          <th class="px-3 py-2 text-left font-medium">Target</th>
+          <th class="px-3 py-2 text-right font-medium w-8"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10" x-data="{ expanded: {} }">
+        {% for r in rows %}
+          {% set key = r.event_id %}
+          <tr class="hover:bg-brand-50/50 cursor-pointer"
+              @click="expanded['{{ key }}'] = !expanded['{{ key }}']">
+            <td class="px-3 py-2 text-brand-500/80 text-xs whitespace-nowrap">{{ r.ts | dt }}</td>
+            <td class="px-3 py-2 font-mono text-xs text-brand-900">{{ r.event }}</td>
+            <td class="px-3 py-2 text-xs">
+              <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                           text-brand-700 ring-1 ring-inset ring-brand-500/20">
+                {{ r.actor_kind }}
+              </span>
+              <span class="font-mono text-brand-500 ml-1">{{ r.actor_id or "—" }}</span>
+            </td>
+            <td class="px-3 py-2 font-mono text-xs text-brand-700">
+              {% if r.target_kind %}
+                <span class="text-brand-500">{{ r.target_kind }}:</span>{{ r.target_id or "—" }}
+              {% else %}
+                <span class="text-brand-500/50">—</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-right text-xs text-brand-500/70">
+              <span x-show="!expanded['{{ key }}']">▸</span>
+              <span x-show="expanded['{{ key }}']" x-cloak>▾</span>
+            </td>
+          </tr>
+          <tr x-show="expanded['{{ key }}']" x-cloak class="bg-brand-50/30">
+            <td colspan="5" class="px-3 pb-4 pt-1">
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                <div class="flex justify-between gap-3">
+                  <dt class="text-brand-500">event_id</dt>
+                  <dd class="font-mono text-brand-700 truncate" title="{{ r.event_id }}">
+                    {{ r.event_id }}
+                  </dd>
+                </div>
+                <div class="flex justify-between gap-3">
+                  <dt class="text-brand-500">prev_hash</dt>
+                  <dd class="font-mono text-brand-500/80 truncate" title="{{ r.prev_hash or '—' }}">
+                    {{ (r.prev_hash[:16] ~ '…') if r.prev_hash else "—" }}
+                  </dd>
+                </div>
+                <div class="flex justify-between gap-3 md:col-span-2">
+                  <dt class="text-brand-500">self_hash</dt>
+                  <dd class="font-mono text-brand-500/80 truncate" title="{{ r.self_hash or '—' }}">
+                    {{ (r.self_hash[:32] ~ '…') if r.self_hash else "—" }}
+                  </dd>
+                </div>
+              </dl>
+              <div class="mt-2 flex items-center gap-3 text-xs">
+                {% if r.actor_id %}
+                  <a href="/admin/audit?actor_id={{ r.actor_id }}"
+                     class="text-brand-700 hover:text-brand-900 underline underline-offset-2">
+                    Filter by this actor
+                  </a>
+                  <span class="text-brand-500/30">·</span>
+                {% endif %}
+                <a href="/admin/audit?event={{ r.event }}"
+                   class="text-brand-700 hover:text-brand-900 underline underline-offset-2">
+                  Filter by this event
+                </a>
+              </div>
+              {% if r.payload_json %}
+                <div class="mt-3">
+                  <div class="text-xs uppercase tracking-wide text-brand-500 mb-1">Payload</div>
+                  <pre class="rounded bg-brand-900 text-brand-50 px-3 py-2 text-xs
+                              font-mono whitespace-pre-wrap overflow-x-auto">{{ r.payload_json }}</pre>
+                </div>
+              {% else %}
+                <div class="mt-3 text-xs text-brand-500/70 italic">no payload</div>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No audit events match the current filters.
+    </div>
+  {% endif %}
+</div>

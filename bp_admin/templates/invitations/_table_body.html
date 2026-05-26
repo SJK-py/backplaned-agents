@@ -1,0 +1,69 @@
+{# HTMX swaps this whole div via hx-swap=outerHTML on the parent form. #}
+<div id="invitations-table" class="mt-6 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if invitations %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Token hash</th>
+          <th class="px-4 py-2 text-left font-medium">Level</th>
+          <th class="px-4 py-2 text-left font-medium">Status</th>
+          <th class="px-4 py-2 text-left font-medium">Expires</th>
+          <th class="px-4 py-2 text-left font-medium">Used by</th>
+          <th class="px-4 py-2 text-left font-medium">Created by</th>
+          <th class="px-4 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for inv in invitations %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 font-mono text-xs text-brand-700"
+                title="{{ inv.token_hash }}">
+              {{ inv.token_hash[:16] }}…
+            </td>
+            <td class="px-4 py-2">
+              {% with value = inv.level %}{% include "_partials/level_badge.html" %}{% endwith %}
+            </td>
+            <td class="px-4 py-2">
+              {% with value = inv.status %}{% include "_partials/invitation_status_badge.html" %}{% endwith %}
+            </td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ inv.expires_at | dt }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700">
+              {{ inv.used_by or "—" }}
+            </td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700">
+              {{ inv.created_by }}
+            </td>
+            <td class="px-4 py-2 text-right">
+              {% if inv.status == "valid" %}
+                <form method="post"
+                      action="/admin/invitations/{{ inv.token_hash }}/revoke"
+                      class="inline"
+                      onsubmit="return confirm('Revoke this invitation? It cannot be used after this.');">
+                  {% include "_partials/csrf.html" %}
+                  <button type="submit"
+                          class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                    Revoke
+                  </button>
+                </form>
+              {% else %}
+                <span class="text-brand-500/50 text-xs">—</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      {% if status_filter %}
+        No invitations with status <code class="text-brand-700">{{ status_filter }}</code>.
+      {% else %}
+        No invitations issued yet.
+        <a href="/admin/invitations/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+          Issue one
+        </a>
+        to onboard an agent.
+      {% endif %}
+    </div>
+  {% endif %}
+</div>

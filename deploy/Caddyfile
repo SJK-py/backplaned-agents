@@ -1,0 +1,22 @@
+# Edge reverse proxy: TLS termination + the WSS upgrade for /v1/agent,
+# fronting the router (HTTP API + admin UI) and — in v2 — the webapp.
+# Replace the site address with your domain; Caddy auto-provisions TLS.
+#
+# The router does NOT terminate TLS itself; everything public goes
+# through here. Postgres / Redis / rustfs are never proxied (internal
+# networks only).
+
+{$PUBLIC_DOMAIN:localhost} {
+	# Router: HTTP API (/v1/*), health, metrics, OpenAPI, and the admin
+	# UI (/admin/*). WebSocket upgrade on /v1/agent is handled
+	# transparently by reverse_proxy.
+	@router path /v1/* /admin* /healthz /readyz /metrics /docs /openapi.json
+	reverse_proxy @router router:8000
+
+	# v2: the webapp served by the chatbot/channel container. Uncomment
+	# when the webapp ships.
+	# reverse_proxy /app/* chatbot:8080
+
+	# Default: send the bare host to the admin UI login.
+	redir / /admin/login
+}

@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Issue invitation — bp_admin{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Issue invitation</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Generates a one-time token bound to a principal level. The raw token
+    is shown <em>once</em> on the next page — copy it before navigating
+    away. The router persists only its SHA-256 hash.
+  </p>
+</header>
+
+<form method="post" action="/admin/invitations/new"
+      x-data="{ expiresIn: '{{ form.expires_in }}',
+                useCustomToken: {{ 'true' if form.token else 'false' }} }"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-md">
+  {% include "_partials/csrf.html" %}
+  {% if error %}
+    <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <div>
+    <label for="level" class="block text-xs font-medium text-brand-700 mb-1">Level</label>
+    <select id="level" name="level"
+            class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+      {% for opt in level_options %}
+        <option value="{{ opt }}" {% if opt == form.level %}selected{% endif %}>{{ opt }}</option>
+      {% endfor %}
+    </select>
+    <p class="mt-1 text-xs text-brand-500">
+      The agent will onboard at this level. Lower number = more privileged;
+      <code class="text-brand-700">tier0</code> is most privileged among
+      non-admin/service levels.
+    </p>
+  </div>
+
+  <div>
+    <label for="expires_in" class="block text-xs font-medium text-brand-700 mb-1">
+      Expires in
+    </label>
+    <select id="expires_in" name="expires_in" x-model="expiresIn"
+            class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+      {% for value, label in ttl_presets %}
+        <option value="{{ value }}" {% if value == form.expires_in %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+      <option value="custom" {% if form.expires_in == "custom" %}selected{% endif %}>Custom (seconds)</option>
+    </select>
+  </div>
+
+  <div x-show="expiresIn === 'custom'" x-cloak>
+    <label for="custom_seconds" class="block text-xs font-medium text-brand-700 mb-1">
+      Custom seconds
+    </label>
+    <input id="custom_seconds" name="custom_seconds" type="number" min="1"
+           value="{{ form.custom_seconds or '' }}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    <p class="mt-1 text-xs text-brand-500">
+      Positive integer. Must be reasonable — there's no upper bound enforced
+      here, but the router rejects absurd values.
+    </p>
+  </div>
+
+  <div class="border-t border-brand-500/10 pt-3 space-y-2">
+    <label class="flex items-start gap-2 text-sm text-brand-700">
+      <input type="checkbox" x-model="useCustomToken"
+             class="mt-0.5 rounded border-brand-500/40"/>
+      <span>
+        Use a custom token <span class="text-brand-500 font-normal">(advanced)</span>
+      </span>
+    </label>
+
+    <div x-show="useCustomToken" x-cloak class="pl-6 space-y-2">
+      <input id="token" name="token" type="text"
+             value="{{ form.token }}"
+             autocomplete="off" spellcheck="false"
+             placeholder="32+ URL-safe characters (A-Z a-z 0-9 - _)"
+             pattern="[A-Za-z0-9_\-]{32,}"
+             :required="useCustomToken"
+             :disabled="!useCustomToken"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-xs font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+      <p class="text-xs text-brand-500">
+        Skips router-side token generation and stores the hash of
+        what you supplied. Useful for bootstrap scripts that
+        pre-distribute a token value via <code>.env</code> to both
+        the issuer and the agent container. The router rejects
+        anything below 32 chars or outside the URL-safe alphabet.
+      </p>
+    </div>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      Issue invitation
+    </button>
+    <a href="/admin/invitations"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

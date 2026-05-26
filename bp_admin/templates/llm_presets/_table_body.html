@@ -1,0 +1,113 @@
+{# List of presets as a table. The list page renders this once;
+   future HTMX flows can re-swap it via #presets-table. #}
+<div id="presets-table" class="bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if presets %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-3 py-2 text-left font-medium">Name</th>
+          <th class="px-3 py-2 text-left font-medium">Provider / Model</th>
+          <th class="px-3 py-2 text-left font-medium">Min user level</th>
+          <th class="px-3 py-2 text-left font-medium">Defaults</th>
+          <th class="px-3 py-2 text-left font-medium">Fallback</th>
+          <th class="px-3 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for p in presets %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-3 py-2">
+              <div class="font-mono text-xs text-brand-900">{{ p.name }}</div>
+              {% if p.description %}
+                <div class="text-xs text-brand-500/80">{{ p.description }}</div>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 font-mono text-xs text-brand-700">
+              <span class="text-brand-500">{{ p.provider }}</span>:{{ p.concrete_model }}
+              {% if p.base_url %}
+                <div class="text-brand-500/70 text-[11px] mt-0.5">{{ p.base_url }}</div>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2">
+              {% if p.min_user_level == "*" %}
+                <span class="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5
+                             text-xs text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                  any
+                </span>
+              {% else %}
+                {% with value = p.min_user_level %}{% include "_partials/level_badge.html" %}{% endwith %}
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-xs text-brand-700">
+              <div class="flex flex-wrap gap-1">
+                {% if p.default_temperature is not none %}
+                  <span class="font-mono">temp={{ p.default_temperature }}</span>
+                {% endif %}
+                {% if p.default_max_tokens is not none %}
+                  <span class="font-mono">max={{ p.default_max_tokens }}</span>
+                {% endif %}
+                {% if p.default_provider_options %}
+                  <span class="text-brand-500/80">
+                    +{{ p.default_provider_options|length }} option{{ p.default_provider_options|length != 1 and 's' or '' }}
+                  </span>
+                {% endif %}
+                {% if p.has_api_key %}
+                  <span class="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5
+                               text-xs text-emerald-700 ring-1 ring-inset ring-emerald-600/20">
+                    inline key
+                  </span>
+                {% endif %}
+                {% if not p.default_temperature and not p.default_max_tokens
+                      and not p.default_provider_options and not p.has_api_key %}
+                  <span class="text-brand-500/50">—</span>
+                {% endif %}
+              </div>
+            </td>
+            <td class="px-3 py-2 text-xs text-brand-700">
+              {% if p.fallback_preset %}
+                <div class="flex flex-col gap-0.5">
+                  <span class="font-mono text-xs">→ {{ p.fallback_preset }}</span>
+                  {% if p.max_retries %}
+                    <span class="text-brand-500/80">retries: {{ p.max_retries }}</span>
+                  {% endif %}
+                </div>
+              {% elif p.max_retries %}
+                <span class="text-brand-500/80 text-xs">retries: {{ p.max_retries }}</span>
+              {% else %}
+                <span class="text-brand-500/50">—</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-right whitespace-nowrap">
+              <a href="/admin/llm/presets/{{ p.name }}/edit"
+                 class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2">
+                Edit
+              </a>
+              <span class="text-brand-500/30 mx-1">·</span>
+              <form method="post"
+                    action="/admin/llm/presets/{{ p.name }}/delete"
+                    class="inline"
+                    onsubmit="return confirm('Delete preset {{ p.name }}? Agents calling it will start receiving preset_unknown errors.');">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                  Delete
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No presets defined. Defaults seed automatically on first router
+      startup, so this is unusual — agents calling the LLM service
+      will hit
+      <code class="text-brand-700">preset_unknown</code> errors.
+      <a href="/admin/llm/presets/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+        Add one
+      </a>
+      to recover.
+    </div>
+  {% endif %}
+</div>

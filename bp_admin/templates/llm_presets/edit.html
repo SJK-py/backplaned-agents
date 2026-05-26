@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Edit LLM preset — bp_admin{% endblock %}
+
+{% block content %}
+<style>[x-cloak] { display: none !important; }</style>
+
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/llm/presets" class="hover:text-brand-900 underline underline-offset-2">LLM presets</a>
+  <span class="mx-1">/</span>
+  <span>{{ preset_name }}</span>
+  <span class="mx-1">/</span>
+  <span>edit</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Edit LLM preset</h1>
+  <p class="text-xs text-brand-500/80 mt-1 font-mono">{{ preset_name }}</p>
+</header>
+
+{% set form_action = "/admin/llm/presets/" ~ preset_name ~ "/edit" %}
+{% set submit_label = "Save changes" %}
+{% set is_create = False %}
+{% include "llm_presets/_form.html" %}
+{% endblock %}

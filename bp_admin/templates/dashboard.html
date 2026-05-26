@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Dashboard</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Operational overview of the router. Cards link through to the
+    relevant section.
+  </p>
+</header>
+
+<section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+  {% for c in cards %}
+    <a href="{{ c.href }}"
+       class="block bg-white border border-brand-500/10 rounded-md p-5 shadow-sm
+              hover:border-brand-700/30 transition-colors">
+      <div class="text-xs uppercase tracking-wide text-brand-500">{{ c.label }}</div>
+      <div class="mt-2 text-3xl font-semibold text-brand-900">{{ c.value }}</div>
+      {% if c.sub %}
+        <div class="mt-1 text-xs text-brand-500/80">{{ c.sub }}</div>
+      {% endif %}
+    </a>
+  {% endfor %}
+</section>
+
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Recent activity
+    </h2>
+    <a href="/admin/audit"
+       class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2">
+      view full audit →
+    </a>
+  </div>
+  {% if audit_failed %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">
+      Audit log is unreachable right now.
+    </div>
+  {% elif audit %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium w-44">When</th>
+          <th class="px-4 py-2 text-left font-medium">Event</th>
+          <th class="px-4 py-2 text-left font-medium">Actor</th>
+          <th class="px-4 py-2 text-left font-medium">Target</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for e in audit %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 text-brand-500/80 text-xs whitespace-nowrap">{{ e.ts | dt }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ e.event }}</td>
+            <td class="px-4 py-2 text-xs">
+              <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                           text-brand-700 ring-1 ring-inset ring-brand-500/20">
+                {{ e.actor_kind }}
+              </span>
+              <span class="font-mono text-brand-500 ml-1">{{ e.actor_id or "—" }}</span>
+            </td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700">
+              {% if e.target_kind %}
+                <span class="text-brand-500">{{ e.target_kind }}:</span>{{ e.target_id or "—" }}
+              {% else %}
+                <span class="text-brand-500/50">—</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">
+      No audit events yet.
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

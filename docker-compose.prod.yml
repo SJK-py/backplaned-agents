@@ -1,0 +1,202 @@
+# Backplaned production topology (skeleton).
+#
+# Brings up the PLATFORM this repo owns: edge proxy, router (+ a one-shot
+# `migrate`), Postgres (router + suite DBs), Redis, and rustfs (S3). The
+# AGENT SUITE (chatbot, sandbox, orchestrator/l1, stores, helpers,
+# searxng) lives in the suite repo — its service shapes are at the bottom
+# as the wire-up CONTRACT; add them from there once those images exist.
+#
+# Secrets: this skeleton reads ${VARS} from a `.env` file for brevity.
+# For real deploys use Docker/host secrets (never a committed .env), and
+# give each container ONLY the secrets it needs — see
+# docs/deployment.md (secret scoping). Do NOT commit real values.
+
+name: backplaned
+
+networks:
+  edge: {}        # proxy  <-> router  (+ webapp in v2)
+  backend: {}     # router <-> postgres / redis / rustfs   (private)
+  agents: {}      # router <-> every agent (the agent WS /v1/agent)
+  suite: {}       # chatbot + suite agents <-> suite Postgres / Redis
+
+volumes:
+  pg_data: {}
+  redis_data: {}
+  rustfs_data: {}
+  caddy_data: {}
+  caddy_config: {}
+  chatbot_state: {}     # chatbot credentials.json + Telegram offset
+  lancedb_data: {}      # per-user LanceDB (knowledge + memory)
+
+services:
+  # --- Edge -------------------------------------------------------------
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [router]
+    ports: ["80:80", "443:443"]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+
+  # --- Data services (private; never published) -------------------------
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD}
+      POSTGRES_DB: bp_router
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Creates the second (suite) database on first init.
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-postgres} -d bp_router"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend, suite]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend, suite]
+
+  rustfs:
+    # S3-compatible object store for the router's file_store=s3 backend.
+    # NOTE: pin a real tag and confirm the env/CLI against rustfs
+    # upstream — this is a representative config. MinIO is a known drop-in
+    # (image minio/minio, command 'server /data', MINIO_ROOT_USER /
+    # MINIO_ROOT_PASSWORD).
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    volumes:
+      - rustfs_data:/data
+    networks: [backend]
+    # Not published: the router reaches it on the backend net (S3 API on
+    # :9000). Keeps downloads in router-proxy mode; only expose it behind
+    # the edge proxy if you switch to 302-presigned downloads.
+
+  # --- Router (this repo) ----------------------------------------------
+  # One-shot: apply router-DB migrations before the router serves, so
+  # scaling the router never races the schema (only this runs `upgrade`).
+  migrate:
+    image: backplaned-router:latest
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
+    networks: [backend]
+    restart: "no"
+
+  router:
+    image: backplaned-router:latest
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    environment:
+      ROUTER_DEPLOYMENT_ENV: prod
+      ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
+      ROUTER_REDIS_URL: redis://redis:6379/0
+      ROUTER_PUBLIC_URL: https://${PUBLIC_DOMAIN:-localhost}
+      ROUTER_JWT_SECRET: ${ROUTER_JWT_SECRET:?openssl rand -base64 32}
+      ROUTER_ADMIN_SESSION_SECRET: ${ROUTER_ADMIN_SESSION_SECRET:?openssl rand -base64 32}
+      ROUTER_METRICS_TOKEN: ${ROUTER_METRICS_TOKEN:?required in prod}
+      ROUTER_FILE_STORE: s3
+      # file_store_options is parsed as JSON (pydantic-settings).
+      ROUTER_FILE_STORE_OPTIONS: >-
+        {"bucket":"${S3_BUCKET:-bp-files}",
+         "endpoint_url":"http://rustfs:9000",
+         "region_name":"us-east-1",
+         "access_key_id":"${S3_ACCESS_KEY}",
+         "secret_access_key":"${S3_SECRET_KEY}"}
+      # First-boot admin seed (idempotent; safe to leave set).
+      ROUTER_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local.test}
+      ROUTER_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set a strong value}
+      # LLM provider-key secrets. Presets themselves live in the
+      # llm_presets table (admin-managed via /admin); a preset's
+      # api_key_ref (e.g. env://GEMINI_API_KEY) resolves to one of these.
+      # Add one per provider you configure.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    networks: [edge, backend, agents]
+    # Not published directly — the edge proxy fronts it.
+
+  # ======================================================================
+  # AGENT SUITE — wire-up CONTRACT (images come from the suite repo).
+  # Uncomment / fill in once those images exist. Each agent onboards with
+  # its OWN admin-issued invitation; the chatbot's is flagged
+  # `provisions_service_user`. NONE of these hold provider / S3 / JWT
+  # secrets — they call ctx.llm and the router's file endpoints. Per-box
+  # config + the secret-scoping table are in docs/deployment.md.
+  # ======================================================================
+
+  # chatbot:                       # docker 5 — gateway (+ webapp in v2)
+  #   image: ${SUITE_IMAGE}        # entrypoint selects agent=chatbot
+  #   restart: unless-stopped
+  #   depends_on: [router, postgres, redis]
+  #   environment:
+  #     AGENT_ROUTER_URL: ws://router:8000/v1/agent
+  #     AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION}      # provisions_service_user
+  #     AGENT_STATE_DIR: /state
+  #     SUITE_DB_URL: postgresql://bp_suite:${SUITE_DB_PASSWORD}@postgres:5432/bp_suite
+  #     SUITE_REDIS_URL: redis://redis:6379/1
+  #     TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+  #   volumes: [chatbot_state:/state]
+  #   networks: [edge, agents, suite]
+
+  # sandbox:                       # docker 6 — UNTRUSTED code execution
+  #   image: ${SANDBOX_IMAGE}
+  #   restart: unless-stopped
+  #   depends_on: [router]
+  #   environment:
+  #     AGENT_ROUTER_URL: ws://router:8000/v1/agent
+  #     AGENT_INVITATION_TOKEN: ${SANDBOX_INVITATION}
+  #     AGENT_STATE_DIR: /state
+  #   security_opt: ["no-new-privileges:true"]
+  #   cap_drop: ["ALL"]
+  #   read_only: true              # + a writable per-user workspace mount
+  #   # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc
+  #   # Resource caps: cpus, mem_limit, pids_limit. Egress off/allowlisted.
+  #   networks: [agents]           # router WS ONLY — no db/redis/s3/web
+
+  # reasoning:                     # docker 7 — orchestrator (l0) + l1
+  #   image: ${SUITE_IMAGE}        # supervisor runs orchestrator,
+  #   #                            # computer_use, research, deep_reasoning
+  #   #                            # — each its own process + invitation
+  #   networks: [agents, suite]
+
+  # stores:                        # knowledge_base + memory (CO-LOCATED)
+  #   image: ${SUITE_IMAGE}
+  #   volumes: [lancedb_data:/lancedb]    # the shared per-user LanceDB
+  #   networks: [agents, suite]
+  #   # memory's per-user lock is in-process here; back it with Redis if
+  #   # this box ever scales beyond one replica.
+
+  # helpers:                       # config + history_summarizer + md_converter
+  #   image: ${SUITE_IMAGE}
+  #   networks: [agents, suite]
+
+  # searxng:                       # docker 9 (optional) — web search backend
+  #   image: searxng/searxng:latest
+  #   networks: [agents]           # research queries it; it alone has web egress

@@ -1,0 +1,273 @@
+{# Shared form body for new/edit. Caller sets `form_action` (URL),
+   `submit_label`, and `is_create` (bool — only the create form
+   exposes the `name` field; edit form pins it).
+
+   Alpine drives the provider-aware base_url field: shown only when
+   provider is one of the openai-compatible variants. The same flag
+   tones down the api_key_ref helper (local servers usually skip it). #}
+<form method="post" action="{{ form_action }}"
+      x-data="{ provider: '{{ form.provider }}' }"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-3xl">
+  {% include "_partials/csrf.html" %}
+
+  {% if errors %}
+    <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 space-y-1">
+      {% for err in errors %}
+        <div>{{ err }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if is_create %}
+    <div>
+      <label for="name" class="block text-xs font-medium text-brand-700 mb-1">Name</label>
+      <input id="name" name="name" type="text" required autofocus
+             value="{{ form.name }}"
+             pattern="[a-z][a-z0-9_-]{0,63}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      <p class="mt-1 text-xs text-brand-500">
+        DNS-friendly slug: lowercase letters, digits, <code class="text-brand-700">-</code>,
+        <code class="text-brand-700">_</code>. 1–64 chars.
+      </p>
+    </div>
+  {% else %}
+    <div>
+      <label class="block text-xs font-medium text-brand-700 mb-1">Name</label>
+      <div class="font-mono text-sm text-brand-900">{{ form.name }}</div>
+      <p class="mt-1 text-xs text-brand-500/80">
+        Name is immutable. Delete and recreate if you need to rename.
+      </p>
+    </div>
+  {% endif %}
+
+  <div>
+    <label for="description" class="block text-xs font-medium text-brand-700 mb-1">
+      Description <span class="font-normal text-brand-500">(optional)</span>
+    </label>
+    <input id="description" name="description" type="text"
+           value="{{ form.description }}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    <p class="mt-1 text-xs text-brand-500">
+      Shown in the list and edit screens. Useful when several presets
+      share a model but differ in defaults.
+    </p>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="provider" class="block text-xs font-medium text-brand-700 mb-1">Provider</label>
+      <select id="provider" name="provider" x-model="provider"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for p in providers %}
+          <option value="{{ p }}" {% if p == form.provider %}selected{% endif %}>{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label for="concrete_model" class="block text-xs font-medium text-brand-700 mb-1">
+        Concrete model
+      </label>
+      <input id="concrete_model" name="concrete_model" type="text" required
+             value="{{ form.concrete_model }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="api_key_ref" class="block text-xs font-medium text-brand-700 mb-1">
+        API key reference
+        <span class="font-normal text-brand-500"
+              x-show="provider === 'openai-compatible' || provider === 'openai-compatible-embeddings'"
+              x-cloak>(optional for local servers)</span>
+      </label>
+      <input id="api_key_ref" name="api_key_ref" type="text"
+             value="{{ form.api_key_ref }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      <p class="mt-1 text-xs text-brand-500">
+        E.g. <code class="text-brand-700">env://OPENAI_API_KEY</code>.
+        Resolved by <code class="text-brand-700">bp_router.security.secrets</code>
+        at first use. Local OpenAI-compatible servers usually don't
+        authenticate; leave blank and the adapter sends a placeholder.
+      </p>
+    </div>
+    <div>
+      <label for="min_user_level" class="block text-xs font-medium text-brand-700 mb-1">
+        Min user level
+      </label>
+      <select id="min_user_level" name="min_user_level"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        {% for lvl in user_levels %}
+          <option value="{{ lvl }}" {% if lvl == form.min_user_level %}selected{% endif %}>{{ lvl }}</option>
+        {% endfor %}
+      </select>
+      <p class="mt-1 text-xs text-brand-500">
+        <code class="text-brand-700">*</code> = any caller.
+        <code class="text-brand-700">tierN</code> = tier-or-stricter.
+        Same grammar as ACL rules.
+      </p>
+    </div>
+  </div>
+
+  <div class="rounded border border-amber-300/40 p-3 space-y-2 bg-amber-50/40">
+    <div class="flex items-center justify-between">
+      <label for="base_url" class="block text-xs font-medium text-brand-700">
+        Endpoint base URL
+        <span class="font-normal text-brand-500"
+              x-show="provider === 'openai-compatible' || provider === 'openai-compatible-embeddings'"
+              x-cloak>(required)</span>
+        <span class="font-normal text-brand-500"
+              x-show="!(provider === 'openai-compatible' || provider === 'openai-compatible-embeddings')"
+              x-cloak>(optional — leave blank for the upstream SDK default)</span>
+      </label>
+    </div>
+    <input id="base_url" name="base_url" type="text"
+           value="{{ form.base_url }}"
+           placeholder="http://localhost:8000/v1"
+           autocomplete="off"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    <p class="text-xs text-brand-500"
+       x-show="provider === 'openai-compatible' || provider === 'openai-compatible-embeddings'"
+       x-cloak>
+      The local server's OpenAI-compatible root. Examples:
+      <code class="text-brand-700">http://localhost:8000/v1</code> (vLLM),
+      <code class="text-brand-700">http://localhost:1234/v1</code> (LM Studio),
+      <code class="text-brand-700">http://localhost:11434/v1</code>
+      (Ollama OpenAI-mode).
+    </p>
+    <p class="text-xs text-brand-500"
+       x-show="!(provider === 'openai-compatible' || provider === 'openai-compatible-embeddings')"
+       x-cloak>
+      Custom endpoint that overrides the upstream SDK default — Azure
+      OpenAI proxy, Bedrock-fronted Anthropic, Vertex / EU Gemini,
+      LiteLLM / Portkey gateways, etc. Leave blank to use the
+      provider's official endpoint.
+    </p>
+  </div>
+
+  <div class="rounded border border-brand-500/10 p-3 space-y-3 bg-brand-50/40">
+    <div class="flex items-center justify-between">
+      <label for="api_key" class="block text-xs font-medium text-brand-700">
+        Inline API key <span class="font-normal text-brand-500">(optional)</span>
+      </label>
+      {% if has_api_key is defined and has_api_key %}
+        <span class="text-xs text-emerald-700 font-medium">an inline key is currently set</span>
+      {% endif %}
+    </div>
+    <input id="api_key" name="api_key" type="password" autocomplete="off"
+           value="{{ form.api_key }}"
+           placeholder="{% if has_api_key is defined and has_api_key %}leave blank to keep existing key{% else %}leave blank to use the reference above{% endif %}"
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    <p class="text-xs text-brand-500">
+      When set, the inline key wins over the reference. Stored in the
+      DB; never shown after save. Pasting a new value replaces any
+      existing inline key.
+    </p>
+    {% if has_api_key is defined and has_api_key %}
+      <label class="flex items-center gap-2 text-xs text-brand-700">
+        <input type="checkbox" name="clear_api_key" value="1"
+               class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700" />
+        Clear the existing inline key (revert to <code class="font-mono text-brand-900">api_key_ref</code>)
+      </label>
+    {% endif %}
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="default_temperature" class="block text-xs font-medium text-brand-700 mb-1">
+        Default temperature <span class="font-normal text-brand-500">(optional)</span>
+      </label>
+      <input id="default_temperature" name="default_temperature" type="number"
+             min="0" max="2" step="0.1"
+             value="{{ form.default_temperature }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+    <div>
+      <label for="default_max_tokens" class="block text-xs font-medium text-brand-700 mb-1">
+        Default max tokens <span class="font-normal text-brand-500">(optional)</span>
+      </label>
+      <input id="default_max_tokens" name="default_max_tokens" type="number" min="1"
+             value="{{ form.default_max_tokens }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="fallback_preset" class="block text-xs font-medium text-brand-700 mb-1">
+        Fallback preset <span class="font-normal text-brand-500">(optional)</span>
+      </label>
+      <select id="fallback_preset" name="fallback_preset"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+        <option value="" {% if not form.fallback_preset %}selected{% endif %}>— none —</option>
+        {% for name in fallback_choices or [] %}
+          <option value="{{ name }}"
+                  {% if name == form.fallback_preset %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      <p class="mt-1 text-xs text-brand-500">
+        Tried after this preset's retries are exhausted. The chain is
+        followed transitively; cycles are rejected on save.
+      </p>
+    </div>
+    <div>
+      <label for="max_retries" class="block text-xs font-medium text-brand-700 mb-1">
+        Max retries
+      </label>
+      <input id="max_retries" name="max_retries" type="number" min="0" max="10"
+             value="{{ form.max_retries }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      <p class="mt-1 text-xs text-brand-500">
+        How many times to retry THIS preset on failure before walking
+        to <code class="text-brand-700">fallback_preset</code>.
+        <code class="text-brand-700">0</code> = no retry, fall through.
+        Cap: 10. Streaming calls bypass retries / fallback entirely.
+      </p>
+    </div>
+  </div>
+
+  <div>
+    <label for="default_provider_options" class="block text-xs font-medium text-brand-700 mb-1">
+      Default <code class="text-brand-700">provider_options</code>
+      <span class="font-normal text-brand-500">(optional, JSON object)</span>
+    </label>
+    <textarea id="default_provider_options" name="default_provider_options"
+              rows="6" spellcheck="false"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-xs font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+              placeholder='{"reasoning": {"effort": "low"}}'
+    >{{ form.default_provider_options }}</textarea>
+    <p class="mt-1 text-xs text-brand-500">
+      Provider-specific config bundled into this preset (e.g.,
+      <code class="text-brand-700">{"thinking": {"type": "adaptive"}}</code> for Anthropic,
+      <code class="text-brand-700">{"reasoning": {"effort": "medium"}}</code> for OpenAI,
+      <code class="text-brand-700">{"thinking_level": "low"}</code> for Gemini 3).
+      Call-time <code class="text-brand-700">provider_options=</code> REPLACES this
+      whole dict (not merged) — agents override at call time only when
+      they want a wholly different config.
+    </p>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2 border-t border-brand-500/10">
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      {{ submit_label or "Save" }}
+    </button>
+    <a href="/admin/llm/presets"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>

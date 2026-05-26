@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}New LLM preset — bp_admin{% endblock %}
+
+{% block content %}
+<style>[x-cloak] { display: none !important; }</style>
+
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/llm/presets" class="hover:text-brand-900 underline underline-offset-2">LLM presets</a>
+  <span class="mx-1">/</span>
+  <span>new</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">New LLM preset</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Bundles provider + model + sampling defaults + per-provider options
+    + tier gate. Agents reference this preset by name via
+    <code class="text-brand-700">ctx.llm.generate(preset="...")</code>.
+  </p>
+</header>
+
+{% set form_action = "/admin/llm/presets/new" %}
+{% set submit_label = "Create preset" %}
+{% set is_create = True %}
+{% include "llm_presets/_form.html" %}
+{% endblock %}

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}bp_admin{% endblock %}</title>
+
+  <!-- Tailwind via Play CDN — no build step. Replace with a built CSS in prod. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind config — keep tiny; expand only when needed.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50:  "#f5f7fb",
+              500: "#4f5d75",
+              700: "#2d3748",
+              900: "#1a202c",
+            },
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- HTMX: declarative async HTML. -->
+  <script src="https://unpkg.com/htmx.org@1.9.12"
+          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
+          crossorigin="anonymous"></script>
+
+  <!-- Alpine.js: lightweight reactive attributes. -->
+  <script defer src="https://unpkg.com/alpinejs@3.13.7/dist/cdn.min.js"></script>
+
+  <link rel="stylesheet" href="/admin/static/admin.css" />
+
+  {# CSRF token for HTMX / fetch state-changing requests; the inline
+     script below echoes it back as X-CSRF-Token. Form-encoded paths
+     use the hidden `csrf_token` field instead. #}
+  <meta name="csrf-token" content="{{ request.session.csrf_token or '' }}" />
+
+  {% block head_extra %}{% endblock %}
+</head>
+<body class="min-h-screen bg-brand-50 text-brand-900 antialiased">
+
+{% if request.session.get("access_token") %}
+  <div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="w-56 shrink-0 bg-brand-900 text-brand-50 flex flex-col">
+      <div class="px-6 py-5 border-b border-brand-700/50">
+        <a href="/admin/" class="text-lg font-semibold tracking-wide">bp_admin</a>
+      </div>
+      <nav class="flex-1 py-4 text-sm">
+        {% set sections = [
+          ("dashboard",    "Dashboard",    "/admin/"),
+          ("users",        "Users",        "/admin/users"),
+          ("agents",       "Agents",       "/admin/agents"),
+          ("invitations",  "Invitations",  "/admin/invitations"),
+          ("registrations","Registrations","/admin/registrations"),
+          ("acl",          "ACL rules",    "/admin/acl/rules"),
+          ("llm_presets",  "LLM presets",  "/admin/llm/presets"),
+          ("mcp_servers",  "MCP servers",  "/admin/mcp-servers"),
+          ("audit",        "Audit log",    "/admin/audit"),
+          ("test",         "Test agent",   "/admin/test-task"),
+        ] %}
+        {% for slug, label, href in sections %}
+          {% set active = active_section == slug %}
+          <a href="{{ href }}"
+             class="block px-6 py-2
+                    {% if active %}bg-brand-700 text-white{% else %}text-brand-50/80 hover:bg-brand-700/40 hover:text-white{% endif %}">
+            {{ label }}
+          </a>
+        {% endfor %}
+      </nav>
+      <div class="px-6 py-4 border-t border-brand-700/50 text-xs text-brand-50/70">
+        <div class="truncate">{{ request.session.get("email", "") }}</div>
+        {% if request.session.get("user_id") %}
+          <div class="mb-2 truncate font-mono text-[10px] text-brand-50/50"
+               title="{{ request.session.get('user_id') }}">
+            {{ request.session.get("user_id") }}
+          </div>
+        {% else %}
+          <div class="mb-2"></div>
+        {% endif %}
+        <form action="/admin/logout" method="post">
+          {% include "_partials/csrf.html" %}
+          <button type="submit"
+                  class="text-brand-50/80 hover:text-white underline underline-offset-2">
+            Log out
+          </button>
+        </form>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="flex-1 p-8 max-w-6xl mx-auto w-full">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+{% else %}
+  <main class="min-h-screen flex items-center justify-center p-6">
+    {% block unauth_content %}{% endblock %}
+  </main>
+{% endif %}
+
+<script>
+  // CSRF: echo the token back on every state-changing HTMX request.
+  document.body.addEventListener('htmx:configRequest', (e) => {
+    const verb = (e.detail.verb || '').toLowerCase();
+    if (['post', 'put', 'patch', 'delete'].includes(verb)) {
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      if (meta && meta.content) e.detail.headers['X-CSRF-Token'] = meta.content;
+    }
+  });
+
+  // Row navigation via data-href. Replaces inline onclick="window.location='...'"
+  // patterns — the dataset attribute is HTML-context (autoescaped properly),
+  // so an ID with a stray quote can't break out into JS context.
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-href]');
+    if (!row) return;
+    // Don't hijack clicks that landed on an interactive child.
+    if (e.target.closest('a, button, input, label, form, [data-no-row-nav]')) return;
+    window.location.href = row.dataset.href;
+  });
+</script>
+
+{% block scripts_extra %}{% endblock %}
+</body>
+</html>

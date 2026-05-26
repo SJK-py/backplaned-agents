@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Test agent — bp_admin{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Test agent</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Admit a task as the synthetic <code class="text-brand-700">admin_console</code>
+    agent through the real admit / dispatch path. Exercises ACL, schema
+    validation, and the state machine end-to-end. For a pure ACL dry-run
+    use the simulate panel on the
+    <a href="/admin/acl/rules" class="text-brand-700 hover:text-brand-900 underline underline-offset-2">ACL rules</a>
+    page instead.
+  </p>
+</header>
+
+<div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+
+  <!-- Form -->
+  <form class="lg:col-span-3 bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4"
+        hx-post="/admin/test-task"
+        hx-target="#test-result"
+        hx-swap="outerHTML"
+        x-data="{
+          wait: {{ 'true' if form.wait else 'false' }},
+          destination: {{ form.destination_agent_id | tojson }},
+          agentInfo: {{ agent_schema_lookup | tojson }},
+          get selected() { return this.agentInfo[this.destination] || null; }
+        }">
+
+    <div>
+      <label for="destination_agent_id"
+             class="block text-xs font-medium text-brand-700 mb-1">
+        Destination agent_id
+      </label>
+      <input id="destination_agent_id" name="destination_agent_id" type="text"
+             required autofocus
+             list="active-agents"
+             x-model="destination"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      <datalist id="active-agents">
+        {% for a in active_agents %}
+          <option value="{{ a.agent_id }}">{{ a.kind }}</option>
+        {% endfor %}
+      </datalist>
+      {% if active_agents %}
+        <p class="mt-1 text-xs text-brand-500">
+          {{ active_agents|length }} active agent{{ active_agents|length != 1 and 's' or '' }}
+          available — start typing for suggestions.
+        </p>
+      {% else %}
+        <p class="mt-1 text-xs text-brand-500/80">
+          No active agents detected. Onboard one or check status filter.
+        </p>
+      {% endif %}
+    </div>
+
+    <!-- Target-agent schema panel — appears once the destination input
+         matches a known agent. Description + capabilities + the two
+         accepts schemas. Pure read-only display. -->
+    <div x-show="selected" x-cloak
+         class="rounded border border-brand-500/10 bg-brand-50/50 p-3 space-y-3">
+      <div class="text-xs text-brand-500">
+        <span class="font-medium text-brand-700">Target</span>
+        — <span x-text="selected?.description || 'no description provided'"></span>
+      </div>
+      <template x-if="selected?.capabilities?.length">
+        <div class="flex flex-wrap items-center gap-1">
+          <span class="text-xs text-brand-500">capabilities:</span>
+          <template x-for="cap in selected.capabilities">
+            <code class="text-xs bg-brand-50 px-1.5 py-0.5 rounded border border-brand-500/10"
+                  x-text="cap"></code>
+          </template>
+        </div>
+      </template>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs font-medium text-brand-700">accepts_schema</span>
+            <span class="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5
+                         text-[10px] font-medium text-emerald-800 ring-1 ring-inset ring-emerald-600/20">
+              data-plane
+            </span>
+          </div>
+          <template x-if="selected?.accepts_schema">
+            <pre class="text-[11px] bg-white border border-brand-500/10 rounded p-2
+                        overflow-auto max-h-48"
+                 x-text="JSON.stringify(selected.accepts_schema, null, 2)"></pre>
+          </template>
+          <template x-if="!selected?.accepts_schema">
+            <p class="text-xs text-brand-500/70 italic">
+              Not advertised — router skips admit-time schema validation.
+            </p>
+          </template>
+        </div>
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs font-medium text-brand-700">accepts_control_schema</span>
+            <span class="inline-flex items-center rounded bg-purple-50 px-1.5 py-0.5
+                         text-[10px] font-medium text-purple-800 ring-1 ring-inset ring-purple-600/20">
+              is_control
+            </span>
+          </div>
+          <template x-if="selected?.accepts_control_schema">
+            <div>
+              <pre class="text-[11px] bg-white border border-brand-500/10 rounded p-2
+                          overflow-auto max-h-48"
+                   x-text="JSON.stringify(selected.accepts_control_schema, null, 2)"></pre>
+              <p class="text-[11px] text-brand-500/80 mt-1">
+                This form sends data-plane only. Use the API directly
+                with <code>is_control=True</code> for the control surface.
+              </p>
+            </div>
+          </template>
+          <template x-if="!selected?.accepts_control_schema">
+            <p class="text-xs text-brand-500/70 italic">
+              No control-plane surface.
+            </p>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <label for="payload" class="block text-xs font-medium text-brand-700 mb-1">
+        Payload (JSON object)
+      </label>
+      <textarea id="payload" name="payload" rows="8" spellcheck="false"
+                class="w-full rounded border border-brand-500/20 px-3 py-2 text-xs font-mono
+                       focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+      >{{ form.payload }}</textarea>
+      <p class="mt-1 text-xs text-brand-500">
+        Must be a JSON object (not array / scalar). The router validates
+        it against the destination's <code class="text-brand-700">accepts_schema</code>;
+        a mismatch surfaces as <code class="text-brand-700">schema_mismatch</code>.
+      </p>
+    </div>
+
+    <details class="text-sm">
+      <summary class="cursor-pointer text-brand-700 hover:text-brand-900">
+        Advanced options
+      </summary>
+      <div class="mt-3 space-y-3">
+        <div>
+          <label for="act_as_user_id"
+                 class="block text-xs font-medium text-brand-700 mb-1">
+            Act as user_id
+            <span class="font-normal text-brand-500">(optional)</span>
+          </label>
+          <input id="act_as_user_id" name="act_as_user_id" type="text"
+                 value="{{ form.act_as_user_id }}"
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+          <p class="mt-1 text-xs text-brand-500">
+            Defaults to the calling admin. Gated by
+            <code class="text-brand-700">ROUTER_ADMIN_TEST_ALLOW_ACT_AS</code>;
+            disabled deployments return 403.
+          </p>
+        </div>
+
+        <div>
+          <label for="session_id"
+                 class="block text-xs font-medium text-brand-700 mb-1">
+            Session ID <span class="font-normal text-brand-500">(optional)</span>
+          </label>
+          <input id="session_id" name="session_id" type="text"
+                 value="{{ form.session_id }}"
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+          <p class="mt-1 text-xs text-brand-500">
+            If blank, the router opens a fresh ephemeral session (auto-GC'd
+            after 30 days when empty).
+          </p>
+        </div>
+      </div>
+    </details>
+
+    <div class="border-t border-brand-500/10 pt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" name="wait" x-model="wait"
+               class="rounded border-brand-500/20" />
+        <span class="text-brand-900">Wait for terminal result</span>
+      </label>
+      <div x-show="wait" x-cloak>
+        <label for="timeout_s" class="block text-xs font-medium text-brand-700 mb-1">
+          Timeout (seconds)
+        </label>
+        <input id="timeout_s" name="timeout_s" type="number"
+               min="0.1" max="{{ max_timeout_s }}" step="0.1"
+               value="{{ form.timeout_s }}"
+               class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                      focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <button type="submit"
+              class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+        Send task
+      </button>
+      <span class="htmx-indicator text-xs text-brand-500">running…</span>
+    </div>
+  </form>
+
+  <!-- Result -->
+  <aside class="lg:col-span-2">
+    {% include "test_task/_result.html" %}
+  </aside>
+</div>
+{% endblock %}

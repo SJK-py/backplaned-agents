@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}MCP servers — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">MCP servers</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      External Model Context Protocol servers bridged into the
+      backplane. The <code class="text-brand-700">bp_mcp_bridge</code>
+      process reads these rows and onboards per-tool agents under
+      <code class="text-brand-700">mcp_&lt;server&gt;_&lt;tool&gt;</code>
+      identities. Phase 10a ships config only — bridge runtime ships separately.
+    </p>
+  </div>
+  <a href="/admin/mcp-servers/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + Add MCP server
+  </a>
+</header>
+
+{% if flash %}
+  <div class="mb-4 rounded border border-brand-500/20 bg-white px-3 py-2 text-sm text-brand-700">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<div class="bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if servers %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Server ID</th>
+          <th class="px-4 py-2 text-left font-medium">Description</th>
+          <th class="px-4 py-2 text-left font-medium">Transport</th>
+          <th class="px-4 py-2 text-left font-medium">Auth</th>
+          <th class="px-4 py-2 text-left font-medium">LLM-callable</th>
+          <th class="px-4 py-2 text-left font-medium">Tools</th>
+          <th class="px-4 py-2 text-left font-medium">Last connected</th>
+          <th class="px-4 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for s in servers %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ s.server_id }}</td>
+            <td class="px-4 py-2 text-brand-700">
+              {{ s.description or "—" }}
+            </td>
+            <td class="px-4 py-2">
+              <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                           text-[11px] font-medium text-brand-700 ring-1 ring-inset ring-brand-500/20">
+                {{ s.transport }}
+              </span>
+            </td>
+            <td class="px-4 py-2">
+              {% if s.auth_kind == "none" %}
+                <span class="text-brand-500/70 text-xs">none</span>
+              {% else %}
+                <span class="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5
+                             text-[11px] font-medium text-amber-800 ring-1 ring-inset ring-amber-600/20"
+                      title="{{ s.auth_value_ref or '' }}">
+                  {{ s.auth_kind }}
+                </span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2">
+              {% if s.expose_to_llm %}
+                <span class="text-emerald-700 text-xs">yes</span>
+              {% else %}
+                <span class="text-brand-500/70 text-xs">hidden</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-brand-700 text-xs">
+              {% if s._tools_count is none %}
+                <span class="text-brand-500/70 italic">not yet refreshed</span>
+              {% else %}
+                {{ s._tools_count }}
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">
+              {% if s.last_connected_at %}
+                {{ s.last_connected_at | dt }}
+              {% else %}
+                <span class="text-brand-500/70 italic">never</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-right">
+              <a href="/admin/mcp-servers/{{ s.server_id }}/edit"
+                 class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2 mr-3">
+                Edit
+              </a>
+              <form method="post"
+                    action="/admin/mcp-servers/{{ s.server_id }}/refresh-tools"
+                    class="inline">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2 mr-3">
+                  Refresh
+                </button>
+              </form>
+              <form method="post"
+                    action="/admin/mcp-servers/{{ s.server_id }}/delete"
+                    class="inline"
+                    onsubmit="return confirm('Delete MCP server {{ s.server_id }}? The bridge will tear down all derived per-tool agents (mcp_{{ s.server_id }}_*).');">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                  Delete
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No MCP servers configured.
+      <a href="/admin/mcp-servers/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+        Add one
+      </a>
+      to bridge an external MCP server into the backplane.
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

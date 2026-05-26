@@ -1,0 +1,405 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.agent_id }} — bp_admin{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/agents" class="hover:text-brand-900 underline underline-offset-2">Agents</a>
+  <span class="mx-1">/</span>
+  <span class="font-mono">{{ agent.agent_id }}</span>
+</nav>
+
+<header class="mb-6 flex items-start justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900 font-mono">{{ agent.agent_id }}</h1>
+    {% if agent.agent_info.get("description") %}
+      <p class="text-sm text-brand-500 mt-1">{{ agent.agent_info["description"] }}</p>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-2">
+    {% with value = agent.status %}{% include "_partials/agent_status_badge.html" %}{% endwith %}
+    {% if agent.kind == "embedded" %}
+      <span class="inline-flex items-center rounded-md bg-violet-100 px-2 py-0.5
+                   text-xs font-medium text-violet-800 ring-1 ring-inset ring-violet-600/20">
+        embedded
+      </span>
+    {% endif %}
+    {% if agent.agent_info.get("hidden") %}
+      <span class="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5
+                   text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-600/20">
+        hidden
+      </span>
+    {% endif %}
+  </div>
+</header>
+
+{% if flash %}
+  <div class="mb-6 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+  <!-- Identity -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Identity</h2>
+    <dl class="mt-3 text-sm space-y-2">
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Kind</dt>
+        <dd class="text-brand-900">{{ agent.kind }}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Status</dt>
+        <dd>{% with value = agent.status %}{% include "_partials/agent_status_badge.html" %}{% endwith %}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Registered</dt>
+        <dd class="text-brand-900">{{ agent.registered_at | dt }}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Last seen</dt>
+        <dd class="text-brand-900">{{ (agent.last_seen_at | dt) or "never" }}</dd>
+      </div>
+      {% if agent.public_key %}
+        <div>
+          <dt class="text-brand-500 text-xs">Public key</dt>
+          <dd class="text-brand-900 font-mono text-xs break-all bg-brand-50 rounded p-2 mt-1">
+            {{ agent.public_key }}
+          </dd>
+        </div>
+      {% endif %}
+    </dl>
+  </div>
+
+  <!-- Surface (groups + capabilities) -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">ACL surface</h2>
+    <div class="mt-3">
+      <div class="text-xs text-brand-500 mb-1">Groups</div>
+      {% if agent.groups %}
+        <div class="flex flex-wrap gap-1">
+          {% for g in agent.groups %}
+            <span class="inline-flex items-center rounded bg-brand-50 px-2 py-0.5
+                         text-xs text-brand-700 ring-1 ring-inset ring-brand-500/20">
+              {{ g }}
+            </span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <span class="text-brand-500/70 text-xs">—</span>
+      {% endif %}
+    </div>
+    <div class="mt-4">
+      <div class="text-xs text-brand-500 mb-1">Capabilities</div>
+      {% if agent.capabilities %}
+        <div class="flex flex-wrap gap-1">
+          {% for c in agent.capabilities %}
+            <span class="inline-flex items-center rounded bg-brand-50 px-2 py-0.5
+                         text-xs font-mono text-brand-700 ring-1 ring-inset ring-brand-500/20">
+              {{ c }}
+            </span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <span class="text-brand-500/70 text-xs">—</span>
+      {% endif %}
+    </div>
+    {% if agent.agent_info.get("documentation_url") %}
+      <div class="mt-4">
+        <a href="{{ agent.agent_info['documentation_url'] }}"
+           class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2"
+           target="_blank" rel="noopener">
+          Documentation →
+        </a>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Actions -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm space-y-4">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Actions</h2>
+
+    {% if agent.status == "active" %}
+      <a href="/admin/test-task?agent_id={{ agent.agent_id }}"
+         class="block w-full text-center rounded bg-brand-900 hover:bg-brand-700
+                text-white text-sm font-medium px-3 py-2">
+        Send test task →
+      </a>
+
+      <!-- Suspend (two-step confirm; reversible) -->
+      <div x-data="{ confirming: false }">
+        <template x-if="!confirming">
+          <button type="button" @click="confirming = true"
+                  class="w-full rounded bg-orange-100 hover:bg-orange-200 text-orange-900
+                         text-sm font-medium px-3 py-2 ring-1 ring-inset ring-orange-600/20">
+            Suspend agent
+          </button>
+        </template>
+        <template x-if="confirming">
+          <form method="post" action="/admin/agents/{{ agent.agent_id }}/suspend"
+                class="flex items-center gap-2">
+            {% include "_partials/csrf.html" %}
+            <button type="submit"
+                    class="flex-1 rounded bg-orange-700 hover:bg-orange-800 text-white
+                           text-sm font-medium px-3 py-2">
+              Confirm suspend
+            </button>
+            <button type="button" @click="confirming = false"
+                    class="rounded text-sm text-brand-500 hover:text-brand-900
+                           px-3 py-2 underline underline-offset-2">
+              Cancel
+            </button>
+          </form>
+        </template>
+      </div>
+
+      <!-- Evict (type-to-confirm; terminal) -->
+      <div x-data="{ open: false, typed: '' }">
+        <template x-if="!open">
+          <button type="button" @click="open = true"
+                  class="w-full rounded bg-red-100 hover:bg-red-200 text-red-900
+                         text-sm font-medium px-3 py-2 ring-1 ring-inset ring-red-600/20">
+            Evict agent (terminal)
+          </button>
+        </template>
+        <template x-if="open">
+          <form method="post" action="/admin/agents/{{ agent.agent_id }}/evict"
+                class="space-y-2 rounded border border-red-200 bg-red-50 p-3">
+            {% include "_partials/csrf.html" %}
+            <p class="text-xs text-red-900">
+              <strong class="font-semibold">Eviction is terminal.</strong>
+              The agent's row stays in the database for audit; the
+              <code class="bg-red-100 rounded px-1">agent_id</code> cannot be re-onboarded.
+              In-flight tasks will fail with <code class="bg-red-100 rounded px-1">agent_evicted</code>.
+            </p>
+            <label for="confirm-id" class="block text-xs font-medium text-red-900">
+              Type <code class="bg-red-100 rounded px-1">{{ agent.agent_id }}</code> to confirm.
+            </label>
+            <input id="confirm-id" name="confirm_agent_id"
+                   x-model="typed"
+                   class="w-full rounded border border-red-200 px-3 py-1.5 text-sm font-mono
+                          focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500" />
+            <div class="flex items-center gap-2">
+              <button type="submit"
+                      :disabled="typed !== '{{ agent.agent_id }}'"
+                      :class="typed === '{{ agent.agent_id }}'
+                              ? 'bg-red-700 hover:bg-red-800 text-white'
+                              : 'bg-red-200 text-red-700 cursor-not-allowed'"
+                      class="flex-1 rounded text-sm font-medium px-3 py-2">
+                Confirm evict
+              </button>
+              <button type="button" @click="open = false; typed = ''"
+                      class="rounded text-sm text-brand-500 hover:text-brand-900
+                             px-3 py-2 underline underline-offset-2">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </template>
+      </div>
+
+    {% elif agent.status == "suspended" %}
+      <form method="post" action="/admin/agents/{{ agent.agent_id }}/unsuspend">
+        {% include "_partials/csrf.html" %}
+        <button type="submit"
+                class="w-full rounded bg-emerald-700 hover:bg-emerald-800 text-white
+                       text-sm font-medium px-3 py-2">
+          Unsuspend
+        </button>
+      </form>
+
+      <!-- Even when suspended, evict is still available. -->
+      <div x-data="{ open: false, typed: '' }">
+        <template x-if="!open">
+          <button type="button" @click="open = true"
+                  class="w-full rounded bg-red-100 hover:bg-red-200 text-red-900
+                         text-sm font-medium px-3 py-2 ring-1 ring-inset ring-red-600/20">
+            Evict (terminal)
+          </button>
+        </template>
+        <template x-if="open">
+          <form method="post" action="/admin/agents/{{ agent.agent_id }}/evict"
+                class="space-y-2 rounded border border-red-200 bg-red-50 p-3">
+            {% include "_partials/csrf.html" %}
+            <p class="text-xs text-red-900">
+              Eviction is terminal. Type <code class="bg-red-100 rounded px-1">{{ agent.agent_id }}</code> to confirm.
+            </p>
+            <input name="confirm_agent_id" x-model="typed"
+                   class="w-full rounded border border-red-200 px-3 py-1.5 text-sm font-mono" />
+            <div class="flex items-center gap-2">
+              <button type="submit"
+                      :disabled="typed !== '{{ agent.agent_id }}'"
+                      :class="typed === '{{ agent.agent_id }}'
+                              ? 'bg-red-700 hover:bg-red-800 text-white'
+                              : 'bg-red-200 text-red-700 cursor-not-allowed'"
+                      class="flex-1 rounded text-sm font-medium px-3 py-2">
+                Confirm evict
+              </button>
+              <button type="button" @click="open = false; typed = ''"
+                      class="rounded text-sm text-brand-500 hover:text-brand-900
+                             px-3 py-2 underline underline-offset-2">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </template>
+      </div>
+
+    {% elif agent.status == "removed" %}
+      <p class="text-sm text-red-700">
+        This agent has been evicted. The row is preserved for audit; the
+        <code class="bg-red-50 rounded px-1">agent_id</code> cannot be re-onboarded.
+      </p>
+
+    {% elif agent.status == "pending" %}
+      <p class="text-sm text-brand-500">
+        Pending registration. No actions available until the agent
+        completes onboarding.
+      </p>
+    {% endif %}
+  </div>
+
+</section>
+
+<!-- AgentInfo blob -->
+{% set _has_accepts = agent.agent_info.get("accepts_schema") %}
+{% set _has_produces = agent.agent_info.get("produces_schema") %}
+{% set _has_control = agent.agent_info.get("accepts_control_schema") %}
+{% if _has_accepts or _has_produces or _has_control %}
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Schemas
+    </h2>
+    {% if _has_control %}
+      <p class="text-xs text-brand-500 mt-1">
+        This agent exposes a separate control-plane surface for
+        channel-side operations (slash commands, session config).
+        Control payloads are invisible to <code>build_tools</code> —
+        an LLM picking this agent as a callable tool sees only the
+        data-plane <code>accepts_schema</code> below.
+      </p>
+    {% endif %}
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-brand-500/10">
+    {% if _has_accepts %}
+      <div class="p-5">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-xs text-brand-500">Accepts (NewTask payload)</span>
+          <span class="inline-flex items-center rounded bg-emerald-50 px-1.5 py-0.5
+                       text-[10px] font-medium text-emerald-800 ring-1 ring-inset ring-emerald-600/20"
+                title="Visible to build_tools — LLM-callable">
+            data-plane
+          </span>
+        </div>
+        <pre class="text-xs bg-brand-50 rounded p-3 overflow-auto thin-scrollbar"
+             >{{ agent.agent_info["accepts_schema"] | tojson(indent=2) }}</pre>
+      </div>
+    {% endif %}
+    {% if _has_control %}
+      <div class="p-5">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-xs text-brand-500">Accepts (control-plane)</span>
+          <span class="inline-flex items-center rounded bg-purple-50 px-1.5 py-0.5
+                       text-[10px] font-medium text-purple-800 ring-1 ring-inset ring-purple-600/20"
+                title="Routed via NewTaskFrame.is_control=True; invisible to build_tools">
+            is_control
+          </span>
+        </div>
+        <pre class="text-xs bg-brand-50 rounded p-3 overflow-auto thin-scrollbar"
+             >{{ agent.agent_info["accepts_control_schema"] | tojson(indent=2) }}</pre>
+      </div>
+    {% endif %}
+    {% if _has_produces %}
+      <div class="p-5">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="text-xs text-brand-500">Produces (Result.output)</span>
+        </div>
+        <pre class="text-xs bg-brand-50 rounded p-3 overflow-auto thin-scrollbar"
+             >{{ agent.agent_info["produces_schema"] | tojson(indent=2) }}</pre>
+      </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<!-- Recent tasks -->
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Recent tasks (cross-user)
+    </h2>
+    <span class="text-xs text-brand-500">last 10</span>
+  </div>
+  {% if tasks %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Task</th>
+          <th class="px-4 py-2 text-left font-medium">State</th>
+          <th class="px-4 py-2 text-left font-medium">User</th>
+          <th class="px-4 py-2 text-left font-medium">Session</th>
+          <th class="px-4 py-2 text-left font-medium">Created</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for t in tasks %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ t.task_id }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ t.state }}{% if t.status_code %} ({{ t.status_code }}){% endif %}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-500">
+              <a href="/admin/users/{{ t.user_id }}" class="hover:text-brand-900 underline underline-offset-2">
+                {{ t.user_id }}
+              </a>
+            </td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-500">{{ t.session_id }}</td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ t.created_at | dt }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">No tasks yet.</div>
+  {% endif %}
+</section>
+
+<!-- Audit -->
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Audit trail
+    </h2>
+    <div class="text-xs text-brand-500 flex items-center gap-3">
+      <span>events where this agent is the actor, last 20</span>
+      <a href="/admin/audit?actor_id={{ agent.agent_id }}"
+         class="text-brand-700 hover:text-brand-900 underline underline-offset-2">
+        view full audit →
+      </a>
+    </div>
+  </div>
+  {% if audit %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">When</th>
+          <th class="px-4 py-2 text-left font-medium">Event</th>
+          <th class="px-4 py-2 text-left font-medium">Target</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for e in audit %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ e.ts | dt }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ e.event }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-500">
+              {% if e.target_kind %}{{ e.target_kind }}:{{ e.target_id or "—" }}{% else %}—{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">No audit events for this agent.</div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,77 @@
+{# HTMX swaps this whole div via hx-swap=outerHTML on the parent form. #}
+<div id="registrations-table" class="mt-6 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if registrations %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Channel</th>
+          <th class="px-4 py-2 text-left font-medium">External id</th>
+          <th class="px-4 py-2 text-left font-medium">Display name</th>
+          <th class="px-4 py-2 text-left font-medium">Email</th>
+          <th class="px-4 py-2 text-left font-medium">Requested</th>
+          <th class="px-4 py-2 text-left font-medium">Attempts</th>
+          <th class="px-4 py-2 text-left font-medium">Submitted by</th>
+          <th class="px-4 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for reg in registrations %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 text-brand-900">{{ reg.channel }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700"
+                title="{{ reg.external_id }}">
+              {{ reg.external_id }}
+            </td>
+            <td class="px-4 py-2 text-brand-900">
+              {{ reg.display_name or "—" }}
+            </td>
+            <td class="px-4 py-2 text-brand-700">
+              {{ reg.requested_email or "—" }}
+            </td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">
+              {{ reg.requested_at | dt }}
+            </td>
+            <td class="px-4 py-2 text-brand-700 text-xs">{{ reg.attempts }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700">
+              {{ reg.submitted_by_service_user_id or "—" }}
+            </td>
+            <td class="px-4 py-2 text-right">
+              <a href="/admin/registrations/{{ reg.registration_id }}"
+                 class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2 mr-3">
+                Review
+              </a>
+              <form method="post"
+                    action="/admin/registrations/{{ reg.registration_id }}/reject"
+                    class="inline"
+                    onsubmit="return confirm('Reject this registration? The pending row will be deleted.');">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                  Reject
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      {% if channel_filter and submitted_by_filter %}
+        No pending registrations on channel
+        <code class="text-brand-700">{{ channel_filter }}</code>
+        submitted by
+        <code class="text-brand-700">{{ submitted_by_filter }}</code>.
+      {% elif channel_filter %}
+        No pending registrations on channel
+        <code class="text-brand-700">{{ channel_filter }}</code>.
+      {% elif submitted_by_filter %}
+        No pending registrations submitted by
+        <code class="text-brand-700">{{ submitted_by_filter }}</code>.
+      {% else %}
+        No pending registrations. Channel agents submit via
+        <code class="text-brand-700">POST /v1/registrations</code>.
+      {% endif %}
+    </div>
+  {% endif %}
+</div>

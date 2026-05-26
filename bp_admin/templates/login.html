@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Sign in — bp_admin{% endblock %}
+
+{% block unauth_content %}
+<div class="w-full max-w-sm">
+  <div class="mb-8 text-center">
+    <h1 class="text-2xl font-semibold tracking-wide text-brand-900">bp_admin</h1>
+    <p class="mt-2 text-sm text-brand-500">Sign in with your admin account.</p>
+  </div>
+
+  <form method="post" action="/admin/login"
+        class="space-y-4 bg-white shadow-sm border border-brand-500/10 rounded-md p-6">
+    {% if error %}
+      <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        {{ error }}
+      </div>
+    {% endif %}
+
+    <div>
+      <label for="email" class="block text-xs font-medium text-brand-700 mb-1">Email</label>
+      <input id="email" name="email" type="email" required autofocus
+             value="{{ email or '' }}"
+             autocomplete="username"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+
+    <div>
+      <label for="password" class="block text-xs font-medium text-brand-700 mb-1">Password</label>
+      <input id="password" name="password" type="password" required
+             autocomplete="current-password"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+
+    <input type="hidden" name="next" value="{{ next or '' }}" />
+
+    <button type="submit"
+            class="w-full rounded bg-brand-900 hover:bg-brand-700 text-white text-sm
+                   font-medium px-3 py-2 transition-colors">
+      Sign in
+    </button>
+  </form>
+
+  <p class="mt-4 text-center text-xs text-brand-500/80">
+    Non-admin accounts cannot use this UI.
+  </p>
+</div>
+{% endblock %}

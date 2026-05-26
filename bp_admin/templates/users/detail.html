@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+{% block title %}{{ user.email or user.user_id }} — bp_admin{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/users" class="hover:text-brand-900 underline underline-offset-2">Users</a>
+  <span class="mx-1">/</span>
+  <span>{{ user.email or user.user_id }}</span>
+</nav>
+
+<header class="mb-6 flex items-start justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">
+      {{ user.email or "(no email)" }}
+    </h1>
+    <p class="text-xs text-brand-500/80 mt-1 font-mono">{{ user.user_id }}</p>
+  </div>
+  <div class="flex items-center gap-2">
+    {% with value = user.level %}{% include "_partials/level_badge.html" %}{% endwith %}
+    {% if user.suspended_at %}
+      <span class="inline-flex items-center rounded-md bg-orange-100 px-2 py-0.5
+                   text-xs font-medium text-orange-800 ring-1 ring-inset ring-orange-600/20">
+        suspended
+      </span>
+    {% endif %}
+    {% if user.deleted_at %}
+      <span class="inline-flex items-center rounded-md bg-red-100 px-2 py-0.5
+                   text-xs font-medium text-red-800 ring-1 ring-inset ring-red-600/20"
+            title="Soft-deleted at {{ user.deleted_at }}. Authentication paths refuse this user; the row is preserved for audit attribution.">
+        deleted
+      </span>
+    {% endif %}
+  </div>
+</header>
+
+{% if flash %}
+  <div class="mb-6 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+  <!-- Identity -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Identity</h2>
+    <dl class="mt-3 text-sm space-y-2">
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Email</dt>
+        <dd class="text-brand-900">{{ user.email or "—" }}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Level</dt>
+        <dd>{% with value = user.level %}{% include "_partials/level_badge.html" %}{% endwith %}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Auth kind</dt>
+        <dd class="text-brand-900">{{ user.auth_kind }}</dd>
+      </div>
+      <div class="flex justify-between gap-4">
+        <dt class="text-brand-500">Created</dt>
+        <dd class="text-brand-900">{{ user.created_at | dt }}</dd>
+      </div>
+      {% if user.suspended_at %}
+        <div class="flex justify-between gap-4">
+          <dt class="text-brand-500">Suspended at</dt>
+          <dd class="text-brand-900">{{ user.suspended_at | dt }}</dd>
+        </div>
+      {% endif %}
+    </dl>
+  </div>
+
+  <!-- Actions -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm space-y-4">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Actions</h2>
+
+    <form method="post" action="/admin/users/{{ user.user_id }}/level" class="flex items-end gap-2">
+      {% include "_partials/csrf.html" %}
+      <div class="flex-1">
+        <label for="level-{{ user.user_id }}"
+               class="block text-xs font-medium text-brand-700 mb-1">Change level</label>
+        <select id="level-{{ user.user_id }}" name="level"
+                class="w-full rounded border border-brand-500/20 px-3 py-1.5 text-sm">
+          {% for opt in level_options %}
+            <option value="{{ opt }}" {% if opt == user.level %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit"
+              class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-1.5">
+        Apply
+      </button>
+    </form>
+
+    {% if user.suspended_at %}
+      <form method="post" action="/admin/users/{{ user.user_id }}/unsuspend">
+        {% include "_partials/csrf.html" %}
+        <button type="submit"
+                class="w-full rounded bg-emerald-700 hover:bg-emerald-800 text-white
+                       text-sm font-medium px-3 py-2">
+          Unsuspend
+        </button>
+      </form>
+    {% else %}
+      <div x-data="{ confirming: false }" class="space-y-2">
+        <template x-if="!confirming">
+          <button type="button" @click="confirming = true"
+                  class="w-full rounded bg-orange-100 hover:bg-orange-200 text-orange-900
+                         text-sm font-medium px-3 py-2 ring-1 ring-inset ring-orange-600/20">
+            Suspend user
+          </button>
+        </template>
+        <template x-if="confirming">
+          <form method="post" action="/admin/users/{{ user.user_id }}/suspend"
+                class="flex items-center gap-2">
+            {% include "_partials/csrf.html" %}
+            <button type="submit"
+                    class="flex-1 rounded bg-orange-700 hover:bg-orange-800 text-white
+                           text-sm font-medium px-3 py-2">
+              Confirm suspend
+            </button>
+            <button type="button" @click="confirming = false"
+                    class="rounded text-sm text-brand-500 hover:text-brand-900
+                           px-3 py-2 underline underline-offset-2">
+              Cancel
+            </button>
+          </form>
+        </template>
+      </div>
+    {% endif %}
+
+    <p class="text-xs text-brand-500/80">
+      Suspending a user blocks new task admits and login;
+      <code class="text-brand-700">PATCH /v1/admin/users/{id}</code> also accepts level
+      changes via this UI.
+    </p>
+
+    {% if not user.deleted_at %}
+      <div x-data="{ confirmingDelete: false }" class="border-t border-red-300/40 pt-3 space-y-2">
+        <template x-if="!confirmingDelete">
+          <button type="button" @click="confirmingDelete = true"
+                  class="w-full rounded border border-red-300 text-red-800
+                         hover:bg-red-50 text-sm font-medium px-3 py-2">
+            Delete user
+          </button>
+        </template>
+        <template x-if="confirmingDelete">
+          <form method="post" action="/admin/users/{{ user.user_id }}/delete"
+                class="flex items-center gap-2">
+            {% include "_partials/csrf.html" %}
+            <button type="submit"
+                    class="flex-1 rounded bg-red-700 hover:bg-red-800 text-white
+                           text-sm font-medium px-3 py-2">
+              Confirm — delete (terminal)
+            </button>
+            <button type="button" @click="confirmingDelete = false"
+                    class="rounded text-sm text-brand-500 hover:text-brand-900
+                           px-3 py-2 underline underline-offset-2">
+              Cancel
+            </button>
+          </form>
+        </template>
+        <p class="text-xs text-brand-500/80">
+          Soft-delete: the user row stays for audit attribution but
+          authentication is refused. Revokes every refresh token,
+          deletes pending password-reset tokens, sweeps the user
+          out of every <code>serviced_by</code> array. Not
+          reversible from the UI — use suspend if you might want
+          to undo.
+        </p>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Credentials -->
+  <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm space-y-3"
+       x-data="{ confirmingRevoke: false }">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Credentials</h2>
+
+    <form method="post" action="/admin/users/{{ user.user_id }}/password-reset">
+      {% include "_partials/csrf.html" %}
+      <button type="submit"
+              class="w-full rounded bg-brand-900 hover:bg-brand-700 text-white
+                     text-sm font-medium px-3 py-2">
+        Mint password-reset token
+      </button>
+    </form>
+    <p class="text-xs text-brand-500/80">
+      Single-use, short-lived. The plaintext is revealed exactly
+      once on the next screen. Useful when a user has lost their
+      password and you don't want to set a new one yourself.
+    </p>
+
+    <div class="border-t border-brand-500/10 pt-3">
+      <template x-if="!confirmingRevoke">
+        <button type="button" @click="confirmingRevoke = true"
+                class="w-full rounded bg-orange-100 hover:bg-orange-200 text-orange-900
+                       text-sm font-medium px-3 py-2 ring-1 ring-inset ring-orange-600/20">
+          Revoke all refresh tokens
+        </button>
+      </template>
+      <template x-if="confirmingRevoke">
+        <form method="post" action="/admin/users/{{ user.user_id }}/refresh-tokens/revoke"
+              class="flex items-center gap-2">
+          {% include "_partials/csrf.html" %}
+          <button type="submit"
+                  class="flex-1 rounded bg-orange-700 hover:bg-orange-800 text-white
+                         text-sm font-medium px-3 py-2">
+            Confirm — log out everywhere
+          </button>
+          <button type="button" @click="confirmingRevoke = false"
+                  class="rounded text-sm text-brand-500 hover:text-brand-900
+                         px-3 py-2 underline underline-offset-2">
+            Cancel
+          </button>
+        </form>
+      </template>
+      <p class="text-xs text-brand-500/80 mt-2">
+        Forces a re-login on every device on the next refresh. Use
+        after revoking a service principal's servicing rights to
+        fully cut off access.
+      </p>
+    </div>
+  </div>
+
+</section>
+
+<!-- serviced_by membership (Phase 8) -->
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md p-5 shadow-sm">
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Serviced by
+    </h2>
+    <span class="text-xs text-brand-500">
+      service principals authorised to mint credentials for this user
+    </span>
+  </div>
+
+  {% if user.serviced_by %}
+    <ul class="space-y-2 mb-4">
+      {% for svc in user.serviced_by %}
+        <li class="flex items-center justify-between gap-3 rounded border border-brand-500/10
+                   bg-brand-50/50 px-3 py-2">
+          <code class="text-xs text-brand-900 font-mono">{{ svc }}</code>
+          <form method="post"
+                action="/admin/users/{{ user.user_id }}/serviced-by/{{ svc }}/revoke"
+                onsubmit="return confirm('Remove {{ svc }} from this user's serviced_by? Already-minted refresh tokens stay valid until you also click &quot;Revoke all refresh tokens&quot; above.');">
+            {% include "_partials/csrf.html" %}
+            <button type="submit"
+                    class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+              Remove
+            </button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-sm text-brand-500/80 mb-4">
+      No service principals authorised. Default-deny: nobody can
+      mint refresh / password-reset tokens for this user via the
+      service-mint endpoints until you add one.
+    </p>
+  {% endif %}
+
+  <form method="post" action="/admin/users/{{ user.user_id }}/serviced-by"
+        class="flex items-end gap-2">
+    {% include "_partials/csrf.html" %}
+    <div class="flex-1">
+      <label for="service_user_id-{{ user.user_id }}"
+             class="block text-xs font-medium text-brand-700 mb-1">
+        Grant a service principal
+      </label>
+      <input type="text" id="service_user_id-{{ user.user_id }}"
+             name="service_user_id"
+             placeholder="usr_…"
+             pattern="usr_[A-Za-z0-9_-]+"
+             required
+             class="w-full rounded border border-brand-500/20 px-3 py-1.5 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <button type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-1.5">
+      Grant
+    </button>
+  </form>
+  <p class="text-xs text-brand-500/80 mt-2">
+    The grantee must already exist with
+    <code class="text-brand-700">level=service</code>; the router
+    rejects other levels. Revoking a grant does NOT invalidate
+    refresh tokens the principal already minted — use 'Revoke all
+    refresh tokens' above for a clean cut-off.
+  </p>
+</section>
+
+<!-- Recent tasks -->
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Recent tasks
+    </h2>
+    <span class="text-xs text-brand-500">cross-session, last 10</span>
+  </div>
+  {% if tasks %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Task</th>
+          <th class="px-4 py-2 text-left font-medium">State</th>
+          <th class="px-4 py-2 text-left font-medium">Agent</th>
+          <th class="px-4 py-2 text-left font-medium">Session</th>
+          <th class="px-4 py-2 text-left font-medium">Created</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for t in tasks %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ t.task_id }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ t.state }}{% if t.status_code %} ({{ t.status_code }}){% endif %}</td>
+            <td class="px-4 py-2 text-brand-700">{{ t.agent_id }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-500">{{ t.session_id }}</td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ t.created_at | dt }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">No tasks yet.</div>
+  {% endif %}
+</section>
+
+<!-- Audit -->
+<section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
+  <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Audit trail
+    </h2>
+    <div class="text-xs text-brand-500 flex items-center gap-3">
+      <span>events where this user is the actor, last 20</span>
+      <a href="/admin/audit?actor_id={{ user.user_id }}"
+         class="text-brand-700 hover:text-brand-900 underline underline-offset-2">
+        view full audit →
+      </a>
+    </div>
+  </div>
+  {% if audit %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">When</th>
+          <th class="px-4 py-2 text-left font-medium">Event</th>
+          <th class="px-4 py-2 text-left font-medium">Target</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for e in audit %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ e.ts | dt }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ e.event }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-500">
+              {% if e.target_kind %}{{ e.target_kind }}:{{ e.target_id or "—" }}{% else %}—{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center">No audit events for this user.</div>
+  {% endif %}
+</section>
+{% endblock %}

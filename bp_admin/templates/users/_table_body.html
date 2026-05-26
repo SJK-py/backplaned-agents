@@ -1,0 +1,66 @@
+{# Rendered standalone on HTMX swaps (just the table) AND included by
+   list.html on first load. The outer `<div id="users-table">` is
+   what HTMX replaces via hx-swap=outerHTML. #}
+<div id="users-table" class="mt-6 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if users %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Email</th>
+          <th class="px-4 py-2 text-left font-medium">Level</th>
+          <th class="px-4 py-2 text-left font-medium">Auth</th>
+          <th class="px-4 py-2 text-left font-medium">Status</th>
+          <th class="px-4 py-2 text-left font-medium">Created</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for u in users %}
+          <tr class="hover:bg-brand-50/50 cursor-pointer"
+              data-href="/admin/users/{{ u.user_id }}">
+            <td class="px-4 py-2 text-brand-900">{{ u.email or "—" }}</td>
+            <td class="px-4 py-2">
+              {% with value = u.level %}{% include "_partials/level_badge.html" %}{% endwith %}
+            </td>
+            <td class="px-4 py-2 text-brand-700">{{ u.auth_kind }}</td>
+            <td class="px-4 py-2 text-brand-700">
+              {% if u.deleted_at %}
+                <span class="inline-flex items-center rounded-md bg-red-100 px-2 py-0.5
+                             text-xs font-medium text-red-800 ring-1 ring-inset ring-red-600/20">
+                  deleted
+                </span>
+              {% elif u.suspended_at %}
+                <span class="inline-flex items-center rounded-md bg-orange-100 px-2 py-0.5
+                             text-xs font-medium text-orange-800 ring-1 ring-inset ring-orange-600/20">
+                  suspended
+                </span>
+              {% else %}
+                <span class="text-brand-500/70">—</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-brand-500/80 text-xs">{{ u.created_at | dt }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if has_more %}
+      <div class="border-t border-brand-500/10 px-4 py-3 bg-brand-50/50 text-center">
+        <button type="button"
+                hx-get="/admin/users?level={{ level_filter }}{% if include_deleted %}&include_deleted=true{% endif %}&offset={{ next_offset }}&limit={{ limit }}"
+                hx-target="#users-table"
+                hx-swap="outerHTML"
+                class="text-sm text-brand-700 hover:text-brand-900 underline underline-offset-2">
+          Load more
+        </button>
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No users match the filter.
+      <a href="/admin/users/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+        Create one
+      </a>
+      to get started.
+    </div>
+  {% endif %}
+</div>
