@@ -84,6 +84,11 @@ class SuiteSettings(BaseSettings):
     kb_overlap_len: int = Field(default=100, ge=0)
     """Markdown chunking bounds ([data-model.md] §2.1)."""
 
+    kb_meta_head_chars: int = Field(default=8000, ge=0)
+    kb_meta_tail_chars: int = Field(default=2000, ge=0)
+    """Head/tail window fed to the LLM for `store` metadata generation
+    (title/tags/description) when the caller omits them ([agents.md])."""
+
     # ------------------------------------------------------------------
     # memory fact-graph ([memory.md])
     # ------------------------------------------------------------------
@@ -96,6 +101,9 @@ class SuiteSettings(BaseSettings):
     memory_gc_horizon_days: int = Field(default=100, ge=1)
     memory_decay_floor: float = Field(default=0.5, ge=0.0, le=1.0)
     """Recency-decay floor for a fact approaching the GC horizon."""
+    memory_gc_interval_s: float = Field(default=86_400.0, gt=0)
+    """Period of the background GC sweep over per-user fact graphs (the
+    decay path keeps surfaced facts alive, so a daily sweep suffices)."""
 
     # ------------------------------------------------------------------
     # sandbox (shared container, per-uid / per-user workspace)

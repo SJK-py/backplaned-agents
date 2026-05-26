@@ -79,7 +79,7 @@ call `end_delegation` to hand control back to the main assistant.\
 """
 
 LocalToolsFactory = Callable[
-    [TaskContext, "SuiteSettings"], Awaitable[LocalToolset | None]
+    [TaskContext, "SuiteSettings", str], Awaitable[LocalToolset | None]
 ]
 
 
@@ -103,9 +103,12 @@ def _preset(cfg, settings: SuiteSettings, field: str) -> str:
 
 
 async def _local_tools(
-    ctx: TaskContext, settings: SuiteSettings, config: L1Config
+    ctx: TaskContext, settings: SuiteSettings, config: L1Config, timezone: str
 ) -> LocalToolset | None:
-    return await config.local_tools(ctx, settings) if config.local_tools else None
+    return (
+        await config.local_tools(ctx, settings, timezone)
+        if config.local_tools else None
+    )
 
 
 def _llmdata_user(payload: LLMData) -> str:
@@ -134,7 +137,8 @@ async def run_subagent(
         Message(role="system", content=system),
         Message(role="user", content=_llmdata_user(payload)),
     ]
-    local = await _local_tools(ctx, settings, config)
+    timezone = cfg.timezone if cfg else settings.default_timezone
+    local = await _local_tools(ctx, settings, config, timezone)
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
@@ -170,7 +174,8 @@ async def run_delegated_turn(
     messages.extend(Message(role=r.role, content=r.message) for r in rows)
     context_tokens = estimate_context_tokens(messages)
 
-    local = await _local_tools(ctx, settings, config)
+    timezone = cfg.timezone if cfg else settings.default_timezone
+    local = await _local_tools(ctx, settings, config, timezone)
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,

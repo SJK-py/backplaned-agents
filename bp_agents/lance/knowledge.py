@@ -96,12 +96,11 @@ class KnowledgeStore:
             for idx, content, emb in chunks
         ])
 
-    def _retrieve_sync(
-        self, *, query_vector: list[float], collection: str | None,
+    def _filter(
+        self, rows: list[dict[str, Any]], *, collection: str | None,
         title: str | None, tags: list[str] | None, count: int,
     ) -> list[dict[str, Any]]:
-        # Over-fetch, then apply metadata filters in Python.
-        rows = self._chunks().search(query_vector).limit(max(count * 10, 50)).to_list()
+        """Apply the metadata filters in Python and cap at `count`."""
         out: list[dict[str, Any]] = []
         for r in rows:
             if collection is not None and r["collection"] != collection:
@@ -114,6 +113,82 @@ class KnowledgeStore:
             if len(out) >= count:
                 break
         return out
+
+    def _vector_rows(self, query_vector: list[float], over: int) -> list[dict[str, Any]]:
+        return self._chunks().search(query_vector).limit(over).to_list()
+
+    def _bm25_rows(self, query: str, over: int) -> list[dict[str, Any]]:
+        tbl = self._chunks()
+        if tbl.count_rows() == 0:
+            return []
+        # (Re)build the BM25/FTS index over `content` on this handle, then
+        # search it. Rebuilt at query time so it always covers current rows
+        # — per-user stores are modest, so staleness is impossible.
+        tbl.create_fts_index("content", use_tantivy=False, replace=True)
+        return tbl.search(query, query_type="fts").limit(over).to_list()
+
+    def _retrieve_sync(
+        self, *, query: str, query_vector: list[float], search_type: str,
+        collection: str | None, title: str | None, tags: list[str] | None,
+        count: int,
+    ) -> list[dict[str, Any]]:
+        over = max(count * 10, 50)
+        if search_type == "vector":
+            rows = self._vector_rows(query_vector, over)
+        elif search_type == "bm25":
+            rows = self._bm25_rows(query, over)
+        else:  # hybrid — reciprocal-rank fusion of the two legs
+            rows = self._fuse(
+                self._vector_rows(query_vector, over), self._bm25_rows(query, over)
+            )
+        return self._filter(
+            rows, collection=collection, title=title, tags=tags, count=count
+        )
+
+    @staticmethod
+    def _fuse(
+        vec_rows: list[dict[str, Any]], bm_rows: list[dict[str, Any]], *, k: int = 60
+    ) -> list[dict[str, Any]]:
+        """Reciprocal-rank fusion: merge two ranked lists by 1/(k+rank),
+        keyed on `chunk_id`. Version-independent (no LanceDB reranker)."""
+        scored: dict[str, dict[str, Any]] = {}
+        for rows in (vec_rows, bm_rows):
+            for rank, r in enumerate(rows):
+                entry = scored.setdefault(r["chunk_id"], {"row": r, "score": 0.0})
+                entry["score"] += 1.0 / (k + rank + 1)
+        ranked = sorted(scored.values(), key=lambda e: e["score"], reverse=True)
+        return [e["row"] for e in ranked]
+
+    def _modify_sync(
+        self, *, title: str, collection: str | None,
+        target_collection: str | None, target_title: str | None,
+        tags: list[str] | None, description: str | None,
+    ) -> int:
+        docs = [
+            d for d in self._scan_docs()
+            if d["title"] == title
+            and (collection is None or d["collection"] == collection)
+        ]
+        if not docs:
+            return 0
+        new_collection = target_collection
+        new_title = target_title
+        doc_vals: dict[str, Any] = {"updated_at": _now()}
+        chunk_vals: dict[str, Any] = {}
+        if new_collection is not None:
+            doc_vals["collection"] = chunk_vals["collection"] = new_collection
+        if new_title is not None:
+            doc_vals["title"] = chunk_vals["title"] = new_title
+        if tags is not None:
+            doc_vals["tags"] = chunk_vals["tags"] = tags
+        if description is not None:
+            doc_vals["description"] = description
+        for d in docs:
+            where = f"doc_id = '{d['doc_id']}'"  # uuid hex — safe
+            self._docs().update(where=where, values=doc_vals)
+            if chunk_vals:
+                self._chunks().update(where=where, values=chunk_vals)
+        return len(docs)
 
     def _remove_sync(self, *, title: str, collection: str | None) -> int:
         docs = [
@@ -172,13 +247,15 @@ class KnowledgeStore:
         return out
 
     async def retrieve(
-        self, *, query_vector: list[float], collection: str | None = None,
+        self, *, query: str, query_vector: list[float],
+        search_type: str = "hybrid", collection: str | None = None,
         title: str | None = None, tags: list[str] | None = None,
         count: int = 3,
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
-            self._retrieve_sync, query_vector=query_vector,
-            collection=collection, title=title, tags=tags, count=count,
+            self._retrieve_sync, query=query, query_vector=query_vector,
+            search_type=search_type, collection=collection, title=title,
+            tags=tags, count=count,
         )
 
     async def remove_document(
@@ -186,4 +263,17 @@ class KnowledgeStore:
     ) -> int:
         return await asyncio.to_thread(
             self._remove_sync, title=title, collection=collection
+        )
+
+    async def modify_document(
+        self, *, title: str, collection: str | None = None,
+        target_collection: str | None = None, target_title: str | None = None,
+        tags: list[str] | None = None, description: str | None = None,
+    ) -> int:
+        """Update metadata on the matching document(s) + their (denormalized)
+        chunks. Returns the number of documents modified."""
+        return await asyncio.to_thread(
+            self._modify_sync, title=title, collection=collection,
+            target_collection=target_collection, target_title=target_title,
+            tags=tags, description=description,
         )

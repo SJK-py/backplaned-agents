@@ -219,6 +219,12 @@ async def get_user_config(
     return UserConfigRow.model_validate(dict(row)) if row else None
 
 
+async def list_user_ids(conn: asyncpg.Connection) -> list[str]:
+    """All known user ids (the memory GC sweep iterates these)."""
+    rows = await conn.fetch("SELECT user_id FROM user_config")
+    return [r["user_id"] for r in rows]
+
+
 async def create_user_config(
     conn: asyncpg.Connection,
     *,

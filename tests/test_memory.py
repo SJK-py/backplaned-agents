@@ -14,6 +14,9 @@ from bp_agents.agents.memory import (
     run_memory_add,
     run_memory_retrieve,
 )
+from bp_agents.agents.memory.agent import gc_sweep
+from bp_agents.db import queries
+from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
 from bp_agents.lance.memory import MemoryStore
 from bp_agents.settings import SuiteSettings
@@ -128,5 +131,49 @@ def test_memory_retrieve_with_graph_expansion(tmp_path) -> None:
         # Top hit (cats) + its graph neighbour (Paris) via expansion.
         assert "likes cats" in out.content
         assert "lives in Paris" in out.content
+
+    asyncio.run(_drive())
+
+
+def test_memory_gc_sweep(suite_db_url: str, tmp_path) -> None:
+    """The background sweep GCs every user with an existing fact graph,
+    keyed off `user_config`. A user with no LanceDB dir is skipped."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "suite_platform_mappings RESTART IDENTITY"
+                )
+                # One user has a store; the other never materialised one.
+                await queries.create_user_config(
+                    conn, user_id="usr_gc", default_session_id="s1"
+                )
+                await queries.create_user_config(
+                    conn, user_id="usr_none", default_session_id="s2"
+                )
+            store = MemoryStore(await connect(tmp_path, "usr_gc"), embedding_dim=_DIM)
+            await store.insert_fact(
+                fact="old fact", kind="event", embedding=_kw_vec("cats")
+            )
+            # Age it past any horizon so the sweep collects it.
+            await asyncio.to_thread(
+                lambda: store._facts().update(
+                    where="uid != ''", values={"last_used_at": "2000-01-01T00:00:00+00:00"}
+                )
+            )
+            assert len(await store.all_facts()) == 1
+
+            settings = SuiteSettings(
+                database_url=suite_db_url, embedding_dim=_DIM,
+                lance_root=str(tmp_path), memory_gc_horizon_days=1,
+            )
+            swept = await gc_sweep(pool, settings)
+            assert swept == 1
+            assert await store.all_facts() == []
+        finally:
+            await pool.close()
 
     asyncio.run(_drive())

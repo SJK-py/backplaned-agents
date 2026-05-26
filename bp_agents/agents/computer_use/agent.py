@@ -31,8 +31,10 @@ task done end-to-end.\
 """
 
 
-async def _tools(ctx: TaskContext, settings: SuiteSettings) -> LocalToolset:
-    return LocalToolset([make_current_time_tool(settings.default_timezone)])
+async def _tools(
+    ctx: TaskContext, settings: SuiteSettings, timezone: str
+) -> LocalToolset:
+    return LocalToolset([make_current_time_tool(timezone)])
 
 
 _CONFIG = L1Config(

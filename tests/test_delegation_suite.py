@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 
 from bp_agents.agents.chatbot.gateway import ChatbotGateway
-from bp_agents.agents.l1_common import L1Config, run_delegated_turn
+from bp_agents.agents.deep_reasoning.agent import _CONFIG as _DR_CONFIG
+from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.agents.orchestrator.agent import (
     run_orchestrator_end_delegation,
     run_orchestrator_message,
@@ -170,6 +171,48 @@ def test_orchestrator_hand_off_fallback_on_admit_failure(suite_db_url: str) -> N
             assert [r.role for r in orch_rows][-1] == "assistant"
             assert orch_rows[-1].message == "Here's my direct answer."
             assert l1_rows == []
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_l1_subagent_current_time_uses_user_timezone(suite_db_url: str) -> None:
+    """The l1 `current_time` tool reads the user's tz (threaded through the
+    local-tools factory), not the default."""
+
+    class _TzLlm:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.tool_results: list = []
+
+        async def generate(self, messages, **kw) -> LlmResponse:
+            self.calls += 1
+            for m in messages:
+                if getattr(m, "role", None) == "tool":
+                    self.tool_results.append(m.content)
+            if self.calls == 1:
+                return LlmResponse(text="", tool_calls=[
+                    ToolCall(id="t", name="current_time", args={})
+                ])
+            return LlmResponse(text="done")
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.create_user_config(
+                    conn, user_id="usr_a", default_session_id="ses_1",
+                    timezone="Asia/Seoul",
+                )
+            llm = _TzLlm()
+            out = await run_subagent(
+                _Ctx(llm, _StubPeers()), LLMData(prompt="what time is it?"),
+                config=_DR_CONFIG, pool=pool, settings=_settings(suite_db_url),
+            )
+            assert out.content == "done"
+            assert any("Asia/Seoul" in tr for tr in llm.tool_results)
         finally:
             await pool.close()
 

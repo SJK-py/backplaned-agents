@@ -32,9 +32,11 @@ information for the user; store useful material in the knowledge base.\
 """
 
 
-async def _tools(ctx: TaskContext, settings: SuiteSettings) -> LocalToolset:
+async def _tools(
+    ctx: TaskContext, settings: SuiteSettings, timezone: str
+) -> LocalToolset:
     return LocalToolset(
-        [make_current_time_tool(settings.default_timezone), *make_web_tools(settings)]
+        [make_current_time_tool(timezone), *make_web_tools(settings)]
     )
 
 
