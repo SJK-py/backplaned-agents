@@ -50,7 +50,7 @@ class LocalFileStore(FileStore):
 
     @classmethod
     def from_options(cls, options: dict) -> LocalFileStore:
-        path = options.get("path", "./proxyfiles")
+        path = options.get("path", "./router_files")
         return cls(Path(path))
 
     # ------------------------------------------------------------------

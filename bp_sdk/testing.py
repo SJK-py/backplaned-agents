@@ -91,7 +91,7 @@ class TestRouter:
             raise RuntimeError(
                 "TestRouter requires db_url (or env ROUTER_DB_URL / TEST_DB_URL)"
             )
-        self._file_store_dir = file_store_dir or "./.test_proxyfiles"
+        self._file_store_dir = file_store_dir or "./.test_router_files"
         self._allow_all_acl = allow_all_acl
         self._port = port
 
