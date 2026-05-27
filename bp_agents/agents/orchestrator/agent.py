@@ -60,10 +60,13 @@ def _hand_off_spec(destinations: list[str]) -> ToolSpec:
     return ToolSpec(
         name=_HAND_OFF_TOOL,
         description=(
-            "Hand this conversation off to a specialist who will take over "
-            "until the task is done. Use when a request is squarely in one "
-            "specialist's domain. The specialist hands control back when "
-            "finished."
+            "Hand this conversation off to a specialist for a SUSTAINED, "
+            "multi-turn effort: the specialist takes over and talks to the "
+            "user directly across several turns, then hands control back "
+            "when finished. Use only when the work clearly spans more than "
+            "one exchange. For a one-shot task you can resolve in a single "
+            "step, call that specialist's own tool (`call_<specialist>`) "
+            "and continue the conversation yourself — do NOT hand off."
         ),
         parameters={
             "type": "object",

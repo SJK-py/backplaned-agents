@@ -9,10 +9,19 @@ three modes ([agents.md]):
 
 `on_delegation` / `delegated_message` share one core: reload the agent's
 own thread (the orchestrator wrote the `delegate_prompt` seed row + the
-channel writes each user turn), run the loop with the `end_delegation`
-terminal tool, and either hand back (delegate the task to the
-orchestrator) or append the assistant turn. Per-agent behaviour (system
-prompt, local tools, preset) is supplied via `L1Config`.
+channel writes each user turn), run the loop, and append the assistant
+turn. Per-agent behaviour (system prompt, local tools, preset) is
+supplied via `L1Config`.
+
+Delegation is a **persistent** episode, so `end_delegation` is offered
+**only on subsequent turns** (`delegated_message`), never on the first
+(`on_delegation`). The first turn always does substantive work and
+returns its own Result on the hand-off task `T`; the channel observes
+that result came from the delegate and pins `delegated_to`. Letting the
+first turn hand back would re-delegate `T` to the orchestrator — which
+the router correctly rejects as a cycle, since `T` originated there.
+One-shot work belongs in the stateless `subagent` mode (a peer-tool
+call), not a delegation.
 """
 
 from __future__ import annotations
@@ -73,9 +82,13 @@ END_DELEGATION_SPEC = ToolSpec(
 
 _GENERAL_DELEGATION = """\
 You are operating as a specialist the main assistant delegated this \
-conversation to. Carry out the user's request using your tools. When the \
-task is done — or the user clearly wants something outside your remit — \
-call `end_delegation` to hand control back to the main assistant.\
+conversation to. Carry out the user's request using your tools.\
+"""
+
+# Appended only on subsequent turns, where the hand-back tool is offered.
+_HANDBACK_NOTE = """\
+ When the task is done — or the user clearly wants something outside your \
+remit — call `end_delegation` to hand control back to the main assistant.\
 """
 
 LocalToolsFactory = Callable[
@@ -153,11 +166,18 @@ async def run_delegated_turn(
     config: L1Config,
     pool: asyncpg.Pool,
     settings: SuiteSettings,
+    first_turn: bool,
 ) -> AgentOutput:
-    """First (`on_delegation`) and subsequent (`delegated_message`)
-    delegated turns. Reload this agent's thread, run the loop with
-    `end_delegation`, and either hand back to the orchestrator or append
-    the assistant turn + return."""
+    """First (`on_delegation`, `first_turn=True`) and subsequent
+    (`delegated_message`) delegated turns. Reload this agent's thread, run
+    the loop, and append the assistant turn.
+
+    `end_delegation` is offered only when `first_turn` is False. On the
+    first turn the delegate must do work and terminate the hand-off task
+    `T` itself; handing back there would re-delegate `T` to the
+    orchestrator (`T`'s originator) and the router rejects that as a
+    cycle. Subsequent turns run on fresh tasks spawned straight to this
+    agent, so handing back to the orchestrator is cycle-free."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
         rows = await queries.reload_incumbent(
@@ -165,8 +185,9 @@ async def run_delegated_turn(
         )
         info = await queries.get_session_info(conn, ctx.session_id)
 
+    guidance = _GENERAL_DELEGATION if first_turn else _GENERAL_DELEGATION + _HANDBACK_NOTE
     system = compose_system_prompt(
-        f"{_GENERAL_DELEGATION}\n\n{config.delegation_system}",
+        f"{guidance}\n\n{config.delegation_system}",
         config_note=user_config_note(cfg) if cfg else "",
         summary=info.delegate_summary if info else None,
     )
@@ -179,7 +200,8 @@ async def run_delegated_turn(
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
-        extra_tools=[END_DELEGATION_SPEC], terminal_tools={END_DELEGATION_TOOL},
+        extra_tools=None if first_turn else [END_DELEGATION_SPEC],
+        terminal_tools=None if first_turn else {END_DELEGATION_TOOL},
         file_tools=config.file_tools, detail_chars=settings.verbose_detail_chars,
     )
 

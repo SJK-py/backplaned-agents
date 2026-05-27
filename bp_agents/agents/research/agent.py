@@ -89,13 +89,17 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 @agent.handler(mode="on_delegation", tool=False)
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
-    return await run_delegated_turn(ctx, config=_CONFIG, pool=_pool, settings=_settings)
+    return await run_delegated_turn(
+        ctx, config=_CONFIG, pool=_pool, settings=_settings, first_turn=True
+    )
 
 
 @agent.handler(mode="delegated_message", tool=False)
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
-    return await run_delegated_turn(ctx, config=_CONFIG, pool=_pool, settings=_settings)
+    return await run_delegated_turn(
+        ctx, config=_CONFIG, pool=_pool, settings=_settings, first_turn=False
+    )
 
 
 if __name__ == "__main__":
