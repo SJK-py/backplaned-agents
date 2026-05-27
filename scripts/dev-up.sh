@@ -60,10 +60,15 @@ else
     log "BP_SKIP_COMPOSE=1 — assuming Postgres+Redis are already running"
 fi
 
-# 2. Wait for Postgres
-log "waiting for Postgres on localhost:5432 …"
+# 2. Wait for Postgres — probe INSIDE the container (pg_isready) so this
+# doesn't depend on a host-side `psql` client (its absence previously read
+# as a false "didn't come up"). The router on the host still connects over
+# the published port; if THAT fails, it's a host->container reachability
+# issue (rootless/remote Docker), surfaced by the router itself.
+log "waiting for Postgres (container pg_isready) …"
 for i in {1..30}; do
-    if PGPASSWORD=bp psql -U postgres -h 127.0.0.1 -d bp_router -c "SELECT 1" >/dev/null 2>&1; then
+    if docker compose -f docker-compose.dev.yml exec -T postgres \
+        pg_isready -U postgres -d bp_router >/dev/null 2>&1; then
         log "  Postgres ready"
         break
     fi
