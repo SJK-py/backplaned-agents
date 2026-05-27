@@ -232,11 +232,12 @@ def test_l1_delegated_turn_normal_and_end(suite_db_url: str) -> None:
                 )
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
 
-            # Normal turn → appends assistant row, no hand-back.
+            # Normal subsequent turn → appends assistant row, no hand-back.
             peers = _StubPeers()
             ctx = _Ctx(_StubLlm([LlmResponse(text="here is my reasoning")]), peers)
             out = await run_delegated_turn(
-                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url)
+                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=False,
             )
             assert out.content == "here is my reasoning"
             assert peers.delegations == []
@@ -246,19 +247,60 @@ def test_l1_delegated_turn_normal_and_end(suite_db_url: str) -> None:
                 )
             assert [r.role for r in rows][-1] == "assistant"
 
-            # end_delegation → hands back to the orchestrator, result-less.
+            # end_delegation on a subsequent turn → hands back, result-less.
             peers2 = _StubPeers()
             ctx2 = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
                 id="c2", name="end_delegation",
                 args={"delegation_summary": "did it", "exit_reason": "done"},
             )])]), peers2)
             out2 = await run_delegated_turn(
-                ctx2, config=cfg, pool=pool, settings=_settings(suite_db_url)
+                ctx2, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=False,
             )
             assert out2.content is None or out2.content == ""
             assert len(peers2.delegations) == 1
             dest, _payload, mode = peers2.delegations[0]
             assert dest == "orchestrator" and mode == "end_delegation"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_l1_first_turn_never_hands_back(suite_db_url: str) -> None:
+    """The first (on_delegation) turn is not offered `end_delegation`, so it
+    cannot hand back — handing back `T` to the orchestrator (its originator)
+    would be a router-rejected cycle. Even a model that hallucinates the tool
+    gets an "unknown tool" response and the turn completes normally."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="user", message="## Delegated task\nthink",
+                )
+            cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
+            peers = _StubPeers()
+            # The model "tries" to end on its first turn; the tool isn't
+            # advertised, so it isn't terminal and isn't dispatched as a
+            # hand-back. The stub then falls through to a plain "done".
+            ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
+                id="c1", name="end_delegation",
+                args={"delegation_summary": "x", "exit_reason": "y"},
+            )])]), peers)
+            out = await run_delegated_turn(
+                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=True,
+            )
+            assert peers.delegations == []           # no hand-back on T
+            assert out.content == "done"             # turn terminates T itself
+            async with pool.acquire() as conn:
+                rows = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id=_L1
+                )
+            assert [r.role for r in rows][-1] == "assistant"
         finally:
             await pool.close()
 

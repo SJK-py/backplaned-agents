@@ -12,6 +12,16 @@
 
 So one delegation episode = a delegated **hand-off** task, then N **spawned** steady-state tasks, then a delegated **hand-back** task.
 
+**Delegation is persistent — it is not a one-shot call.** A delegate's
+**first** turn (`on_delegation`) is therefore *not* offered `end_delegation`:
+it must do substantive work and terminate the hand-off task `T` itself. The
+hand-back tool appears only on **subsequent** turns (`delegated_message`).
+This is also why the router is right to reject a hand-back on `T` (see §4
+F6): `T` originated at the orchestrator, so delegating it back there is a
+cycle. For genuinely **one-shot** work the orchestrator must call the
+specialist's stateless `subagent` mode (a peer-tool call it awaits inline),
+**not** `hand_off`.
+
 ## 2. `delegated_to` is channel-maintained by observing the result source
 
 The channel owns `delegated_to` (`session.management`) and derives it from **who produced the result** vs **who it dispatched to** — no orchestrator→channel signaling:
@@ -33,6 +43,10 @@ The channel owns `delegated_to` (`session.management`) and derives it from **who
 5. Channel (awaiting `T`) receives computer_use's `AgentOutput`, sends it to the user, and — observing `result.agent_id = computer_use ≠ orchestrator` — sets `delegated_to = computer_use`.
 
 → **Exactly one terminal Result on `T`, produced by computer_use.**
+
+The first turn **cannot** elect to end (no `end_delegation` tool); it always
+produces a Result on `T`. The episode ends later, in Phase 3, on a steady-state
+`Tn`.
 
 ### Phase 2 — Steady state (per user message), via `spawn`
 
@@ -61,6 +75,7 @@ The channel owns `delegated_to` (`session.management`) and derives it from **who
 | **F3** | concurrent messages / an end-of-delegation routing race | Resolved by per-session serialization ([sessions.md §4](./sessions.md)) — the routing read for turn N+1 happens only after turn N committed its `delegated_to` change. |
 | **F4** | a slow first delegated turn hits `T`'s **original** deadline | `delegate` reassigns but does **not** reset the deadline. Use generous deadlines for delegatable agents (or extend at hand-off). Steady-state `Tn` each get a fresh per-turn deadline. |
 | **F5** | a delegate wants to switch to a *third* specialist | **Single-level only** — a delegate has `end_delegation`, not `delegate`. It ends back to the orchestrator, which then re-delegates. `delegated_to` stays single-valued; the task chain stays flat. |
+| **F6** | a delegate tries to hand back on the **hand-off task `T`** (e.g. it decides it's done on the first turn) | Forbidden by construction: the first turn isn't offered `end_delegation`, so it terminates `T` itself. If it *were* attempted, the router rejects it as a **delegation cycle** — `T` originated at the orchestrator. One-shot needs belong in a `subagent` call, not a delegation. |
 
 ## 5. Invariants
 
