@@ -37,6 +37,11 @@ WS_URL="${WS_URL:-ws://127.0.0.1:8000/v1/agent}"
 PYTHON_BIN="${PYTHON:-python}"
 : "${SUITE_DATABASE_URL:=postgresql://postgres:bp@127.0.0.1:5432/bp_suite}"
 export SUITE_DATABASE_URL
+# The sandbox writes its per-user workspace under SUITE_SANDBOX_ROOT/<user_id>.
+# Default to a writable /tmp dir — the production default (/home) isn't
+# writable by a non-root dev user, so `mkdir` would fail on the first bash.
+: "${SUITE_SANDBOX_ROOT:=/tmp/bp-suite-sandbox}"
+export SUITE_SANDBOX_ROOT
 
 log() { printf '\033[1;36m[run-suite]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[run-suite]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -113,6 +118,12 @@ for entry in "${AGENTS[@]}"; do
         [[ -n "$token" ]] || fail "$name invitation mint returned empty"
     else
         log "$name: resuming from persisted creds"
+    fi
+    if [[ "$name" == "sandbox" ]]; then
+        log "WARNING: 'sandbox' runs UNCONTAINED on this host — LLM/user bash"
+        log "         executes as $(whoami) with NO isolation (workspace:"
+        log "         $SUITE_SANDBOX_ROOT). Dev/trusted use only; for real isolation"
+        log "         run the hardened sandbox container (docker-compose.prod.yml)."
     fi
     log "starting $name (state=$state)"
     AGENT_INVITATION_TOKEN="$token" \

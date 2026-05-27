@@ -98,6 +98,14 @@ sandboxed runtime (gVisor / Kata), add resource caps (`cpus`,
 backend behind the same agent interface is future work
 ([`deferred-work.md`](./deferred-work.md)).
 
+> **Dev caveat.** `scripts/run-suite.sh` runs every agent — including the
+> sandbox — as a **host process**, so its bash executes **uncontained on
+> your machine** as the dev user (no container, no uid drop without root,
+> no egress limit). `run-suite.sh` defaults `SUITE_SANDBOX_ROOT` to a
+> writable `/tmp/bp-suite-sandbox` so it works, and warns on start. Treat
+> dev `computer_use` as trusted-only; for untrusted prompts use the
+> hardened container above (or a throwaway VM).
+
 ## Bring-up order
 
 ```
