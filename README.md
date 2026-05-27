@@ -66,11 +66,11 @@ The system runs as a **router** (the Backplaned platform) plus a fleet of **suit
 ### Develop — router + agents from source, dependencies in Docker
 
 ```bash
-# 0. Install. The llm-gemini extra pulls the google-genai SDK the router
-#    needs to call Gemini (suite agents call the LLM via the router, so
-#    they don't need it themselves).
+# 0. Install. `llm-gemini` pulls the google-genai SDK the router needs to
+#    call Gemini (suite agents call the LLM via the router, so they don't
+#    need it); `admin` mounts the /admin web UI (else /admin/login 404s).
 uv venv && source .venv/bin/activate
-uv pip install -e ".[router,suite,dev,llm-gemini]"
+uv pip install -e ".[router,suite,dev,llm-gemini,admin]"
 
 # 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
 #    SearXNG, and rustfs(S3) are opt-in profiles (single-worker dev needs none):
