@@ -26,6 +26,7 @@ from bp_agents.common.tools import (
     LocalTool,
     LocalToolset,
     make_current_time_tool,
+    make_send_file_tool,
     peer_tool_specs,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "estimate_context_tokens",
     "estimate_tokens",
     "make_current_time_tool",
+    "make_send_file_tool",
     "peer_tool_specs",
     "run_llm_loop",
     "text_output",

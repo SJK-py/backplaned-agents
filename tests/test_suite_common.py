@@ -16,6 +16,7 @@ from bp_agents.common import (
     compose_system_prompt,
     estimate_context_tokens,
     make_current_time_tool,
+    make_send_file_tool,
     peer_tool_specs,
     run_llm_loop,
     text_output,
@@ -378,3 +379,60 @@ def test_loop_progress_model() -> None:
     dumped = lp.model_dump()
     assert dumped["kind"] == "tool_call"
     assert dumped["tool"] == "call_echo"
+
+
+# ---------------------------------------------------------------------------
+# send_file tool — records names for delivery to the user
+# ---------------------------------------------------------------------------
+
+
+class _FilesWith:
+    """ctx.files stand-in with a fixed set of session/persistent names."""
+
+    def __init__(self, session=(), persistent=()) -> None:
+        self._session = list(session)
+        self._persistent = list(persistent)
+
+    async def list(self, *, persistent=False, query=None):
+        return list(self._persistent if persistent else self._session)
+
+
+def _ctx_with_files(files):
+    return _StubCtx(_StubLlm([]), _StubPeers(), _StubProgress(), files=files)
+
+
+def test_send_file_records_existing_name() -> None:
+    outbound: list[str] = []
+    tool = make_send_file_tool(outbound)
+    ctx = _ctx_with_files(_FilesWith(session=["report.pdf"]))
+    msg = asyncio.run(
+        LocalToolset([tool]).dispatch(ctx, ToolCall(id="c", name="send_file",
+                                                    args={"name": "report.pdf"}))
+    )
+    assert outbound == ["report.pdf"]
+    assert "delivered to the user" in msg.content
+
+
+def test_send_file_dedups_and_validates_persist_prefix() -> None:
+    outbound: list[str] = []
+    ts = LocalToolset([make_send_file_tool(outbound)])
+    ctx = _ctx_with_files(_FilesWith(persistent=["notes.md"]))
+    # persist/ name is validated against the persistent stash (bare match ok)
+    asyncio.run(ts.dispatch(ctx, ToolCall(id="c1", name="send_file",
+                                          args={"name": "persist/notes.md"})))
+    # a second call with the same name doesn't double-add
+    asyncio.run(ts.dispatch(ctx, ToolCall(id="c2", name="send_file",
+                                          args={"name": "persist/notes.md"})))
+    assert outbound == ["persist/notes.md"]
+
+
+def test_send_file_rejects_unknown_name() -> None:
+    outbound: list[str] = []
+    tool = make_send_file_tool(outbound)
+    ctx = _ctx_with_files(_FilesWith(session=["other.txt"]))
+    msg = asyncio.run(
+        LocalToolset([tool]).dispatch(ctx, ToolCall(id="c", name="send_file",
+                                                    args={"name": "missing.pdf"}))
+    )
+    assert outbound == []
+    assert "No stash file" in msg.content

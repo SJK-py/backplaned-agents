@@ -144,3 +144,61 @@ def make_current_time_tool(timezone: str = "UTC") -> LocalTool:
         ),
         handler=_handler,
     )
+
+
+async def _stash_has(ctx: TaskContext, name: str) -> bool:
+    """Best-effort existence check tolerant of the `persist/` prefix —
+    `files.list` may return persistent names bare or prefixed."""
+    if name.startswith("persist/"):
+        names = await ctx.files.list(persistent=True)
+        return name in names or name[len("persist/"):] in names
+    return name in await ctx.files.list(persistent=False)
+
+
+def make_send_file_tool(outbound: list[str]) -> LocalTool:
+    """A tool the user-facing agents (orchestrator, l1 delegated turns,
+    cron) carry so the model can DELIVER a stash file to the user. The
+    handler records the name into `outbound`; the caller passes that list
+    as `AgentOutput.files`, which the channel resolves + sends
+    ([channel.md] §7). Files are only sent when explicitly named here —
+    scratch files the model writes are not auto-delivered."""
+
+    async def _handler(ctx: TaskContext, args: dict[str, Any]) -> str:
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return "send_file needs a non-empty 'name'."
+        if not await _stash_has(ctx, name):
+            return (
+                f"No stash file named '{name}'. Create it first with "
+                "write_file, or pass a name a specialist returned."
+            )
+        if name not in outbound:
+            outbound.append(name)
+        return f"OK — '{name}' will be delivered to the user with this reply."
+
+    return LocalTool(
+        spec=ToolSpec(
+            name="send_file",
+            description=(
+                "Deliver a file to the user as an attachment, alongside your "
+                "text reply. Pass a stash file name — one you created with "
+                "write_file, or a name a specialist returned to you. Use this "
+                "whenever the user should receive an actual file (a document, "
+                "export, image, etc.), not just text about it."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Stash file name: '{filename}' (session stash) or "
+                            "'persist/{filename}' (persistent stash)."
+                        ),
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        handler=_handler,
+    )

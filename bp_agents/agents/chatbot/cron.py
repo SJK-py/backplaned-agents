@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
+from bp_agents.agents.chatbot.gateway import send_named_file
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
@@ -31,6 +32,7 @@ from bp_sdk import Message, TaskContext, ToolSpec
 if TYPE_CHECKING:
     import asyncpg
 
+    from bp_agents.agents.chatbot.credentials import ChannelCredentials
     from bp_agents.agents.chatbot.gateway import RootDispatcher
     from bp_agents.agents.chatbot.telegram import TelegramClient
     from bp_agents.db.models import CronJobRow
@@ -58,12 +60,14 @@ class CronScheduler:
         settings: SuiteSettings,
         telegram: TelegramClient | None,
         session_lock: Callable[[str], asyncio.Lock],
+        credentials: ChannelCredentials | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
         self._settings = settings
         self._telegram = telegram
         self._session_lock = session_lock
+        self._credentials = credentials
 
     async def run_loop(self, stop: asyncio.Event, *, interval_s: float = 60.0) -> None:
         while not stop.is_set():
@@ -140,6 +144,7 @@ class CronScheduler:
             )
             out = result.output
             message = (out.content if out else None) or ""
+            out_files = list(out.files) if out else []
             meta = out.metadata if out else {}
             reason = meta.get("reason")
             reported = _effective_report(job.report, bool(meta.get("report", False)))
@@ -147,21 +152,31 @@ class CronScheduler:
             # C3: log the error, mark executed anyway (no retry storm).
             logger.exception("cron_execute_failed", extra={"event": "cron_execute_failed"})
             error = type(exc).__name__
+            out_files = []
 
-        if reported and message:
+        if reported and (message or out_files):
             # Apply step — serialized with the user's turns ([cron.md] §2).
             async with self._session_lock(session_id):
                 async with self._pool.acquire() as conn:
-                    await queries.append_history(
-                        conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                        role="assistant", message=message,
-                    )
+                    if message:
+                        await queries.append_history(
+                            conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                            role="assistant", message=message,
+                        )
                     info = await queries.get_session_info(conn, session_id)
             if self._telegram is not None and info and info.chat_id:
-                try:
-                    await self._telegram.send_message(chat_id=info.chat_id, text=message)
-                except Exception:  # noqa: BLE001 — C5: row already appended
-                    logger.exception("cron_send_failed", extra={"event": "cron_send_failed"})
+                if message:
+                    try:
+                        await self._telegram.send_message(chat_id=info.chat_id, text=message)
+                    except Exception:  # noqa: BLE001 — C5: row already appended
+                        logger.exception("cron_send_failed", extra={"event": "cron_send_failed"})
+                # Deliver any files the run produced for the user ([channel.md] §7).
+                for name in out_files:
+                    await send_named_file(
+                        telegram=self._telegram, credentials=self._credentials,
+                        chat_id=info.chat_id, user_id=job.user_id,
+                        session_id=session_id, name=name,
+                    )
 
         async with self._pool.acquire() as conn:
             await queries.record_cron_execution(

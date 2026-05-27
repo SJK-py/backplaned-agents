@@ -63,8 +63,17 @@ class _StubPeers:
         self.delegations.append((dest, payload, mode))
 
 
+class _StubFiles:
+    def __init__(self, session=()) -> None:
+        self._session = list(session)
+
+    async def list(self, *, persistent=False, query=None):
+        return [] if persistent else list(self._session)
+
+
 class _Ctx:
-    def __init__(self, llm, peers, *, user_id="usr_a", session_id="ses_1", delegating=None):
+    def __init__(self, llm, peers, *, user_id="usr_a", session_id="ses_1",
+                 delegating=None, files=None):
         self.llm = llm
         self.peers = peers
         self.progress = _StubProgress()
@@ -72,6 +81,7 @@ class _Ctx:
         self.session_id = session_id
         self.user_level = "tier0"
         self.delegating_agent_id = delegating
+        self.files = files
 
 
 def _settings(url: str) -> SuiteSettings:
@@ -121,6 +131,33 @@ def test_orchestrator_hand_off(suite_db_url: str) -> None:
                 )
             assert rows and rows[0].role == "user"
             assert "reason about X" in rows[0].message
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_orchestrator_message_surfaces_send_file(suite_db_url: str) -> None:
+    """When the model calls `send_file`, the name rides out on
+    `AgentOutput.files` so the channel delivers it to the user."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            # Round 1: model attaches a file; round 2: final text.
+            llm = _StubLlm([
+                LlmResponse(text="", tool_calls=[ToolCall(
+                    id="c1", name="send_file", args={"name": "report.pdf"},
+                )]),
+                LlmResponse(text="Here's your report."),
+            ])
+            ctx = _Ctx(llm, _StubPeers(), files=_StubFiles(session=["report.pdf"]))
+            out = await run_orchestrator_message(
+                ctx, MessagePayload(prompt="make me a report"),
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            assert out.content == "Here's your report."
+            assert out.files == ["report.pdf"]
         finally:
             await pool.close()
 

@@ -28,6 +28,37 @@ logger = logging.getLogger(__name__)
 
 PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
+
+
+async def send_named_file(
+    *,
+    telegram: TelegramClient,
+    credentials: ChannelCredentials | None,
+    chat_id: str,
+    user_id: str,
+    session_id: str,
+    name: str,
+) -> None:
+    """Resolve a produced file-store name to bytes and send it as a
+    Telegram document. Best-effort — a failure is logged, never raised
+    (an undeliverable attachment must not break the turn). Shared by the
+    inbound message path and the cron scheduler ([channel.md] §7)."""
+    if credentials is None:
+        return
+    try:
+        file_id = await credentials.resolve_named_file(
+            user_id=user_id, session_id=session_id, name=name,
+        )
+        if file_id is None:
+            return
+        data = await credentials.fetch_file(user_id=user_id, file_id=file_id)
+        await telegram.send_document(
+            chat_id=chat_id, filename=name.rsplit("/", 1)[-1], data=data,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "outbound_file_failed", extra={"event": "outbound_file_failed"}
+        )
 ORCHESTRATOR_AGENT_ID = "orchestrator"
 MEMORY_AGENT_ID = "memory"
 CONFIG_AGENT_ID = "config"
@@ -559,24 +590,10 @@ class ChatbotGateway:
     async def _send_outbound_file(
         self, chat_id: str, user_id: str, session_id: str, name: str
     ) -> None:
-        """Resolve a produced file-store name and send the bytes.
-        Best-effort."""
-        if self._credentials is None:
-            return
-        try:
-            file_id = await self._credentials.resolve_named_file(
-                user_id=user_id, session_id=session_id, name=name,
-            )
-            if file_id is None:
-                return
-            data = await self._credentials.fetch_file(user_id=user_id, file_id=file_id)
-            await self._telegram.send_document(
-                chat_id=chat_id, filename=name.rsplit("/", 1)[-1], data=data,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "outbound_file_failed", extra={"event": "outbound_file_failed"}
-            )
+        await send_named_file(
+            telegram=self._telegram, credentials=self._credentials,
+            chat_id=chat_id, user_id=user_id, session_id=session_id, name=name,
+        )
 
     async def _update_delegation(self, session_id: str, dest: str, result) -> None:  # noqa: ANN001
         """Maintain `delegated_to` from the result source ([delegation.md] §2).
