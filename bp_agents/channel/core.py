@@ -76,6 +76,12 @@ class ChannelCore:
         # Detached fire-and-forget memory.add tasks (tracked for cleanup).
         self._memory_tasks: set[asyncio.Task] = set()
 
+    @property
+    def delegatable_agents(self) -> frozenset[str]:
+        """The agent ids a user may `/delegate` to (the channel's allow-list).
+        Exposed so a frontend can render the delegation picker."""
+        return self._delegatable
+
     # -- session serialization + routing --------------------------------
 
     def session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard

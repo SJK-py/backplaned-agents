@@ -26,7 +26,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from bp_agents.agents.webapp.auth import make_auth_middleware
 from bp_agents.agents.webapp.config import WebappConfig
 from bp_agents.agents.webapp.csrf import make_csrf_middleware
-from bp_agents.agents.webapp.pages import auth_pages, chat, sessions
+from bp_agents.agents.webapp.pages import auth_pages, chat, files, sessions
 from bp_agents.agents.webapp.upstream import UpstreamClient
 
 if TYPE_CHECKING:
@@ -119,4 +119,5 @@ def create_app(
     app.include_router(auth_pages.router)
     app.include_router(sessions.router)
     app.include_router(chat.router)
+    app.include_router(files.router)
     return app

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Files — backplaned{% endblock %}
+
+{% block content %}
+<div x-data="{ tab: '{{ tab }}' }">
+  <div class="mb-4 flex items-center gap-3">
+    <a href="/chat/{{ session_id }}" class="text-sm text-brand-500 hover:text-brand-700">
+      &larr; Chat
+    </a>
+    <h1 class="text-xl font-semibold text-brand-900">Files</h1>
+  </div>
+
+  {% if error %}
+    <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {{ error }}
+    </div>
+  {% endif %}
+
+  <div class="mb-4 flex gap-1 border-b border-brand-500/10 text-sm">
+    <button @click="tab = 'session'"
+            :class="tab === 'session' ? 'border-brand-900 text-brand-900' : 'border-transparent text-brand-500'"
+            class="border-b-2 px-3 py-2">This session</button>
+    <button @click="tab = 'persist'"
+            :class="tab === 'persist' ? 'border-brand-900 text-brand-900' : 'border-transparent text-brand-500'"
+            class="border-b-2 px-3 py-2">Persistent</button>
+  </div>
+
+  <div x-show="tab === 'session'">
+    {% with names=session_files %}{% include "files/_list.html" %}{% endwith %}
+    {% with scope="session", label="Upload to this session" %}
+      {% include "files/_upload.html" %}
+    {% endwith %}
+  </div>
+
+  <div x-show="tab === 'persist'" x-cloak>
+    {% with names=persist_files %}{% include "files/_list.html" %}{% endwith %}
+    {% with scope="persist", label="Upload to persistent stash" %}
+      {% include "files/_upload.html" %}
+    {% endwith %}
+  </div>
+</div>
+{% endblock %}

@@ -22,19 +22,16 @@ import asyncio
 import contextlib
 import logging
 import secrets
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.upstream import UpstreamError
+from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
 from bp_agents.channel import ORCHESTRATOR_AGENT_ID, agent_tag, render_progress_line
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
-
-if TYPE_CHECKING:
-    from bp_agents.db.models import SessionInfoRow
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,21 +39,6 @@ router = APIRouter()
 # Cap the pending-turn registry so a tab that POSTs but never opens the
 # stream can't grow it without bound (oldest dropped).
 _MAX_PENDING_TURNS = 512
-
-
-async def _owned_session(request: Request, session_id: str) -> SessionInfoRow | None:
-    """The user's `session_info` row for `session_id`, or None (→ 404). The
-    router's `admit_task` is the ultimate ownership gate on injection; this
-    is the local UX check + the source of the active thread."""
-    pool = request.app.state.pool
-    user_id = session_user_id(request)
-    if pool is None or not user_id:
-        return None
-    async with pool.acquire() as conn:
-        info = await queries.get_session_info(conn, session_id)
-    if info is None or info.user_id != user_id:
-        return None
-    return info
 
 
 @router.get("/chat/{session_id}", response_class=HTMLResponse)
@@ -82,6 +64,8 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
             "tag": tag if r.role == "assistant" else "",
         })
 
+    core = request.app.state.core
+    delegatable = sorted(core.delegatable_agents) if core is not None else []
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -90,9 +74,36 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
             "session_id": session_id,
             "history": history,
             "delegated_to": info.delegated_to,
+            "delegatable": delegatable,
             "active_section": "sessions",
         },
     )
+
+
+@router.post("/chat/{session_id}/delegate")
+async def chat_delegate(
+    session_id: str, request: Request, agent: str = Form(...)
+) -> Response:
+    """Hand the session to specialist `agent` (the deterministic path,
+    [delegation.md] §6b). Reloads the chat so the new active thread + badge
+    render."""
+    info = await _owned_session(request, session_id)
+    core = request.app.state.core
+    if info is None or core is None:
+        raise HTTPException(status_code=404)
+    await core.delegate(session_user_id(request), session_id, agent.strip())
+    return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
+
+
+@router.post("/chat/{session_id}/undelegate")
+async def chat_undelegate(session_id: str, request: Request) -> Response:
+    """Return the session to the main assistant."""
+    info = await _owned_session(request, session_id)
+    core = request.app.state.core
+    if info is None or core is None:
+        raise HTTPException(status_code=404)
+    await core.undelegate(session_user_id(request), session_id)
+    return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
 
 
 @router.post("/chat/{session_id}", response_class=HTMLResponse)
@@ -201,36 +212,6 @@ async def chat_stream(
         _gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@router.get("/files/{session_id}/{name:path}")
-async def download_file(session_id: str, name: str, request: Request) -> Response:
-    """Resolve a produced file NAME in the session scope and stream its
-    bytes (the user's own token). Powers the chat answer's download chips."""
-    info = await _owned_session(request, session_id)
-    if info is None:
-        raise HTTPException(status_code=404)
-    upstream = request.app.state.upstream
-    access = request.session["access_token"]
-    try:
-        file_id = await upstream.resolve_named_file(
-            access_token=access, session_id=session_id, name=name
-        )
-        if file_id is None:
-            raise HTTPException(status_code=404)
-        data = await upstream.fetch_file(access_token=access, file_id=file_id)
-    except UpstreamError as exc:
-        logger.warning(
-            "webapp_file_download_failed",
-            extra={"event": "webapp_file_download_failed", "status_code": exc.status_code},
-        )
-        raise HTTPException(status_code=502) from exc
-    filename = name.rsplit("/", 1)[-1]
-    return Response(
-        content=data,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

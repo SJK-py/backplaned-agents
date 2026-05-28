@@ -87,6 +87,47 @@ class UpstreamClient:
             "GET", "/v1/sessions", access_token=access_token
         )
 
+    # -- files (user token) — stash listing + upload ------------------
+
+    async def list_names(
+        self, *, access_token: str, session_id: str | None = None,
+        persistent: bool = False,
+    ) -> list[str]:
+        params: dict[str, Any] = {"persistent": str(persistent).lower()}
+        if session_id is not None:
+            params["session_id"] = session_id
+        body = await self.request(
+            "GET", "/v1/files/names", access_token=access_token, params=params
+        )
+        return body.get("names", []) if body else []
+
+    async def upload_file(
+        self, *, access_token: str, filename: str, data: bytes,
+        session_id: str | None = None, persistent: bool = False,
+        mime_type: str | None = None,
+    ) -> str:
+        """Upload a blob then bind it to a stash NAME (session or `persist/`),
+        the user's own token. Returns the actual saved name (post-dedup)."""
+        headers = {"Authorization": f"Bearer {access_token}"}
+        params = {} if persistent else {"session_id": session_id or ""}
+        up = await self._http.post(
+            "/v1/files", headers=headers, params=params,
+            files={"file": (filename, data, mime_type or "application/octet-stream")},
+        )
+        if up.status_code >= 400:
+            raise UpstreamError(up.status_code, up.text)
+        sha256 = up.json()["sha256"]
+        name = f"persist/{filename}" if persistent else filename
+        bind_body: dict[str, Any] = {"name": name, "sha256": sha256}
+        if not persistent:
+            bind_body["session_id"] = session_id
+        bind = await self._http.post(
+            "/v1/files/names", headers=headers, json=bind_body
+        )
+        if bind.status_code >= 400:
+            raise UpstreamError(bind.status_code, bind.text)
+        return bind.json()["saved_name"]
+
     # -- files (user token) — resolve a produced NAME → bytes ----------
 
     async def resolve_named_file(

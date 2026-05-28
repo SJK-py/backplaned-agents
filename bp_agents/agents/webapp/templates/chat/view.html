@@ -3,7 +3,7 @@
 
 {% block content %}
 <div class="flex flex-col h-[calc(100vh-7rem)] md:h-[calc(100vh-4rem)]">
-  <div class="mb-3 flex items-center gap-3">
+  <div class="mb-3 flex flex-wrap items-center gap-3">
     <a href="/" class="text-sm text-brand-500 hover:text-brand-700">&larr; Sessions</a>
     {% if delegated_to %}
       <span class="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
@@ -14,6 +14,34 @@
         Main assistant
       </span>
     {% endif %}
+
+    <div class="ml-auto flex items-center gap-2">
+      <a href="/files/{{ session_id }}"
+         class="text-sm text-brand-500 hover:text-brand-700 underline underline-offset-2">
+        Files
+      </a>
+      {% if delegated_to %}
+        <button type="button"
+                hx-post="/chat/{{ session_id }}/undelegate"
+                class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
+          Return to assistant
+        </button>
+      {% elif delegatable %}
+        <form hx-post="/chat/{{ session_id }}/delegate" class="flex items-center gap-1">
+          {% include "_partials/csrf.html" %}
+          <select name="agent"
+                  class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700">
+            {% for a in delegatable %}
+              <option value="{{ a }}">{{ a.replace("_", " ").title() }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit"
+                  class="rounded bg-brand-900 px-2 py-1 text-xs font-medium text-white hover:bg-brand-700">
+            Delegate
+          </button>
+        </form>
+      {% endif %}
+    </div>
   </div>
 
   <div id="messages"
