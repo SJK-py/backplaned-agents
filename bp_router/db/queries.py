@@ -863,6 +863,50 @@ class Scope:
         )
         return int(result.rsplit(" ", 1)[-1])
 
+    async def purge_session(self, session_id: str) -> bool:
+        """Hard-delete a session and its router-side dependents, user-scoped,
+        in FK order. Caller MUST run inside a transaction and should have
+        closed the session first (so no task is mid-flight).
+
+        `files` rows are **detached** (`session_id`/`task_id` → NULL), not
+        deleted: they're content-addressed, dedup'd per `(user, sha256)`,
+        and refcounted by `file_names`, so deleting them could break a
+        `persist/` name that shares the row. The reclaim sweep frees the
+        blob once no name references it — same contract as session close.
+        Returns True if a session row was removed (False ⇒ not found)."""
+        user_id = self._require_user()
+        tids = [
+            r["task_id"]
+            for r in await self._conn.fetch(
+                "SELECT task_id FROM tasks WHERE session_id = $1 AND user_id = $2",
+                session_id, user_id,
+            )
+        ]
+        if tids:
+            await self._conn.execute(
+                "DELETE FROM task_events WHERE task_id = ANY($1::text[])", tids
+            )
+        await self.delete_file_names_for_scope(f"session:{session_id}")
+        await self._conn.execute(
+            "UPDATE files SET session_id = NULL WHERE user_id = $1 AND session_id = $2",
+            user_id, session_id,
+        )
+        if tids:
+            await self._conn.execute(
+                "UPDATE files SET task_id = NULL "
+                "WHERE user_id = $1 AND task_id = ANY($2::text[])",
+                user_id, tids,
+            )
+        await self._conn.execute(
+            "DELETE FROM tasks WHERE session_id = $1 AND user_id = $2",
+            session_id, user_id,
+        )
+        status = await self._conn.execute(
+            "DELETE FROM sessions WHERE session_id = $1 AND user_id = $2",
+            session_id, user_id,
+        )
+        return status.endswith(" 1")
+
     async def count_user_storage_bytes(self) -> int:
         """Per-user storage usage = SUM(byte_size) over the user's
         directory rows (session + persist). Drives the quota gate.

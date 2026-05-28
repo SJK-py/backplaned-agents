@@ -20,6 +20,30 @@
 
 ## 2026-05-28
 
+### Added — session hard-delete (`DELETE /v1/sessions/{id}?purge=true`)
+
+- **What:** `DELETE /v1/sessions/{id}` gains a `purge` query param. `false`
+  (default) is the existing soft **close**; `true` closes-then-**hard-deletes**
+  the session and its router-side data (`bp_router/api/sessions.py`,
+  `queries.Scope.purge_session`). Refactored the close body into a shared
+  `_close_session` helper used by both paths.
+- **Why:** the webapp's "remove session" needs a true delete; only soft close
+  existed. This is the **only router-side change** the webapp requires.
+- **Shape:** **Added** — default behavior unchanged. The purge deletes in FK
+  order (`task_events` → file-name directory → `tasks` → `sessions`) inside
+  one transaction, and **detaches** `files` rows (`session_id`/`task_id` →
+  NULL) rather than deleting them — they're content-addressed, dedup'd per
+  `(user, sha256)`, and refcounted by `file_names`, so the reclaim sweep frees
+  the blob once unreferenced (same contract as close; a `persist/` name
+  sharing the row is preserved). Audits `session.purged`. Suite-side data
+  (`bp_suite` `session_history` / `session_info` / `cron_jobs`) is the
+  webapp's responsibility to clean — out of router scope.
+- **Verified:** `tests/test_session_purge.py` — a real-DB cascade test
+  (seeds user→agent→session→task→event→file→file_name; asserts the session +
+  dependents are gone, the dedup'd `files` row detached, a `persist/` name
+  survives) + source-inspection guards; existing close-GC tests repointed at
+  the extracted helper.
+
 ### Fixed — broadcast a CatalogUpdate when a handshake refreshes agent info
 
 - **What:** When `_handshake` refreshes a reconnecting agent's published
