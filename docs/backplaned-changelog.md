@@ -20,6 +20,21 @@
 
 ## 2026-05-28
 
+### Changed — drop the `[capabilities: …]` suffix from tool descriptions
+
+- **What:** `build_tools` (`bp_sdk/tools.py::_description`) no longer appends
+  `" [capabilities: …]"` to a tool's description; it emits the per-mode (or
+  agent-level) description verbatim.
+- **Why:** capabilities are ACL/catalog metadata; echoing them into the
+  tool description the model reads is redundant and sometimes misleading
+  (capability names like `assistant.rag` aren't usage guidance). Per-mode
+  descriptions now carry the actual "what this tool does" text.
+- **Shape:** **Behavior change** to generated tool schemas (description
+  text only — names/params unchanged). Catalog/admin still expose
+  `capabilities` as a structured field.
+- **Verified:** `tests/test_per_mode_tool_descriptions.py` asserts verbatim
+  descriptions + no suffix; tool/suite suites green.
+
 ### Added — per-mode tool descriptions (`AgentInfo.mode_descriptions`)
 
 - **What:** A new optional `AgentInfo.mode_descriptions: dict[str, str]`

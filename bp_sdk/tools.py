@@ -167,11 +167,11 @@ def _safe_tool_name(agent_id: str) -> str:
 
 
 def _description(entry: dict[str, Any], *, override: str | None = None) -> str:
-    desc = override or entry.get("description", "")
-    caps = entry.get("capabilities") or []
-    if caps:
-        desc += f" [capabilities: {', '.join(caps)}]"
-    return desc
+    # The per-mode description (when set) else the agent-level one. No
+    # `[capabilities: …]` suffix — capabilities are ACL/catalog metadata,
+    # redundant (and sometimes misleading) inside a tool description the
+    # model reads.
+    return override or entry.get("description", "")
 
 
 # ---------------------------------------------------------------------------

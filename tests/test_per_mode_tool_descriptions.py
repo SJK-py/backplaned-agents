@@ -60,13 +60,13 @@ def _descs(a: Agent) -> dict[str, str]:
 
 def test_build_tools_uses_per_mode_description_with_fallback() -> None:
     d = _descs(_agent_with_modes())
-    # Per-mode descriptions win…
-    assert d["call_kb_retrieve"].startswith("Search the knowledge base.")
-    assert d["call_kb_remove"].startswith("Delete a document by id.")
+    # Per-mode descriptions win, verbatim — no trailing metadata.
+    assert d["call_kb_retrieve"] == "Search the knowledge base."
+    assert d["call_kb_remove"] == "Delete a document by id."
     # …a mode without one falls back to the agent-level description.
-    assert d["call_kb_plain"].startswith("Agent-level desc.")
-    # Capabilities suffix still appended to each.
-    assert all("[capabilities: database.retrieval]" in v for v in d.values())
+    assert d["call_kb_plain"] == "Agent-level desc."
+    # Capabilities are NOT appended to the tool description.
+    assert all("[capabilities:" not in v for v in d.values())
 
 
 def test_single_mode_agent_keeps_agent_level_description() -> None:
