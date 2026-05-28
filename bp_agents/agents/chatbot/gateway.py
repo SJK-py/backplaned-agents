@@ -80,6 +80,8 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("stop", "stop the current in-progress reply"),
     ("config", "view or change your settings"),
     ("cron", "manage scheduled reminders/tasks"),
+    ("delegate", "hand this chat to a specialist (e.g. /delegate research)"),
+    ("undelegate", "return to the main assistant"),
     ("password", "get a one-time link to set a web password"),
     ("v", "verbose: prefix a message to see step-by-step progress"),
     ("help", "show the command list"),
@@ -117,13 +119,18 @@ _VERBOSE_PREFIX = "💭 "
 _UNTAGGED_AGENTS = frozenset({ORCHESTRATOR_AGENT_ID, "router"})
 
 
+def _pretty_agent(agent_id: str) -> str:
+    """`computer_use` → `Computer Use` — a human-readable specialist name."""
+    return agent_id.replace("_", " ").title()
+
+
 def _agent_tag(agent_id: str | None) -> str:
     """`"[Research Agent] "` for a delegate, `""` otherwise. Prettifies the
     agent_id (underscores → spaces, title case) so the user sees which
     specialist currently holds the session."""
     if not agent_id or agent_id in _UNTAGGED_AGENTS:
         return ""
-    return f"[{agent_id.replace('_', ' ').title()} Agent] "
+    return f"[{_pretty_agent(agent_id)} Agent] "
 # Delegation transition tools read better as plain phrases than as a raw
 # `[Tool] hand_off` line (they're terminal tools, not ordinary dispatches).
 _TRANSITION_PHRASE = {
@@ -196,6 +203,7 @@ class ChatbotGateway:
         result_timeout_s: float = 180.0,
         fire_memory: bool = False,
         redis: Any | None = None,
+        delegatable_agents: frozenset[str] = frozenset(),
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
@@ -203,6 +211,9 @@ class ChatbotGateway:
         self._credentials = credentials
         self._result_timeout_s = result_timeout_s
         self._fire_memory = fire_memory
+        # Agent ids a user may /delegate to (the l1 specialists). The channel
+        # has no peer catalog, so this is its allow-list.
+        self._delegatable = delegatable_agents
         # Per-`session_id` FIFO serialization ([sessions.md] §4). In-process
         # only when `redis` is None (single channel instance); cross-process
         # (distributed lock) when a Redis client is supplied — the
@@ -278,6 +289,10 @@ class ChatbotGateway:
         elif cmd == "/cron":
             await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "cron",
                                   arg or "List my scheduled jobs.")
+        elif cmd == "/delegate":
+            await self._cmd_delegate(chat_id, arg)
+        elif cmd == "/undelegate":
+            await self._cmd_undelegate(chat_id)
         else:
             await self._telegram.send_message(
                 chat_id=chat_id,
@@ -323,6 +338,156 @@ class ChatbotGateway:
             return
         reply = (result.output.content if result.output else "") or "Done."
         await self._telegram.send_message(chat_id=chat_id, text=reply)
+
+    # ------------------------------------------------------------------
+    # /delegate · /undelegate — user-driven delegation switch
+    # ([delegation.md] §6: the deterministic, channel-driven path).
+    # ------------------------------------------------------------------
+
+    async def _resolve_session(self, chat_id: str) -> tuple[str, str] | None:
+        """`(user_id, session_id)` for a registered chat, or None after
+        sending the appropriate prompt."""
+        user_id = await self._resolve_user(chat_id)
+        if user_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
+            return None
+        async with self._pool.acquire() as conn:
+            cfg = await queries.get_user_config(conn, user_id)
+        session_id = cfg.default_session_id if cfg else None
+        if session_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
+            return None
+        return user_id, session_id
+
+    async def _summarize_thread(
+        self, session_id: str, user_id: str, agent_id: str, *, previous: str | None
+    ) -> str:
+        """Best-effort complete summary of one agent's incumbent thread (the
+        prior rolling summary folded in). Returns `previous` (or '') on an
+        empty thread or a summarizer failure — never blocks the switch."""
+        async with self._pool.acquire() as conn:
+            rows = await queries.reload_incumbent(
+                conn, session_id=session_id, agent_id=agent_id
+            )
+        if not rows:
+            return previous or ""
+        from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
+            HISTORY_SUMMARIZER_AGENT_ID,
+            SummarizeIncumbent,
+        )
+        try:
+            task_id = await self._dispatcher.spawn_root_for_user(
+                HISTORY_SUMMARIZER_AGENT_ID,
+                SummarizeIncumbent(
+                    agent_id=agent_id, up_to=rows[-1].id, previous_summary=previous
+                ),
+                user_id=user_id, session_id=session_id, mode="summarize_incumbent",
+            )
+            result = await self._dispatcher.await_root_result(
+                task_id, timeout_s=self._result_timeout_s
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "delegation_summarize_failed",
+                extra={"event": "delegation_summarize_failed",
+                       "bp.session_id": session_id, "agent_id": agent_id},
+            )
+            return previous or ""
+        return (result.output.content if result.output else "") or (previous or "")
+
+    async def _fold_back(
+        self, session_id: str, user_id: str, delegate: str, info
+    ) -> None:  # noqa: ANN001
+        """End a delegation: summarize the delegate thread into a recap row on
+        the main thread, retire the delegate episode, and clear the flags.
+        Mirrors `orchestrator.end_delegation` ([delegation.md] Phase 3)."""
+        summary = await self._summarize_thread(
+            session_id, user_id, delegate,
+            previous=info.delegate_summary if info else None,
+        )
+        recap = f"[Returned from {_pretty_agent(delegate)}] {summary or '(no summary)'}"
+        async with self._pool.acquire() as conn:
+            await queries.append_history(
+                conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                role="user", message=recap, incumbent=True, hidden=True,
+            )
+            await queries.demote_thread(conn, session_id=session_id, agent_id=delegate)
+            await queries.update_session_info(
+                conn, session_id, delegate_summary=None, delegated_to=None
+            )
+
+    async def _cmd_delegate(self, chat_id: str, arg: str) -> None:
+        resolved = await self._resolve_session(chat_id)
+        if resolved is None:
+            return
+        user_id, session_id = resolved
+        target = arg.split(maxsplit=1)[0] if arg.split(maxsplit=1) else ""
+        if target not in self._delegatable:
+            avail = ", ".join(sorted(self._delegatable)) or "(none configured)"
+            await self._telegram.send_message(
+                chat_id=chat_id,
+                text=f"Can't delegate to {target or '(missing agent)'}. "
+                     f"Available: {avail}.",
+            )
+            return
+        async with self._session_lock(session_id):
+            async with self._pool.acquire() as conn:
+                info = await queries.get_session_info(conn, session_id)
+            current = info.delegated_to if info else None
+            if current == target:
+                await self._telegram.send_message(
+                    chat_id=chat_id,
+                    text=f"Already delegated to {_pretty_agent(target)}.",
+                )
+                return
+            # Implicit switch: fold the current delegate back before seeding
+            # the new one, so its work isn't lost.
+            if current:
+                await self._fold_back(session_id, user_id, current, info)
+                async with self._pool.acquire() as conn:
+                    info = await queries.get_session_info(conn, session_id)
+            # Seed the new delegate with the conversation so far.
+            summary = await self._summarize_thread(
+                session_id, user_id, ORCHESTRATOR_AGENT_ID,
+                previous=info.history_summary if info else None,
+            )
+            seed = (
+                "## Conversation so far (summarized)\n"
+                f"{summary or '(no prior conversation)'}\n\n"
+                "The user has delegated this conversation to you; continue "
+                "helping them directly."
+            )
+            async with self._pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id=session_id, agent_id=target,
+                    role="user", message=seed, incumbent=True, hidden=True,
+                )
+                await queries.update_session_info(conn, session_id, delegated_to=target)
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=f"Delegated to {_pretty_agent(target)} — it'll handle your "
+                 "messages until /undelegate.",
+        )
+
+    async def _cmd_undelegate(self, chat_id: str) -> None:
+        resolved = await self._resolve_session(chat_id)
+        if resolved is None:
+            return
+        user_id, session_id = resolved
+        async with self._session_lock(session_id):
+            async with self._pool.acquire() as conn:
+                info = await queries.get_session_info(conn, session_id)
+            current = info.delegated_to if info else None
+            if not current:
+                await self._telegram.send_message(
+                    chat_id=chat_id, text="You're already with the main assistant.",
+                )
+                return
+            await self._fold_back(session_id, user_id, current, info)
+        await self._telegram.send_message(
+            chat_id=chat_id,
+            text=f"Returned to the main assistant (was {_pretty_agent(current)}).",
+        )
 
     async def _resolve_user(self, chat_id: str) -> str | None:
         async with self._pool.acquire() as conn:

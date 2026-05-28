@@ -41,6 +41,11 @@ class SuiteSettings(BaseSettings):
     unset, the lock is in-process only (correct for a single instance).
     May point at the same Redis the router uses; keys are prefixed."""
 
+    delegatable_agents: list[str] = ["research", "computer_use", "deep_reasoning"]
+    """Agent ids a user may hand the conversation to via `/delegate <id>`
+    (the l1 specialists). The channel has no peer-catalog visibility, so
+    this is the allow-list it validates `/delegate` targets against."""
+
     # ------------------------------------------------------------------
     # user_config defaults — seeded into a new `user_config` row at
     # registration approval; users tune them later via the config agent.

@@ -75,8 +75,13 @@ Every verbose line leads with a **`💭` marker** so it's visually distinct from
 | `/register [email]` | submit a pending registration (email optional) |
 | `/password` | mint a one-time password-setup token |
 | `/config [text]` | bare → show config; `<text>` → NL update via the config agent, **bypassing the orchestrator**; never written to history |
+| `/cron [text]` | manage scheduled jobs via the config agent's `cron` mode |
+| `/delegate <agent>` | hand the session to a specialist (validated against `delegatable_agents`): summarize the main thread → seed the delegate's thread → set `delegated_to`. While already delegated, folds the current one back first. The deterministic, channel-driven counterpart to the orchestrator's LLM `hand_off` (§ below). |
+| `/undelegate` | return to the main assistant: summarize the delegate thread into a recap row on the main thread, retire the delegate episode (`demote_thread`), clear `delegated_to`. |
 | `/v <text>` | one-shot verbose override |
 | `/help` | command reference |
+
+Both run **under the per-session lock** ([sessions.md §4](./sessions.md)) — they mutate `delegated_to` + history that turns read — and prepare context via the **history summarizer** (seed on delegate, recap on undelegate). They don't conflict with the result-source `delegated_to` maintenance (§2): steady-state delegated turns are `dest=delegate, producer=delegate` (no change), and post-`/undelegate` turns are `dest=orch, producer=orch` (no change).
 
 Delegation-control commands (e.g. `/unlink`) follow [`delegation.md`](./delegation.md). Slash handling fires **after** the `/v` strip, so `/v /register` still routes to registration.
 

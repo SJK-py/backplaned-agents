@@ -47,10 +47,11 @@ class _FakeDispatcher:
     async def spawn_root_for_user(
         self, dest, payload, *, user_id, session_id, mode=None, **kw
     ) -> str:
-        self.spawns.append((dest, payload.prompt, user_id, session_id, mode))
+        prompt = getattr(payload, "prompt", None)  # summarizer payloads have none
+        self.spawns.append((dest, prompt, user_id, session_id, mode))
         if self.fail:
             raise RuntimeError("admit failed")
-        return f"tsk:{payload.prompt}"
+        return f"tsk:{prompt}"
 
     async def await_root_result(self, task_id, *, timeout_s=None, **kw):
         return ResultFrame(
@@ -285,6 +286,148 @@ def test_cmd_agent_surfaces_failed_task(suite_db_url: str) -> None:
             assert len(tg.sent) == 1
             assert "went wrong" in tg.sent[0][1]
             assert "Done." not in tg.sent[0][1]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+# --- /delegate · /undelegate -------------------------------------------
+
+_DELEGATABLE = frozenset({"research", "computer_use", "deep_reasoning"})
+
+
+def _deleg_gw(pool, tg, disp):
+    return ChatbotGateway(
+        dispatcher=disp, pool=pool, telegram=tg, delegatable_agents=_DELEGATABLE
+    )
+
+
+def test_delegate_sets_state_and_seeds_delegate_thread(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="user", message="help me plan a trip",
+                )
+            tg = _FakeTelegram()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="trip-planning summary"))
+            await gw.handle_update("tg1", "/delegate research")
+
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_1")
+                seed_rows = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="research"
+                )
+            assert info.delegated_to == "research"
+            assert seed_rows and "delegated this conversation" in seed_rows[-1].message
+            assert "trip-planning summary" in seed_rows[-1].message  # summarizer output
+            assert "Research" in tg.sent[-1][1]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_delegate_rejects_unknown_agent(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher())
+            await gw.handle_update("tg1", "/delegate memory")
+            assert "Can't delegate" in tg.sent[-1][1]
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_1")
+            assert info.delegated_to is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_undelegate_folds_back_to_main(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            async with pool.acquire() as conn:
+                await queries.update_session_info(conn, "ses_1", delegated_to="research")
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="research",
+                    role="assistant", message="found 3 flights",
+                )
+            tg = _FakeTelegram()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="did the research"))
+            await gw.handle_update("tg1", "/undelegate")
+
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_1")
+                main = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="orchestrator"
+                )
+                deleg = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="research"
+                )
+            assert info.delegated_to is None
+            assert info.delegate_summary is None
+            assert any("Returned from Research" in r.message for r in main)
+            assert deleg == []  # delegate episode demoted
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_undelegate_when_not_delegated_is_noop(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher())
+            await gw.handle_update("tg1", "/undelegate")
+            assert "main assistant" in tg.sent[-1][1]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_delegate_switch_folds_old_then_seeds_new(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            async with pool.acquire() as conn:
+                await queries.update_session_info(conn, "ses_1", delegated_to="research")
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="research",
+                    role="assistant", message="research output",
+                )
+            tg = _FakeTelegram()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="s"))
+            await gw.handle_update("tg1", "/delegate computer_use")
+
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_1")
+                main = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="orchestrator"
+                )
+                old = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="research"
+                )
+                new = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="computer_use"
+                )
+            assert info.delegated_to == "computer_use"
+            assert any("Returned from Research" in r.message for r in main)  # old folded
+            assert old == []                                                 # old demoted
+            assert new and "delegated this conversation" in new[-1].message  # new seeded
         finally:
             await pool.close()
 
