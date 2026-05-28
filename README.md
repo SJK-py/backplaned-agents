@@ -68,9 +68,10 @@ The system runs as a **router** (the Backplaned platform) plus a fleet of **suit
 ```bash
 # 0. Install. `llm-gemini` pulls the google-genai SDK the router needs to
 #    call Gemini (suite agents call the LLM via the router, so they don't
-#    need it); `admin` mounts the /admin web UI (else /admin/login 404s).
+#    need it); `admin` mounts the /admin web UI (else /admin/login 404s);
+#    `webapp` adds the browser channel's FastAPI/Jinja2 stack.
 uv venv && source .venv/bin/activate
-uv pip install -e ".[router,suite,dev,llm-gemini,admin]"
+uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
 
 # 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
 #    SearXNG, and rustfs(S3) are opt-in profiles (single-worker dev needs none):
@@ -86,12 +87,16 @@ set -a && . ./.env && set +a
 python -m bp_router                   # serves http://127.0.0.1:8000 — leave running
 
 # 3. Suite — migrates bp_suite, mints each agent's invitation, launches all
-#    11 agents, and applies the suite ACL. Run in a second shell (venv active).
+#    12 agents (incl. the webapp browser channel), and applies the suite ACL.
+#    Run in a second shell (venv active). run-suite.sh sets an insecure dev
+#    WEBAPP_SESSION_SECRET for you; the web UI serves on http://127.0.0.1:8002.
 set -a && . ./.env && set +a
 SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
 
 # 4. Message your bot on Telegram and send /register, then approve it at
 #    http://127.0.0.1:8000/admin/login  (admin creds were printed in step 2).
+#    For the browser channel: send /password to the bot to set a web password,
+#    then log in at http://127.0.0.1:8002 with your email + that password.
 ```
 
 ### Production — everything in Docker
@@ -109,7 +114,7 @@ scripts/init-prod-env.sh
 docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
 
-Then message the bot on Telegram, send `/register`, and approve it as admin. Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
+Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
 ---
 

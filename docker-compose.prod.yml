@@ -37,6 +37,8 @@ services:
     ports: ["80:80", "443:443"]
     environment:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+      # Webapp (browser channel) host — defaults to the `app.` subdomain.
+      WEBAPP_DOMAIN: ${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

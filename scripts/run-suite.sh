@@ -42,6 +42,13 @@ export SUITE_DATABASE_URL
 # writable by a non-root dev user, so `mkdir` would fail on the first bash.
 : "${SUITE_SANDBOX_ROOT:=/tmp/bp-suite-sandbox}"
 export SUITE_SANDBOX_ROOT
+# The webapp agent serves a browser UI (FastAPI) and needs a cookie-signing
+# secret + (over http://localhost) a non-secure cookie. Default insecure dev
+# values so `run-suite.sh` works out of the box; override for anything real.
+: "${WEBAPP_SESSION_SECRET:=dev-insecure-change-me-000000000000000000000000}"
+export WEBAPP_SESSION_SECRET
+: "${WEBAPP_SESSION_COOKIE_SECURE:=false}"
+export WEBAPP_SESSION_COOKIE_SECURE
 
 log() { printf '\033[1;36m[run-suite]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[run-suite]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -88,6 +95,7 @@ mint_invite() {
 AGENTS=(
     "orchestrator:false"
     "chatbot:true"
+    "webapp:false"
     "history_summarizer:false"
     "memory:false"
     "knowledge_base:false"
@@ -144,5 +152,6 @@ if [[ "${SKIP_ACL:-0}" != "1" ]]; then
         log "WARNING: load_acl failed — apply it manually with python -m bp_agents.load_acl"
 fi
 
+log "web UI: http://127.0.0.1:${WEBAPP_BIND_PORT:-8002}  (log in with your email + a web password — send /password to the bot to set one)"
 log "Ctrl-C to stop. Message the bot on Telegram and send /register (an admin approves it)."
 wait
