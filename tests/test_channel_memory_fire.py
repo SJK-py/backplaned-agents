@@ -67,7 +67,7 @@ def test_channel_fires_memory_add(suite_db_url: str) -> None:
             )
             await gw.handle_update("tg1", "remember I like cats")
             # Drain the detached memory.add task.
-            await asyncio.gather(*gw._memory_tasks)
+            await asyncio.gather(*gw._core._memory_tasks)
 
             mem = [s for s in disp.spawns if s[0] == "memory"]
             assert len(mem) == 1

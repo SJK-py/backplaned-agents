@@ -134,7 +134,7 @@ def test_channel_summarizes_over_limit(suite_db_url: str) -> None:
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram()
             )
             # context_tokens (500) > limit (100), 10 rows ≥ min.
-            await gw._maybe_summarize("ses_1", "orchestrator", 500)
+            await gw._core.maybe_summarize("ses_1", "orchestrator", 500)
 
             # Summarizer spawned with the 70% cutoff.
             assert len(disp.spawns) == 1
@@ -177,10 +177,10 @@ def test_channel_skips_summary_under_limit_or_too_few(suite_db_url: str) -> None
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram()
             )
             # Under the limit → no summarize.
-            await gw._maybe_summarize("ses_1", "orchestrator", 50)
+            await gw._core.maybe_summarize("ses_1", "orchestrator", 50)
             assert disp.spawns == []
             # None context_tokens → no summarize.
-            await gw._maybe_summarize("ses_1", "orchestrator", None)
+            await gw._core.maybe_summarize("ses_1", "orchestrator", None)
             assert disp.spawns == []
         finally:
             await pool.close()

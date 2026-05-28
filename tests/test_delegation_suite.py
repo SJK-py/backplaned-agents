@@ -399,19 +399,19 @@ def test_gateway_delegated_to_maintenance(suite_db_url: str) -> None:
             gw = ChatbotGateway(dispatcher=None, pool=pool, telegram=None)
 
             # Hand-off: dispatched orchestrator, delegate produced result.
-            await gw._update_delegation("ses_1", "orchestrator", _result(_L1))
+            await gw._core._update_delegation("ses_1", "orchestrator", _result(_L1))
             async with pool.acquire() as conn:
                 assert (await queries.get_session_info(conn, "ses_1")).delegated_to == _L1
 
             # Hand-back: dispatched delegate, orchestrator produced result.
-            await gw._update_delegation("ses_1", _L1, _result("orchestrator"))
+            await gw._core._update_delegation("ses_1", _L1, _result("orchestrator"))
             async with pool.acquire() as conn:
                 assert (await queries.get_session_info(conn, "ses_1")).delegated_to is None
 
             # F2: a delegated turn FAILED → revert to orchestrator.
             async with pool.acquire() as conn:
                 await queries.update_session_info(conn, "ses_1", delegated_to=_L1)
-            await gw._update_delegation("ses_1", _L1, _result(_L1, TaskStatus.FAILED))
+            await gw._core._update_delegation("ses_1", _L1, _result(_L1, TaskStatus.FAILED))
             async with pool.acquire() as conn:
                 assert (await queries.get_session_info(conn, "ses_1")).delegated_to is None
         finally:
