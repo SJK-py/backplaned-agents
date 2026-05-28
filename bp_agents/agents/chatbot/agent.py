@@ -16,18 +16,16 @@ from typing import TYPE_CHECKING
 
 from bp_agents.agents.chatbot.approval import approval_poll_loop
 from bp_agents.agents.chatbot.credentials import HttpChannelCredentials
-from bp_agents.agents.chatbot.cron import CronScheduler, run_cron_management
-from bp_agents.agents.chatbot.gateway import ChatbotGateway
+from bp_agents.agents.chatbot.cron import CronScheduler
+from bp_agents.agents.chatbot.gateway import BOT_COMMANDS, ChatbotGateway
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
 )
-from bp_agents.common.payloads import MessagePayload
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
-from bp_protocol.types import AgentInfo, AgentOutput
-from bp_sdk import Agent, TaskContext
+from bp_protocol.types import AgentInfo
+from bp_sdk import Agent
 
 if TYPE_CHECKING:
     import asyncpg
@@ -103,6 +101,12 @@ async def _startup() -> None:
     _telegram = HttpTelegramClient(
         _settings.telegram_bot_token, base_url=_settings.telegram_base_url
     )
+    # Advertise the command list to Telegram's "/" menu. Best-effort — a
+    # failure here must not stop the bot from polling.
+    try:
+        await _telegram.set_my_commands(BOT_COMMANDS)
+    except Exception:  # noqa: BLE001
+        logger.warning("set_my_commands_failed", extra={"event": "set_my_commands_failed"})
     gateway = ChatbotGateway(
         dispatcher=agent,
         pool=_pool,
@@ -138,17 +142,6 @@ async def _shutdown() -> None:
         await _credentials.aclose()
     if _pool is not None:
         await _pool.close()
-
-
-@agent.handler(mode="cron", tool=False)
-async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
-    """Cron job management (add/list/remove/modify) — reached via the
-    channel's `/cron` command."""
-    assert _pool is not None
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_lite if cfg else _settings.default_preset_lite
-    return await run_cron_management(ctx, payload, pool=_pool, preset=preset)
 
 
 async def _poll_loop(

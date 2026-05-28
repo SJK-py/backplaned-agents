@@ -21,15 +21,14 @@ _RULES: list[tuple[str, str, str, str, str]] = [
     ("allow", "*", "channel/*", "l1/*", "user message → delegate"),
     ("allow", "*", "l0/*", "channel/*", "orchestrator → channel push"),
     ("allow", "*", "l1/*", "channel/*", "delegate → channel push"),
-    ("allow", "*", "channel/*", "channel/*", "channel self-dispatch (/cron mode)"),
     # Memory
     ("allow", "*", "*/assistant.*", "l3/memory.retrieval", "assistant recall"),
     ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add"),
     # Summarization
     ("allow", "*", "channel/*", "l3/summarize.history", "channel summarizer"),
-    # User config
+    # User config + cron management (both hosted on the config agent)
     ("allow", "*", "l0/*", "l2/user.config", "orchestrator config changes"),
-    ("allow", "*", "channel/*", "l2/user.config", "webapp config UI (v2)"),
+    ("allow", "*", "channel/*", "l2/user.config", "channel /config + /cron commands"),
     # Infra + converters
     ("allow", "*", "*/computer.*", "infra/computer.*", "computer_use → sandbox"),
     ("allow", "*", "*/database.*", "l3/database.*", "research → knowledge_base"),

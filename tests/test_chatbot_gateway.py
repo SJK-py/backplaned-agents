@@ -9,12 +9,17 @@ serialization.
 from __future__ import annotations
 
 import asyncio
+import json
+
+import httpx
 
 from bp_agents.agents.chatbot.gateway import (
+    BOT_COMMANDS,
     HELP_TEXT,
     REGISTER_PROMPT,
     ChatbotGateway,
 )
+from bp_agents.agents.chatbot.telegram import HttpTelegramClient
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
@@ -199,6 +204,87 @@ def test_gateway_serializes_per_session(suite_db_url: str) -> None:
             second = disp.events[2].split(":", 1)[1]
             assert disp.events[3] == f"result:{second}"
             assert {first, second} == {"a", "b"}
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+# --- command registration (setMyCommands) -------------------------------
+
+
+def test_help_text_lists_every_command() -> None:
+    # HELP_TEXT is derived from BOT_COMMANDS, so each stays in lockstep.
+    for name, desc in BOT_COMMANDS:
+        assert f"/{name}" in HELP_TEXT
+        assert desc in HELP_TEXT
+
+
+def test_set_my_commands_posts_normalized_payload() -> None:
+    captured: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async def _drive() -> None:
+        client = HttpTelegramClient("TOKEN", base_url="https://api.telegram.org")
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        # Leading slash + mixed case must be normalized away.
+        await client.set_my_commands([("/Help", "show help"), ("v", "verbose")])
+        await client.aclose()
+
+    asyncio.run(_drive())
+    assert captured["url"].endswith("/botTOKEN/setMyCommands")
+    assert captured["body"]["commands"] == [
+        {"command": "help", "description": "show help"},
+        {"command": "v", "description": "verbose"},
+    ]
+
+
+# --- slash-command routing + failure surfacing -------------------------
+
+
+def test_cron_routes_to_config_agent(suite_db_url: str) -> None:
+    """/cron is hosted on the config agent (the chatbot can't spawn to
+    itself — the router denies self-call)."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _FakeDispatcher(reply="your jobs: none")
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram())
+            await gw.handle_update("tg1", "/cron")
+            assert disp.spawns == [
+                ("config", "List my scheduled jobs.", "usr_a", "ses_1", "cron")
+            ]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_cmd_agent_surfaces_failed_task(suite_db_url: str) -> None:
+    """A FAILED task result is surfaced as an error, not masked as 'Done.'."""
+    class _FailingDispatcher(_FakeDispatcher):
+        async def await_root_result(self, task_id, *, timeout_s=None, **kw):
+            return ResultFrame(
+                agent_id="config", trace_id="0" * 32, span_id="0" * 16,
+                task_id=task_id, status=TaskStatus.FAILED, status_code=500,
+                output=None,
+            )
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            gw = ChatbotGateway(dispatcher=_FailingDispatcher(), pool=pool, telegram=tg)
+            await gw.handle_update("tg1", "/config")
+            assert len(tg.sent) == 1
+            assert "went wrong" in tg.sent[0][1]
+            assert "Done." not in tg.sent[0][1]
         finally:
             await pool.close()
 

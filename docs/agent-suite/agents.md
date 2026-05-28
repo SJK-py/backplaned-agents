@@ -95,15 +95,16 @@ Each decision's prompt is `## Current step (n/N): {item} — decide: modify the 
 
 ## config — group l2
 
-Conversational user-config management.
+Conversational user self-service: settings **and** scheduled jobs.
 
-**Capabilities:** `user.config`.
+**Capabilities:** `user.config`, `user.cron`.
 
-| Mode | Payload | Tool? |
-| --- | --- | --- |
-| `message` | `{prompt}` | **yes** — the orchestrator's LLM calls `call_config` to apply "change my timezone" etc. |
+| Mode | Payload | Tool? | Notes |
+| --- | --- | --- | --- |
+| `message` | `{prompt}` | **yes** — the orchestrator's LLM calls `call_config` to apply "change my timezone" etc. | user-config read/set loop |
+| `cron` | `{prompt}` | no | cron-job management loop (list/add/remove/modify), reached via the channel's `/cron`. Hosted here — **not** the chatbot — because the router denies self-call (`<self_call>`); `channel → config` is a normal cross-agent call. The scheduler stays in the chatbot; they share the `cron_jobs` table ([cron.md](./cron.md)). |
 
-**Local tools:** the user-config editing toolset (read/set fields in [data-model.md](./data-model.md)). Not delegatable.
+**Local tools:** the user-config editing toolset (read/set fields in [data-model.md](./data-model.md)) for `message`; the cron add/list/remove/modify toolset (`bp_agents/cron_manage.py`) for `cron`. Not delegatable.
 
 ---
 
@@ -198,9 +199,8 @@ It is a **gateway**, not a normal handler-agent — its full runtime (the inboun
 | --- | --- | --- | --- |
 | `message_to_user` | `{message}` | no | push text to `channel`+`chat_id` from session-info; append assistant row |
 | `file_to_user` | `{name}` | no | fetch a stash file and send it |
-| `cron` | `{prompt}` | no | LLM loop managing cron jobs (list/add/remove/modify) via local tools |
 
-`non_tool_modes`: all three.
+`non_tool_modes`: both. Cron **management** now lives on the config agent's `cron` mode (the router denies self-call, so the channel can't host it); the chatbot still owns the cron **scheduler** (firing).
 
 **Responsibilities beyond modes** (it's the session manager):
 - Owns the **per-session queue** and all **session-info writes** ([sessions.md](./sessions.md), [delegation.md](./delegation.md)).

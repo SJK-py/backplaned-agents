@@ -71,17 +71,22 @@ _SUMMARIZE_FRACTION = 0.7
 _MIN_ROWS_TO_SUMMARIZE = 6
 _DEFAULT_CONTEXT_LIMIT = 120_000
 
+# Single source of truth for the bot's commands: drives both the /help
+# text and the Telegram `setMyCommands` registration (the "/" menu).
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("register", "request access (an admin approves it)"),
+    ("new", "start a fresh conversation"),
+    ("stop", "stop the current in-progress reply"),
+    ("config", "view or change your settings"),
+    ("cron", "manage scheduled reminders/tasks"),
+    ("password", "get a one-time link to set a web password"),
+    ("v", "verbose: prefix a message to see step-by-step progress"),
+    ("help", "show the command list"),
+]
+
 HELP_TEXT = (
     "I'm your personal assistant. Just send me a message and I'll help.\n\n"
-    "Commands:\n"
-    "/register [email] — request access (an admin approves it)\n"
-    "/new — start a fresh conversation\n"
-    "/stop — stop the current in-progress reply\n"
-    "/config [text] — view or change your settings\n"
-    "/cron [text] — manage scheduled reminders/tasks\n"
-    "/password — get a one-time link to set a web password\n"
-    "/v <message> — show step-by-step progress for this turn\n"
-    "/help — show this message"
+    "Commands:\n" + "\n".join(f"/{name} — {desc}" for name, desc in BOT_COMMANDS)
 )
 REGISTER_PROMPT = (
     "You're not registered yet. Send /register (optionally with your "
@@ -271,7 +276,7 @@ class ChatbotGateway:
             await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "message",
                                   arg or "Show my current settings.")
         elif cmd == "/cron":
-            await self._cmd_agent(chat_id, CHATBOT_AGENT_ID, "cron",
+            await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "cron",
                                   arg or "List my scheduled jobs.")
         else:
             await self._telegram.send_message(
@@ -306,6 +311,14 @@ class ChatbotGateway:
         except Exception:  # noqa: BLE001
             logger.exception("command_dispatch_failed",
                              extra={"event": "command_dispatch_failed", "cmd": mode})
+            await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
+            return
+        # Surface a failed task instead of masking it as "Done." — a None
+        # output on a FAILED result would otherwise read as success.
+        if result.status != TaskStatus.SUCCEEDED:
+            logger.warning("command_task_failed",
+                           extra={"event": "command_task_failed", "cmd": mode,
+                                  "status": str(result.status)})
             await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
             return
         reply = (result.output.content if result.output else "") or "Done."

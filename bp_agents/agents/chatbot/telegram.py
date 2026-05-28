@@ -45,6 +45,10 @@ class TelegramClient(Protocol):
         self, *, chat_id: str, filename: str, data: bytes
     ) -> None: ...
 
+    async def set_my_commands(
+        self, commands: list[tuple[str, str]]
+    ) -> None: ...
+
 
 class HttpTelegramClient:
     """Real Telegram Bot API client over httpx long-polling."""
@@ -111,6 +115,18 @@ class HttpTelegramClient:
             f"{self._base}/sendDocument",
             data={"chat_id": chat_id},
             files={"document": (filename, data)},
+        )
+        resp.raise_for_status()
+
+    async def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        # Advertise the command list so it shows in Telegram's "/" menu.
+        # `command` must be lowercase, no leading slash (Bot API rule).
+        resp = await self._client.post(
+            f"{self._base}/setMyCommands",
+            json={"commands": [
+                {"command": name.lstrip("/").lower(), "description": desc}
+                for name, desc in commands
+            ]},
         )
         resp.raise_for_status()
 

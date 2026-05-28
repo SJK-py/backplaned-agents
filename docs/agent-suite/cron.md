@@ -2,8 +2,10 @@
 
 > Scheduled jobs: the scheduler, the execution path, the report/spam-control
 > logic, and routing. Job + log schemas are in [`data-model.md`](./data-model.md).
-> Management (creating/editing jobs) is the chatbot's `cron` mode
-> ([agents.md](./agents.md)).
+> Management (creating/editing jobs) is the **config agent's** `cron` mode
+> ([agents.md](./agents.md)) — the channel can't host it (the router denies
+> an agent invoking itself), so `/cron` is a normal `channel → config` call.
+> The scheduler still lives in the chatbot; the two share the `cron_jobs` table.
 
 ## 1. The scheduler
 
