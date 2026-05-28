@@ -77,7 +77,10 @@ per neighbor. Return ONLY JSON: {"decisions": [{"action": "UPDATE|REMOVE|UNRELAT
 agent = Agent(
     info=AgentInfo(
         agent_id=MEMORY_AGENT_ID,
-        description="Per-user long-term memory (fact graph).",
+        description=(
+            "Per-user long-term memory — a fact graph of what's been "
+            "learned about the user across conversations."
+        ),
         groups=["l3"],
         capabilities=["memory.add", "memory.retrieval"],
     ),
@@ -418,13 +421,22 @@ async def run_memory_add(
     return text_output("")
 
 
-@agent.handler(mode="retrieve")
+@agent.handler(
+    mode="retrieve",
+    description="Recall facts remembered about this user (preferences, "
+    "personal details, prior context) relevant to a query — call to "
+    "personalize a reply or when the user refers to something said before.",
+)
 async def retrieve_mode(ctx: TaskContext, payload: MemRetrieve) -> AgentOutput:
     # Lock-free; only writes last_used_at (a recency heuristic).
     return await run_memory_retrieve(ctx, payload, settings=_settings)
 
 
-@agent.handler(mode="add", tool=False)
+@agent.handler(
+    mode="add", tool=False,
+    description="Extract and store durable facts from a completed turn "
+    "(background; not user-facing).",
+)
 async def add_mode(ctx: TaskContext, payload: MemAdd) -> AgentOutput:
     async with _user_lock(ctx.user_id):
         return await run_memory_add(ctx, payload, settings=_settings)

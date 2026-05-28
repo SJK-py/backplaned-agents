@@ -119,7 +119,7 @@ def test_agent_info_update_frame_does_not_carry_agent_id_as_mutation() -> None:
     # The frame inherits `agent_id` from _FrameBase, but the
     # post-Hello mutable fields are explicit and limited.
     mutable = {"description", "groups", "capabilities",
-               "accepts_schema", "non_tool_modes",
+               "accepts_schema", "non_tool_modes", "mode_descriptions",
                "produces_schema", "produces_files", "hidden",
                "documentation_url"}
     declared = set(AgentInfoUpdateFrame.model_fields.keys())

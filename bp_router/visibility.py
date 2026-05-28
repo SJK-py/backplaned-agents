@@ -60,6 +60,7 @@ def available_destinations(
             "capabilities": agent.capabilities,
             "accepts_schema": info.get("accepts_schema"),
             "non_tool_modes": info.get("non_tool_modes", []),
+            "mode_descriptions": info.get("mode_descriptions"),
             "hidden": info.get("hidden", False),
             "documentation_url": info.get("documentation_url"),
             "callable_user_levels": callable_levels,

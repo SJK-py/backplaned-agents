@@ -53,7 +53,10 @@ class WorkspaceToStorage(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=SANDBOX_AGENT_ID,
-        description="Containerized per-user bash workspace.",
+        description=(
+            "The user's isolated sandbox workspace — run bash and move "
+            "files between the stash and the workspace."
+        ),
         groups=["infra"],
         capabilities=["computer.bash", "computer.network", "file.full"],
     ),
@@ -143,12 +146,20 @@ async def run_bash(
     return text_output(text)
 
 
-@agent.handler(mode="bash")
+@agent.handler(
+    mode="bash",
+    description="Run a bash command in the user's sandbox workspace and "
+    "return its output.",
+)
 async def bash(ctx: TaskContext, payload: Bash) -> AgentOutput:
     return await run_bash(ctx, payload, settings=_settings, uid=await _user_uid(ctx))
 
 
-@agent.handler(mode="storage_to_workspace")
+@agent.handler(
+    mode="storage_to_workspace",
+    description="Copy a stash file (by name) into the sandbox workspace so "
+    "bash can operate on it.",
+)
 async def storage_to_workspace(
     ctx: TaskContext, payload: StorageToWorkspace
 ) -> AgentOutput:
@@ -161,7 +172,11 @@ async def storage_to_workspace(
     return text_output(f"Fetched into workspace: {dest.name}")
 
 
-@agent.handler(mode="workspace_to_storage")
+@agent.handler(
+    mode="workspace_to_storage",
+    description="Save a file from the sandbox workspace (by path) back to "
+    "the stash, returning its stash name.",
+)
 async def workspace_to_storage(
     ctx: TaskContext, payload: WorkspaceToStorage
 ) -> AgentOutput:

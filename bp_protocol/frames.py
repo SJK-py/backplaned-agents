@@ -154,7 +154,8 @@ class AgentInfoUpdateFrame(_FrameBase):
 
     Mutable surface: `description`, `groups`, `capabilities`,
     `accepts_schema`, `produces_schema`, `produces_files`,
-    `non_tool_modes`, `hidden`, `documentation_url`. `agent_id` is
+    `non_tool_modes`, `mode_descriptions`, `hidden`,
+    `documentation_url`. `agent_id` is
     locked — it's the
     stable identity that refresh tokens / ACL `@<id>` rules /
     audit history depend on.
@@ -186,6 +187,7 @@ class AgentInfoUpdateFrame(_FrameBase):
     produces_schema: dict[str, Any] | None = None
     produces_files: bool | None = None
     non_tool_modes: list[str] | None = None
+    mode_descriptions: dict[str, str] | None = None
     hidden: bool | None = None
     documentation_url: str | None = None
 

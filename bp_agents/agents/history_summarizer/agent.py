@@ -145,7 +145,11 @@ async def run_summarize_all(
     )
 
 
-@agent.handler(mode="summarize_incumbent", tool=False)
+@agent.handler(
+    mode="summarize_incumbent", tool=False,
+    description="Fold the oldest part of a thread's incumbent history into "
+    "the rolling summary and demote those turns (channel-driven).",
+)
 async def summarize_incumbent(
     ctx: TaskContext, payload: SummarizeIncumbent
 ) -> AgentOutput:
@@ -155,7 +159,11 @@ async def summarize_incumbent(
     )
 
 
-@agent.handler(mode="summarize_all", tool=False)
+@agent.handler(
+    mode="summarize_all", tool=False,
+    description="Produce a fresh full-thread summary from all incumbent "
+    "turns (channel-driven).",
+)
 async def summarize_all(ctx: TaskContext, payload: SummarizeAll) -> AgentOutput:
     assert _pool is not None
     return await run_summarize_all(ctx, payload, pool=_pool, settings=_settings)

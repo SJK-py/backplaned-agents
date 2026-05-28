@@ -20,6 +20,44 @@
 
 ## 2026-05-28
 
+### Changed — drop the `[capabilities: …]` suffix from tool descriptions
+
+- **What:** `build_tools` (`bp_sdk/tools.py::_description`) no longer appends
+  `" [capabilities: …]"` to a tool's description; it emits the per-mode (or
+  agent-level) description verbatim.
+- **Why:** capabilities are ACL/catalog metadata; echoing them into the
+  tool description the model reads is redundant and sometimes misleading
+  (capability names like `assistant.rag` aren't usage guidance). Per-mode
+  descriptions now carry the actual "what this tool does" text.
+- **Shape:** **Behavior change** to generated tool schemas (description
+  text only — names/params unchanged). Catalog/admin still expose
+  `capabilities` as a structured field.
+- **Verified:** `tests/test_per_mode_tool_descriptions.py` asserts verbatim
+  descriptions + no suffix; tool/suite suites green.
+
+### Added — per-mode tool descriptions (`AgentInfo.mode_descriptions`)
+
+- **What:** A new optional `AgentInfo.mode_descriptions: dict[str, str]`
+  (`bp_protocol`), a `description=` kwarg on `@agent.handler` that publishes
+  it (`bp_sdk/agent.py::_republish_schemas`), and `build_tools`
+  (`bp_sdk/tools.py`) now prefers the per-mode description over the
+  agent-level `description` for each `call_<agent>_<mode>` tool (falling back
+  when a mode has none). Threaded through the router: the catalog projection
+  (`visibility.available_destinations`) carries it, it's a mutable field on
+  `AgentInfoUpdateFrame` + `_AGENT_INFO_MUTABLE_FIELDS` (so edits propagate
+  via handshake-refresh / AgentInfoUpdate).
+- **Why:** a multi-mode agent's modes each become a distinct tool
+  (`call_knowledge_base_store` / `_retrieve` / `_remove`, …) but all shared
+  the single agent-level `description`. Per-mode descriptions let the calling
+  LLM tell them apart. (`AgentInfo.description` is the agent-level fallback,
+  used for single-tool-mode agents and the admin catalog.)
+- **Shape:** **Added** — `None` default reproduces the previous
+  single-description behaviour; no agent need set it.
+- **Verified:** `tests/test_per_mode_tool_descriptions.py` (publish on
+  `description=`, `None` when absent, per-mode wins + fallback in
+  `build_tools`); `test_phase10e` lockstep guards updated for the new mutable
+  field; tool/agent-info/handshake suites green.
+
 ### Fixed — refresh a reconnecting agent's AgentInfo on handshake
 
 - **What:** `_handshake` (`bp_router/ws_hub.py`) now re-publishes the

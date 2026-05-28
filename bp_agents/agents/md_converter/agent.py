@@ -47,7 +47,7 @@ class Webpage(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=MD_CONVERTER_AGENT_ID,
-        description="Convert files and webpages to Markdown.",
+        description="Converts files and webpages to Markdown.",
         groups=["l4"],
         capabilities=["document.convert", "web.convert", "file.full"],
     ),
@@ -141,12 +141,20 @@ async def _default_fetch(url: str) -> bytes:
             return bytes(buf)
 
 
-@agent.handler(mode="convert")
+@agent.handler(
+    mode="convert",
+    description="Convert an uploaded file (PDF, DOCX, spreadsheet, image, "
+    "…) to Markdown text.",
+)
 async def convert_mode(ctx: TaskContext, payload: Convert) -> AgentOutput:
     return await run_convert(ctx, payload)
 
 
-@agent.handler(mode="webpage", tool=False)
+@agent.handler(
+    mode="webpage", tool=False,
+    description="Fetch a URL and convert the page to Markdown (internal; "
+    "used by research's web pipeline).",
+)
 async def webpage_mode(ctx: TaskContext, payload: Webpage) -> AgentOutput:
     return await run_webpage(ctx, payload)
 

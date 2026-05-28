@@ -100,7 +100,7 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
 agent = Agent(
     info=AgentInfo(
         agent_id=CONFIG_AGENT_ID,
-        description="Conversational user self-service: settings and scheduled jobs.",
+        description="User self-service: account settings and scheduled jobs.",
         groups=["l2"],
         capabilities=["user.config", "user.cron"],
     ),
@@ -150,13 +150,21 @@ async def run_config(
     return text_output(_format_config(cfg))
 
 
-@agent.handler(mode="message")
+@agent.handler(
+    mode="message",
+    description="Read or change the user's settings — name, timezone, "
+    "language, verbose mode, context-token limit, custom note.",
+)
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_config(ctx, payload, pool=_pool, settings=_settings)
 
 
-@agent.handler(mode="cron", tool=False)
+@agent.handler(
+    mode="cron", tool=False,
+    description="Manage the user's scheduled jobs (add/list/remove/modify); "
+    "reached via the /cron command.",
+)
 async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     """Cron-job management (add/list/remove/modify) — reached via the
     channel's `/cron` command. Hosted here (not the chatbot) because the

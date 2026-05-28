@@ -50,7 +50,7 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=COMPUTER_USE_AGENT_ID,
-        description="Coding and computer tasks via the sandbox.",
+        description="Coding/computer specialist that drives a sandboxed bash environment.",
         groups=["l1"],
         capabilities=[
             "llm.generation.text", "assistant.coding", "assistant.computer",
@@ -75,13 +75,21 @@ async def _shutdown() -> None:
         await _pool.close()
 
 
-@agent.handler(mode="subagent")
+@agent.handler(
+    mode="subagent",
+    description="Carry out a coding/computer task in the sandbox (inspect, "
+    "edit, build, run, test) and report concrete results.",
+)
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_subagent(ctx, payload, config=_CONFIG, pool=_pool, settings=_settings)
 
 
-@agent.handler(mode="on_delegation", tool=False)
+@agent.handler(
+    mode="on_delegation", tool=False,
+    description="First turn after the orchestrator delegates a coding "
+    "conversation (delegation lifecycle; not a tool).",
+)
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
@@ -89,7 +97,11 @@ async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     )
 
 
-@agent.handler(mode="delegated_message", tool=False)
+@agent.handler(
+    mode="delegated_message", tool=False,
+    description="A user turn while computer_use holds the delegated "
+    "conversation (delegation lifecycle; not a tool).",
+)
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(

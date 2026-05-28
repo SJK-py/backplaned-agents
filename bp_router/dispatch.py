@@ -1067,6 +1067,7 @@ _AGENT_INFO_MUTABLE_FIELDS = (
     "produces_schema",
     "produces_files",
     "non_tool_modes",
+    "mode_descriptions",
     "hidden",
     "documentation_url",
 )

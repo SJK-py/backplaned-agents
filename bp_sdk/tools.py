@@ -104,6 +104,7 @@ def _tool_specs(
         accepts = entry.get("accepts_schema")
         non_tool = set(entry.get("non_tool_modes") or [])
         desc = _description(entry)
+        mode_descs = entry.get("mode_descriptions") or {}
         if isinstance(accepts, dict) and accepts:
             modes = [(m, s) for m, s in accepts.items() if m not in non_tool]
             if not modes:
@@ -132,8 +133,12 @@ def _tool_specs(
                 if multi
                 else _safe_tool_name(agent_id)
             )
+            # Per-mode description (from AgentInfo.mode_descriptions) wins
+            # over the agent-level one; the capabilities suffix is appended
+            # to whichever is used.
+            mode_desc = _description(entry, override=mode_descs.get(mode))
             out.append(
-                (tool_name, agent_id, mode, _schema_for(schema), desc)
+                (tool_name, agent_id, mode, _schema_for(schema), mode_desc)
             )
     return out
 
@@ -161,12 +166,12 @@ def _safe_tool_name(agent_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", raw)[:64]
 
 
-def _description(entry: dict[str, Any]) -> str:
-    desc = entry.get("description", "")
-    caps = entry.get("capabilities") or []
-    if caps:
-        desc += f" [capabilities: {', '.join(caps)}]"
-    return desc
+def _description(entry: dict[str, Any], *, override: str | None = None) -> str:
+    # The per-mode description (when set) else the agent-level one. No
+    # `[capabilities: …]` suffix — capabilities are ACL/catalog metadata,
+    # redundant (and sometimes misleading) inside a tool description the
+    # model reads.
+    return override or entry.get("description", "")
 
 
 # ---------------------------------------------------------------------------

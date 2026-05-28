@@ -86,7 +86,10 @@ class KbModify(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=KNOWLEDGE_BASE_AGENT_ID,
-        description="Per-user document knowledge base (store + retrieval).",
+        description=(
+            "The user's personal document knowledge base — search, store, "
+            "list, modify, and remove documents."
+        ),
         groups=["l3"],
         capabilities=[
             "database.manage", "database.retrieval", "file.full",
@@ -323,27 +326,44 @@ async def run_kb_modify(
     )
 
 
-@agent.handler(mode="store")
+@agent.handler(
+    mode="store",
+    description="Save a document (text or an uploaded file) to the user's "
+    "knowledge base for later retrieval.",
+)
 async def store_mode(ctx: TaskContext, payload: KbStore) -> AgentOutput:
     return await run_kb_store(ctx, payload, settings=_settings)
 
 
-@agent.handler(mode="modify")
+@agent.handler(
+    mode="modify",
+    description="Re-file, retitle, or re-tag an existing knowledge-base document.",
+)
 async def modify_mode(ctx: TaskContext, payload: KbModify) -> AgentOutput:
     return await run_kb_modify(ctx, payload, settings=_settings)
 
 
-@agent.handler(mode="retrieve")
+@agent.handler(
+    mode="retrieve",
+    description="Search the user's knowledge base and return the most "
+    "relevant document chunks for a query.",
+)
 async def retrieve_mode(ctx: TaskContext, payload: KbRetrieve) -> AgentOutput:
     return await run_kb_retrieve(ctx, payload, settings=_settings)
 
 
-@agent.handler(mode="list")
+@agent.handler(
+    mode="list",
+    description="List the documents in the user's knowledge base.",
+)
 async def list_mode(ctx: TaskContext, payload: KbList) -> AgentOutput:
     return await run_kb_list(ctx, payload, settings=_settings)
 
 
-@agent.handler(mode="remove")
+@agent.handler(
+    mode="remove",
+    description="Delete a document from the user's knowledge base by id.",
+)
 async def remove_mode(ctx: TaskContext, payload: KbRemove) -> AgentOutput:
     return await run_kb_remove(ctx, payload, settings=_settings)
 
