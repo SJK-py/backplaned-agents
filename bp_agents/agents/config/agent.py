@@ -100,7 +100,12 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
 agent = Agent(
     info=AgentInfo(
         agent_id=CONFIG_AGENT_ID,
-        description="Conversational user self-service: settings and scheduled jobs.",
+        description=(
+            "Read or change the user's settings on request — name, "
+            "timezone, language, verbose mode, context-token limit, custom "
+            "note. (Scheduled-job management is reached via /cron, not this "
+            "tool.)"
+        ),
         groups=["l2"],
         capabilities=["user.config", "user.cron"],
     ),

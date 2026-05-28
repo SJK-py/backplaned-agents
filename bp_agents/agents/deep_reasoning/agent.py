@@ -93,7 +93,10 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=DEEP_REASONING_AGENT_ID,
-        description="Planning and multi-step reasoning specialist.",
+        description=(
+            "Work through a hard, multi-step reasoning or planning problem "
+            "and return a structured, worked-through answer."
+        ),
         groups=["l1"],
         capabilities=[
             "agent.orchestration", "llm.generation.text", "llm.multimodal.image",

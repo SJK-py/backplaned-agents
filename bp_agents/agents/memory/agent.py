@@ -77,7 +77,12 @@ per neighbor. Return ONLY JSON: {"decisions": [{"action": "UPDATE|REMOVE|UNRELAT
 agent = Agent(
     info=AgentInfo(
         agent_id=MEMORY_AGENT_ID,
-        description="Per-user long-term memory (fact graph).",
+        description=(
+            "Recall facts remembered about this user from past "
+            "conversations (preferences, personal details, prior context). "
+            "Call this to personalize a reply or when the user refers to "
+            "something they mentioned before."
+        ),
         groups=["l3"],
         capabilities=["memory.add", "memory.retrieval"],
     ),

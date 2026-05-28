@@ -86,7 +86,11 @@ class KbModify(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=KNOWLEDGE_BASE_AGENT_ID,
-        description="Per-user document knowledge base (store + retrieval).",
+        description=(
+            "Search, store, list, update, or remove documents in the "
+            "user's personal knowledge base (the mode in the tool name "
+            "selects the operation)."
+        ),
         groups=["l3"],
         capabilities=[
             "database.manage", "database.retrieval", "file.full",

@@ -50,7 +50,10 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=COMPUTER_USE_AGENT_ID,
-        description="Coding and computer tasks via the sandbox.",
+        description=(
+            "Carry out coding or computer tasks in a sandboxed bash "
+            "environment — inspect, edit, build, run, and test."
+        ),
         groups=["l1"],
         capabilities=[
             "llm.generation.text", "assistant.coding", "assistant.computer",

@@ -53,7 +53,10 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=RESEARCH_AGENT_ID,
-        description="Web, RAG, and document research; owns the knowledge base.",
+        description=(
+            "Research a question using web search, page fetching, and the "
+            "user's knowledge base; returns a sourced answer."
+        ),
         groups=["l1"],
         capabilities=[
             "llm.generation.text", "assistant.rag", "assistant.web",

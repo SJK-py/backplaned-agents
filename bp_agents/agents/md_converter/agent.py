@@ -47,7 +47,10 @@ class Webpage(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=MD_CONVERTER_AGENT_ID,
-        description="Convert files and webpages to Markdown.",
+        description=(
+            "Convert an uploaded file (PDF, DOCX, spreadsheet, image, "
+            "etc.) to Markdown text you can read or store."
+        ),
         groups=["l4"],
         capabilities=["document.convert", "web.convert", "file.full"],
     ),

@@ -53,7 +53,11 @@ class WorkspaceToStorage(BaseModel):
 agent = Agent(
     info=AgentInfo(
         agent_id=SANDBOX_AGENT_ID,
-        description="Containerized per-user bash workspace.",
+        description=(
+            "Run bash commands and move files in the user's isolated "
+            "sandbox workspace (the mode in the tool name selects the "
+            "operation)."
+        ),
         groups=["infra"],
         capabilities=["computer.bash", "computer.network", "file.full"],
     ),
