@@ -64,6 +64,8 @@ result = await outbound_await_result(
 
 Agents emit a structured **`LoopProgress`** in `ProgressFrame.metadata` ([data-model.md](./data-model.md)). In **verbose** mode the channel passes an `on_progress` callback to `outbound_await_result` and renders **one Telegram message per frame**; non-verbose suppresses interim output. Effective verbose = `/v` one-shot prefix > `user_config.verbose_default` > false.
 
+Every verbose line leads with a **`💭` marker** so it's visually distinct from the final answer (which has none). When the session is **delegated**, both the specialist's verbose lines and its final reply are prefixed with a **`[<Specialist> Agent]`** tag (derived per-frame from the emitting/producing `agent_id`, prettified) — the orchestrator's own lines stay untagged, so the user can see exactly when a specialist holds the session. The delegation **transition** tools (`hand_off` / `end_delegation`) render as `Delegating to a specialist…` / `Handing back to the assistant…`.
+
 ## 6. Slash commands (intercepted; never reach an agent)
 
 | Command | Effect |
@@ -83,7 +85,7 @@ Delegation-control commands (e.g. `/unlink`) follow [`delegation.md`](./delegati
 The channel is a **gateway, not a task handler**, so it has no `ctx.files` (that API binds to a running task's active executor, which the channel — a spawner — never is). It uses the **session-authed named-store HTTP endpoints** instead, authenticated with the per-user session JWT (§3); they share the agent frames' dedup / scope / quota, so HTTP and frame stores behave identically ([`../design/router-managed-file-store.md` §6](../design/router-managed-file-store.md)). At the channel boundary:
 
 - **Inbound:** download the Telegram upload → `POST /v1/files?session_id=…` (stores the blob, scoped to the user's session) → `POST /v1/files/names` to bind it to a name in the **session scope** → append the `(incumbent=T, hidden=T)` "user-attached file saved as `{name}`" history row *before* dispatching the message ([sessions.md](./sessions.md)). The message payload stays `{prompt}`; the orchestrator discovers the files from that row / `ctx.files.list()`.
-- **Outbound:** files an agent produced arrive as **names** on `result.output.files`; the channel resolves each via `GET /v1/files/names/resolve` (→ `file_id` + a fetch key) and pulls the bytes from `GET /v1/files/{file_id}`, then sends them.
+- **Outbound:** files an agent produced arrive as **names** on `result.output.files`; the channel resolves each via `GET /v1/files/names/resolve` (→ `file_id` + a fetch key) and pulls the bytes from `GET /v1/files/{file_id}`, then sends them (`send_named_file`, shared by the message path and the cron scheduler). A user-facing agent populates `output.files` by calling its **`send_file(name)`** tool — the orchestrator (`message` / `cron_message`), an l1 in a delegated turn, and the F1 fallback all carry it. Files are sent only when explicitly named this way; scratch files an agent writes to the stash are not auto-delivered.
 - Only the **sandbox** uses a filesystem workspace, bridged to the named store via `storage_to_workspace` / `workspace_to_storage` ([agents.md](./agents.md)).
 
 ## 8. History ownership

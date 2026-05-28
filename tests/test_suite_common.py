@@ -16,6 +16,7 @@ from bp_agents.common import (
     compose_system_prompt,
     estimate_context_tokens,
     make_current_time_tool,
+    make_send_file_tool,
     peer_tool_specs,
     run_llm_loop,
     text_output,
@@ -261,6 +262,44 @@ def test_run_llm_loop_dispatches_local_and_peer_tools() -> None:
     assert "thinking" in kinds and "tool_call" in kinds and "tool_result" in kinds
 
 
+def test_run_llm_loop_emits_progress_for_terminal_tool() -> None:
+    """A terminal tool (hand_off / end_delegation) ends the loop but must
+    still surface a `tool_call` progress frame — otherwise the delegation
+    transitions are invisible in verbose mode."""
+    round1 = LlmResponse(
+        text="I'll hand this to research.",
+        tool_calls=[ToolCall(id="c1", name="hand_off", args={"agent_id": "research"})],
+    )
+    llm = _StubLlm([round1])
+    progress = _StubProgress()
+    ctx = _StubCtx(llm, _StubPeers(), progress)
+    messages: list[Message] = [Message(role="user", content="research X")]
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, local_tools=None, use_peer_tools=False,
+            extra_tools=[ToolSpec(name="hand_off", description="", parameters={})],
+            terminal_tools={"hand_off"},
+        )
+    )
+    # The loop returned on the terminal tool (one round, no dispatch).
+    assert any(tc.name == "hand_off" for tc in resp.tool_calls)
+    assert len(llm.calls) == 1
+    tool_calls = [
+        md[LOOP_PROGRESS_KEY]
+        for _e, _c, md in progress.events
+        if LOOP_PROGRESS_KEY in md and md[LOOP_PROGRESS_KEY]["kind"] == "tool_call"
+    ]
+    assert any(lp["tool"] == "hand_off" for lp in tool_calls)
+    # No tool_result frame — a terminal tool is never dispatched.
+    assert not any(
+        md[LOOP_PROGRESS_KEY]["kind"] == "tool_result"
+        for _e, _c, md in progress.events
+        if LOOP_PROGRESS_KEY in md
+    )
+
+
 def test_run_llm_loop_unknown_tool_feeds_error_back() -> None:
     round1 = LlmResponse(
         text="", tool_calls=[ToolCall(id="c1", name="mystery", args={})]
@@ -378,3 +417,60 @@ def test_loop_progress_model() -> None:
     dumped = lp.model_dump()
     assert dumped["kind"] == "tool_call"
     assert dumped["tool"] == "call_echo"
+
+
+# ---------------------------------------------------------------------------
+# send_file tool — records names for delivery to the user
+# ---------------------------------------------------------------------------
+
+
+class _FilesWith:
+    """ctx.files stand-in with a fixed set of session/persistent names."""
+
+    def __init__(self, session=(), persistent=()) -> None:
+        self._session = list(session)
+        self._persistent = list(persistent)
+
+    async def list(self, *, persistent=False, query=None):
+        return list(self._persistent if persistent else self._session)
+
+
+def _ctx_with_files(files):
+    return _StubCtx(_StubLlm([]), _StubPeers(), _StubProgress(), files=files)
+
+
+def test_send_file_records_existing_name() -> None:
+    outbound: list[str] = []
+    tool = make_send_file_tool(outbound)
+    ctx = _ctx_with_files(_FilesWith(session=["report.pdf"]))
+    msg = asyncio.run(
+        LocalToolset([tool]).dispatch(ctx, ToolCall(id="c", name="send_file",
+                                                    args={"name": "report.pdf"}))
+    )
+    assert outbound == ["report.pdf"]
+    assert "delivered to the user" in msg.content
+
+
+def test_send_file_dedups_and_validates_persist_prefix() -> None:
+    outbound: list[str] = []
+    ts = LocalToolset([make_send_file_tool(outbound)])
+    ctx = _ctx_with_files(_FilesWith(persistent=["notes.md"]))
+    # persist/ name is validated against the persistent stash (bare match ok)
+    asyncio.run(ts.dispatch(ctx, ToolCall(id="c1", name="send_file",
+                                          args={"name": "persist/notes.md"})))
+    # a second call with the same name doesn't double-add
+    asyncio.run(ts.dispatch(ctx, ToolCall(id="c2", name="send_file",
+                                          args={"name": "persist/notes.md"})))
+    assert outbound == ["persist/notes.md"]
+
+
+def test_send_file_rejects_unknown_name() -> None:
+    outbound: list[str] = []
+    tool = make_send_file_tool(outbound)
+    ctx = _ctx_with_files(_FilesWith(session=["other.txt"]))
+    msg = asyncio.run(
+        LocalToolset([tool]).dispatch(ctx, ToolCall(id="c", name="send_file",
+                                                    args={"name": "missing.pdf"}))
+    )
+    assert outbound == []
+    assert "No stash file" in msg.content

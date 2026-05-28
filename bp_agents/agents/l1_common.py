@@ -34,6 +34,7 @@ from bp_agents.common import (
     LocalToolset,
     compose_system_prompt,
     estimate_context_tokens,
+    make_send_file_tool,
     run_llm_loop,
     text_output,
     user_config_note,
@@ -82,7 +83,9 @@ END_DELEGATION_SPEC = ToolSpec(
 
 _GENERAL_DELEGATION = """\
 You are operating as a specialist the main assistant delegated this \
-conversation to. Carry out the user's request using your tools.\
+conversation to. Carry out the user's request using your tools. To give \
+the user an actual file, call `send_file` with its stash name — it is \
+delivered as an attachment alongside your reply.\
 """
 
 # Appended only on subsequent turns, where the hand-back tool is offered.
@@ -196,7 +199,11 @@ async def run_delegated_turn(
     context_tokens = estimate_context_tokens(messages)
 
     timezone = cfg.timezone if cfg else settings.default_timezone
-    local = await _local_tools(ctx, settings, config, timezone)
+    # A delegate talks to the user directly, so it can deliver files via
+    # `send_file` (recorded into `outbound` → AgentOutput.files).
+    outbound: list[str] = []
+    local = await _local_tools(ctx, settings, config, timezone) or LocalToolset()
+    local.add(make_send_file_tool(outbound))
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
@@ -222,4 +229,4 @@ async def run_delegated_turn(
             conn, session_id=ctx.session_id, agent_id=config.agent_id,
             role="assistant", message=resp.text,
         )
-    return text_output(resp.text, context_tokens=context_tokens)
+    return text_output(resp.text, files=outbound, context_tokens=context_tokens)

@@ -28,6 +28,37 @@ logger = logging.getLogger(__name__)
 
 PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
+
+
+async def send_named_file(
+    *,
+    telegram: TelegramClient,
+    credentials: ChannelCredentials | None,
+    chat_id: str,
+    user_id: str,
+    session_id: str,
+    name: str,
+) -> None:
+    """Resolve a produced file-store name to bytes and send it as a
+    Telegram document. Best-effort — a failure is logged, never raised
+    (an undeliverable attachment must not break the turn). Shared by the
+    inbound message path and the cron scheduler ([channel.md] §7)."""
+    if credentials is None:
+        return
+    try:
+        file_id = await credentials.resolve_named_file(
+            user_id=user_id, session_id=session_id, name=name,
+        )
+        if file_id is None:
+            return
+        data = await credentials.fetch_file(user_id=user_id, file_id=file_id)
+        await telegram.send_document(
+            chat_id=chat_id, filename=name.rsplit("/", 1)[-1], data=data,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "outbound_file_failed", extra={"event": "outbound_file_failed"}
+        )
 ORCHESTRATOR_AGENT_ID = "orchestrator"
 MEMORY_AGENT_ID = "memory"
 CONFIG_AGENT_ID = "config"
@@ -71,6 +102,28 @@ _TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under th
 
 # Verbose-mode rendering ([channel.md] §5).
 _KIND_LABEL = {"tool_call": "[Tool]", "tool_result": "[Result]"}
+# Leads every verbose/progress line so it's visually distinct from the
+# final answer (which carries no marker).
+_VERBOSE_PREFIX = "💭 "
+# Agents that are NOT a delegation target — their output needs no tag (the
+# orchestrator is the assistant the user normally talks to; `router` is the
+# platform). Any other producer means the session is delegated to it.
+_UNTAGGED_AGENTS = frozenset({ORCHESTRATOR_AGENT_ID, "router"})
+
+
+def _agent_tag(agent_id: str | None) -> str:
+    """`"[Research Agent] "` for a delegate, `""` otherwise. Prettifies the
+    agent_id (underscores → spaces, title case) so the user sees which
+    specialist currently holds the session."""
+    if not agent_id or agent_id in _UNTAGGED_AGENTS:
+        return ""
+    return f"[{agent_id.replace('_', ' ').title()} Agent] "
+# Delegation transition tools read better as plain phrases than as a raw
+# `[Tool] hand_off` line (they're terminal tools, not ordinary dispatches).
+_TRANSITION_PHRASE = {
+    "hand_off": "Delegating to a specialist",
+    "end_delegation": "Handing back to the assistant",
+}
 
 
 def _render_progress(lp: dict) -> str:
@@ -80,6 +133,8 @@ def _render_progress(lp: dict) -> str:
       reasoning → `(…<reasoning>)`.
     - `tool_call` / `tool_result` → `[Tool]/[Result] <tool> (<detail>)`, the
       `call_` peer-tool prefix stripped for readability.
+    - the delegation transition tools (`hand_off` / `end_delegation`) →
+      `Delegating to a specialist…` / `Handing back to the assistant…`.
     - anything else falls back to its detail or kind.
     """
     kind = lp.get("kind", "")
@@ -89,6 +144,9 @@ def _render_progress(lp: dict) -> str:
             return "Thinking…"
         lead = "" if detail.startswith("…") else "…"
         return f"({lead}{detail})"
+    phrase = _TRANSITION_PHRASE.get(lp.get("tool") or "") if kind == "tool_call" else None
+    if phrase:
+        return f"{phrase}… ({detail})" if detail else f"{phrase}…"
     label = _KIND_LABEL.get(kind)
     if label:
         name = (lp.get("tool") or "").removeprefix("call_") or "tool"
@@ -366,7 +424,11 @@ class ChatbotGateway:
             lp = (pf.metadata or {}).get(LOOP_PROGRESS_KEY)
             if not lp:
                 return
-            await self._telegram.send_message(chat_id=chat_id, text=_render_progress(lp))
+            # marker → (delegate tag, if any) → the rendered line. The tag is
+            # per-frame: the orchestrator's own lines stay untagged; a
+            # specialist's lines show it holds the session.
+            text = f"{_VERBOSE_PREFIX}{_agent_tag(pf.agent_id)}{_render_progress(lp)}"
+            await self._telegram.send_message(chat_id=chat_id, text=text)
         return _cb
 
     @contextlib.asynccontextmanager
@@ -478,9 +540,11 @@ class ChatbotGateway:
                 self._current_task.pop(chat_id, None)
 
             reply = (result.output.content if result.output else "") or ""
-            await self._telegram.send_message(
-                chat_id=chat_id, text=reply or "(no response)"
-            )
+            # Tag the final reply with the specialist when the session is
+            # delegated (producer = result.agent_id), so it's clear who
+            # answered ([delegation.md] §2).
+            reply_text = f"{_agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
+            await self._telegram.send_message(chat_id=chat_id, text=reply_text)
 
             # Outbound files: the agent returned file-store NAMES; resolve
             # each + send the bytes ([channel.md] §7).
@@ -559,24 +623,10 @@ class ChatbotGateway:
     async def _send_outbound_file(
         self, chat_id: str, user_id: str, session_id: str, name: str
     ) -> None:
-        """Resolve a produced file-store name and send the bytes.
-        Best-effort."""
-        if self._credentials is None:
-            return
-        try:
-            file_id = await self._credentials.resolve_named_file(
-                user_id=user_id, session_id=session_id, name=name,
-            )
-            if file_id is None:
-                return
-            data = await self._credentials.fetch_file(user_id=user_id, file_id=file_id)
-            await self._telegram.send_document(
-                chat_id=chat_id, filename=name.rsplit("/", 1)[-1], data=data,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "outbound_file_failed", extra={"event": "outbound_file_failed"}
-            )
+        await send_named_file(
+            telegram=self._telegram, credentials=self._credentials,
+            chat_id=chat_id, user_id=user_id, session_id=session_id, name=name,
+        )
 
     async def _update_delegation(self, session_id: str, dest: str, result) -> None:  # noqa: ANN001
         """Maintain `delegated_to` from the result source ([delegation.md] §2).

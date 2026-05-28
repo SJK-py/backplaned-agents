@@ -24,6 +24,7 @@ from bp_agents.common import (
     compose_system_prompt,
     estimate_context_tokens,
     make_current_time_tool,
+    make_send_file_tool,
     run_llm_loop,
     text_output,
     user_config_note,
@@ -164,7 +165,10 @@ async def run_orchestrator_message(
     # turns — this is the channel's summarization signal ([sessions.md] §3).
     context_tokens = estimate_context_tokens(messages)
 
-    local_tools = LocalToolset([make_current_time_tool(timezone)])
+    outbound: list[str] = []
+    local_tools = LocalToolset(
+        [make_current_time_tool(timezone), make_send_file_tool(outbound)]
+    )
     destinations = _l1_destinations(ctx)
     extra = [_hand_off_spec(destinations)] if destinations else []
     resp = await run_llm_loop(
@@ -192,6 +196,7 @@ async def run_orchestrator_message(
             )
             return await _run_hand_off_fallback(
                 ctx, pool, messages, hand_off, preset=preset,
+                local_tools=local_tools, outbound=outbound,
                 context_tokens=context_tokens,
             )
         # The delegate produces the terminal Result; the router drops
@@ -207,7 +212,7 @@ async def run_orchestrator_message(
             message=resp.text,
         )
 
-    return text_output(resp.text, context_tokens=context_tokens)
+    return text_output(resp.text, files=outbound, context_tokens=context_tokens)
 
 
 async def _do_hand_off(
@@ -253,19 +258,25 @@ async def _run_hand_off_fallback(
     hand_off: ToolCall,
     *,
     preset: str | None,
+    local_tools: LocalToolset,
+    outbound: list[str],
     context_tokens: int,
 ) -> AgentOutput:
     """F1 fallback: the elected hand-off couldn't be admitted, so answer the
     turn directly. The loop left a dangling `hand_off` tool_call (it's a
     terminal tool, so no tool-response was appended); satisfy it with an
     error response, then re-run the loop with no hand-off tool so the model
-    answers inline instead of trying to delegate again."""
+    answers inline instead of trying to delegate again. Keep the same local
+    tools (incl. `send_file`) so the fallback can still deliver files."""
     messages.append(Message.tool_response(
         tool_call_id=hand_off.id,
         name=_HAND_OFF_TOOL,
         response="The specialist is unavailable right now. Answer the user directly.",
     ))
-    resp = await run_llm_loop(ctx, messages=messages, preset=preset, file_tools="full")
+    resp = await run_llm_loop(
+        ctx, messages=messages, preset=preset, local_tools=local_tools,
+        file_tools="full",
+    )
     async with pool.acquire() as conn:
         await queries.append_history(
             conn,
@@ -274,7 +285,7 @@ async def _run_hand_off_fallback(
             role="assistant",
             message=resp.text,
         )
-    return text_output(resp.text, context_tokens=context_tokens)
+    return text_output(resp.text, files=outbound, context_tokens=context_tokens)
 
 
 async def run_orchestrator_subagent(
@@ -380,9 +391,12 @@ async def run_orchestrator_cron_message(
         Message(role="user", content=payload.prompt),
     ]
     # Full toolset, but NO hand_off — a cron never delegates ([cron.md] §2).
+    outbound: list[str] = []
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset,
-        local_tools=LocalToolset([make_current_time_tool(timezone)]),
+        local_tools=LocalToolset(
+            [make_current_time_tool(timezone), make_send_file_tool(outbound)]
+        ),
         file_tools="full",
     )
 
@@ -403,7 +417,7 @@ async def run_orchestrator_cron_message(
     except (json.JSONDecodeError, ValueError, KeyError, AttributeError):
         logger.debug("cron_report_decision_parse_failed", exc_info=True)
 
-    return text_output(resp.text, report=report, reason=reason)
+    return text_output(resp.text, files=outbound, report=report, reason=reason)
 
 
 @agent.handler(mode="subagent", tool=False)
