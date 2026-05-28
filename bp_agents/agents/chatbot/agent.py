@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from bp_agents.agents.chatbot.approval import approval_poll_loop
 from bp_agents.agents.chatbot.credentials import HttpChannelCredentials
 from bp_agents.agents.chatbot.cron import CronScheduler, run_cron_management
-from bp_agents.agents.chatbot.gateway import ChatbotGateway
+from bp_agents.agents.chatbot.gateway import BOT_COMMANDS, ChatbotGateway
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
@@ -103,6 +103,12 @@ async def _startup() -> None:
     _telegram = HttpTelegramClient(
         _settings.telegram_bot_token, base_url=_settings.telegram_base_url
     )
+    # Advertise the command list to Telegram's "/" menu. Best-effort — a
+    # failure here must not stop the bot from polling.
+    try:
+        await _telegram.set_my_commands(BOT_COMMANDS)
+    except Exception:  # noqa: BLE001
+        logger.warning("set_my_commands_failed", extra={"event": "set_my_commands_failed"})
     gateway = ChatbotGateway(
         dispatcher=agent,
         pool=_pool,
