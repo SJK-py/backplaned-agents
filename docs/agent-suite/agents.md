@@ -75,20 +75,21 @@ Planning / multi-step reasoning.
 
 Same three modes as the other l1 agents.
 
-**`plan_mode` (local tool, not a router mode)** opens a *fresh* in-process loop — the prior loop closes and a new one starts with a targeted system prompt (objective, context, enumerated steps) and a dedicated toolset:
+**`plan_mode`** is a **terminal tool offered on delegated turns** (both `on_delegation` and `delegated_message`, wired via the `L1Config.extra_terminal` seam — *not* in `subagent` mode, which structurally bounds recursion since `execute_step` re-enters the suite only through `orchestrator(subagent)`). When the model calls `plan_mode(objective, steps?)`, the turn loop returns and `deep_reasoning/plan.py::run_plan` drives an explicit plan, one **fresh** decision loop per step (system prompt = objective + plan + result *summaries*, not an accumulating transcript). The result is the delegated turn's `AgentOutput`, so the session stays delegated to deep_reasoning. Plan state is in-memory; `plan_max_steps` / `plan_max_iters` guarantee termination.
 
-| Local tool | Args | Effect |
+| Plan tool | Args | Effect |
 | --- | --- | --- |
-| `add_step` | `add_after_num`, `contents` | insert a step |
+| `add_step` | `add_after_num`, `contents` | insert a step (`0` = front) |
 | `modify_step` | `target_step_num`, `contents` | rewrite a step |
 | `remove_step` | `target_step_num` | delete a step |
-| `execute_step` | `relevant_context`, `additional_instruction` | **spawn `orchestrator(subagent)`** with (general+additional instruction, context, current step); on result, record it and open the next step's loop |
+| `execute_step` | `relevant_context`, `additional_instruction?` | **spawn `orchestrator(subagent)`** with (step-instruction + additional, relevant context + prior results, the current step); record the result, advance |
 | `quit_and_report` | `result_content` | finalize + report (short-circuit) |
-| `read_file` | `name` | read a result's file by name |
+| `read_file` | `name` | inspect a result's file (`read_only` `file_tools`) |
+| `send_file` | `name` | mark a produced file to deliver with the final report |
 
-The per-step user prompt is `## Results from previous steps … ## Current Step: {item} — decide: modify plan / execute / finalize`. When all steps complete, a final loop runs with a limited toolset (`add_step(contents)`, `read_file`) instructed to emit the result unless another step is needed.
+Each decision's prompt is `## Current step (n/N): {item} — decide: modify the plan / execute / finalize`. When the cursor passes the last step, a final loop (limited to `add_step` + `read_file`/`send_file`) writes the answer unless another step is needed.
 
-> `execute_step` → `orchestrator(subagent)` is **l1→l0**; allowed by the ACL rule `l1/* -> l0/agent.orchestration`. Watch task deadlines for long plans ([delegation.md F4](./delegation.md)).
+> `execute_step` → `orchestrator(subagent)` is **l1→l0**; allowed by the ACL rule `l1/* -> l0/agent.orchestration`. The whole plan runs inside one delegated task, so watch its deadline for long plans ([delegation.md F4](./delegation.md)); each step also has a `plan_step_timeout_s`.
 
 ---
 
