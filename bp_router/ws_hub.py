@@ -413,6 +413,13 @@ class _CatalogCache:
             self._expires_at = loop.time() + self._ttl_s
             return agents
 
+    def clear(self) -> None:
+        """Drop the cached scan so the next `get` re-reads. Called after a
+        handshake refreshes an agent's published info, so a peer connecting
+        within the TTL window doesn't get a stale Welcome catalog."""
+        self._cached = None
+        self._expires_at = 0.0
+
 
 async def _handshake(ws: WebSocket, state: AppState) -> SocketEntry:
     """Read Hello, validate auth, register, send Welcome."""
@@ -493,6 +500,7 @@ async def _handshake(ws: WebSocket, state: AppState) -> SocketEntry:
         )
 
     pool = state.db_pool  # type: ignore[attr-defined]
+    info_changed = False
     # Thundering-herd guard: bound the DB-heavy section so a fleet
     # reconnecting in lockstep can't open one pool checkout per
     # handshake and starve every other router DB op. The per-IP
@@ -525,6 +533,7 @@ async def _handshake(ws: WebSocket, state: AppState) -> SocketEntry:
                         groups=groups, capabilities=capabilities,
                     )
                     agent_row = await queries.get_agent(conn, principal.agent_id)
+                    info_changed = True
                     logger.info(
                         "agent_info_refreshed_on_connect",
                         extra={"event": "agent_info_refreshed_on_connect",
@@ -632,6 +641,26 @@ async def _handshake(ws: WebSocket, state: AppState) -> SocketEntry:
             "resumed": resumed is not None,
         },
     )
+
+    # The agent's published modes/capabilities changed on this reconnect —
+    # already-connected peers hold a stale catalog (they only refresh on
+    # CatalogUpdate / their own reconnect), so push one now. Drop the
+    # short-TTL catalog cache too, so a peer connecting in the next few
+    # seconds doesn't get a stale Welcome. Best-effort: a broadcast hiccup
+    # must not fail the handshake (peers rebuild on their next reconnect).
+    if info_changed:
+        from bp_router.catalog import push_catalog_update_to_all  # noqa: PLC0415
+
+        state.agent_catalog_cache.clear()  # type: ignore[attr-defined]
+        try:
+            await push_catalog_update_to_all(state)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "catalog_broadcast_after_refresh_failed",
+                extra={"event": "catalog_broadcast_after_refresh_failed",
+                       "bp.agent_id": principal.agent_id},
+            )
+
     return entry
 
 

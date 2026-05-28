@@ -20,6 +20,27 @@
 
 ## 2026-05-28
 
+### Fixed — broadcast a CatalogUpdate when a handshake refreshes agent info
+
+- **What:** When `_handshake` refreshes a reconnecting agent's published
+  info (the prior fix), it now also drops the short-TTL `_CatalogCache`
+  (new `clear()`) and calls `push_catalog_update_to_all` — but only when the
+  info actually changed (`bp_router/ws_hub.py`).
+- **Why:** the handshake refresh updated the DB, but already-connected peers
+  hold their catalog from the *last* Welcome and only refresh on a
+  `CatalogUpdate` (or their own reconnect). So an agent that gained a
+  tool-visible mode (e.g. config's `cron` → `call_config_cron`) stayed
+  invisible to the orchestrator's live `peers.visible()` until it
+  reconnected. `admit` reads the DB fresh, but tool *visibility* is
+  catalog-driven — hence the broadcast.
+- **Shape:** **Fixed.** Bounded: the broadcast/clear fire only on an actual
+  change (write-on-change refresh), so a normal no-op reconnect — or a fleet
+  restart with unchanged code — triggers neither. Best-effort: a broadcast
+  failure logs and never fails the handshake.
+- **Verified:** `tests/test_handshake_agent_info_refresh.py` (cache `clear()`
+  + source guard that `_handshake` broadcasts on change); handshake +
+  agent-info suites green.
+
 ### Changed — drop the `[capabilities: …]` suffix from tool descriptions
 
 - **What:** `build_tools` (`bp_sdk/tools.py::_description`) no longer appends
