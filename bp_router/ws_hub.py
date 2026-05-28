@@ -54,10 +54,40 @@ from bp_router.security.jwt import TokenError, is_jti_revoked, verify_agent_toke
 from bp_router.visibility import available_destinations
 
 if TYPE_CHECKING:
+    from bp_protocol.types import AgentInfo
     from bp_router.app import AppState
     from bp_router.db.models import AgentRow
 
 logger = logging.getLogger(__name__)
+
+
+def _merged_hello_agent_info(
+    existing_info: dict | None, hello: AgentInfo
+) -> tuple[dict, list[str], list[str]] | None:
+    """Merge a reconnecting agent's Hello-declared `agent_info` onto its
+    stored record, returning `(info_dump, groups, capabilities)` when the
+    result differs (so the handshake should persist it), else `None`.
+
+    Honors the SDK's "publish the current snapshot on connect" contract
+    ([bp_sdk/agent.py]) so a restart with changed modes / capabilities
+    takes effect without re-onboarding. Restricted to the same self-mutable
+    fields as `AgentInfoUpdate` (`_AGENT_INFO_MUTABLE_FIELDS`), with
+    `agent_id` pinned and the merged shape fully re-validated."""
+    from bp_protocol.types import AgentInfo  # noqa: PLC0415
+    from bp_router.dispatch import _AGENT_INFO_MUTABLE_FIELDS  # noqa: PLC0415
+
+    existing = dict(existing_info or {})
+    hello_dump = hello.model_dump()
+    merged = dict(existing)
+    for fld in _AGENT_INFO_MUTABLE_FIELDS:
+        merged[fld] = hello_dump.get(fld)
+    # agent_id is locked to the stored (authenticated) record — never
+    # taken from the Hello-declared info.
+    merged["agent_id"] = existing.get("agent_id") or hello.agent_id
+    if merged == existing:
+        return None
+    validated = AgentInfo.model_validate(merged)  # defensive; raises on bad shape
+    return validated.model_dump(), list(validated.groups), list(validated.capabilities)
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +502,34 @@ async def _handshake(ws: WebSocket, state: AppState) -> SocketEntry:
     async with state.ws_handshake_semaphore:  # type: ignore[attr-defined]
         async with pool.acquire() as conn:
             agent_row = await queries.get_agent(conn, principal.agent_id)
+            # Refresh the published AgentInfo from the Hello so a restart
+            # with changed modes / capabilities propagates without
+            # re-onboarding (onboarding is otherwise the only writer). Only
+            # for an active agent, and only when something actually changed.
+            if agent_row is not None and agent_row.status == "active":
+                try:
+                    refreshed = _merged_hello_agent_info(
+                        agent_row.agent_info, frame.agent_info
+                    )
+                except ValidationError:
+                    logger.warning(
+                        "agent_info_refresh_invalid",
+                        extra={"event": "agent_info_refresh_invalid",
+                               "bp.agent_id": principal.agent_id},
+                    )
+                    refreshed = None
+                if refreshed is not None:
+                    info_dump, groups, capabilities = refreshed
+                    await queries.update_agent_info(
+                        conn, principal.agent_id, agent_info=info_dump,
+                        groups=groups, capabilities=capabilities,
+                    )
+                    agent_row = await queries.get_agent(conn, principal.agent_id)
+                    logger.info(
+                        "agent_info_refreshed_on_connect",
+                        extra={"event": "agent_info_refreshed_on_connect",
+                               "bp.agent_id": principal.agent_id},
+                    )
         if agent_row is None:
             raise _HandshakeFailed(
                 f"unknown agent: {principal.agent_id}",
