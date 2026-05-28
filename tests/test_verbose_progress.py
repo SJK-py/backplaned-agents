@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from bp_agents.agents.chatbot.gateway import ChatbotGateway, _render_progress
+from bp_agents.agents.chatbot.gateway import ChatbotGateway
+from bp_agents.channel import render_progress_line
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -166,33 +167,33 @@ def test_verbose_default_renders_progress(suite_db_url: str) -> None:
 
 def test_render_progress_formats() -> None:
     # thinking: heartbeat vs reasoning detail (parenthesized, ellipsis lead)
-    assert _render_progress({"kind": "thinking"}) == "Thinking…"
-    assert _render_progress(
+    assert render_progress_line({"kind": "thinking"}) == "Thinking…"
+    assert render_progress_line(
         {"kind": "thinking", "detail": "so I check the docs"}
     ) == "(…so I check the docs)"
     # an already-truncated detail (leading …) isn't double-ellipsised
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "thinking", "detail": "…the tail of a long thought"}
     ) == "(…the tail of a long thought)"
     # tool_call / tool_result: [Tool]/[Result] labels, call_ stripped, parens
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_call", "tool": "call_knowledge_base", "detail": "looking it up"}
     ) == "[Tool] knowledge_base (looking it up)"
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_result", "tool": "call_knowledge_base"}
     ) == "[Result] knowledge_base"
     # a non-peer local tool keeps its name as-is
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_call", "tool": "current_time"}
     ) == "[Tool] current_time"
     # delegation transition tools render as plain phrases, not `[Tool] hand_off`
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_call", "tool": "hand_off"}
     ) == "Delegating to a specialist…"
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_call", "tool": "hand_off", "detail": "research can dig in"}
     ) == "Delegating to a specialist… (research can dig in)"
-    assert _render_progress(
+    assert render_progress_line(
         {"kind": "tool_call", "tool": "end_delegation"}
     ) == "Handing back to the assistant…"
 

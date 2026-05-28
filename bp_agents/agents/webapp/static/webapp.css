@@ -1,0 +1,13 @@
+/* Minimal app stylesheet. Tailwind (Play CDN) carries the layout; this
+   file holds only the few overrides the CDN build can't express. */
+
+/* Smooth the mobile drawer slide. */
+aside {
+  transition: transform 0.2s ease-in-out;
+}
+
+/* Hide Alpine-cloaked elements (e.g. the inactive file-stash tab) until
+   Alpine initialises, to avoid a flash of both panels on load. */
+[x-cloak] {
+  display: none !important;
+}

@@ -219,6 +219,18 @@ services:
     volumes: [chatbot_state:/state]
     networks: [edge, agents, suite]
 
+  webapp:                          # browser channel (FastAPI + agent WS)
+    <<: *suite-agent
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: webapp
+      AGENT_INVITATION_TOKEN: ${WEBAPP_INVITATION:?}
+      # Signs the browser session cookie. Generate a strong random value.
+      WEBAPP_SESSION_SECRET: ${WEBAPP_SESSION_SECRET:?set a strong random value}
+      WEBAPP_DEPLOYMENT_ENV: prod
+    # Fronted by the edge proxy (HTTPS + SSE); not published directly.
+    networks: [edge, agents, suite]
+
   orchestrator:
     <<: *suite-agent
     environment:

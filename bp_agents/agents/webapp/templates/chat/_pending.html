@@ -1,0 +1,17 @@
+{# The pending assistant bubble: connects to the SSE stream, appends each
+   `progress` event into the activity strip, swaps the `result` event into
+   the answer slot, and closes on `done`. #}
+<div class="flex justify-start my-2"
+     hx-ext="sse"
+     sse-connect="/chat/{{ session_id }}/stream/{{ turn_id }}"
+     sse-close="done">
+  <div class="max-w-[80%] w-full">
+    <details class="mb-1 rounded border border-brand-500/10 bg-brand-50/60" open>
+      <summary class="cursor-pointer select-none px-2 py-1 text-xs text-brand-500">
+        Activity
+      </summary>
+      <div class="px-2 py-1 space-y-0.5" sse-swap="progress" hx-swap="beforeend"></div>
+    </details>
+    <div sse-swap="result"></div>
+  </div>
+</div>

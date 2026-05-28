@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
+from bp_agents.config_edit import EDITABLE_FIELDS, ConfigError, coerce_config_value
 from bp_agents.cron_manage import run_cron_management
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -21,15 +22,8 @@ logger = logging.getLogger(__name__)
 
 CONFIG_AGENT_ID = "config"
 
-# Fields the user may read/set conversationally (a subset of user_config).
-_EDITABLE = {
-    "full_name": str,
-    "timezone": str,
-    "language": str,
-    "verbose_default": bool,
-    "custom_note": str,
-    "max_context_token_limit": int,
-}
+# Editable fields + value coercion are shared with the webapp config form
+# (bp_agents.config_edit) so the NL path and the structured form agree.
 
 _SYSTEM = """\
 You manage the user's settings. Use `get_config` to read current values and \
@@ -44,7 +38,7 @@ value. Never reply with only an acknowledgement like "done".\
 def _format_config(cfg: Any) -> str:
     if cfg is None:
         return "No settings found."
-    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in _EDITABLE)
+    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in EDITABLE_FIELDS)
 
 
 async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
@@ -55,19 +49,10 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
 
     async def _set(ctx: TaskContext, args: dict[str, Any]) -> str:
         field = args.get("field")
-        if field not in _EDITABLE:
-            return f"Unknown field {field!r}. Editable: {sorted(_EDITABLE)}"
-        raw = args.get("value")
-        typ = _EDITABLE[field]
         try:
-            if typ is bool:
-                value: Any = str(raw).lower() in ("1", "true", "yes", "on")
-            elif typ is int:
-                value = int(raw)
-            else:
-                value = str(raw)
-        except (TypeError, ValueError):
-            return f"Invalid value for {field}: {raw!r}"
+            value = coerce_config_value(field, args.get("value"))
+        except ConfigError as exc:
+            return str(exc)
         async with pool.acquire() as conn:
             await queries.update_user_config(conn, ctx.user_id, **{field: value})
         return f"Set {field} = {value}."
@@ -86,7 +71,7 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "field": {"type": "string", "enum": sorted(_EDITABLE)},
+                        "field": {"type": "string", "enum": sorted(EDITABLE_FIELDS)},
                         "value": {"type": "string"},
                     },
                     "required": ["field", "value"],

@@ -61,7 +61,7 @@ def test_bootstrap_registers_all_and_applies_acl(monkeypatch) -> None:
     posts = [c for c in calls if c[0] == "POST"]
     assert posts[0][1].endswith("/v1/auth/login")
     invites = [c for c in posts if c[1].endswith("/v1/admin/invitations")]
-    assert len(invites) == 11
+    assert len(invites) == 12
     # The chatbot — and only the chatbot — provisions its service principal.
     provisioning = [c for c in invites if c[2]["json"].get("provisions_service_user")]
     assert len(provisioning) == 1

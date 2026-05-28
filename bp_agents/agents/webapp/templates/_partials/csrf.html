@@ -1,0 +1,3 @@
+{# Hidden CSRF field for raw HTML forms. Include inside any form that
+   POSTs. The middleware also accepts the value via X-CSRF-Token (HTMX). #}
+<input type="hidden" name="csrf_token" value="{{ request.session.csrf_token or '' }}" />

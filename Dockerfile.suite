@@ -22,9 +22,11 @@ WORKDIR /app
 
 COPY . .
 # `suite` brings asyncpg/alembic/sqlalchemy/lancedb/markitdown/croniter;
-# the SDK + protocol come with the package. No router/provider extras —
-# agents reach the LLM through the router's LlmService.
-RUN pip install ".[suite]"
+# `webapp` adds the browser channel's FastAPI/uvicorn/Jinja2 stack (one
+# image serves the whole roster, so the webapp agent ships here too). The
+# SDK + protocol come with the package. No router/provider extras — agents
+# reach the LLM through the router's LlmService.
+RUN pip install ".[suite,webapp]"
 
 USER bp
 

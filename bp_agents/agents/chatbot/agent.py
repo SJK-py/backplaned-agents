@@ -128,7 +128,7 @@ async def _startup() -> None:
     # per-session lock so the apply step serializes with user turns.
     scheduler = CronScheduler(
         dispatcher=agent, pool=_pool, settings=_settings, telegram=_telegram,
-        session_lock=gateway._session_lock, credentials=_credentials,
+        session_lock=gateway.session_lock, credentials=_credentials,
     )
     global _cron_task  # noqa: PLW0603
     _cron_task = asyncio.create_task(scheduler.run_loop(_stop))

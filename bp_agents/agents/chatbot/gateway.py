@@ -16,10 +16,15 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from bp_agents.agents.chatbot.credentials import ChannelCredentials
 from bp_agents.agents.chatbot.telegram import TelegramClient
+from bp_agents.channel import (
+    VERBOSE_PREFIX,
+    ChannelCore,
+    agent_tag,
+    render_progress_line,
+)
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
-from bp_agents.session_lock import SessionLockManager
 from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
@@ -60,17 +65,8 @@ async def send_named_file(
         logger.exception(
             "outbound_file_failed", extra={"event": "outbound_file_failed"}
         )
-ORCHESTRATOR_AGENT_ID = "orchestrator"
-MEMORY_AGENT_ID = "memory"
 CONFIG_AGENT_ID = "config"
 CHATBOT_AGENT_ID = "chatbot"
-
-# Summarization tuning ([sessions.md] §3): fold the oldest ~70% of the
-# incumbent window once a thread crosses the soft limit, but only when
-# there's a meaningful number of turns to compress.
-_SUMMARIZE_FRACTION = 0.7
-_MIN_ROWS_TO_SUMMARIZE = 6
-_DEFAULT_CONTEXT_LIMIT = 120_000
 
 # Single source of truth for the bot's commands: drives both the /help
 # text and the Telegram `setMyCommands` registration (the "/" menu).
@@ -107,67 +103,6 @@ _NO_SESSION = (
 )
 _DISPATCH_FAILED = "Sorry — something went wrong handling that. Please try again."
 _TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under that.
-
-# Verbose-mode rendering ([channel.md] §5).
-_KIND_LABEL = {"tool_call": "[Tool]", "tool_result": "[Result]"}
-# Leads every verbose/progress line so it's visually distinct from the
-# final answer (which carries no marker).
-_VERBOSE_PREFIX = "💭 "
-# Agents that are NOT a delegation target — their output needs no tag (the
-# orchestrator is the assistant the user normally talks to; `router` is the
-# platform). Any other producer means the session is delegated to it.
-_UNTAGGED_AGENTS = frozenset({ORCHESTRATOR_AGENT_ID, "router"})
-
-
-def _pretty_agent(agent_id: str) -> str:
-    """`computer_use` → `Computer Use` — a human-readable specialist name."""
-    return agent_id.replace("_", " ").title()
-
-
-def _agent_tag(agent_id: str | None) -> str:
-    """`"[Research Agent] "` for a delegate, `""` otherwise. Prettifies the
-    agent_id (underscores → spaces, title case) so the user sees which
-    specialist currently holds the session."""
-    if not agent_id or agent_id in _UNTAGGED_AGENTS:
-        return ""
-    return f"[{_pretty_agent(agent_id)} Agent] "
-# Delegation transition tools read better as plain phrases than as a raw
-# `[Tool] hand_off` line (they're terminal tools, not ordinary dispatches).
-_TRANSITION_PHRASE = {
-    "hand_off": "Delegating to a specialist",
-    "end_delegation": "Handing back to the assistant",
-}
-
-
-def _render_progress(lp: dict) -> str:
-    """Format one `LoopProgress` payload into a friendly verbose-mode line.
-
-    - `thinking` heartbeat (no detail) → `Thinking…`; with the model's
-      reasoning → `(…<reasoning>)`.
-    - `tool_call` / `tool_result` → `[Tool]/[Result] <tool> (<detail>)`, the
-      `call_` peer-tool prefix stripped for readability.
-    - the delegation transition tools (`hand_off` / `end_delegation`) →
-      `Delegating to a specialist…` / `Handing back to the assistant…`.
-    - anything else falls back to its detail or kind.
-    """
-    kind = lp.get("kind", "")
-    detail = lp.get("detail")
-    if kind == "thinking":
-        if not detail:
-            return "Thinking…"
-        lead = "" if detail.startswith("…") else "…"
-        return f"({lead}{detail})"
-    phrase = _TRANSITION_PHRASE.get(lp.get("tool") or "") if kind == "tool_call" else None
-    if phrase:
-        return f"{phrase}… ({detail})" if detail else f"{phrase}…"
-    label = _KIND_LABEL.get(kind)
-    if label:
-        name = (lp.get("tool") or "").removeprefix("call_") or "tool"
-        head = f"{label} {name}"
-        return f"{head} ({detail})" if detail else head
-    return detail or kind or "…"
-
-
 
 class RootDispatcher(Protocol):
     """The slice of the SDK `Agent` the gateway needs — root-task
@@ -210,22 +145,24 @@ class ChatbotGateway:
         self._telegram = telegram
         self._credentials = credentials
         self._result_timeout_s = result_timeout_s
-        self._fire_memory = fire_memory
-        # Agent ids a user may /delegate to (the l1 specialists). The channel
-        # has no peer catalog, so this is its allow-list.
-        self._delegatable = delegatable_agents
-        # Per-`session_id` FIFO serialization ([sessions.md] §4). In-process
-        # only when `redis` is None (single channel instance); cross-process
-        # (distributed lock) when a Redis client is supplied — the
-        # prerequisite for running a second channel (webapp).
-        self._session_locks = SessionLockManager(redis)
+        # Transport-free channel engine: routing, the per-session lock,
+        # `delegated_to` maintenance, summarization, /delegate·/undelegate,
+        # and `memory.add` ([channel.md], shared with the webapp frontend).
+        self._core = ChannelCore(
+            dispatcher=dispatcher,
+            pool=pool,
+            delegatable_agents=delegatable_agents,
+            result_timeout_s=result_timeout_s,
+            fire_memory=fire_memory,
+            redis=redis,
+        )
         # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
         self._current_task: dict[str, tuple[str, str]] = {}
-        # Detached fire-and-forget memory.add tasks (tracked for cleanup).
-        self._memory_tasks: set[asyncio.Task] = set()
 
-    def _session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
-        return self._session_locks(session_id)
+    def session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
+        """The per-session lock, shared with the cron scheduler so its
+        applied turns serialize with inbound user turns ([sessions.md] §4)."""
+        return self._core.session_lock(session_id)
 
     async def handle_update(
         self,
@@ -359,135 +296,22 @@ class ChatbotGateway:
             return None
         return user_id, session_id
 
-    async def _summarize_thread(
-        self, session_id: str, user_id: str, agent_id: str, *, previous: str | None
-    ) -> str:
-        """Best-effort complete summary of one agent's incumbent thread (the
-        prior rolling summary folded in). Returns `previous` (or '') on an
-        empty thread or a summarizer failure — never blocks the switch."""
-        async with self._pool.acquire() as conn:
-            rows = await queries.reload_incumbent(
-                conn, session_id=session_id, agent_id=agent_id
-            )
-        if not rows:
-            return previous or ""
-        from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
-            HISTORY_SUMMARIZER_AGENT_ID,
-            SummarizeIncumbent,
-        )
-        try:
-            task_id = await self._dispatcher.spawn_root_for_user(
-                HISTORY_SUMMARIZER_AGENT_ID,
-                SummarizeIncumbent(
-                    agent_id=agent_id, up_to=rows[-1].id, previous_summary=previous
-                ),
-                user_id=user_id, session_id=session_id, mode="summarize_incumbent",
-            )
-            result = await self._dispatcher.await_root_result(
-                task_id, timeout_s=self._result_timeout_s
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "delegation_summarize_failed",
-                extra={"event": "delegation_summarize_failed",
-                       "bp.session_id": session_id, "agent_id": agent_id},
-            )
-            return previous or ""
-        return (result.output.content if result.output else "") or (previous or "")
-
-    async def _fold_back(
-        self, session_id: str, user_id: str, delegate: str, info
-    ) -> None:  # noqa: ANN001
-        """End a delegation: summarize the delegate thread into a recap row on
-        the main thread, retire the delegate episode, and clear the flags.
-        Mirrors `orchestrator.end_delegation` ([delegation.md] Phase 3)."""
-        summary = await self._summarize_thread(
-            session_id, user_id, delegate,
-            previous=info.delegate_summary if info else None,
-        )
-        recap = f"[Returned from {_pretty_agent(delegate)}] {summary or '(no summary)'}"
-        async with self._pool.acquire() as conn:
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                role="user", message=recap, incumbent=True, hidden=True,
-            )
-            await queries.demote_thread(conn, session_id=session_id, agent_id=delegate)
-            await queries.update_session_info(
-                conn, session_id, delegate_summary=None, delegated_to=None
-            )
-
     async def _cmd_delegate(self, chat_id: str, arg: str) -> None:
         resolved = await self._resolve_session(chat_id)
         if resolved is None:
             return
         user_id, session_id = resolved
         target = arg.split(maxsplit=1)[0] if arg.split(maxsplit=1) else ""
-        if target not in self._delegatable:
-            avail = ", ".join(sorted(self._delegatable)) or "(none configured)"
-            await self._telegram.send_message(
-                chat_id=chat_id,
-                text=f"Can't delegate to {target or '(missing agent)'}. "
-                     f"Available: {avail}.",
-            )
-            return
-        async with self._session_lock(session_id):
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-            current = info.delegated_to if info else None
-            if current == target:
-                await self._telegram.send_message(
-                    chat_id=chat_id,
-                    text=f"Already delegated to {_pretty_agent(target)}.",
-                )
-                return
-            # Implicit switch: fold the current delegate back before seeding
-            # the new one, so its work isn't lost.
-            if current:
-                await self._fold_back(session_id, user_id, current, info)
-                async with self._pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, session_id)
-            # Seed the new delegate with the conversation so far.
-            summary = await self._summarize_thread(
-                session_id, user_id, ORCHESTRATOR_AGENT_ID,
-                previous=info.history_summary if info else None,
-            )
-            seed = (
-                "## Conversation so far (summarized)\n"
-                f"{summary or '(no prior conversation)'}\n\n"
-                "The user has delegated this conversation to you; continue "
-                "helping them directly."
-            )
-            async with self._pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id=session_id, agent_id=target,
-                    role="user", message=seed, incumbent=True, hidden=True,
-                )
-                await queries.update_session_info(conn, session_id, delegated_to=target)
-        await self._telegram.send_message(
-            chat_id=chat_id,
-            text=f"Delegated to {_pretty_agent(target)} — it'll handle your "
-                 "messages until /undelegate.",
-        )
+        msg = await self._core.delegate(user_id, session_id, target)
+        await self._telegram.send_message(chat_id=chat_id, text=msg)
 
     async def _cmd_undelegate(self, chat_id: str) -> None:
         resolved = await self._resolve_session(chat_id)
         if resolved is None:
             return
         user_id, session_id = resolved
-        async with self._session_lock(session_id):
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-            current = info.delegated_to if info else None
-            if not current:
-                await self._telegram.send_message(
-                    chat_id=chat_id, text="You're already with the main assistant.",
-                )
-                return
-            await self._fold_back(session_id, user_id, current, info)
-        await self._telegram.send_message(
-            chat_id=chat_id,
-            text=f"Returned to the main assistant (was {_pretty_agent(current)}).",
-        )
+        msg = await self._core.undelegate(user_id, session_id)
+        await self._telegram.send_message(chat_id=chat_id, text=msg)
 
     async def _resolve_user(self, chat_id: str) -> str | None:
         async with self._pool.acquire() as conn:
@@ -605,7 +429,7 @@ class ChatbotGateway:
             # marker → (delegate tag, if any) → the rendered line. The tag is
             # per-frame: the orchestrator's own lines stay untagged; a
             # specialist's lines show it holds the session.
-            text = f"{_VERBOSE_PREFIX}{_agent_tag(pf.agent_id)}{_render_progress(lp)}"
+            text = f"{VERBOSE_PREFIX}{agent_tag(pf.agent_id)}{render_progress_line(lp)}"
             await self._telegram.send_message(chat_id=chat_id, text=text)
         return _cb
 
@@ -647,22 +471,12 @@ class ChatbotGateway:
         verbose: bool = False,
     ) -> None:
         """Serialize on the session, write the user turn, inject the task,
-        await the result, and relay it."""
-        async with self._session_lock(session_id):
-            # Routing: the delegate during an active delegation, else the
-            # orchestrator.
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-                dest = (
-                    info.delegated_to
-                    if info and info.delegated_to
-                    else ORCHESTRATOR_AGENT_ID
-                )
-                mode = (
-                    "delegated_message"
-                    if info and info.delegated_to
-                    else "message"
-                )
+        await the result, and relay it. The channel logic (routing,
+        delegated_to maintenance, summarization, memory) lives in
+        `ChannelCore`; this keeps only Telegram I/O + /stop tracking."""
+        reply = ""
+        async with self._core.session_lock(session_id):
+            dest, mode = await self._core.route(session_id)
 
             # Inbound files: save to the session stash + record a (T,T)
             # history row BEFORE dispatch so the agent discovers them
@@ -672,34 +486,22 @@ class ChatbotGateway:
                     user_id, session_id, dest, tg_file_id, filename
                 )
 
-            async with self._pool.acquire() as conn:
-                # The channel is the sole writer of user turns, written
-                # verbatim BEFORE dispatch so the agent's reload sees it.
-                # (Skip an empty turn for a file-only message — the file
-                # row above is the user input.)
-                if text:
-                    await queries.append_history(
-                        conn,
-                        session_id=session_id,
-                        agent_id=dest,
-                        role="user",
-                        message=text,
-                    )
+            # The channel is the sole writer of user turns, written verbatim
+            # BEFORE dispatch so the agent's reload sees it. (Skip an empty
+            # turn for a file-only message — the file row above is the input.)
+            if text:
+                await self._core.record_user_turn(session_id, dest, text)
 
             prompt = text or "(the user sent a file — see the attached file.)"
             try:
-                task_id = await self._dispatcher.spawn_root_for_user(
-                    dest,
-                    MessagePayload(prompt=prompt),
-                    user_id=user_id,
-                    session_id=session_id,
-                    mode=mode,
+                task_id = await self._core.spawn(
+                    user_id, session_id, dest, mode, prompt
                 )
                 # Record the in-flight task so /stop can cancel it.
                 self._current_task[chat_id] = (user_id, task_id)
                 async with self._typing(chat_id):
-                    result = await self._dispatcher.await_root_result(
-                        task_id, timeout_s=self._result_timeout_s,
+                    result = await self._core.await_result(
+                        task_id,
                         on_progress=self._progress_callback(chat_id) if verbose else None,
                     )
             except Exception:  # noqa: BLE001
@@ -721,7 +523,7 @@ class ChatbotGateway:
             # Tag the final reply with the specialist when the session is
             # delegated (producer = result.agent_id), so it's clear who
             # answered ([delegation.md] §2).
-            reply_text = f"{_agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
+            reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
             await self._telegram.send_message(chat_id=chat_id, text=reply_text)
 
             # Outbound files: the agent returned file-store NAMES; resolve
@@ -730,48 +532,16 @@ class ChatbotGateway:
             for name in out_files:
                 await self._send_outbound_file(chat_id, user_id, session_id, name)
 
-            # delegated_to maintenance via result-source observation
-            # ([delegation.md] §2) — who produced the result vs who we
-            # dispatched to. Channel-owned (session.management).
-            await self._update_delegation(session_id, dest, result)
-
-            # Post-turn summarization check, still inside the session lock
-            # so it serializes with the next turn ([sessions.md] §3.1). The
-            # agent measured `context_tokens` while building its context.
-            context_tokens = (
-                result.output.metadata.get("context_tokens")
-                if result.output
-                else None
-            )
-            await self._maybe_summarize(session_id, dest, context_tokens)
+            # delegated_to maintenance + post-turn summarization, still inside
+            # the session lock so they serialize with the next turn
+            # ([delegation.md] §2, [sessions.md] §3.1).
+            context_tokens = await self._core.after_result(session_id, dest, result)
+            await self._core.maybe_summarize(session_id, dest, context_tokens)
 
         # memory.add is per-USER (not per-session) and a multi-LLM-call
         # extraction, so it runs OUTSIDE the session lock, fire-and-forget
-        # ([overview.md] §2.2). Detached so the next turn isn't blocked.
-        if self._fire_memory and reply:
-            task = asyncio.create_task(
-                self._fire_memory_add(user_id, session_id, text, reply)
-            )
-            self._memory_tasks.add(task)
-            task.add_done_callback(self._memory_tasks.discard)
-
-    async def _fire_memory_add(
-        self, user_id: str, session_id: str, user_prompt: str, reply: str
-    ) -> None:
-        """Spawn `memory.add` for the turn (fire-and-forget — the result
-        is ignored). Best-effort: a memory failure never affects the user."""
-        from bp_agents.common.payloads import MemAdd  # noqa: PLC0415
-
-        try:
-            await self._dispatcher.spawn_root_for_user(
-                MEMORY_AGENT_ID,
-                MemAdd(user_prompt=user_prompt, assistant_response=reply),
-                user_id=user_id, session_id=session_id, mode="add",
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "memory_add_failed", extra={"event": "memory_add_failed"}
-            )
+        # ([overview.md] §2.2). No-op unless `fire_memory` and a real reply.
+        self._core.fire_memory_add(user_id, session_id, text, reply)
 
     async def _save_inbound_file(
         self, user_id: str, session_id: str, dest: str,
@@ -805,95 +575,3 @@ class ChatbotGateway:
             telegram=self._telegram, credentials=self._credentials,
             chat_id=chat_id, user_id=user_id, session_id=session_id, name=name,
         )
-
-    async def _update_delegation(self, session_id: str, dest: str, result) -> None:  # noqa: ANN001
-        """Maintain `delegated_to` from the result source ([delegation.md] §2).
-
-        - dispatched orchestrator but a delegate produced the result ⇒
-          hand-off ⇒ set `delegated_to = <delegate>`.
-        - dispatched a delegate but orchestrator produced the result ⇒
-          hand-back ⇒ clear.
-        - a delegated turn FAILED (F2) ⇒ revert to the orchestrator so the
-          session isn't stuck routing to a broken delegate.
-        """
-        producer = result.agent_id
-        failed = result.status != TaskStatus.SUCCEEDED
-        update: tuple[str | None] | None = None  # (value,) when a change applies
-        if failed and dest != ORCHESTRATOR_AGENT_ID:
-            update = (None,)  # F2: broken delegate → back to orchestrator
-        elif dest == ORCHESTRATOR_AGENT_ID and producer not in (
-            ORCHESTRATOR_AGENT_ID, "router",
-        ):
-            update = (producer,)  # hand-off
-        elif dest != ORCHESTRATOR_AGENT_ID and producer == ORCHESTRATOR_AGENT_ID:
-            update = (None,)  # hand-back
-        if update is not None:
-            async with self._pool.acquire() as conn:
-                await queries.update_session_info(
-                    conn, session_id, delegated_to=update[0]
-                )
-
-    async def _maybe_summarize(
-        self, session_id: str, agent_id: str, context_tokens: int | None
-    ) -> None:
-        """If the thread's context is over the user's soft limit, fold its
-        oldest ~70% of incumbent turns into the rolling summary and demote
-        them. Best-effort — a summarizer failure never breaks the turn."""
-        if not context_tokens:
-            return
-        async with self._pool.acquire() as conn:
-            info = await queries.get_session_info(conn, session_id)
-            if info is None:
-                return
-            cfg = await queries.get_user_config(conn, info.user_id)
-            limit = (
-                cfg.max_context_token_limit
-                if cfg
-                else _DEFAULT_CONTEXT_LIMIT
-            )
-            if context_tokens <= limit:
-                return
-            rows = await queries.reload_incumbent(
-                conn, session_id=session_id, agent_id=agent_id
-            )
-        if len(rows) < _MIN_ROWS_TO_SUMMARIZE:
-            return
-
-        # Fold the oldest ~70% of the incumbent window.
-        cutoff_idx = max(1, int(len(rows) * _SUMMARIZE_FRACTION))
-        up_to = rows[cutoff_idx - 1].id
-        is_main = agent_id == ORCHESTRATOR_AGENT_ID
-        previous = info.history_summary if is_main else info.delegate_summary
-
-        try:
-            from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
-                HISTORY_SUMMARIZER_AGENT_ID,
-                SummarizeIncumbent,
-            )
-
-            task_id = await self._dispatcher.spawn_root_for_user(
-                HISTORY_SUMMARIZER_AGENT_ID,
-                SummarizeIncumbent(
-                    agent_id=agent_id, up_to=up_to, previous_summary=previous
-                ),
-                user_id=info.user_id,
-                session_id=session_id,
-                mode="summarize_incumbent",
-            )
-            result = await self._dispatcher.await_root_result(
-                task_id, timeout_s=self._result_timeout_s
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "summarize_failed",
-                extra={"event": "summarize_failed", "bp.session_id": session_id},
-            )
-            return
-
-        new_summary = (result.output.content if result.output else "") or ""
-        field = "history_summary" if is_main else "delegate_summary"
-        async with self._pool.acquire() as conn:
-            await queries.update_session_info(conn, session_id, **{field: new_summary})
-            await queries.demote_incumbent_through(
-                conn, session_id=session_id, agent_id=agent_id, up_to_id=up_to
-            )
