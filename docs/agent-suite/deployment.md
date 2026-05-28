@@ -63,7 +63,9 @@ automatically for a local router.
 - `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`
 - `SUITE_LANCE_ROOT` — per-user LanceDB root (`/lancedb`; shared volume
   for `knowledge_base` + `memory`).
-- chatbot: `SUITE_TELEGRAM_BOT_TOKEN`.
+- chatbot: `SUITE_TELEGRAM_BOT_TOKEN`; `SUITE_REDIS_URL` (optional) makes
+  the per-session turn lock distributed — set it only to run a second
+  channel instance (e.g. a webapp); a single Telegram bot needs no Redis.
 - research: `SUITE_SEARXNG_URL` (the bundled SearXNG or an external
   Brave-API-compatible endpoint).
 - LLM presets are router-side (`llm_presets` table); the suite only names

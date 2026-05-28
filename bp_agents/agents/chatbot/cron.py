@@ -29,6 +29,9 @@ from bp_agents.cron_manage import REPORT_NEVER as _REPORT_NEVER
 from bp_agents.db import queries
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+    from typing import Any
+
     import asyncpg
 
     from bp_agents.agents.chatbot.credentials import ChannelCredentials
@@ -57,7 +60,7 @@ class CronScheduler:
         pool: asyncpg.Pool,
         settings: SuiteSettings,
         telegram: TelegramClient | None,
-        session_lock: Callable[[str], asyncio.Lock],
+        session_lock: Callable[[str], AbstractAsyncContextManager[Any]],
         credentials: ChannelCredentials | None = None,
     ) -> None:
         self._dispatcher = dispatcher
