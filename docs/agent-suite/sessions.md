@@ -86,7 +86,7 @@ The channel maintains a **per-`session_id` FIFO queue**. Serialized ops: message
 - **Why:** the router serializes per *task*, never per *session*. Without this, two turns' history appends interleave and summarization's `incumbent` flips race.
 - **Scope:** an op spans dispatch → agent runs (and writes its turn rows) → result → channel writes. No other op for that session overlaps, so all reads see a consistent snapshot and all writes are exclusive.
 - **Out of the queue:** `memory.add` (per-user, separate store — queuing it would block the next message behind a multi-LLM extraction). Cron's agent **loop** also runs outside the queue; only its apply step is queued ([cron.md](./cron.md)).
-- **Multi-worker:** in-memory only serializes within one channel process. For horizontal scale, back the queue/lock with **Redis** or pin a session to a worker (consistent-hash affinity); otherwise two workers process one session concurrently and the races return.
+- **Multi-worker:** the lock is an in-process `asyncio.Lock` by default (serializes within one channel process). Set **`SUITE_REDIS_URL`** and it becomes a **distributed lock** (`bp_agents/session_lock.py`: local lock for in-process FIFO + a Redis `SET NX PX` with a renewal watchdog), so a second channel instance (e.g. a webapp alongside the Telegram bot) serializes turns for the same session across processes. Redis errors fail open to local-only. Without it, two instances would process one session concurrently and the races return — so today's single Telegram instance is correct as-is.
 
 ## 5. System-prompt composition
 

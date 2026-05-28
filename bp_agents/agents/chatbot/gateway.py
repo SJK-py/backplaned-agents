@@ -19,6 +19,7 @@ from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
+from bp_agents.session_lock import SessionLockManager
 from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
@@ -194,6 +195,7 @@ class ChatbotGateway:
         credentials: ChannelCredentials | None = None,
         result_timeout_s: float = 180.0,
         fire_memory: bool = False,
+        redis: Any | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
@@ -201,20 +203,18 @@ class ChatbotGateway:
         self._credentials = credentials
         self._result_timeout_s = result_timeout_s
         self._fire_memory = fire_memory
-        # Per-`session_id` FIFO serialization ([sessions.md] §4). In-memory
-        # (single channel instance); Redis / session-affinity for multi-worker.
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        # Per-`session_id` FIFO serialization ([sessions.md] §4). In-process
+        # only when `redis` is None (single channel instance); cross-process
+        # (distributed lock) when a Redis client is supplied — the
+        # prerequisite for running a second channel (webapp).
+        self._session_locks = SessionLockManager(redis)
         # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
         self._current_task: dict[str, tuple[str, str]] = {}
         # Detached fire-and-forget memory.add tasks (tracked for cleanup).
         self._memory_tasks: set[asyncio.Task] = set()
 
-    def _session_lock(self, session_id: str) -> asyncio.Lock:
-        lock = self._session_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._session_locks[session_id] = lock
-        return lock
+    def _session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
+        return self._session_locks(session_id)
 
     async def handle_update(
         self,

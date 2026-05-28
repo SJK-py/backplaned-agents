@@ -33,6 +33,14 @@ class SuiteSettings(BaseSettings):
     """Per-connection `statement_timeout` so a runaway query can't pin
     a pool connection indefinitely."""
 
+    redis_url: str | None = None
+    """Optional Redis DSN (`SUITE_REDIS_URL`). When set, the channel's
+    per-session lock becomes cross-process (a distributed lock) instead of
+    an in-process `asyncio.Lock` — the prerequisite for running more than
+    one channel instance (e.g. a webapp alongside the Telegram bot). When
+    unset, the lock is in-process only (correct for a single instance).
+    May point at the same Redis the router uses; keys are prefixed."""
+
     # ------------------------------------------------------------------
     # user_config defaults — seeded into a new `user_config` row at
     # registration approval; users tune them later via the config agent.

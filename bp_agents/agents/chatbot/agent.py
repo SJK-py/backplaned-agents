@@ -22,7 +22,7 @@ from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
 )
-from bp_agents.db.connection import open_pool
+from bp_agents.db.connection import open_pool, open_redis
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo
 from bp_sdk import Agent
@@ -55,6 +55,7 @@ agent = Agent(
 
 _settings: SuiteSettings = load_suite_settings()
 _pool: asyncpg.Pool | None = None
+_redis: object | None = None  # suite Redis (distributed session lock); None in dev
 _telegram: HttpTelegramClient | None = None
 _credentials: HttpChannelCredentials | None = None
 _poll_task: asyncio.Task | None = None
@@ -77,8 +78,11 @@ def _http_url() -> str:
 
 @agent.on_startup
 async def _startup() -> None:
-    global _pool, _telegram, _credentials, _poll_task, _approval_task  # noqa: PLW0603
+    global _pool, _redis, _telegram, _credentials, _poll_task, _approval_task  # noqa: PLW0603
     _pool = await open_pool(_settings)
+    # Suite Redis (optional): when set, the per-session lock is distributed,
+    # so a second channel instance (webapp) can serialize turns with this one.
+    _redis = await open_redis(_settings)
 
     # Control-plane client (registration submit, serviced-session
     # discovery, per-user session/cancel). Available whenever the
@@ -114,6 +118,7 @@ async def _startup() -> None:
         credentials=_credentials,
         result_timeout_s=_settings.dispatch_result_timeout_s,
         fire_memory=True,
+        redis=_redis,
     )
     offset_store = FileOffsetStore(Path(agent.config.state_dir) / "telegram_offset")
     _poll_task = asyncio.create_task(_poll_loop(gateway, offset_store))
@@ -140,6 +145,8 @@ async def _shutdown() -> None:
         await _telegram.aclose()
     if _credentials is not None:
         await _credentials.aclose()
+    if _redis is not None:
+        await _redis.aclose()
     if _pool is not None:
         await _pool.close()
 

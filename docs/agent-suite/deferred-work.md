@@ -93,6 +93,24 @@
   the rule list); the loader is a deliberate deploy step, and tier gating
   is deployment-specific policy.
 
+## Scaling / multi-instance
+
+- **constraint — single router WS process.** The router's `SocketRegistry`
+  is in-memory per process and there is **no cross-worker frame bus** (no
+  Redis pub/sub); `deliver_frame`/`fanout_frame` only find sockets on the
+  local worker. So delegation hand-off, Progress/Result fan-out, and
+  CatalogUpdate broadcast assume caller + callee share one process. Redis
+  (required in staging/prod) covers **only** JWT revocation + the
+  admit/auth rate-limit buckets — **not** horizontal WS scaling. Run **one
+  router WS process**; true multi-worker needs a pub/sub routing layer
+  (future work).
+- **lean — channel per-session lock is Redis-backable, the rest is
+  single-instance.** Setting `SUITE_REDIS_URL` makes the per-session turn
+  lock distributed (`session_lock.py`) — the prerequisite for a second
+  channel (webapp). Still single-instance without further work: the
+  chatbot's Telegram poll offset (one poller) and the per-worker in-memory
+  caches. The cron scheduler is one loop per chatbot process.
+
 ## Known unrelated platform test
 
 - `tests/test_docs_cleanup.py::test_acl_doc_pseudocode_includes_admin_service_branch`
