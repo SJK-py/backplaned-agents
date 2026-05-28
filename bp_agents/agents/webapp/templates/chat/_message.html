@@ -1,0 +1,20 @@
+{# One chat bubble. `role` ∈ {user, assistant}; `tag` is the delegate
+   label (e.g. "[Research Agent] ") or ""; `files` are produced file-store
+   names rendered as download chips (need `session_id` in context). #}
+<div class="flex {% if role == 'user' %}justify-end{% else %}justify-start{% endif %} my-2">
+  <div class="max-w-[80%] rounded-lg px-3 py-2 text-sm
+              {% if role == 'user' %}bg-brand-900 text-brand-50{% else %}bg-white border border-brand-500/10 text-brand-900{% endif %}">
+    {% if tag %}<div class="mb-1 text-xs font-medium text-amber-700">{{ tag }}</div>{% endif %}
+    <div class="whitespace-pre-wrap break-words">{{ content }}</div>
+    {% if files %}
+      <div class="mt-2 flex flex-wrap gap-1">
+        {% for f in files %}
+          <a class="inline-flex items-center rounded bg-brand-50 border border-brand-500/20 px-2 py-0.5 text-xs text-brand-700 hover:bg-brand-100"
+             href="/files/{{ session_id }}/{{ f }}" download>
+            ⬇ {{ f }}
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+</div>

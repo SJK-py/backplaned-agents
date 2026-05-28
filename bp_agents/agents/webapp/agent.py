@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING
 from bp_agents.agents.webapp.app import create_app
 from bp_agents.agents.webapp.config import WebappConfig
 from bp_agents.agents.webapp.upstream import UpstreamClient
-from bp_agents.db.connection import open_pool
+from bp_agents.channel import ChannelCore
+from bp_agents.db.connection import open_pool, open_redis
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo
 from bp_sdk import Agent
@@ -52,6 +53,7 @@ agent = Agent(
 
 _settings: SuiteSettings = load_suite_settings()
 _pool: asyncpg.Pool | None = None
+_redis: object | None = None  # suite Redis (distributed session lock); None in dev
 _upstream: UpstreamClient | None = None
 _web_server: object | None = None  # uvicorn.Server
 _web_task: asyncio.Task | None = None
@@ -70,13 +72,27 @@ def _http_url() -> str:
 
 @agent.on_startup
 async def _startup() -> None:
-    global _pool, _upstream, _web_server, _web_task  # noqa: PLW0603
+    global _pool, _redis, _upstream, _web_server, _web_task  # noqa: PLW0603
     import uvicorn  # noqa: PLC0415
 
     _pool = await open_pool(_settings)
+    # Suite Redis (optional): shared with the chatbot so the per-session
+    # lock serializes turns across both channels ([webapp.md] §1).
+    _redis = await open_redis(_settings)
     cfg = WebappConfig()  # type: ignore[call-arg]
     _upstream = UpstreamClient(_http_url(), timeout_s=cfg.upstream_timeout_s)
-    app = create_app(cfg, upstream=_upstream, pool=_pool)
+    # The transport-free channel engine — same instance the Telegram bot
+    # uses, so delegation/summarization/locking are single-sourced. The
+    # agent is the dispatcher (its WS injects root tasks on the user's behalf).
+    core = ChannelCore(
+        dispatcher=agent,
+        pool=_pool,
+        delegatable_agents=frozenset(_settings.delegatable_agents),
+        result_timeout_s=_settings.dispatch_result_timeout_s,
+        fire_memory=True,
+        redis=_redis,
+    )
+    app = create_app(cfg, upstream=_upstream, pool=_pool, core=core)
 
     server = uvicorn.Server(
         uvicorn.Config(
@@ -107,6 +123,8 @@ async def _shutdown() -> None:
             _web_task.cancel()
     if _upstream is not None:
         await _upstream.aclose()
+    if _redis is not None:
+        await _redis.aclose()
     if _pool is not None:
         await _pool.close()
 

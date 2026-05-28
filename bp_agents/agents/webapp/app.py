@@ -26,11 +26,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from bp_agents.agents.webapp.auth import make_auth_middleware
 from bp_agents.agents.webapp.config import WebappConfig
 from bp_agents.agents.webapp.csrf import make_csrf_middleware
-from bp_agents.agents.webapp.pages import auth_pages, sessions
+from bp_agents.agents.webapp.pages import auth_pages, chat, sessions
 from bp_agents.agents.webapp.upstream import UpstreamClient
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from bp_agents.channel import ChannelCore
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +64,11 @@ def create_app(
     *,
     upstream: UpstreamClient,
     pool: asyncpg.Pool | None = None,
+    core: ChannelCore | None = None,
 ) -> FastAPI:
     """Build the webapp. `upstream` (router HTTP, user-token) is required;
-    `pool` (suite DB, for session badges) is optional — handlers degrade
-    gracefully when it's None."""
+    `pool` (suite DB) and `core` (the channel engine; required for the chat
+    pane to inject turns) are optional so tests can build a read-only app."""
     app = FastAPI(
         title="bp_webapp",
         version="0.1.0",
@@ -75,6 +78,11 @@ def create_app(
     app.state.config = config
     app.state.upstream = upstream
     app.state.pool = pool
+    app.state.core = core
+    # turn_id → pending {session_id, user_id, text}; handed off from the
+    # POST that records a turn to the SSE GET that streams it. Bounded so a
+    # tab that never opens the stream can't grow it without limit.
+    app.state.turns = {}
 
     app.state.templates = Jinja2Templates(directory=str(_here() / "templates"))
     app.state.templates.env.filters["dt"] = _dt_filter
@@ -110,4 +118,5 @@ def create_app(
 
     app.include_router(auth_pages.router)
     app.include_router(sessions.router)
+    app.include_router(chat.router)
     return app

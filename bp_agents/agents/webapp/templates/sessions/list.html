@@ -26,8 +26,11 @@
     </thead>
     <tbody class="divide-y divide-brand-500/10">
       {% for row in rows %}
-      <tr class="hover:bg-brand-50/60">
-        <td class="px-4 py-2 font-mono text-xs text-brand-700">{{ row.session_id }}</td>
+      <tr class="cursor-pointer hover:bg-brand-50/60"
+          onclick="window.location='/chat/{{ row.session_id }}'">
+        <td class="px-4 py-2 font-mono text-xs text-brand-700">
+          <a href="/chat/{{ row.session_id }}" class="hover:underline">{{ row.session_id }}</a>
+        </td>
         <td class="px-4 py-2 text-brand-700">{{ row.opened_at | dt }}</td>
         <td class="px-4 py-2">
           {% if row.closed %}

@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from bp_agents.agents.chatbot.credentials import ChannelCredentials
 from bp_agents.agents.chatbot.telegram import TelegramClient
-from bp_agents.channel import ORCHESTRATOR_AGENT_ID, ChannelCore, pretty_agent
+from bp_agents.channel import (
+    VERBOSE_PREFIX,
+    ChannelCore,
+    agent_tag,
+    render_progress_line,
+)
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
@@ -98,62 +103,6 @@ _NO_SESSION = (
 )
 _DISPATCH_FAILED = "Sorry — something went wrong handling that. Please try again."
 _TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under that.
-
-# Verbose-mode rendering ([channel.md] §5).
-_KIND_LABEL = {"tool_call": "[Tool]", "tool_result": "[Result]"}
-# Leads every verbose/progress line so it's visually distinct from the
-# final answer (which carries no marker).
-_VERBOSE_PREFIX = "💭 "
-# Agents that are NOT a delegation target — their output needs no tag (the
-# orchestrator is the assistant the user normally talks to; `router` is the
-# platform). Any other producer means the session is delegated to it.
-_UNTAGGED_AGENTS = frozenset({ORCHESTRATOR_AGENT_ID, "router"})
-
-
-def _agent_tag(agent_id: str | None) -> str:
-    """`"[Research Agent] "` for a delegate, `""` otherwise. Prettifies the
-    agent_id (underscores → spaces, title case) so the user sees which
-    specialist currently holds the session."""
-    if not agent_id or agent_id in _UNTAGGED_AGENTS:
-        return ""
-    return f"[{pretty_agent(agent_id)} Agent] "
-# Delegation transition tools read better as plain phrases than as a raw
-# `[Tool] hand_off` line (they're terminal tools, not ordinary dispatches).
-_TRANSITION_PHRASE = {
-    "hand_off": "Delegating to a specialist",
-    "end_delegation": "Handing back to the assistant",
-}
-
-
-def _render_progress(lp: dict) -> str:
-    """Format one `LoopProgress` payload into a friendly verbose-mode line.
-
-    - `thinking` heartbeat (no detail) → `Thinking…`; with the model's
-      reasoning → `(…<reasoning>)`.
-    - `tool_call` / `tool_result` → `[Tool]/[Result] <tool> (<detail>)`, the
-      `call_` peer-tool prefix stripped for readability.
-    - the delegation transition tools (`hand_off` / `end_delegation`) →
-      `Delegating to a specialist…` / `Handing back to the assistant…`.
-    - anything else falls back to its detail or kind.
-    """
-    kind = lp.get("kind", "")
-    detail = lp.get("detail")
-    if kind == "thinking":
-        if not detail:
-            return "Thinking…"
-        lead = "" if detail.startswith("…") else "…"
-        return f"({lead}{detail})"
-    phrase = _TRANSITION_PHRASE.get(lp.get("tool") or "") if kind == "tool_call" else None
-    if phrase:
-        return f"{phrase}… ({detail})" if detail else f"{phrase}…"
-    label = _KIND_LABEL.get(kind)
-    if label:
-        name = (lp.get("tool") or "").removeprefix("call_") or "tool"
-        head = f"{label} {name}"
-        return f"{head} ({detail})" if detail else head
-    return detail or kind or "…"
-
-
 
 class RootDispatcher(Protocol):
     """The slice of the SDK `Agent` the gateway needs — root-task
@@ -480,7 +429,7 @@ class ChatbotGateway:
             # marker → (delegate tag, if any) → the rendered line. The tag is
             # per-frame: the orchestrator's own lines stay untagged; a
             # specialist's lines show it holds the session.
-            text = f"{_VERBOSE_PREFIX}{_agent_tag(pf.agent_id)}{_render_progress(lp)}"
+            text = f"{VERBOSE_PREFIX}{agent_tag(pf.agent_id)}{render_progress_line(lp)}"
             await self._telegram.send_message(chat_id=chat_id, text=text)
         return _cb
 
@@ -574,7 +523,7 @@ class ChatbotGateway:
             # Tag the final reply with the specialist when the session is
             # delegated (producer = result.agent_id), so it's clear who
             # answered ([delegation.md] §2).
-            reply_text = f"{_agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
+            reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
             await self._telegram.send_message(chat_id=chat_id, text=reply_text)
 
             # Outbound files: the agent returned file-store NAMES; resolve

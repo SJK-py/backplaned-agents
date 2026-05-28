@@ -15,10 +15,20 @@ from bp_agents.channel.core import (
     ChannelCore,
     pretty_agent,
 )
+from bp_agents.channel.render import (
+    UNTAGGED_AGENTS,
+    VERBOSE_PREFIX,
+    agent_tag,
+    render_progress_line,
+)
 
 __all__ = [
     "MEMORY_AGENT_ID",
     "ORCHESTRATOR_AGENT_ID",
+    "UNTAGGED_AGENTS",
+    "VERBOSE_PREFIX",
     "ChannelCore",
+    "agent_tag",
     "pretty_agent",
+    "render_progress_line",
 ]

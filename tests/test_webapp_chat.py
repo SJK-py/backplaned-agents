@@ -1,0 +1,252 @@
+"""Webapp chat pane + SSE progress (Phase 3).
+
+Drives the full flow on one event loop (asyncpg pool is loop-bound) via
+httpx.ASGITransport: log in → open the chat view (history) → POST a
+message → stream the turn over SSE. A fake dispatcher stands in for the
+router, emitting LoopProgress frames then a terminal result, so the
+ChannelCore path (route → record → spawn → await(on_progress) →
+after_result) runs end-to-end against a real suite DB.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import re
+
+import httpx
+import pytest
+
+from bp_agents.channel import ChannelCore
+from bp_agents.common.progress import LOOP_PROGRESS_KEY
+from bp_agents.db import queries
+from bp_agents.db.connection import open_pool
+from bp_agents.settings import SuiteSettings
+from bp_protocol.frames import ProgressFrame, ResultFrame
+from bp_protocol.types import AgentOutput, TaskStatus
+
+
+def _fake_jwt(sub: str) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": sub}).encode()).rstrip(b"=")
+    return f"hdr.{payload.decode()}.sig"
+
+
+class _FakeUpstream:
+    def __init__(self, *, sub: str = "usr_a") -> None:
+        self._sub = sub
+
+    async def login(self, *, email: str, password: str) -> dict:
+        return {
+            "access_token": _fake_jwt(self._sub),
+            "refresh_token": "r",
+            "expires_at": "2999-01-01T00:00:00+00:00",
+            "level": "tier1",
+        }
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _ChatDispatcher:
+    """Emits the given LoopProgress frames via on_progress, then a result."""
+
+    def __init__(self, *, content: str, progress: list[dict],
+                 agent_id: str = "orchestrator", files: list[str] | None = None) -> None:
+        self.content = content
+        self.progress = progress
+        self.agent_id = agent_id
+        self.files = files or []
+        self.spawns: list[tuple[str, str | None]] = []
+
+    async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+        self.spawns.append((dest, mode))
+        return "tsk"
+
+    async def await_root_result(self, task_id, *, timeout_s=None, on_progress=None, **kw):
+        if on_progress is not None:
+            for lp in self.progress:
+                await on_progress(ProgressFrame(
+                    agent_id=self.agent_id, trace_id="0" * 32, span_id="0" * 16,
+                    task_id=task_id, event=lp["kind"], metadata={LOOP_PROGRESS_KEY: lp},
+                ))
+        return ResultFrame(
+            agent_id=self.agent_id, trace_id="0" * 32, span_id="0" * 16,
+            task_id=task_id, status=TaskStatus.SUCCEEDED, status_code=200,
+            output=AgentOutput(content=self.content, files=self.files),
+        )
+
+
+def _build_app(*, upstream, pool, core):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("itsdangerous")
+    pytest.importorskip("jinja2")
+    from pydantic import SecretStr  # noqa: PLC0415
+
+    from bp_agents.agents.webapp.app import create_app  # noqa: PLC0415
+    from bp_agents.agents.webapp.config import WebappConfig  # noqa: PLC0415
+
+    cfg = WebappConfig(session_secret=SecretStr("x" * 32), session_cookie_secure=False)
+    return create_app(cfg, upstream=upstream, pool=pool, core=core)
+
+
+async def _seed(pool) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "suite_platform_mappings RESTART IDENTITY CASCADE"
+        )
+        await queries.create_session_info(
+            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
+        )
+        # A visible exchange + a hidden internal row (must NOT render).
+        await queries.append_history(
+            conn, session_id="ses_1", agent_id="orchestrator", role="user",
+            message="earlier question",
+        )
+        await queries.append_history(
+            conn, session_id="ses_1", agent_id="orchestrator", role="assistant",
+            message="earlier answer",
+        )
+        await queries.append_history(
+            conn, session_id="ses_1", agent_id="orchestrator", role="user",
+            message="SECRET SEED ROW", incumbent=True, hidden=True,
+        )
+        # A session owned by someone else (ownership guard).
+        await queries.create_session_info(
+            conn, session_id="ses_other", user_id="usr_b", channel="webapp",
+        )
+
+
+async def _login(client) -> None:
+    await client.post("/login", data={"email": "a@b.c", "password": "x", "next": "/"})
+
+
+async def _csrf(client, path: str = "/chat/ses_1") -> str:
+    """The session's CSRF token, scraped from a rendered page's meta tag."""
+    page = await client.get(path)
+    m = re.search(r'name="csrf-token" content="([^"]+)"', page.text)
+    return m.group(1) if m else ""
+
+
+def test_chat_view_renders_visible_history_only(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> str:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/chat/ses_1")
+            assert r.status_code == 200, r.text[:300]
+            return r.text
+        finally:
+            await pool.close()
+
+    html = asyncio.run(_drive())
+    assert "earlier question" in html and "earlier answer" in html
+    assert "SECRET SEED ROW" not in html  # hidden rows are not shown
+
+
+def test_chat_view_404_for_unowned_session(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> int:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/chat/ses_other")
+            return r.status_code
+        finally:
+            await pool.close()
+
+    assert asyncio.run(_drive()) == 404
+
+
+def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[str, str, list]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _ChatDispatcher(
+                content="the assistant reply",
+                progress=[
+                    {"kind": "thinking", "round": 1},
+                    {"kind": "tool_call", "tool": "call_knowledge_base", "round": 1},
+                ],
+                files=["report.md"],
+            )
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                send = await client.post(
+                    "/chat/ses_1", data={"message": "do the thing"},
+                    headers={"X-CSRF-Token": token},
+                )
+                assert send.status_code == 200, send.text[:300]
+                m = re.search(r'sse-connect="/chat/ses_1/stream/([^"]+)"', send.text)
+                assert m, send.text
+                turn_id = m.group(1)
+                stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
+                stream_text = stream.text
+            # The user turn was recorded by the channel.
+            async with pool.acquire() as conn:
+                rows = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="orchestrator"
+                )
+            return send.text, stream_text, [r.message for r in rows]
+        finally:
+            await pool.close()
+
+    send_html, stream_text, messages = asyncio.run(_drive())
+    # POST returns the user bubble + the SSE-connected pending bubble.
+    assert "do the thing" in send_html
+    assert "sse-connect=" in send_html
+    # SSE: two progress events (rendered), then the result, then close.
+    assert stream_text.count("event: progress") == 2
+    assert "event: result" in stream_text
+    assert "event: done" in stream_text
+    assert "Thinking" in stream_text
+    assert "knowledge_base" in stream_text  # call_ prefix stripped by renderer
+    assert "the assistant reply" in stream_text
+    assert "report.md" in stream_text  # produced file → download chip
+    # The channel recorded the user turn verbatim.
+    assert "do the thing" in messages
+
+
+def test_chat_stream_unknown_turn_is_404(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> int:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/chat/ses_1/stream/nope")
+            return r.status_code
+        finally:
+            await pool.close()
+
+    assert asyncio.run(_drive()) == 404

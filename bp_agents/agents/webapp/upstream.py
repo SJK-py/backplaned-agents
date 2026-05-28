@@ -86,3 +86,29 @@ class UpstreamClient:
         return await self.request(
             "GET", "/v1/sessions", access_token=access_token
         )
+
+    # -- files (user token) — resolve a produced NAME → bytes ----------
+
+    async def resolve_named_file(
+        self, *, access_token: str, session_id: str, name: str
+    ) -> str | None:
+        resp = await self._http.get(
+            "/v1/files/names/resolve",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"name": name, "session_id": session_id},
+        )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            raise UpstreamError(resp.status_code, resp.text)
+        return resp.json()["file_id"]
+
+    async def fetch_file(self, *, access_token: str, file_id: str) -> bytes:
+        resp = await self._http.get(
+            f"/v1/files/{file_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            follow_redirects=True,
+        )
+        if resp.status_code >= 400:
+            raise UpstreamError(resp.status_code, resp.text)
+        return resp.content
