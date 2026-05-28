@@ -87,6 +87,30 @@ class UpstreamClient:
             "GET", "/v1/sessions", access_token=access_token
         )
 
+    async def create_session(
+        self, *, access_token: str, metadata: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self.request(
+            "POST", "/v1/sessions", access_token=access_token,
+            json={"metadata": metadata or {}},
+        )
+
+    async def delete_session(
+        self, *, access_token: str, session_id: str, purge: bool = False
+    ) -> None:
+        """Close (archive) the session, or hard-delete it with `purge=True`
+        (the router's `DELETE …?purge=true`). 404 is swallowed — an
+        already-gone session is a no-op for the caller's intent."""
+        try:
+            await self.request(
+                "DELETE", f"/v1/sessions/{session_id}",
+                access_token=access_token,
+                params={"purge": "true"} if purge else None,
+            )
+        except UpstreamError as exc:
+            if exc.status_code != 404:
+                raise
+
     # -- files (user token) — stash listing + upload ------------------
 
     async def list_names(

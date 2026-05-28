@@ -2,9 +2,15 @@
 {% block title %}Sessions — backplaned{% endblock %}
 
 {% block content %}
-<div class="mb-6">
-  <h1 class="text-xl font-semibold text-brand-900">Sessions</h1>
-  <p class="mt-1 text-sm text-brand-500">Your conversations.</p>
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h1 class="text-xl font-semibold text-brand-900">Sessions</h1>
+    <p class="mt-1 text-sm text-brand-500">Your conversations.</p>
+  </div>
+  <button hx-post="/sessions"
+          class="rounded bg-brand-900 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700">
+    New session
+  </button>
 </div>
 
 {% if error %}
@@ -22,12 +28,12 @@
         <th class="px-4 py-2 font-medium">Opened</th>
         <th class="px-4 py-2 font-medium">Status</th>
         <th class="px-4 py-2 font-medium">Channel</th>
+        <th class="px-4 py-2 font-medium text-right">Actions</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-brand-500/10">
       {% for row in rows %}
-      <tr class="cursor-pointer hover:bg-brand-50/60"
-          onclick="window.location='/chat/{{ row.session_id }}'">
+      <tr class="hover:bg-brand-50/60">
         <td class="px-4 py-2 font-mono text-xs text-brand-700">
           <a href="/chat/{{ row.session_id }}" class="hover:underline">{{ row.session_id }}</a>
         </td>
@@ -55,6 +61,24 @@
               → {{ row.delegated_to }}
             </span>
           {% endif %}
+        </td>
+        <td class="px-4 py-2 text-right whitespace-nowrap">
+          <a href="/chat/{{ row.session_id }}"
+             class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
+            Open
+          </a>
+          {% if not row.closed %}
+            <button hx-post="/sessions/{{ row.session_id }}/close"
+                    hx-confirm="Close this conversation?"
+                    class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
+              Close
+            </button>
+          {% endif %}
+          <button hx-post="/sessions/{{ row.session_id }}/remove"
+                  hx-confirm="Permanently delete this conversation and all its data? This cannot be undone."
+                  class="rounded border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50">
+            Remove
+          </button>
         </td>
       </tr>
       {% endfor %}

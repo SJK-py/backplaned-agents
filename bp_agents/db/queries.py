@@ -40,6 +40,25 @@ async def get_session_info(
     return SessionInfoRow.model_validate(dict(row)) if row else None
 
 
+async def purge_session_suite_data(
+    conn: asyncpg.Connection, session_id: str
+) -> dict[str, int]:
+    """Reclaim a session's suite-side rows on a webapp 'remove' — the router
+    purge ([webapp.md] §4) hard-deletes its own session/tasks/files but
+    doesn't reach `bp_suite`. Deletes `session_history`, `cron_jobs`, and
+    `session_info` for `session_id`. Caller MUST have verified ownership
+    (session_ids are router-unique, but this is keyed only by session_id).
+    Run inside a transaction for atomicity. Returns per-table delete counts."""
+    counts: dict[str, int] = {}
+    for table in ("session_history", "cron_jobs", "session_info"):
+        status = await conn.execute(
+            f"DELETE FROM {table} WHERE session_id = $1", session_id  # noqa: S608
+        )
+        # asyncpg returns e.g. "DELETE 3"; the trailing token is the count.
+        counts[table] = int(status.rsplit(" ", 1)[-1]) if status else 0
+    return counts
+
+
 async def list_session_info_for_user(
     conn: asyncpg.Connection, user_id: str
 ) -> list[SessionInfoRow]:
