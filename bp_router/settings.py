@@ -243,6 +243,14 @@ class Settings(BaseSettings):
     otel_service_name: str = "bp_router"
     log_level: str = "INFO"
 
+    access_log_quiet_paths: list[str] = [
+        "/healthz", "/metrics", "/v1/admin/serviced-sessions",
+    ]
+    """Path prefixes whose *successful* (`<400`) GET access-log lines are
+    suppressed, so routine health/poll traffic (e.g. the channel's
+    serviced-sessions approval poll) doesn't flood `uvicorn.access`. Errors
+    on these paths still log. Set to `[]` to log everything."""
+
     deployment_env: Literal["dev", "staging", "prod"] = "dev"
 
     metrics_token: SecretStr | None = None

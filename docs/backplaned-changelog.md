@@ -18,6 +18,28 @@
 
 ---
 
+## 2026-05-28
+
+### Added — access-log quiet filter for routine poll/health endpoints
+
+- **What:** A `Settings.access_log_quiet_paths` knob (default
+  `["/healthz", "/metrics", "/v1/admin/serviced-sessions"]`) plus an
+  `_AccessLogQuietFilter` attached to the `uvicorn.access` logger in
+  `configure_logging` (`bp_router/observability/logging.py`,
+  `bp_router/settings.py`). It drops **successful (`<400`) GET** access
+  lines whose path matches a configured prefix; errors and all other
+  traffic still log.
+- **Why:** the suite's chatbot polls `GET /v1/admin/serviced-sessions`
+  every 30s for registration approvals, flooding `uvicorn.access` with
+  200s. Health/metrics scrapes do the same. The filter removes the noise
+  without losing genuine access logs.
+- **Shape:** **Added** — opt-out by setting `access_log_quiet_paths=[]`
+  (or `ROUTER_ACCESS_LOG_QUIET_PATHS`). Fails open: any record that isn't
+  the expected uvicorn.access 5-tuple is kept, so a uvicorn change can't
+  silently swallow logs.
+- **Verified:** `tests/test_access_log_filter.py` (drop success / keep
+  errors+non-GET+other paths / fail-open on foreign records).
+
 ## 2026-05-26
 
 ### Changed — local file-store default dir renamed (drop `proxyfiles` relic)
