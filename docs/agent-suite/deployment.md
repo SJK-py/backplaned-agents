@@ -1,6 +1,7 @@
 # Agent Suite — Deployment
 
-> How to run the v1 suite (Telegram chatbot + orchestrator + specialists)
+> How to run the v1 suite (Telegram chatbot + webapp browser channel +
+> orchestrator + specialists)
 > on top of a Backplaned router. The router's own deployment (Postgres,
 > Redis, file store, edge proxy, secrets) is in
 > [`../deployment.md`](../deployment.md); this covers the **suite**
@@ -16,8 +17,9 @@
   provider / S3 / JWT secrets — LLM calls go through the router's
   `ctx.llm`, and files through the router's file endpoints.
 - Networks: every agent is on `agents` (router WS); suite agents that
-  touch the suite DB are also on `suite`; the chatbot is additionally on
-  `edge` (Telegram egress); the **sandbox** is on `agents` only.
+  touch the suite DB are also on `suite`; the chatbot (Telegram egress) and
+  the webapp (fronted by Caddy) are additionally on `edge`; the **sandbox**
+  is on `agents` only.
 
 ## Databases
 
@@ -46,6 +48,7 @@ feed the agent containers:
 | env var | agent | notes |
 | --- | --- | --- |
 | `CHATBOT_INVITATION` | chatbot | `provisions_service_user=true` |
+| `WEBAPP_INVITATION` | webapp | browser channel (no service principal) |
 | `ORCHESTRATOR_INVITATION` | orchestrator | |
 | `DEEP_REASONING_INVITATION` · `RESEARCH_INVITATION` · `COMPUTER_USE_INVITATION` | l1 | |
 | `KNOWLEDGE_BASE_INVITATION` · `MEMORY_INVITATION` | l3 stores | share `lancedb_data` |
@@ -63,9 +66,17 @@ automatically for a local router.
 - `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`
 - `SUITE_LANCE_ROOT` — per-user LanceDB root (`/lancedb`; shared volume
   for `knowledge_base` + `memory`).
-- chatbot: `SUITE_TELEGRAM_BOT_TOKEN`; `SUITE_REDIS_URL` (optional) makes
-  the per-session turn lock distributed — set it only to run a second
-  channel instance (e.g. a webapp); a single Telegram bot needs no Redis.
+- chatbot: `SUITE_TELEGRAM_BOT_TOKEN`; `SUITE_REDIS_URL` makes the
+  per-session turn lock distributed — **required when both the chatbot and
+  the webapp run**, so the two channels serialize turns for a shared
+  session; a chatbot-only deploy needs no Redis.
+- webapp: `WEBAPP_SESSION_SECRET` (signs the browser session cookie;
+  required). Serves FastAPI on `:8002`, fronted by Caddy on its own host
+  (`WEBAPP_DOMAIN`, default `app.<PUBLIC_DOMAIN>`) — it serves from root, so
+  it can't share the router's domain where `/admin` lives. HTTP ops use the
+  logged-in user's own token (no service principal). Optional
+  `WEBAPP_USE_BUILT_CSS=true` swaps the Tailwind CDN for a pre-built
+  stylesheet (see `bp_agents/agents/webapp/tailwind.config.js`).
 - research: `SUITE_SEARXNG_URL` (the bundled SearXNG or an external
   Brave-API-compatible endpoint).
 - LLM presets are router-side (`llm_presets` table); the suite only names

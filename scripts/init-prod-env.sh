@@ -62,6 +62,9 @@ if [[ -z "$ADMIN_PW" ]]; then ADMIN_PW="$(gen 20)"; GENERATED_PW=1; fi
     echo "ROUTER_ADMIN_SESSION_SECRET=$(gen 48)"
     echo "ROUTER_METRICS_TOKEN=$(gen 32)"
     echo
+    echo "# --- Webapp (browser channel) secrets ---"
+    echo "WEBAPP_SESSION_SECRET=$(gen 48)"
+    echo
     echo "# --- First-boot admin (idempotent seed) ---"
     echo "BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL"
     echo "BOOTSTRAP_ADMIN_PASSWORD=$ADMIN_PW"

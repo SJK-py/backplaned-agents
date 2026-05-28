@@ -1,6 +1,6 @@
 # Edge reverse proxy: TLS termination + the WSS upgrade for /v1/agent,
-# fronting the router (HTTP API + admin UI) and — in v2 — the webapp.
-# Replace the site address with your domain; Caddy auto-provisions TLS.
+# fronting the router (HTTP API + admin UI) and the webapp (browser channel).
+# Replace the site addresses with your domains; Caddy auto-provisions TLS.
 #
 # The router does NOT terminate TLS itself; everything public goes
 # through here. Postgres / Redis / rustfs are never proxied (internal
@@ -13,10 +13,16 @@
 	@router path /v1/* /admin* /healthz /readyz /metrics /docs /openapi.json
 	reverse_proxy @router router:8000
 
-	# v2: the webapp served by the chatbot/channel container. Uncomment
-	# when the webapp ships.
-	# reverse_proxy /app/* chatbot:8080
-
 	# Default: send the bare host to the admin UI login.
 	redir / /admin/login
+}
+
+# Webapp (browser channel) — its own host because it serves from root
+# (login at /, /chat/*, /files/*, …), which would collide with the
+# router's /admin on the main domain. `flush_interval -1` disables
+# response buffering so the chat SSE progress stream flushes immediately.
+{$WEBAPP_DOMAIN:app.localhost} {
+	reverse_proxy webapp:8002 {
+		flush_interval -1
+	}
 }

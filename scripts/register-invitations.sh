@@ -30,6 +30,7 @@ PYTHON_BIN="${PYTHON:-python}"
 # usr_service_* principal (registration submit + per-user minting).
 ROSTER=(
     "chatbot:CHATBOT_INVITATION:true"
+    "webapp:WEBAPP_INVITATION:false"
     "orchestrator:ORCHESTRATOR_INVITATION:false"
     "history_summarizer:HISTORY_SUMMARIZER_INVITATION:false"
     "memory:MEMORY_INVITATION:false"
