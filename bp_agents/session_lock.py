@@ -37,7 +37,7 @@ class SessionLockManager:
     """Hands out per-`session_id` async-context locks (see module docstring).
 
     `__call__(session_id)` returns an `async with`-able guard, so existing
-    call sites (`async with gateway._session_lock(sid):`) are unchanged.
+    call sites (`async with core.session_lock(sid):`) are unchanged.
     """
 
     def __init__(

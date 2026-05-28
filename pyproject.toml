@@ -64,6 +64,19 @@ admin = [
     "itsdangerous>=2.2",
 ]
 
+# Webapp channel (bp_agents.agents.webapp) — the browser channel: a
+# FastAPI web server alongside the agent WS. Mirrors the `admin` extra
+# (Jinja2 + Starlette SessionMiddleware → itsdangerous; python-multipart
+# for the login Form). fastapi/uvicorn are repeated so the extra is
+# independently installable on the suite image. Layer on top of `suite`.
+webapp = [
+    "fastapi>=0.135",
+    "uvicorn[standard]>=0.42",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.22",
+    "itsdangerous>=2.2",
+]
+
 # Agent suite (bp_agents) — its own Postgres (asyncpg + Alembic) on top
 # of the platform. SQLAlchemy is required by the suite's Alembic env
 # (async migration runner), matching the router extra. Provider /
@@ -107,7 +120,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["bp_admin", "bp_agents", "bp_protocol", "bp_router", "bp_sdk"]
-artifacts = ["bp_admin/templates/**", "bp_admin/static/**"]
+artifacts = [
+    "bp_admin/templates/**", "bp_admin/static/**",
+    "bp_agents/agents/webapp/templates/**", "bp_agents/agents/webapp/static/**",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -34,6 +34,7 @@ from bp_agents.load_acl import _env
 # usr_service_* principal (registration submit + per-user minting).
 _ROSTER: list[tuple[str, str, bool]] = [
     ("chatbot", "CHATBOT_INVITATION", True),
+    ("webapp", "WEBAPP_INVITATION", False),
     ("orchestrator", "ORCHESTRATOR_INVITATION", False),
     ("history_summarizer", "HISTORY_SUMMARIZER_INVITATION", False),
     ("memory", "MEMORY_INVITATION", False),

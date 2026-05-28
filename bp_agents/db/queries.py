@@ -40,6 +40,20 @@ async def get_session_info(
     return SessionInfoRow.model_validate(dict(row)) if row else None
 
 
+async def list_session_info_for_user(
+    conn: asyncpg.Connection, user_id: str
+) -> list[SessionInfoRow]:
+    """Every session_info row this user owns, newest first. Powers the
+    webapp session list's channel badge + delegation status ([webapp.md]
+    §4); the router's `/v1/sessions` remains the authoritative open/closed
+    list."""
+    rows = await conn.fetch(
+        "SELECT * FROM session_info WHERE user_id = $1 ORDER BY created_at DESC",
+        user_id,
+    )
+    return [SessionInfoRow.model_validate(dict(r)) for r in rows]
+
+
 async def create_session_info(
     conn: asyncpg.Connection,
     *,

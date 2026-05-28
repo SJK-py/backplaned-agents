@@ -210,6 +210,11 @@ class ChatbotGateway:
         # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
         self._current_task: dict[str, tuple[str, str]] = {}
 
+    def session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
+        """The per-session lock, shared with the cron scheduler so its
+        applied turns serialize with inbound user turns ([sessions.md] §4)."""
+        return self._core.session_lock(session_id)
+
     async def handle_update(
         self,
         chat_id: str,
