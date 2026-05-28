@@ -20,6 +20,34 @@
 
 ## 2026-05-28
 
+### Fixed — refresh a reconnecting agent's AgentInfo on handshake
+
+- **What:** `_handshake` (`bp_router/ws_hub.py`) now re-publishes the
+  reconnecting agent's `agent_info` from its `HelloFrame` — merging the
+  same self-mutable fields as `AgentInfoUpdate`
+  (`_AGENT_INFO_MUTABLE_FIELDS`: `accepts_schema`, `non_tool_modes`,
+  `capabilities`, `groups`, `description`, …), `agent_id` pinned to the
+  stored record, fully re-validated, and persisted (incl. the denormalised
+  `groups`/`capabilities` columns) **only when something changed**.
+- **Why:** onboarding was the *only* writer of `agent_info`, so a code
+  change that added/changed an agent's modes (e.g. the config agent
+  gaining a `cron` mode) never reached the router — `admit_task` validated
+  `input_mode` against the stale `accepts_schema` and rejected the new mode
+  (`unknown input_mode 'cron'; destination modes: ['message']`). The SDK
+  already documents that `run_async()` "publishes the up-to-date snapshot
+  on its initial handshake" (`bp_sdk/agent.py`); the router simply wasn't
+  honoring it.
+- **Shape:** **Fixed.** Mode/capability changes now take effect on the
+  agent's next reconnect — no re-onboarding. Consistent with the existing
+  `AgentInfoUpdate` trust model (agents already self-declare these fields).
+  No full catalog re-broadcast on the hot handshake path — `admit_task`
+  reads the DB fresh, and peer-tool visibility refreshes via the existing
+  ~5s catalog cache. Manual escape hatch (clear creds → re-onboard) is no
+  longer needed.
+- **Verified:** `tests/test_handshake_agent_info_refresh.py` (refresh on
+  added mode / no-op when unchanged / `agent_id` locked / invalid merge
+  raises). Existing handshake + agent-info-update suites green (74 passed).
+
 ### Added — access-log quiet filter for routine poll/health endpoints
 
 - **What:** A `Settings.access_log_quiet_paths` knob (default
