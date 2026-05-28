@@ -1,0 +1,10 @@
+/* Tailwind build input for the webapp's PROD stylesheet.
+ *
+ * Compiled to `tailwind.css` (git-ignored build artifact) by the command in
+ * ../tailwind.config.js. base.html links it when WEBAPP_USE_BUILT_CSS=true;
+ * otherwise it uses the Play CDN. App-specific overrides (e.g. [x-cloak])
+ * live in webapp.css, which is linked in both modes.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

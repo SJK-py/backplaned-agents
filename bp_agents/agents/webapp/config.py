@@ -45,5 +45,10 @@ class WebappConfig(BaseSettings):
 
     deployment_env: Literal["dev", "staging", "prod"] = "dev"
 
+    use_built_css: bool = False
+    """Serve the pre-built `/static/tailwind.css` instead of the Tailwind Play
+    CDN. Opt-in (default False) so a deploy that hasn't built the CSS yet keeps
+    working on the CDN. Set true in prod AFTER building the stylesheet."""
+
     bind_host: str = "0.0.0.0"  # noqa: S104 — container-internal; edge proxy fronts it
     bind_port: int = Field(default=8002, ge=1, le=65535)

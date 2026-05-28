@@ -12,6 +12,11 @@ from bp_agents.db import queries
 if TYPE_CHECKING:
     from bp_agents.db.models import SessionInfoRow
 
+# session_info.channel value the chatbot writes for Telegram-origin
+# sessions — flagged in the UI (list badge + a one-time note on open) so the
+# user knows progress won't mirror back to Telegram if continued here.
+TELEGRAM_CHANNEL = "chatbot_telegram"
+
 
 async def owned_session(request: Request, session_id: str) -> SessionInfoRow | None:
     """The user's `session_info` row for `session_id`, or None (→ 404). The

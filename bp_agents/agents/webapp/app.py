@@ -87,6 +87,8 @@ def create_app(
 
     app.state.templates = Jinja2Templates(directory=str(_here() / "templates"))
     app.state.templates.env.filters["dt"] = _dt_filter
+    # Tailwind source: built CSS (prod, opt-in) vs the Play CDN (dev default).
+    app.state.templates.env.globals["use_built_css"] = config.use_built_css
     app.mount(
         "/static",
         StaticFiles(directory=str(_here() / "static")),

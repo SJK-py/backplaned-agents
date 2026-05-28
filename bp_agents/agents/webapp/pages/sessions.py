@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.pages._common import owned_session
+from bp_agents.agents.webapp.pages._common import TELEGRAM_CHANNEL, owned_session
 from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.db import queries
 
@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 WEBAPP_CHANNEL = "webapp"
-# session_info.channel value the chatbot writes for Telegram-origin
-# sessions — flagged in the UI so the user knows progress won't mirror
-# back to Telegram if they continue it here ([webapp.md] §4).
-TELEGRAM_CHANNEL = "chatbot_telegram"
 
 
 @dataclass

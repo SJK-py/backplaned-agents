@@ -34,3 +34,6 @@ Thumbs.db
 # Prod compose env (filled-in copy of deploy/.env.prod.example)
 deploy/.env.prod
 .env.prod
+
+# Webapp prod CSS — a build artifact (see bp_agents/agents/webapp/tailwind.config.js)
+bp_agents/agents/webapp/static/tailwind.css

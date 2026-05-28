@@ -5,15 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}bp{% endblock %}</title>
 
-  <!-- Tailwind via Play CDN — no build step. Replace with built CSS in prod. -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: { extend: { colors: { brand: {
-        50: "#f5f7fb", 500: "#4f5d75", 700: "#2d3748", 900: "#1a202c",
-      } } } },
-    };
-  </script>
+  {% if use_built_css %}
+    {# Prod: a static CSS built ahead of time (no runtime CDN; no console
+       warning). Build it with `tailwindcss` against tailwind.config.js and
+       set WEBAPP_USE_BUILT_CSS=true. See bp_agents/agents/webapp/static. #}
+    <link rel="stylesheet" href="/static/tailwind.css" />
+  {% else %}
+    <!-- Dev: Tailwind via Play CDN — no build step. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: { extend: { colors: { brand: {
+          50: "#f5f7fb", 500: "#4f5d75", 700: "#2d3748", 900: "#1a202c",
+        } } } },
+      };
+    </script>
+  {% endif %}
 
   <script src="https://unpkg.com/htmx.org@1.9.12"
           integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
@@ -34,6 +41,9 @@
 
 {% if request.session.get("access_token") %}
   <div class="flex min-h-screen" x-data="{ drawer: false }">
+    <!-- Backdrop: tap to close the mobile drawer. -->
+    <div x-show="drawer" x-cloak @click="drawer = false"
+         class="fixed inset-0 z-10 bg-black/30 md:hidden"></div>
     <!-- Sidebar (drawer on mobile) -->
     <aside class="w-56 shrink-0 bg-brand-900 text-brand-50 flex-col
                   fixed inset-y-0 left-0 z-20 transform transition-transform

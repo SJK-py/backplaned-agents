@@ -28,6 +28,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
+from bp_agents.agents.webapp.pages._common import TELEGRAM_CHANNEL
 from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
 from bp_agents.channel import ORCHESTRATOR_AGENT_ID, agent_tag, render_progress_line
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
@@ -75,6 +76,7 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
             "history": history,
             "delegated_to": info.delegated_to,
             "delegatable": delegatable,
+            "is_telegram": info.channel == TELEGRAM_CHANNEL,
             "active_section": "sessions",
         },
     )

@@ -48,6 +48,23 @@
     </div>
   </div>
 
+  {% if is_telegram %}
+    {# One-time (per session, per browser) note: continuing a Telegram-origin
+       session here means Telegram won't mirror the replies/progress. #}
+    <div x-data="{ show: !localStorage.getItem('tgnote:{{ session_id }}') }"
+         x-show="show" x-cloak
+         class="mb-3 flex items-start justify-between gap-3 rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+      <span>
+        This conversation started on Telegram. If you continue it here,
+        replies and progress won’t appear in Telegram.
+      </span>
+      <button class="shrink-0 font-medium text-sky-700 hover:text-sky-900"
+              @click="show = false; localStorage.setItem('tgnote:{{ session_id }}', '1')">
+        Dismiss
+      </button>
+    </div>
+  {% endif %}
+
   <div id="messages"
        class="flex-1 overflow-y-auto rounded-md border border-brand-500/10 bg-brand-50/40 p-3">
     {% for m in history %}
