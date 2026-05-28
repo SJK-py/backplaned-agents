@@ -23,6 +23,16 @@ from bp_agents.agents.webapp.upstream import UpstreamError
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Friendly messages for a failed /set-password redeem, keyed by a code we
+# put on the redirect (never reflect the router's raw error text).
+_RESET_ERRORS = {
+    "invalid": "That token is invalid or expired. Send /password to the bot for a new one.",
+    "ratelimited": "Too many attempts — please wait a moment and try again.",
+    "conflict": "This account can’t use a password login.",
+    "weak": "Choose a password of at least 8 characters.",
+    "failed": "Couldn’t set your password. Please try again.",
+}
+
 
 def _safe_next(raw: str | None) -> str:
     """Sanitise the post-login redirect target: reject absolute URLs
@@ -38,14 +48,28 @@ def _safe_next(raw: str | None) -> str:
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_form(request: Request, error: str | None = None) -> HTMLResponse:
+async def login_form(
+    request: Request,
+    error: str | None = None,
+    reset: str | None = None,
+    reset_error: str | None = None,
+) -> HTMLResponse:
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
     templates = request.app.state.templates
+    reset_msg = _RESET_ERRORS.get(reset_error or "")
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"error": error, "next": request.query_params.get("next", "")},
+        {
+            "error": error,
+            "next": request.query_params.get("next", ""),
+            "reset_ok": reset == "1",
+            "reset_error": reset_msg,
+            # Open the set-password form when redeeming failed, so the error
+            # shows next to it.
+            "show_reset": reset_msg is not None,
+        },
     )
 
 
@@ -74,6 +98,33 @@ async def login_submit(
         )
     store_login(request, login_response=body, email=email)
     return RedirectResponse(url=_safe_next(next), status_code=303)
+
+
+@router.post("/set-password")
+async def set_password_submit(
+    request: Request,
+    token: str = Form(...),
+    new_password: str = Form(...),
+) -> RedirectResponse:
+    """Redeem a one-time token from the bot's `/password` and set the web
+    password. On success the user signs in below with their email + the new
+    password (the router's returned TokenPair is intentionally not used —
+    the user just chose the password, so a normal sign-in is the clear UX)."""
+    if len(new_password.strip()) < 8:
+        return RedirectResponse(url="/login?reset_error=weak", status_code=303)
+    upstream = request.app.state.upstream
+    try:
+        await upstream.reset_password(token=token.strip(), new_password=new_password)
+    except UpstreamError as exc:
+        code = {401: "invalid", 429: "ratelimited", 409: "conflict"}.get(
+            exc.status_code, "failed"
+        )
+        logger.info(
+            "webapp_set_password_failed",
+            extra={"event": "webapp_set_password_failed", "status_code": exc.status_code},
+        )
+        return RedirectResponse(url=f"/login?reset_error={code}", status_code=303)
+    return RedirectResponse(url="/login?reset=1", status_code=303)
 
 
 @router.post("/logout")
