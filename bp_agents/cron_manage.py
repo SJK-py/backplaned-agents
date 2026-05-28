@@ -25,6 +25,7 @@ from bp_sdk import Message, ToolSpec
 if TYPE_CHECKING:
     import asyncpg
 
+    from bp_agents.db.models import CronJobRow
     from bp_protocol.types import AgentOutput
     from bp_sdk import TaskContext
 
@@ -32,20 +33,64 @@ if TYPE_CHECKING:
 REPORT_ALWAYS, REPORT_NEVER, REPORT_CBC = "always", "never", "case_by_case"
 
 
+class CronError(ValueError):
+    """An invalid cron expression (or other bad cron input)."""
+
+
+def is_valid_cron(expr: str) -> bool:
+    """Standard 5-field cron validity (croniter)."""
+    return croniter.is_valid(expr)
+
+
+# -- shared add / remove (the LLM toolset AND the webapp form call these,
+#    so validation + ownership are single-sourced, [webapp.md] §5) ----------
+
+
+async def add_cron(
+    pool: asyncpg.Pool,
+    *,
+    user_id: str,
+    session_id: str,
+    cron_expression: str,
+    cron_message: str,
+    timezone: str = "UTC",
+    report: str = REPORT_CBC,
+) -> CronJobRow:
+    """Validate + create a cron job. Raises `CronError` on a bad expression."""
+    if not is_valid_cron(cron_expression):
+        raise CronError(f"Invalid cron expression: {cron_expression!r}")
+    async with pool.acquire() as conn:
+        return await queries.create_cron_job(
+            conn, cron_id=uuid.uuid4().hex, user_id=user_id,
+            session_id=session_id, cron_expression=cron_expression,
+            cron_message=cron_message, timezone=timezone, report=report,
+        )
+
+
+async def remove_cron(pool: asyncpg.Pool, *, user_id: str, cron_id: str) -> bool:
+    """Delete a job the user owns. Returns False if it doesn't exist or isn't
+    theirs (so callers can 404/report without leaking other users' ids)."""
+    async with pool.acquire() as conn:
+        job = await queries.get_cron_job(conn, cron_id)
+        if job is None or job.user_id != user_id:
+            return False
+        await queries.remove_cron_job(conn, cron_id)
+    return True
+
+
 def make_cron_tools(pool: asyncpg.Pool) -> list[LocalTool]:
     async def _add(ctx: TaskContext, args: dict[str, Any]) -> str:
-        expr = args["cron_expression"]
-        if not croniter.is_valid(expr):
-            return f"Invalid cron expression: {expr!r}"
-        async with pool.acquire() as conn:
-            job = await queries.create_cron_job(
-                conn, cron_id=uuid.uuid4().hex, user_id=ctx.user_id,
-                session_id=ctx.session_id, cron_expression=expr,
+        try:
+            job = await add_cron(
+                pool, user_id=ctx.user_id, session_id=ctx.session_id,
+                cron_expression=args["cron_expression"],
                 cron_message=args["cron_message"],
                 timezone=args.get("timezone", "UTC"),
                 report=args.get("report", REPORT_CBC),
             )
-        return f"Created job {job.cron_id} ({expr})."
+        except CronError as exc:
+            return str(exc)
+        return f"Created job {job.cron_id} ({job.cron_expression})."
 
     async def _list(ctx: TaskContext, args: dict[str, Any]) -> str:
         async with pool.acquire() as conn:
@@ -59,11 +104,8 @@ def make_cron_tools(pool: asyncpg.Pool) -> list[LocalTool]:
         )
 
     async def _remove(ctx: TaskContext, args: dict[str, Any]) -> str:
-        async with pool.acquire() as conn:
-            job = await queries.get_cron_job(conn, args["cron_id"])
-            if job is None or job.user_id != ctx.user_id:
-                return "No such job."
-            await queries.remove_cron_job(conn, args["cron_id"])
+        if not await remove_cron(pool, user_id=ctx.user_id, cron_id=args["cron_id"]):
+            return "No such job."
         return f"Removed job {args['cron_id']}."
 
     async def _modify(ctx: TaskContext, args: dict[str, Any]) -> str:

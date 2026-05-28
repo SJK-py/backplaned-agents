@@ -20,6 +20,10 @@
          class="text-sm text-brand-500 hover:text-brand-700 underline underline-offset-2">
         Files
       </a>
+      <a href="/cron/{{ session_id }}"
+         class="text-sm text-brand-500 hover:text-brand-700 underline underline-offset-2">
+        Schedule
+      </a>
       {% if delegated_to %}
         <button type="button"
                 hx-post="/chat/{{ session_id }}/undelegate"

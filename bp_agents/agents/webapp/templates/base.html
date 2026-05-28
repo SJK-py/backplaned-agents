@@ -46,6 +46,7 @@
       <nav class="flex-1 py-4 text-sm">
         {% set sections = [
           ("sessions", "Sessions", "/"),
+          ("config", "Settings", "/config"),
         ] %}
         {% for slug, label, href in sections %}
           {% set active = active_section == slug %}
