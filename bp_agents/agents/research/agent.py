@@ -53,10 +53,7 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=RESEARCH_AGENT_ID,
-        description=(
-            "Research a question using web search, page fetching, and the "
-            "user's knowledge base; returns a sourced answer."
-        ),
+        description="Web and knowledge-base research specialist.",
         groups=["l1"],
         capabilities=[
             "llm.generation.text", "assistant.rag", "assistant.web",
@@ -83,13 +80,21 @@ async def _shutdown() -> None:
         await _pool.close()
 
 
-@agent.handler(mode="subagent")
+@agent.handler(
+    mode="subagent",
+    description="Research a question end-to-end (web search, page fetch, "
+    "knowledge-base retrieval) and return a sourced Markdown answer.",
+)
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_subagent(ctx, payload, config=_CONFIG, pool=_pool, settings=_settings)
 
 
-@agent.handler(mode="on_delegation", tool=False)
+@agent.handler(
+    mode="on_delegation", tool=False,
+    description="First turn after the orchestrator delegates a research "
+    "conversation (delegation lifecycle; not a tool).",
+)
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
@@ -97,7 +102,11 @@ async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     )
 
 
-@agent.handler(mode="delegated_message", tool=False)
+@agent.handler(
+    mode="delegated_message", tool=False,
+    description="A user turn while research holds the delegated conversation "
+    "(delegation lifecycle; not a tool).",
+)
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(

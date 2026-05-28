@@ -354,7 +354,11 @@ async def run_orchestrator_end_delegation(
     return text_output("")
 
 
-@agent.handler(mode="message", tool=False)
+@agent.handler(
+    mode="message", tool=False,
+    description="A live user turn from the channel — the main assistant "
+    "loop (may hand off to a specialist).",
+)
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None, "orchestrator pool not initialised (on_startup)"
     return await run_orchestrator_message(
@@ -420,7 +424,11 @@ async def run_orchestrator_cron_message(
     return text_output(resp.text, files=outbound, report=report, reason=reason)
 
 
-@agent.handler(mode="subagent", tool=False)
+@agent.handler(
+    mode="subagent", tool=False,
+    description="Stateless one-shot execution with the full toolset and no "
+    "session history (e.g. a deep_reasoning plan step).",
+)
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_orchestrator_subagent(
@@ -428,7 +436,11 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     )
 
 
-@agent.handler(mode="end_delegation", tool=False)
+@agent.handler(
+    mode="end_delegation", tool=False,
+    description="Hand-back target: a specialist returns the conversation to "
+    "the orchestrator (delegation lifecycle).",
+)
 async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
     assert _pool is not None
     return await run_orchestrator_end_delegation(
@@ -436,7 +448,11 @@ async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
     )
 
 
-@agent.handler(mode="cron_message", tool=False)
+@agent.handler(
+    mode="cron_message", tool=False,
+    description="A scheduled run on the user's behalf — fresh context, never "
+    "delegates; returns the message plus a {report, reason} decision.",
+)
 async def cron_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_orchestrator_cron_message(

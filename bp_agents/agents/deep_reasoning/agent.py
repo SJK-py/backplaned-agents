@@ -93,10 +93,7 @@ _CONFIG = L1Config(
 agent = Agent(
     info=AgentInfo(
         agent_id=DEEP_REASONING_AGENT_ID,
-        description=(
-            "Work through a hard, multi-step reasoning or planning problem "
-            "and return a structured, worked-through answer."
-        ),
+        description="Planning and multi-step reasoning specialist.",
         groups=["l1"],
         capabilities=[
             "agent.orchestration", "llm.generation.text", "llm.multimodal.image",
@@ -122,13 +119,21 @@ async def _shutdown() -> None:
         await _pool.close()
 
 
-@agent.handler(mode="subagent")
+@agent.handler(
+    mode="subagent",
+    description="Work a hard, multi-step reasoning or planning sub-problem "
+    "and return a structured, worked-through answer.",
+)
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_subagent(ctx, payload, config=_CONFIG, pool=_pool, settings=_settings)
 
 
-@agent.handler(mode="on_delegation", tool=False)
+@agent.handler(
+    mode="on_delegation", tool=False,
+    description="First turn after the orchestrator delegates a reasoning "
+    "conversation; may enter plan_mode (delegation lifecycle; not a tool).",
+)
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
@@ -136,7 +141,11 @@ async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     )
 
 
-@agent.handler(mode="delegated_message", tool=False)
+@agent.handler(
+    mode="delegated_message", tool=False,
+    description="A user turn while deep_reasoning holds the delegated "
+    "conversation (delegation lifecycle; not a tool).",
+)
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
