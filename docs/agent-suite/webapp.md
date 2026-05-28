@@ -1,0 +1,190 @@
+# Agent Suite — Webapp Channel (design)
+
+> A browser channel alongside the Telegram bot: log in, manage sessions,
+> chat with live progress, configure settings/cron, delegate to specialists,
+> and manage the file stash. This is a **design**; status is *planned*. It
+> builds on the channel machinery in [`channel.md`](./channel.md),
+> [`delegation.md`](./delegation.md), [`sessions.md`](./sessions.md), and the
+> distributed session lock ([`sessions.md` §4](./sessions.md)).
+
+## 1. Architecture
+
+The webapp is a **new suite process** (compose service `webapp`, agent_id
+`webapp`, group `channel`) wearing three hats:
+
+1. **Channel agent** — a WS connection to the router (like the chatbot),
+   used **only** for chat **task injection + progress**
+   (`spawn_root_for_user(user_id, session_id)` /
+   `await_root_result(on_progress=…)`).
+2. **Web server** — FastAPI + Jinja2 + HTMX + Alpine + Tailwind (mirrors
+   `bp_admin`), `SessionMiddleware` + CSRF, **SSE** for live progress.
+3. **Direct clients** — the suite Postgres pool (read `session_info` /
+   `user_config` / `cron_jobs` / history for display; delegation
+   bookkeeping; suite-side purge cleanup) **and** a per-user router HTTP
+   client carrying *the logged-in user's own token* (sessions lifecycle,
+   files).
+
+```
+browser ⇄ (HTTPS + SSE) ⇄ webapp server ─┬─ agent WS ──▶ router  (inject turn, stream progress)
+                                          ├─ user-token HTTP ▶ router  (/v1/sessions, /v1/files)
+                                          └─ asyncpg ▶ bp_suite  (config, cron, delegation, history)
+```
+
+**Why a channel agent + browser server (not a browser-only SPA):** root-task
+injection is agent-only (`spawn_root_for_user` rides the agent WS). A plain
+user JWT can't inject. So the browser talks to the webapp server; the server
+(a channel agent) injects on the user's behalf.
+
+**Auth model (confirmed simple):** `admit_task` does **not** gate root
+injection on `serviced_by` — it checks the channel is ACL-allowed
+(`channel → l0`) and that `(user_id, session_id)` is a real, open, owned
+session. And `/v1/sessions` + `/v1/files` are plain `require_authenticated`.
+So **no service-principal/minting dance** (unlike the chatbot, which needs it
+because Telegram users have no password): the user logs in and the webapp
+holds *their* token.
+
+**Concurrency:** webapp + chatbot share `SUITE_REDIS_URL`, so the
+**distributed per-session lock** serializes turns for one session across both
+processes. The webapp is the reason that lock exists.
+
+## 2. Decision 1 — channel-core refactor (chosen)
+
+Today `ChatbotGateway` mixes transport (Telegram client, `chat_id` mapping,
+`send_message`/`send_document`, poll offset) with channel logic
+(`_dispatch_turn`, `delegated_to` maintenance, `/delegate`·`/undelegate`,
+summarization, config/cron routing, the session lock, `send_named_file`).
+
+Extract a **transport-agnostic `ChannelCore`** holding the logic, with a thin
+**`Channel` frontend protocol** the transports implement:
+
+```
+ChannelCore(dispatcher, pool, session_locks, *, delegatable_agents, …)
+  .handle_turn(user_id, session_id, text, attachments, *, on_progress, verbose) -> Reply
+  .delegate(user_id, session_id, agent) / .undelegate(...)
+  .update_delegation_from_result(...)            # §2 result-source maintenance
+  # plus the helpers: _summarize_thread, _fold_back, _maybe_summarize
+
+Channel (frontend) provides: identity (chat_id/login → user_id+session_id),
+  send_text / send_file / send_progress, and the command surface.
+```
+
+- **Telegram frontend** = today's gateway minus the logic (poll → `handle_turn`; `send_*` via the Telegram client; identity via `platform_mappings`).
+- **Web frontend** = HTTP handlers + SSE (identity via login session; `send_progress` → SSE; `send_file` → download chip).
+
+This keeps **one source of truth** for delegation/summarization/locking. It
+touches the chatbot (acceptable — it's behind tests), and is the bulk of the
+webapp's reusable value. *Alternative considered:* a parallel web gateway
+duplicating the logic — rejected (drift risk).
+
+## 3. Auth / login
+
+- **Login** (email + password) → `POST /v1/auth/login` → `TokenPair`, stored
+  **server-side** in the signed session cookie (as `bp_admin` does); refresh
+  via `/v1/auth/refresh`; logout clears it + `POST /v1/auth/logout`.
+- HTTP ops (sessions, files, change-password) use the **user's token**.
+- Task injection asserts `(user_id, session_id)`; the webapp only injects for
+  sessions it listed with the user's token, so it can't reach another user's.
+- Mobile: same responsive form.
+
+## 4. Feature panes (server-rendered, HTMX-swapped)
+
+**Session list** — `GET /v1/sessions` (user token). New (`POST`), **close**
+(`DELETE`), **remove** = **`DELETE …?purge=true`** (the new router
+hard-delete) **followed by suite-side cleanup** (`bp_suite`
+`session_history` / `session_info` / `cron_jobs` for that `session_id` —
+router purge doesn't reach the suite DB). Each row shows a **channel badge**;
+`channel=chatbot_telegram` rows get a **"Telegram"** flag.
+  - *"progress won't show in chatbot":* whoever injects+awaits a task
+    receives its progress/result. A Telegram-origin session continued here
+    runs in the webapp, and Telegram won't mirror it. The flag is the UX
+    warning (+ a one-time note on open).
+
+**Main chat pane** — history from `bp_suite` (`reload_incumbent` for the
+active thread: orchestrator or current delegate) + input. Send → HTMX
+`POST /chat` → `ChannelCore.handle_turn` under the session lock → "pending"
+bubble + an **SSE** stream.
+
+**Progress UX (SSE)** — the `on_progress` callback forwards each
+`LoopProgress` over SSE; render a **collapsible activity strip** above the
+final bubble, reusing the existing rendering: `💭 Thinking…`,
+`[Tool] knowledge_base (…)`, `Delegating to a specialist…`, the
+`[<Specialist> Agent]` tag — styled rows, not plain text. The terminal
+`ResultFrame` closes the stream and renders the answer (tagged when
+delegated); `output.files` render as download chips.
+
+**Delegation control** — a **dropdown** of `delegatable_agents` + a
+**"Return to assistant"** button → `ChannelCore.delegate/undelegate` (the
+deterministic path, [delegation.md §6 (b)]). A persistent **status badge**
+("Talking to: Research Agent" / "Main assistant") from
+`session_info.delegated_to`.
+
+## 5. Decision 2 — config & cron as structured forms (chosen)
+
+The webapp is a suite process with the `bp_suite` pool, so the **panes are
+structured forms over the DB**, not NL round-trips:
+
+- **Config pane** — read `user_config` directly; write the editable fields
+  via `queries.update_user_config` with the **same validation as the config
+  agent's `set_config`** (factor that validation into a shared helper so the
+  form and the agent agree). The chat pane still handles NL ("change my
+  timezone").
+- **Cron pane** — list/add/remove over `cron_jobs` (croniter-validated),
+  reusing `bp_agents/cron_manage.py` helpers (factor the add/remove/validate
+  out of the LLM toolset so the form calls the same code).
+
+Forms give immediate, deterministic UX; the agents stay the NL path.
+
+## 6. Decision 3 — cron delivery deferred to channel-agnostic routing (chosen)
+
+Cron **firing** delivers via the scheduler in the chatbot → Telegram today.
+A webapp-session cron needs the deferred **channel-agnostic cron routing**
+([cron.md §6]): *fire → resolve the user's reachable channel → route*. For
+v1 the webapp can **manage** jobs (create/list/remove on a webapp session),
+but reliable **delivery** to the webapp is gated on that routing work. The
+cron pane will note this until §6 lands. (Telegram-session cron is
+unaffected.)
+
+## 7. File stash pane
+
+List session + persistent stash; **upload** (`POST /v1/files` + name-bind,
+user token) and **download** (resolve → stream `GET /v1/files/{id}`),
+reusing the `ChannelCredentials` file methods (now with the user's token).
+Tabs for `session:` vs `persist/`; size/quota display.
+
+## 8. Design language & mobile
+
+Mirror `bp_admin`: Tailwind (Play CDN → built CSS for prod), HTMX for pane
+swaps, Alpine for local interactivity (dropdowns, collapsibles), a shared
+`base.html`, `viewport` meta. Layout: sidebar (sessions) + main pane; on
+mobile the sidebar collapses to a drawer and the chat goes full-width.
+
+## 9. New surface
+
+- **Done (router):** `DELETE /v1/sessions/{id}?purge=true` (the only router
+  change). *Confirm `list_sessions` returns `channel`* (for the badge) — add
+  it to `SessionView` if missing.
+- **Suite:** `ChannelCore` extraction; shared config-validation + cron
+  helpers; `webapp` agent + onboarding/invitation; a `[webapp]` extra
+  (fastapi/uvicorn/jinja2/itsdangerous, like `admin`); compose service.
+- **Suite-side session purge cleanup** (called by the webapp's "remove").
+
+## 10. Phasing
+
+1. `ChannelCore` extraction (refactor; Telegram still green).
+2. Webapp skeleton: process (agent WS + FastAPI), login, base layout,
+   session list (read-only) + badges.
+3. Chat pane + SSE progress (the core).
+4. Delegation control + status; file stash pane.
+5. Config + cron structured panes.
+6. Session new/close/remove (remove = purge + suite cleanup).
+7. Polish: mobile, the chatbot-session flag/notes, prod CSS build.
+
+## 11. Non-goals / open items
+
+- Multi-instance webapp horizontal scale beyond the per-session lock (router
+  WS plane is single-process — [deferred-work.md]).
+- Cron delivery to webapp sessions (Decision 3 — deferred to [cron.md §6]).
+- Real-time push of *unsolicited* messages (cron results, proactive) to an
+  open webapp tab — needs the channel-agnostic routing + an SSE/notification
+  channel; later.
+- Hard "remove" is irreversible; the UI must confirm.
