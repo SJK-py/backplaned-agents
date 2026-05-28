@@ -27,7 +27,7 @@ call), not a delegation.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from bp_agents.common import (
@@ -41,7 +41,7 @@ from bp_agents.common import (
 )
 from bp_agents.db import queries
 from bp_protocol.types import AgentOutput, LLMData
-from bp_sdk import Message, TaskContext, ToolSpec
+from bp_sdk import Message, TaskContext, ToolCall, ToolSpec
 
 if TYPE_CHECKING:
     import asyncpg
@@ -97,6 +97,12 @@ remit — call `end_delegation` to hand control back to the main assistant.\
 LocalToolsFactory = Callable[
     [TaskContext, "SuiteSettings", str], Awaitable[LocalToolset | None]
 ]
+# Handler for an agent-specific terminal tool (e.g. deep_reasoning's
+# `plan_mode`): given the firing tool call, produce the turn's result.
+ExtraTerminalHandler = Callable[
+    [TaskContext, ToolCall, "asyncpg.Pool", "SuiteSettings"],
+    Awaitable[AgentOutput],
+]
 
 
 @dataclass
@@ -110,6 +116,12 @@ class L1Config:
     # None disables file tools. `read_file` feeds a file to the model
     # multimodally on the next turn.
     file_tools: str | None = None
+    # Agent-specific terminal tools offered on delegated turns (both first
+    # and subsequent). When the model calls one, `on_extra_terminal`
+    # produces the turn result instead of the normal assistant reply —
+    # used by deep_reasoning's `plan_mode`.
+    extra_terminal: list[ToolSpec] = field(default_factory=list)
+    on_extra_terminal: ExtraTerminalHandler | None = None
 
 
 def _preset(cfg, settings: SuiteSettings, field: str) -> str:
@@ -204,11 +216,18 @@ async def run_delegated_turn(
     outbound: list[str] = []
     local = await _local_tools(ctx, settings, config, timezone) or LocalToolset()
     local.add(make_send_file_tool(outbound))
+
+    # Terminal tools: end_delegation (subsequent turns only) + any
+    # agent-specific ones (e.g. plan_mode), offered on every turn.
+    extra_specs = list(config.extra_terminal)
+    terminal = {t.name for t in extra_specs}
+    if not first_turn:
+        extra_specs.append(END_DELEGATION_SPEC)
+        terminal.add(END_DELEGATION_TOOL)
     resp = await run_llm_loop(
         ctx, messages=messages,
         preset=_preset(cfg, settings, config.preset_field), local_tools=local,
-        extra_tools=None if first_turn else [END_DELEGATION_SPEC],
-        terminal_tools=None if first_turn else {END_DELEGATION_TOOL},
+        extra_tools=extra_specs or None, terminal_tools=terminal or None,
         file_tools=config.file_tools, detail_chars=settings.verbose_detail_chars,
     )
 
@@ -223,6 +242,14 @@ async def run_delegated_turn(
             ORCHESTRATOR_AGENT_ID, dict(end_call.args or {}), mode="end_delegation"
         )
         return AgentOutput()
+
+    if config.on_extra_terminal is not None:
+        extra_names = {t.name for t in config.extra_terminal}
+        extra_call = next(
+            (tc for tc in resp.tool_calls if tc.name in extra_names), None
+        )
+        if extra_call is not None:
+            return await config.on_extra_terminal(ctx, extra_call, pool, settings)
 
     async with pool.acquire() as conn:
         await queries.append_history(

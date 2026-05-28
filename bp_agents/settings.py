@@ -75,6 +75,21 @@ class SuiteSettings(BaseSettings):
     surfacing a failure to the user."""
 
     # ------------------------------------------------------------------
+    # deep_reasoning plan_mode ([agents.md] deep_reasoning)
+    # ------------------------------------------------------------------
+
+    plan_max_steps: int = Field(default=12, ge=1)
+    """Hard cap on the number of steps a plan may hold (add_step beyond
+    this is ignored), bounding plan size."""
+
+    plan_max_iters: int = Field(default=24, ge=1)
+    """Hard cap on planner decision rounds (mutations + executions +
+    finalize attempts), so a plan always terminates."""
+
+    plan_step_timeout_s: float = Field(default=120.0, gt=0.0)
+    """Per-step `execute_step` → `orchestrator(subagent)` result timeout."""
+
+    # ------------------------------------------------------------------
     # Per-user LanceDB (knowledge base + memory)
     # ------------------------------------------------------------------
 

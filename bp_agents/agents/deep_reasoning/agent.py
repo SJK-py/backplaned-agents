@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents.agents.deep_reasoning.plan import run_plan
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.common import LocalToolset, make_current_time_tool
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
-from bp_sdk import Agent, TaskContext
+from bp_sdk import Agent, TaskContext, ToolCall, ToolSpec
 
 if TYPE_CHECKING:
     import asyncpg
@@ -26,8 +27,49 @@ problem down, and produce a clear, well-structured answer.\
 """
 _DELEGATION_SYSTEM = """\
 You specialise in planning and multi-step reasoning. Work the problem \
-methodically with the user.\
+methodically with the user. For a genuinely multi-step task — one that \
+needs several distinct sub-tasks carried out and combined — call \
+`plan_mode` with the objective (and optional initial steps) to build and \
+execute an explicit plan. For anything you can answer in one pass, just \
+answer directly.\
 """
+
+PLAN_MODE_TOOL = "plan_mode"
+_PLAN_MODE_SPEC = ToolSpec(
+    name=PLAN_MODE_TOOL,
+    description=(
+        "Enter structured planning for a complex, multi-step task. Provide the "
+        "overall objective and an optional initial list of steps; you then "
+        "manage and execute the plan step by step and report the result. Use "
+        "only for genuinely multi-step work — answer directly otherwise."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "objective": {
+                "type": "string",
+                "description": "The overall goal the plan should accomplish.",
+            },
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional initial steps; you can revise them as you go.",
+            },
+        },
+        "required": ["objective"],
+    },
+)
+
+
+async def _enter_plan(
+    ctx: TaskContext, tool_call: ToolCall, pool: asyncpg.Pool, settings: SuiteSettings
+) -> AgentOutput:
+    args = tool_call.args or {}
+    objective = str(args.get("objective") or "").strip()
+    steps = [s for s in (args.get("steps") or []) if isinstance(s, str)]
+    return await run_plan(
+        ctx, objective=objective, initial_steps=steps, pool=pool, settings=settings
+    )
 
 
 async def _tools(
@@ -43,6 +85,8 @@ _CONFIG = L1Config(
     preset_field="preset_pro",
     local_tools=_tools,
     file_tools="full",
+    extra_terminal=[_PLAN_MODE_SPEC],
+    on_extra_terminal=_enter_plan,
 )
 
 

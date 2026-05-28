@@ -64,15 +64,6 @@
   update-propagation as "enhancement, safe to skip"; phases 1–2 (the facts
   + edges that matter) are robust.
 
-## Delegation / l1 specialists
-
-- **deferred — deep_reasoning `plan_mode`** ([agents.md]) — the bespoke
-  fresh-loop step planner (`add_step`/`execute_step`→`orchestrator(subagent)`/
-  `quit_and_report`).
-  *Why:* **bounded-scope** — it's a large, agent-specific sub-loop;
-  deep_reasoning works as a standard l1 (subagent + delegation) without
-  it, so it was separated from the delegation-core milestone.
-
 ## Cron / channel files
 
 - **deferred — cron C4 fallback** (`cron.py::_resolve_session`): open a
@@ -144,6 +135,11 @@ as a short record; the detail lives in the commit/PR history.
   (`orchestrator/agent.py::_run_hand_off_fallback`).
 - Router-level delegation e2e (`test_delegation_e2e`) — real orchestrator →
   deep_reasoning hand-off over a live `TestRouter`.
+- deep_reasoning `plan_mode` ([agents.md]) — the bespoke planning sub-loop
+  (`add_step`/`modify_step`/`remove_step`/`execute_step`→`orchestrator(subagent)`/
+  `quit_and_report`), entered as a terminal tool on delegated turns via the
+  `L1Config.extra_terminal` seam (`deep_reasoning/plan.py`). In-memory plan
+  state, bounded by `plan_max_steps`/`plan_max_iters`.
 
 **Channel**
 - `/password` slash command ([channel.md] §6) — mints a one-time
