@@ -86,4 +86,12 @@ produces a Result on `T`. The episode ends later, in Phase 3, on a steady-state
 
 ## 6. User- and slash-initiated delegation
 
-A user can request delegation (slash command / UI). Route it **through the orchestrator** — the channel dispatches `orchestrator(message)` with the request, and the orchestrator decides + executes the hand-off as in Phase 1. This keeps the delegation decision and the `delegate_prompt` seed in one place; the channel still learns `delegated_to` by observing the result source.
+Two paths, both ending in the same steady state (`delegated_to` set + a seeded delegate thread):
+
+**(a) LLM-decided, via the orchestrator.** A free-text request ("can a researcher handle this?") routes **through the orchestrator** — the channel dispatches `orchestrator(message)`, and the orchestrator decides + executes the hand-off as in Phase 1 (it writes the `delegate_prompt` seed). The channel learns `delegated_to` by observing the result source (§2). Use this when the *model* should choose whether/whom to delegate.
+
+**(b) Deterministic, via the channel — `/delegate <agent>` / `/undelegate`.** A user (or a webapp button) names the target explicitly, so the channel switches `delegated_to` **directly**, with no orchestrator round-trip or Phase-1 hand-off task:
+- `/delegate <agent>` (validated against `delegatable_agents`): summarize the **main thread** (history summarizer) → write that as the delegate's seed row → set `delegated_to`. The next message is a normal Phase-2 `delegated_message`. While already delegated, the current delegate is folded back first.
+- `/undelegate`: summarize the **delegate thread** → write a recap row on the main thread (so the orchestrator resumes with context) → `demote_thread` the episode → clear `delegated_to`. Equivalent to Phase 3's hand-back, but channel-driven.
+
+Both (b) commands run under the per-session lock and never produce a Phase-1 `T` (so the §4 F6 first-turn-hand-back hazard doesn't apply). The result-source maintenance (§2) is a no-op for the turns that follow, so the two `delegated_to` writers never fight.

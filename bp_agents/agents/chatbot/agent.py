@@ -119,6 +119,7 @@ async def _startup() -> None:
         result_timeout_s=_settings.dispatch_result_timeout_s,
         fire_memory=True,
         redis=_redis,
+        delegatable_agents=frozenset(_settings.delegatable_agents),
     )
     offset_store = FileOffsetStore(Path(agent.config.state_dir) / "telegram_offset")
     _poll_task = asyncio.create_task(_poll_loop(gateway, offset_store))
