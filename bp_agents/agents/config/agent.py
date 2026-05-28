@@ -161,14 +161,17 @@ async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
 
 
 @agent.handler(
-    mode="cron", tool=False,
-    description="Manage the user's scheduled jobs (add/list/remove/modify); "
-    "reached via the /cron command.",
+    mode="cron",
+    description="Manage the user's scheduled jobs / reminders — add, list, "
+    "remove, or modify recurring tasks (e.g. \"remind me at 8am\").",
 )
 async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
-    """Cron-job management (add/list/remove/modify) — reached via the
-    channel's `/cron` command. Hosted here (not the chatbot) because the
-    router forbids an agent invoking itself ([acl.py] `<self_call>`)."""
+    """Cron-job management (add/list/remove/modify). Tool-visible: the
+    orchestrator's LLM calls `call_config_cron` to set reminders, and the
+    channel's `/cron` command spawns it directly. Hosted here (not the
+    chatbot) because the router forbids an agent invoking itself
+    ([acl.py] `<self_call>`); config is reachable only by the orchestrator
+    and the channel."""
     assert _pool is not None
     async with _pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)

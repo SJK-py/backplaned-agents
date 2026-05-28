@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 from pydantic import BaseModel
 
 from bp_protocol.types import AgentInfo
@@ -81,3 +83,14 @@ def test_single_mode_agent_keeps_agent_level_description() -> None:
     d = _descs(a)
     # Single tool-visible mode keeps the back-compat `call_<agent>` name.
     assert d["call_solo"].startswith("Do the one thing.")
+
+
+def test_config_agent_exposes_settings_and_cron_tools() -> None:
+    """The config agent's `cron` mode is tool-visible (config is reachable
+    only by the orchestrator + channel), so the orchestrator can set
+    reminders via `call_config_cron` alongside `call_config_message`."""
+    cfg = importlib.import_module("bp_agents.agents.config.agent").agent
+    d = _descs(cfg)
+    assert set(d) == {"call_config_message", "call_config_cron"}
+    assert "settings" in d["call_config_message"].lower()
+    assert "remind" in d["call_config_cron"].lower() or "scheduled" in d["call_config_cron"].lower()

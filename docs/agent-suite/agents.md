@@ -99,10 +99,12 @@ Conversational user self-service: settings **and** scheduled jobs.
 
 **Capabilities:** `user.config`, `user.cron`.
 
+Both modes are **tool-visible** — config is reachable only by the orchestrator (`l0/* → l2/user.config`) and the channel (`channel/* → l2/user.config`), so exposing them as tools is safe. With two tool modes, `build_tools` names them `call_config_message` and `call_config_cron`.
+
 | Mode | Payload | Tool? | Notes |
 | --- | --- | --- | --- |
-| `message` | `{prompt}` | **yes** — the orchestrator's LLM calls `call_config` to apply "change my timezone" etc. | user-config read/set loop |
-| `cron` | `{prompt}` | no | cron-job management loop (list/add/remove/modify), reached via the channel's `/cron`. Hosted here — **not** the chatbot — because the router denies self-call (`<self_call>`); `channel → config` is a normal cross-agent call. The scheduler stays in the chatbot; they share the `cron_jobs` table ([cron.md](./cron.md)). |
+| `message` | `{prompt}` | **yes** (`call_config_message`) | the orchestrator's LLM applies "change my timezone" etc.; also `/config`. user-config read/set loop |
+| `cron` | `{prompt}` | **yes** (`call_config_cron`) | cron-job management loop (list/add/remove/modify): the orchestrator sets reminders conversationally ("remind me at 8am"), and the channel's `/cron` spawns it directly. Hosted here — **not** the chatbot — because the router denies self-call (`<self_call>`). The scheduler stays in the chatbot; they share the `cron_jobs` table ([cron.md](./cron.md)). |
 
 **Local tools:** the user-config editing toolset (read/set fields in [data-model.md](./data-model.md)) for `message`; the cron add/list/remove/modify toolset (`bp_agents/cron_manage.py`) for `cron`. Not delegatable.
 
