@@ -140,6 +140,16 @@ def test_render_progress_formats() -> None:
     assert _render_progress(
         {"kind": "tool_call", "tool": "current_time"}
     ) == "[Tool] current_time"
+    # delegation transition tools render as plain phrases, not `[Tool] hand_off`
+    assert _render_progress(
+        {"kind": "tool_call", "tool": "hand_off"}
+    ) == "Delegating to a specialist…"
+    assert _render_progress(
+        {"kind": "tool_call", "tool": "hand_off", "detail": "research can dig in"}
+    ) == "Delegating to a specialist… (research can dig in)"
+    assert _render_progress(
+        {"kind": "tool_call", "tool": "end_delegation"}
+    ) == "Handing back to the assistant…"
 
 
 def test_typing_indicator_sent_during_turn(suite_db_url: str) -> None:

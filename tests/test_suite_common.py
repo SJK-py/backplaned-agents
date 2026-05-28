@@ -262,6 +262,44 @@ def test_run_llm_loop_dispatches_local_and_peer_tools() -> None:
     assert "thinking" in kinds and "tool_call" in kinds and "tool_result" in kinds
 
 
+def test_run_llm_loop_emits_progress_for_terminal_tool() -> None:
+    """A terminal tool (hand_off / end_delegation) ends the loop but must
+    still surface a `tool_call` progress frame — otherwise the delegation
+    transitions are invisible in verbose mode."""
+    round1 = LlmResponse(
+        text="I'll hand this to research.",
+        tool_calls=[ToolCall(id="c1", name="hand_off", args={"agent_id": "research"})],
+    )
+    llm = _StubLlm([round1])
+    progress = _StubProgress()
+    ctx = _StubCtx(llm, _StubPeers(), progress)
+    messages: list[Message] = [Message(role="user", content="research X")]
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, local_tools=None, use_peer_tools=False,
+            extra_tools=[ToolSpec(name="hand_off", description="", parameters={})],
+            terminal_tools={"hand_off"},
+        )
+    )
+    # The loop returned on the terminal tool (one round, no dispatch).
+    assert any(tc.name == "hand_off" for tc in resp.tool_calls)
+    assert len(llm.calls) == 1
+    tool_calls = [
+        md[LOOP_PROGRESS_KEY]
+        for _e, _c, md in progress.events
+        if LOOP_PROGRESS_KEY in md and md[LOOP_PROGRESS_KEY]["kind"] == "tool_call"
+    ]
+    assert any(lp["tool"] == "hand_off" for lp in tool_calls)
+    # No tool_result frame — a terminal tool is never dispatched.
+    assert not any(
+        md[LOOP_PROGRESS_KEY]["kind"] == "tool_result"
+        for _e, _c, md in progress.events
+        if LOOP_PROGRESS_KEY in md
+    )
+
+
 def test_run_llm_loop_unknown_tool_feeds_error_back() -> None:
     round1 = LlmResponse(
         text="", tool_calls=[ToolCall(id="c1", name="mystery", args={})]

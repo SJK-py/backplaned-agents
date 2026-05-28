@@ -102,6 +102,12 @@ _TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under th
 
 # Verbose-mode rendering ([channel.md] §5).
 _KIND_LABEL = {"tool_call": "[Tool]", "tool_result": "[Result]"}
+# Delegation transition tools read better as plain phrases than as a raw
+# `[Tool] hand_off` line (they're terminal tools, not ordinary dispatches).
+_TRANSITION_PHRASE = {
+    "hand_off": "Delegating to a specialist",
+    "end_delegation": "Handing back to the assistant",
+}
 
 
 def _render_progress(lp: dict) -> str:
@@ -111,6 +117,8 @@ def _render_progress(lp: dict) -> str:
       reasoning → `(…<reasoning>)`.
     - `tool_call` / `tool_result` → `[Tool]/[Result] <tool> (<detail>)`, the
       `call_` peer-tool prefix stripped for readability.
+    - the delegation transition tools (`hand_off` / `end_delegation`) →
+      `Delegating to a specialist…` / `Handing back to the assistant…`.
     - anything else falls back to its detail or kind.
     """
     kind = lp.get("kind", "")
@@ -120,6 +128,9 @@ def _render_progress(lp: dict) -> str:
             return "Thinking…"
         lead = "" if detail.startswith("…") else "…"
         return f"({lead}{detail})"
+    phrase = _TRANSITION_PHRASE.get(lp.get("tool") or "") if kind == "tool_call" else None
+    if phrase:
+        return f"{phrase}… ({detail})" if detail else f"{phrase}…"
     label = _KIND_LABEL.get(kind)
     if label:
         name = (lp.get("tool") or "").removeprefix("call_") or "tool"

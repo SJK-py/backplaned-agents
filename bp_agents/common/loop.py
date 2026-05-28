@@ -166,7 +166,19 @@ async def run_llm_loop(
 
         # A terminal tool ends the loop — the caller inspects
         # `resp.tool_calls` and acts (e.g. delegation hand-off/back).
-        if any(tc.name in terminal for tc in resp.tool_calls):
+        # Surface it as progress first: otherwise the hand-off / hand-back
+        # transitions are invisible in verbose mode, unlike the ordinary
+        # dispatched tool calls below. The loop never dispatches a terminal
+        # tool, so there's no matching `tool_result` frame.
+        terminal_calls = [tc for tc in resp.tool_calls if tc.name in terminal]
+        if terminal_calls:
+            if emit_progress:
+                accompanying = _detail_tail(resp.text, detail_chars)
+                for tc in terminal_calls:
+                    await emit_loop_progress(
+                        ctx, kind="tool_call", round=round_idx + 1,
+                        tool=tc.name, detail=accompanying,
+                    )
             return resp
 
         # The assistant's spoken message accompanying the tool call(s).
