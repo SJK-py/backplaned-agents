@@ -70,6 +70,17 @@ class UpstreamClient:
             "POST", "/v1/auth/refresh", json={"refresh_token": refresh_token}
         )
 
+    async def reset_password(
+        self, *, token: str, new_password: str
+    ) -> dict[str, Any]:
+        """Consume a one-time password-reset token (minted by `/password` on
+        the bot) and set the user's web password. The token IS the auth — no
+        Bearer header. Returns a `TokenPair`."""
+        return await self.request(
+            "POST", "/v1/auth/reset-password",
+            json={"token": token, "new_password": new_password},
+        )
+
     async def logout(
         self, *, access_token: str, refresh_token: str | None = None
     ) -> None:

@@ -25,10 +25,12 @@ from bp_agents.agents.webapp.upstream import UpstreamClient, UpstreamError
 
 logger = logging.getLogger(__name__)
 
-PUBLIC_PATHS = frozenset({"/login"})
-"""Paths that don't require authentication. The webapp is standalone (no
-mount prefix), so these are compared against `request.url.path` directly.
-`/static/...` is also public."""
+PUBLIC_PATHS = frozenset({"/login", "/set-password"})
+"""Paths that don't require authentication. `/set-password` redeems a
+one-time token (the token IS the auth, like login) — reachable before the
+user has a session. The webapp is standalone (no mount prefix), so these
+are compared against `request.url.path` directly. `/static/...` is also
+public."""
 
 
 def is_authenticated(request: Request) -> bool:

@@ -2,13 +2,20 @@
 {% block title %}Sign in — backplaned{% endblock %}
 
 {% block unauth_content %}
-<div class="w-full max-w-sm">
+<div class="w-full max-w-sm" x-data="{ mode: '{{ 'reset' if show_reset else 'login' }}' }">
   <div class="mb-8 text-center">
     <h1 class="text-2xl font-semibold tracking-wide text-brand-900">backplaned</h1>
     <p class="mt-2 text-sm text-brand-500">Sign in to your account.</p>
   </div>
 
-  <form method="post" action="/login"
+  {% if reset_ok %}
+    <div class="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+      Password set — sign in below.
+    </div>
+  {% endif %}
+
+  <!-- Sign in -->
+  <form method="post" action="/login" x-show="mode === 'login'"
         class="space-y-4 bg-white shadow-sm border border-brand-500/10 rounded-md p-6">
     {% if error %}
       <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -41,8 +48,55 @@
     </button>
   </form>
 
-  <p class="mt-4 text-center text-xs text-brand-500/80">
-    No password yet? Send <span class="font-mono">/password</span> to the bot to set one.
+  <p class="mt-4 text-center text-xs text-brand-500/80" x-show="mode === 'login'">
+    No password yet?
+    <button type="button" @click="mode = 'reset'"
+            class="font-medium text-brand-700 underline underline-offset-2">
+      Set one with a token
+    </button>
   </p>
+
+  <!-- Set / reset password with a one-time token -->
+  <form method="post" action="/set-password" x-show="mode === 'reset'" x-cloak
+        class="space-y-4 bg-white shadow-sm border border-brand-500/10 rounded-md p-6">
+    {% if reset_error %}
+      <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        {{ reset_error }}
+      </div>
+    {% endif %}
+
+    <p class="text-xs text-brand-500">
+      Send <span class="font-mono">/password</span> to the bot to get a
+      one-time token, then set your web password here.
+    </p>
+
+    <div>
+      <label for="token" class="block text-xs font-medium text-brand-700 mb-1">One-time token</label>
+      <input id="token" name="token" type="text" required autocomplete="off"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+
+    <div>
+      <label for="new_password" class="block text-xs font-medium text-brand-700 mb-1">New password</label>
+      <input id="new_password" name="new_password" type="password" required minlength="8"
+             autocomplete="new-password"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+    </div>
+
+    <button type="submit"
+            class="w-full rounded bg-brand-900 hover:bg-brand-700 text-white text-sm
+                   font-medium px-3 py-2 transition-colors">
+      Set password
+    </button>
+
+    <p class="text-center text-xs text-brand-500/80">
+      <button type="button" @click="mode = 'login'"
+              class="font-medium text-brand-700 underline underline-offset-2">
+        Back to sign in
+      </button>
+    </p>
+  </form>
 </div>
 {% endblock %}
