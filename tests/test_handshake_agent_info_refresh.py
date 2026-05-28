@@ -4,10 +4,13 @@ modes/capabilities propagates without re-onboarding)."""
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from bp_protocol.types import AgentInfo
-from bp_router.ws_hub import _merged_hello_agent_info
+from bp_router import ws_hub
+from bp_router.ws_hub import _CatalogCache, _merged_hello_agent_info
 
 
 def _info(modes: list[str], *, caps: list[str] | None = None, agent_id: str = "config") -> AgentInfo:
@@ -61,3 +64,22 @@ def test_invalid_merge_raises_validation_error() -> None:
 
     with pytest.raises(Exception):  # noqa: B017 — pydantic ValidationError
         _merged_hello_agent_info(existing, _Bad())  # type: ignore[arg-type]
+
+
+def test_catalog_cache_clear_resets_state() -> None:
+    c = _CatalogCache(ttl_s=100.0)
+    c._cached = ["seeded"]          # type: ignore[assignment]
+    c._expires_at = 1e18
+    c.clear()
+    assert c._cached is None
+    assert c._expires_at == 0.0
+
+
+def test_handshake_broadcasts_catalog_update_when_info_changed() -> None:
+    """A reconnect that changes the agent's published info must push a
+    CatalogUpdate to connected peers (they hold a stale catalog otherwise)
+    and drop the short-TTL catalog cache."""
+    src = inspect.getsource(ws_hub._handshake)
+    assert "info_changed = True" in src
+    assert "push_catalog_update_to_all(state)" in src
+    assert "agent_catalog_cache" in src and ".clear()" in src
