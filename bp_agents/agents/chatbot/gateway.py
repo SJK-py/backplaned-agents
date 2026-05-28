@@ -276,7 +276,7 @@ class ChatbotGateway:
             await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "message",
                                   arg or "Show my current settings.")
         elif cmd == "/cron":
-            await self._cmd_agent(chat_id, CHATBOT_AGENT_ID, "cron",
+            await self._cmd_agent(chat_id, CONFIG_AGENT_ID, "cron",
                                   arg or "List my scheduled jobs.")
         else:
             await self._telegram.send_message(
@@ -311,6 +311,14 @@ class ChatbotGateway:
         except Exception:  # noqa: BLE001
             logger.exception("command_dispatch_failed",
                              extra={"event": "command_dispatch_failed", "cmd": mode})
+            await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
+            return
+        # Surface a failed task instead of masking it as "Done." — a None
+        # output on a FAILED result would otherwise read as success.
+        if result.status != TaskStatus.SUCCEEDED:
+            logger.warning("command_task_failed",
+                           extra={"event": "command_task_failed", "cmd": mode,
+                                  "status": str(result.status)})
             await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
             return
         reply = (result.output.content if result.output else "") or "Done."

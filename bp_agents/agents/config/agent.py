@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
+from bp_agents.cron_manage import run_cron_management
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
@@ -34,17 +35,23 @@ _SYSTEM = """\
 You manage the user's settings. Use `get_config` to read current values and \
 `set_config` to change one. Editable fields: full_name, timezone (IANA), \
 language, verbose_default (true/false), custom_note, max_context_token_limit. \
-Confirm changes in plain language.\
+ALWAYS end your reply by stating the relevant settings in plain language: on \
+a read, list the current values; after a change, restate the field's new \
+value. Never reply with only an acknowledgement like "done".\
 """
+
+
+def _format_config(cfg: Any) -> str:
+    if cfg is None:
+        return "No settings found."
+    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in _EDITABLE)
 
 
 async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
     async def _get(ctx: TaskContext, args: dict[str, Any]) -> str:
         async with pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, ctx.user_id)
-        if cfg is None:
-            return "No config found."
-        return "\n".join(f"{f}: {getattr(cfg, f)}" for f in _EDITABLE)
+        return _format_config(cfg)
 
     async def _set(ctx: TaskContext, args: dict[str, Any]) -> str:
         field = args.get("field")
@@ -93,9 +100,9 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
 agent = Agent(
     info=AgentInfo(
         agent_id=CONFIG_AGENT_ID,
-        description="Conversational user-settings management.",
+        description="Conversational user self-service: settings and scheduled jobs.",
         groups=["l2"],
-        capabilities=["user.config"],
+        capabilities=["user.config", "user.cron"],
     ),
 )
 
@@ -134,13 +141,31 @@ async def run_config(
         ctx, messages=messages, preset=preset, local_tools=tools,
         use_peer_tools=False,
     )
-    return text_output(resp.text or "Done.")
+    if resp.text and resp.text.strip():
+        return text_output(resp.text)
+    # The model produced no prose (e.g. it called a tool and stopped) — show
+    # the current settings rather than a bare "Done." that hides the result.
+    async with pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    return text_output(_format_config(cfg))
 
 
 @agent.handler(mode="message")
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_config(ctx, payload, pool=_pool, settings=_settings)
+
+
+@agent.handler(mode="cron", tool=False)
+async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
+    """Cron-job management (add/list/remove/modify) — reached via the
+    channel's `/cron` command. Hosted here (not the chatbot) because the
+    router forbids an agent invoking itself ([acl.py] `<self_call>`)."""
+    assert _pool is not None
+    async with _pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    preset = cfg.preset_lite if cfg else _settings.default_preset_lite
+    return await run_cron_management(ctx, payload, pool=_pool, preset=preset)
 
 
 if __name__ == "__main__":

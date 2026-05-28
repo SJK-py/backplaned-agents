@@ -8,8 +8,9 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from bp_agents.agents.chatbot.cron import CronScheduler, run_cron_management
+from bp_agents.agents.chatbot.cron import CronScheduler
 from bp_agents.agents.config.agent import run_config
+from bp_agents.cron_manage import run_cron_management
 from bp_agents.agents.orchestrator.agent import run_orchestrator_cron_message
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
@@ -220,6 +221,54 @@ def test_cron_management_adds_job(suite_db_url: str) -> None:
             async with pool.acquire() as conn:
                 jobs = await queries.list_cron_jobs(conn, user_id="usr_a")
             assert len(jobs) == 1 and jobs[0].cron_expression == "0 9 * * *"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_cron_management_empty_reply_lists_jobs(suite_db_url: str) -> None:
+    """If the model calls a tool and stops (no prose), the management loop
+    falls back to listing jobs rather than a bare 'Done.'."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            llm = _ScriptLlm([
+                LlmResponse(text="", tool_calls=[ToolCall(
+                    id="c", name="add_cron",
+                    args={"cron_expression": "0 8 * * *", "cron_message": "standup"},
+                )]),
+                LlmResponse(text=""),  # empty final turn
+            ])
+            out = await run_cron_management(
+                _Ctx(llm), MessagePayload(prompt="standup at 8"), pool=pool, preset="lite"
+            )
+            assert "0 8 * * *" in out.content and "standup" in out.content
+            assert "Done." not in out.content
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_config_empty_reply_shows_settings(suite_db_url: str) -> None:
+    """An empty model turn falls back to the current settings, not 'Done.'."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.create_user_config(
+                    conn, user_id="usr_a", timezone="Asia/Seoul"
+                )
+            llm = _ScriptLlm([LlmResponse(text="")])  # model says nothing
+            out = await run_config(
+                _Ctx(llm), MessagePayload(prompt="show settings"),
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            assert "timezone: Asia/Seoul" in out.content
+            assert out.content != "Done."
         finally:
             await pool.close()
 
