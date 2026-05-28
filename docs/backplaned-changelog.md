@@ -20,6 +20,29 @@
 
 ## 2026-05-28
 
+### Added — per-mode tool descriptions (`AgentInfo.mode_descriptions`)
+
+- **What:** A new optional `AgentInfo.mode_descriptions: dict[str, str]`
+  (`bp_protocol`), a `description=` kwarg on `@agent.handler` that publishes
+  it (`bp_sdk/agent.py::_republish_schemas`), and `build_tools`
+  (`bp_sdk/tools.py`) now prefers the per-mode description over the
+  agent-level `description` for each `call_<agent>_<mode>` tool (falling back
+  when a mode has none). Threaded through the router: the catalog projection
+  (`visibility.available_destinations`) carries it, it's a mutable field on
+  `AgentInfoUpdateFrame` + `_AGENT_INFO_MUTABLE_FIELDS` (so edits propagate
+  via handshake-refresh / AgentInfoUpdate).
+- **Why:** a multi-mode agent's modes each become a distinct tool
+  (`call_knowledge_base_store` / `_retrieve` / `_remove`, …) but all shared
+  the single agent-level `description`. Per-mode descriptions let the calling
+  LLM tell them apart. (`AgentInfo.description` is the agent-level fallback,
+  used for single-tool-mode agents and the admin catalog.)
+- **Shape:** **Added** — `None` default reproduces the previous
+  single-description behaviour; no agent need set it.
+- **Verified:** `tests/test_per_mode_tool_descriptions.py` (publish on
+  `description=`, `None` when absent, per-mode wins + fallback in
+  `build_tools`); `test_phase10e` lockstep guards updated for the new mutable
+  field; tool/agent-info/handshake suites green.
+
 ### Fixed — refresh a reconnecting agent's AgentInfo on handshake
 
 - **What:** `_handshake` (`bp_router/ws_hub.py`) now re-publishes the

@@ -134,6 +134,14 @@ class AgentInfo(BaseModel):
     unified mode registry, with this list as the only tool-visibility
     knob."""
 
+    mode_descriptions: dict[str, str] | None = None
+    """Optional per-mode tool descriptions, `{mode: description}`. When a
+    mode has an entry, `build_tools` uses it as that mode's tool
+    description instead of the agent-level `description` — so a
+    multi-mode agent can describe each `call_<agent>_<mode>` distinctly.
+    Modes without an entry fall back to `description`. `None` (the
+    default) reproduces the single-description behaviour."""
+
     documentation_url: str | None = None
     """Optional URL to fetch the agent's full markdown docs.
 

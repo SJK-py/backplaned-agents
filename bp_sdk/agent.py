@@ -35,6 +35,7 @@ class _RegisteredHandler:
     input_model: Any  # type[BaseModel] | the bare `dict` escape hatch
     output_model: type[BaseModel] | None = None
     tool: bool = True  # False => excluded from build_tools (control-plane)
+    description: str | None = None  # per-mode tool description (build_tools)
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +96,8 @@ class Agent:
     # ------------------------------------------------------------------
 
     def _make_registered(
-        self, fn: HandlerFn, *, mode: str | None, tool: bool
+        self, fn: HandlerFn, *, mode: str | None, tool: bool,
+        description: str | None = None,
     ) -> _RegisteredHandler:
         """Introspect a handler and build the `_RegisteredHandler` record.
 
@@ -180,6 +182,7 @@ class Agent:
             input_model=input_model,
             output_model=resolved_output,
             tool=tool,
+            description=description,
         )
 
     @staticmethod
@@ -228,6 +231,12 @@ class Agent:
                 r.mode for r in regs if not r.tool
             ]
 
+        if "mode_descriptions" not in self._operator_pinned_schema_fields:
+            # Per-mode tool descriptions (build_tools prefers these over the
+            # agent-level description). None when no handler supplied one.
+            descs = {r.mode: r.description for r in regs if r.description}
+            self.info.mode_descriptions = descs or None
+
         if "produces_schema" not in self._operator_pinned_schema_fields:
             outs = list(dict.fromkeys(
                 r.output_model for r in regs if r.output_model is not None
@@ -247,6 +256,7 @@ class Agent:
         *,
         mode: str | None = None,
         tool: bool = True,
+        description: str | None = None,
     ) -> HandlerFn | Callable[[HandlerFn], HandlerFn]:
         """Register `fn` as a handler. Usable bare (`@agent.handler`)
         or parameterised (`@agent.handler(mode="…", tool=False)`).
@@ -267,12 +277,20 @@ class Agent:
         reads `ctx.delegating_agent_id` if it needs delegation-aware
         behaviour.
 
+        `description` (optional) is published as this mode's per-mode
+        tool description (`AgentInfo.mode_descriptions[mode]`); the
+        calling LLM sees it on `call_<agent>[_<mode>]` instead of the
+        agent-level `description`. Use it on multi-mode agents to
+        distinguish each tool.
+
         Auto-publishes `accepts_schema` (`{mode: schema|null}`),
-        `non_tool_modes`, and `produces_schema` unless the operator
-        pinned them on `AgentInfo(...)`.
+        `non_tool_modes`, `mode_descriptions`, and `produces_schema`
+        unless the operator pinned them on `AgentInfo(...)`.
         """
         def _register(f: HandlerFn) -> HandlerFn:
-            registered = self._make_registered(f, mode=mode, tool=tool)
+            registered = self._make_registered(
+                f, mode=mode, tool=tool, description=description
+            )
             if registered.mode in self._handlers_by_mode:
                 raise TypeError(
                     f"duplicate handler mode {registered.mode!r} "
