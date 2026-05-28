@@ -84,7 +84,52 @@ def test_one_shot_verbose_renders_progress(suite_db_url: str) -> None:
             # The `call_` peer-tool prefix is stripped and the [Tool] label
             # leads the tool_call line.
             assert any("memory" in s and "[Tool]" in s for s in sent)
+            # Verbose lines lead with the 💭 marker; the final answer does not.
+            assert all(s.startswith("💭 ") for s in sent[:-1])
             assert sent[-1] == "final answer"
+            assert not sent[-1].startswith("💭")
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+class _DelegatedDispatcher:
+    """Progress + result both come from a delegate (`research`)."""
+
+    async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+        return "t"
+
+    async def await_root_result(self, task_id, *, timeout_s=None, on_progress=None, **kw):
+        if on_progress is not None:
+            await on_progress(ProgressFrame(
+                agent_id="research", trace_id="0" * 32, span_id="0" * 16,
+                task_id="t", event="thinking",
+                metadata={LOOP_PROGRESS_KEY: {"kind": "thinking", "round": 1}},
+            ))
+        return ResultFrame(
+            agent_id="research", trace_id="0" * 32, span_id="0" * 16,
+            task_id="t", status=TaskStatus.SUCCEEDED, status_code=200,
+            output=AgentOutput(content="the research summary"),
+        )
+
+
+def test_delegated_messages_carry_agent_tag(suite_db_url: str) -> None:
+    """When a specialist holds the session, both its verbose lines and the
+    final reply are tagged so the user knows who's answering."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool, verbose_default=True)
+            gw = ChatbotGateway(
+                dispatcher=_DelegatedDispatcher(), pool=pool, telegram=_FakeTelegram()
+            )
+            await gw.handle_update("tg1", "do the thing")
+            sent = gw._telegram.sent
+            # Verbose line: marker, then the delegate tag, then the content.
+            assert sent[0] == "💭 [Research Agent] Thinking…"
+            # Final reply: delegate tag, no marker.
+            assert sent[-1] == "[Research Agent] the research summary"
         finally:
             await pool.close()
 
