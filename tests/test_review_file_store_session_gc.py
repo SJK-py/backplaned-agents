@@ -24,7 +24,7 @@ def test_close_session_gcs_session_scope_directory_rows() -> None:
     pytest.importorskip("fastapi")
     from bp_router.api import sessions as sessions_mod
 
-    src = inspect.getsource(sessions_mod.close_session)
+    src = inspect.getsource(sessions_mod._close_session)
     # Deletes the session-scoped directory rows...
     assert "delete_file_names_for_scope(" in src
     # ...keyed by the SESSION scope (not persist).
@@ -39,7 +39,7 @@ def test_close_session_gc_is_in_the_close_transaction() -> None:
     pytest.importorskip("fastapi")
     from bp_router.api import sessions as sessions_mod
 
-    src = inspect.getsource(sessions_mod.close_session)
+    src = inspect.getsource(sessions_mod._close_session)
     txn_idx = src.index("async with conn.transaction()")
     close_idx = src.index("scope.close_session(session_id)")
     gc_idx = src.index("delete_file_names_for_scope(")
@@ -55,7 +55,7 @@ def test_close_session_does_not_delete_persist_scope() -> None:
     pytest.importorskip("fastapi")
     from bp_router.api import sessions as sessions_mod
 
-    src = inspect.getsource(sessions_mod.close_session)
+    src = inspect.getsource(sessions_mod._close_session)
     # GC keyed by the session scope only; no literal "persist" target.
     assert 'f"session:{session_id}"' in src
     assert 'delete_file_names_for_scope("persist")' not in src
@@ -68,5 +68,5 @@ def test_close_session_gc_count_in_audit_payload() -> None:
     pytest.importorskip("fastapi")
     from bp_router.api import sessions as sessions_mod
 
-    src = inspect.getsource(sessions_mod.close_session)
+    src = inspect.getsource(sessions_mod._close_session)
     assert '"file_names_gc": gc_count' in src

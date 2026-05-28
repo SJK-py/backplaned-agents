@@ -75,60 +75,92 @@ async def open_session(
 async def close_session(
     session_id: str,
     request: Request,
+    purge: bool = False,
     principal: SessionPrincipal = Depends(require_authenticated),
 ) -> None:
+    """Close (archive) the session. With `?purge=true`, also **hard-delete**
+    it and its router-side data — tasks, task events, the file-name directory;
+    `files` rows are detached for the reclaim sweep — after closing. That's
+    the webapp's "remove session". Idempotent; 404 if not the caller's."""
     state = request.app.state.bp
+    existed = await _close_session(state, session_id, principal.user_id)
+    if not existed:
+        raise HTTPException(status_code=404, detail="session not found")
+    if not purge:
+        return None
     async with state.db_pool.acquire() as conn:
-        scope = queries.Scope.user(conn, principal.user_id)
+        async with conn.transaction():
+            scope = queries.Scope.user(conn, principal.user_id)
+            await scope.purge_session(session_id)
+            await queries.append_audit_event(
+                conn,
+                actor_kind="user",
+                actor_id=principal.user_id,
+                event="session.purged",
+                target_kind="session",
+                target_id=session_id,
+            )
+    return None
+
+
+async def _close_session(state: Any, session_id: str, user_id: str) -> bool:
+    """Cancel in-flight tasks + archive the session (+ GC its file-name
+    directory). Returns False if the session isn't the user's, True otherwise
+    (idempotent when already closed). Shared by the close + purge paths."""
+    async with state.db_pool.acquire() as conn:
+        scope = queries.Scope.user(conn, user_id)
         existing = await scope.get_session(session_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="session not found")
-        if existing.closed_at is not None:
-            return None  # idempotent
-
-        # Cancel any in-flight tasks within this session.
-        rows = await conn.fetch(
-            """
-            SELECT task_id FROM tasks
-            WHERE user_id = $1 AND session_id = $2
-              AND state IN ('QUEUED','RUNNING','WAITING_CHILDREN')
-            """,
-            principal.user_id,
-            session_id,
+            return False
+        already_closed = existing.closed_at is not None
+        rows = (
+            []
+            if already_closed
+            else await conn.fetch(
+                """
+                SELECT task_id FROM tasks
+                WHERE user_id = $1 AND session_id = $2
+                  AND state IN ('QUEUED','RUNNING','WAITING_CHILDREN')
+                """,
+                user_id,
+                session_id,
+            )
         )
 
     for r in rows:
         await cancel_task(
             state,
             r["task_id"],
-            user_id=principal.user_id,
+            user_id=user_id,
             reason="session_closed",
-            initiator=principal.user_id,
+            initiator=user_id,
         )
 
-    async with state.db_pool.acquire() as conn:
-        # Atomic session-close + file-store GC + audit append.
-        async with conn.transaction():
-            scope = queries.Scope.user(conn, principal.user_id)
-            await scope.close_session(session_id)
-            # Reclaim the session's ephemeral file stash: delete every
-            # `file_names` directory row under this session's scope.
-            # The now-unreferenced blobs are reclaimed by the refcount
-            # sweep — NOT inline, to keep an S3 delete storm off the
-            # close request path. `persist/` rows are user-wide and
-            # untouched.
-            gc_count = await scope.delete_file_names_for_scope(
-                f"session:{session_id}"
-            )
-            await queries.append_audit_event(
-                conn,
-                actor_kind="user",
-                actor_id=principal.user_id,
-                event="session.closed",
-                target_kind="session",
-                target_id=session_id,
-                payload={"file_names_gc": gc_count} if gc_count else None,
-            )
+    if not already_closed:
+        async with state.db_pool.acquire() as conn:
+            # Atomic session-close + file-store GC + audit append.
+            async with conn.transaction():
+                scope = queries.Scope.user(conn, user_id)
+                await scope.close_session(session_id)
+                # Reclaim the session's ephemeral file stash: delete every
+                # `file_names` directory row under this session's scope.
+                # The now-unreferenced blobs are reclaimed by the refcount
+                # sweep — NOT inline, to keep an S3 delete storm off the
+                # close request path. `persist/` rows are user-wide and
+                # untouched.
+                gc_count = await scope.delete_file_names_for_scope(
+                    f"session:{session_id}"
+                )
+                await queries.append_audit_event(
+                    conn,
+                    actor_kind="user",
+                    actor_id=user_id,
+                    event="session.closed",
+                    target_kind="session",
+                    target_id=session_id,
+                    payload={"file_names_gc": gc_count} if gc_count else None,
+                )
+    return True
 
 
 @router.get("", response_model=list[SessionView])
