@@ -29,13 +29,15 @@ Two policies enforced:
    the allowlist passes regardless of address class. Useful for
    private-VPC LiteLLM / Portkey gateways at known hostnames.
 
-The validator is a pure function — it does NOT perform DNS resolution.
-All checks run against the literal hostname / IP literal in the URL.
-DNS resolution at validation time would be racy (rebinding) and
-flaky (reachability issues at admin-save time). The trade-off is
-that a hostname like ``mycorp-internal`` could pass validation and
-later resolve to a private IP — that's the operator's domain to
-constrain via the explicit allowlist.
+The validator resolves the hostname at validation time
+(``socket.getaddrinfo``) and rejects the URL if ANY resolved address
+falls in a blocked class (loopback / private / link-local /
+cloud-metadata) — an IP literal is class-checked directly. This is
+resolve-time, not connect-time, so it cannot fully close DNS-rebinding
+(a name that passes at admin-save can later re-resolve to a private
+IP at connect-time); that residual gap is the operator's domain to
+constrain via the explicit allowlist. Resolution failures are treated
+per the caller's policy rather than silently passing.
 
 Raised as ``BaseUrlValidationError`` so the admin API can surface
 HTTP 400 with a clean detail string.

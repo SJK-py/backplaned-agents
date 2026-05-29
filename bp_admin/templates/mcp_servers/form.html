@@ -35,7 +35,7 @@
 
 <form method="post"
       action="{% if mode == 'new' %}/admin/mcp-servers/new{% else %}/admin/mcp-servers/{{ form.server_id }}/edit{% endif %}"
-      x-data="{ authKind: {{ form.auth_kind | tojson }} }"
+      x-data="{ authKind: {{ form.auth_kind | tojson | forceescape }} }"
       class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
   {% include "_partials/csrf.html" %}
 

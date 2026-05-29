@@ -34,7 +34,7 @@ A roster of cooperating agents and the conversation machinery around them:
 - **Knowledge base** — per-user documents with hybrid retrieval, semantic chunking, any-file ingest (via `md_converter`), and LLM-generated metadata.
 - **Conversational sessions** — full history per `(session, agent)` thread with **rolling summarization** so context stays bounded without losing the thread.
 - **Scheduled tasks** — DST-aware **cron** reminders and jobs that run on your behalf and ping you when they matter.
-- **Channels** — **Telegram** today (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose); a web app is next.
+- **Channels** — **Telegram** (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose) and a **web app** (browser channel: login, session management, live-progress chat, settings/cron, file stash).
 - **Helpers** — `config` (change settings in natural language), `history_summarizer`, `md_converter`.
 
 Every task runs as the end user, so all of the above is isolated per person.

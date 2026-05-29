@@ -89,7 +89,7 @@ Groups are Backplaned `groups`; the ACL routes on them.
 | **l2** | **Non-delegatable LLM helpers** — invoked as a tool/subagent, never become the session delegate | `config` |
 | **l3** | LLM-backed tools (structured input) | `knowledge_base`, `memory`, `history_summarizer` |
 | **l4** | Non-LLM tools | `md_converter` |
-| **channel** | User-facing dispatchers + session managers | `chatbot` (v1), `webapp` (v2) |
+| **channel** | User-facing dispatchers + session managers | `chatbot`, `webapp` |
 | **infra** | Containerized execution environment | `sandbox` |
 
 > The l1/l2 split is about **delegation**, not "uses an LLM" — every l1/l2 agent is LLM-based. l1 agents can take the wheel of a session; l2 cannot.
@@ -109,12 +109,16 @@ Groups are Backplaned `groups`; the ACL routes on them.
 | `md_converter` | l4 | File / webpage → Markdown (MarkItDown) |
 | `sandbox` | infra | Containerized Debian workspace per user |
 | `chatbot` | channel | Telegram channel + session manager + cron scheduler (v1) |
-| `webapp` | channel | Web channel + session manager (**v2**) |
+| `webapp` | channel | Web (browser) channel + session manager |
 
 ## 5. Scope
 
-- **v1:** everything above except `webapp`. Single channel (Telegram). Cron scheduler + routing live in the chatbot.
-- **v2:** `webapp`; the cron scheduler becomes **channel-agnostic** (fire → resolve the user's reachable channel → route), and a cron whose session belongs to a non-active channel notifies the user via their default channel ([cron.md §6](./cron.md)).
+- **v1 (shipped):** the full roster above, including both channels
+  (`chatbot` Telegram + `webapp` browser). The cron scheduler + routing
+  live in the chatbot.
+- The cron scheduler is **channel-agnostic** (fire → persist → route to the
+  user's reachable channel): a cron whose target session isn't live-reachable
+  persists its result and nudges the user via Telegram ([cron.md §6](./cron.md)).
 
 ## 6. Output convention (applies everywhere)
 

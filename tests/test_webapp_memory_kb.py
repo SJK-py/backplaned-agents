@@ -100,11 +100,9 @@ async def _csrf(client, path: str = "/") -> str:
     return m.group(1) if m else ""
 
 
-def _run(core, *, upstream=None, fn=None):
+def _run(core, *, db_url, upstream=None, fn=None):
     async def _drive():
-        pool = await open_pool(SuiteSettings(
-            database_url="postgresql://postgres@127.0.0.1:5433/bp_suite_test"
-        ))
+        pool = await open_pool(SuiteSettings(database_url=db_url))
         try:
             await _seed(pool)
             app = _build_app(upstream=upstream or _Upstream(), pool=pool, core=core)
@@ -134,7 +132,7 @@ def test_memory_page_renders_facts_and_dispatches_list(suite_db_url: str) -> Non
     async def _fn(client):
         return (await client.get("/memory")).text
 
-    html = _run(core, fn=_fn)
+    html = _run(core, db_url=suite_db_url, fn=_fn)
     assert "likes tea" in html
     call = core.calls[0]
     assert call["dest"] == "memory" and call["mode"] == "list"
@@ -151,7 +149,7 @@ def test_memory_add_dispatches_manual_add(suite_db_url: str) -> None:
             headers={"X-CSRF-Token": token},
         )
 
-    r = _run(core, fn=_fn)
+    r = _run(core, db_url=suite_db_url, fn=_fn)
     assert r.status_code == 204 and r.headers.get("HX-Trigger") == "memoryChanged"
     call = next(c for c in core.calls if c["mode"] == "manual_add")
     assert call["payload"].fact == "allergic to peanuts"
@@ -167,7 +165,7 @@ def test_memory_delete_dispatches_delete(suite_db_url: str) -> None:
             "/memory/delete", data={"uid": "u1"}, headers={"X-CSRF-Token": token},
         )
 
-    r = _run(core, fn=_fn)
+    r = _run(core, db_url=suite_db_url, fn=_fn)
     assert r.status_code == 204 and r.headers.get("HX-Trigger") == "memoryChanged"
     assert any(c["mode"] == "delete" and c["payload"].uid == "u1" for c in core.calls)
 
@@ -178,7 +176,7 @@ def test_memory_page_empty_state_without_open_session(suite_db_url: str) -> None
     async def _fn(client):
         return (await client.get("/memory")).text
 
-    html = _run(core, upstream=_Upstream(sessions=[]), fn=_fn)
+    html = _run(core, db_url=suite_db_url, upstream=_Upstream(sessions=[]), fn=_fn)
     assert "Start a conversation" in html
     assert core.calls == []  # no carrier → no dispatch
 
@@ -199,7 +197,7 @@ def test_knowledge_page_renders_docs_and_dispatches_browse(suite_db_url: str) ->
     async def _fn(client):
         return (await client.get("/knowledge")).text
 
-    html = _run(core, fn=_fn)
+    html = _run(core, db_url=suite_db_url, fn=_fn)
     assert "Tax notes" in html and "finance" in html
     assert core.calls[0]["dest"] == "knowledge_base"
     assert core.calls[0]["mode"] == "browse"
@@ -215,7 +213,7 @@ def test_knowledge_delete_dispatches_delete(suite_db_url: str) -> None:
             headers={"X-CSRF-Token": token},
         )
 
-    r = _run(core, fn=_fn)
+    r = _run(core, db_url=suite_db_url, fn=_fn)
     assert r.status_code == 204 and r.headers.get("HX-Trigger") == "knowledgeChanged"
     call = next(c for c in core.calls if c["mode"] == "delete")
     assert call["payload"].title == "Tax notes" and call["payload"].collection == "finance"

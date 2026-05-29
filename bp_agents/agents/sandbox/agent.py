@@ -96,6 +96,11 @@ def _preexec(uid: int | None):  # noqa: ANN202
         return None
 
     def _set() -> None:
+        # Drop root's supplementary groups BEFORE setgid/setuid — otherwise
+        # the subprocess keeps every group root belonged to, defeating the
+        # per-user isolation this uid drop exists to provide. setgroups must
+        # run while still privileged.
+        os.setgroups([])
         os.setgid(uid)
         os.setuid(uid)
 

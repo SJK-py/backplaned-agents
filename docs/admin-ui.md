@@ -35,7 +35,7 @@ exposing the UI to a non-loopback network:**
 
 | Setting | Dev default | Production target |
 | --- | --- | --- |
-| `ADMIN_SESSION_COOKIE_SECURE` | `false` | `true` (cookie sent over HTTPS only) |
+| `ADMIN_SESSION_COOKIE_SECURE` | `true` (secure-by-default) | `true` (cookie sent over HTTPS only; set `false` only for local http://localhost dev) |
 | `ADMIN_SESSION_COOKIE_SAME_SITE` | `strict` | `strict` (keep) |
 | `ADMIN_SESSION_COOKIE_MAX_AGE_S` | `86400` (1 day) | tune to your operational window |
 | HTTPS termination | none | required — login posts the password as form data |

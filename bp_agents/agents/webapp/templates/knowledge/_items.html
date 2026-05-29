@@ -29,7 +29,7 @@
           <td class="px-4 py-2 text-xs text-brand-500">
             {% for t in item.tags %}<span class="mr-1 rounded bg-brand-50 px-1.5 py-0.5">{{ t }}</span>{% endfor %}
           </td>
-          <td class="px-4 py-2 text-xs text-brand-500">{{ item.updated_at[:10] }}</td>
+          <td class="px-4 py-2 text-xs text-brand-500">{{ (item.updated_at or '')[:10] }}</td>
           <td class="px-4 py-2 text-right">
             <form hx-post="/knowledge/delete" hx-confirm="Delete this document?" class="inline">
               <input type="hidden" name="title" value="{{ item.title }}" />
