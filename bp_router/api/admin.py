@@ -2903,6 +2903,37 @@ def _check_provider_base_url_consistency(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _check_mcp_url_ssrf(url: str, request: Request | None) -> None:
+    """SSRF guard for an MCP server `url`. The bridge connects to this URL
+    and presents the configured `auth_value_ref` credential, so an
+    admin-set (or, once Phase-10d narrows this to a service role, a
+    service-set) URL pointing at the cloud-metadata endpoint or another
+    internal service is a credential-exfil / SSRF vector. Mirrors the LLM
+    preset `base_url` policy but as the `mcp` provider class: loopback /
+    private are allowed (internal MCP servers are the norm), while
+    link-local (169.254.169.254), cloud-metadata hostnames, and
+    multicast/reserved are blocked. http is permitted; operators can
+    allowlist hosts via `ROUTER_BASE_URL_ALLOWED_HOSTS`.
+    """
+    from bp_router.url_validation import (  # noqa: PLC0415
+        BaseUrlValidationError,
+        parse_allowed_hosts,
+        validate_base_url,
+    )
+
+    allowed_hosts: frozenset[str] = frozenset()
+    if request is not None:
+        state = getattr(request.app.state, "bp", None)
+        settings = getattr(state, "settings", None) if state else None
+        raw = getattr(settings, "base_url_allowed_hosts", None) if settings else None
+        allowed_hosts = parse_allowed_hosts(raw)
+
+    try:
+        validate_base_url(provider="mcp", base_url=url, allowed_hosts=allowed_hosts)
+    except BaseUrlValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _validate_preset_payload(*, name: str | None = None, **fields) -> None:
     """Per-field format / range checks. Cross-field invariants live in
     helpers like `_check_provider_base_url_consistency` so the patch
@@ -3574,6 +3605,7 @@ async def create_mcp_server(
     the bridge process (Phase 10b/c) will pick it up and onboard
     derived per-tool agents at runtime."""
     req._check_auth_consistency()
+    _check_mcp_url_ssrf(req.url, request)
     state = request.app.state.bp
     import asyncpg  # noqa: PLC0415
     async with state.db_pool.acquire() as conn:
@@ -3654,6 +3686,7 @@ async def update_mcp_server(
             ),
         )
         synthetic._check_auth_consistency()
+        _check_mcp_url_ssrf(synthetic.url, request)
 
         async with conn.transaction():
             row = await queries.update_mcp_server(
