@@ -163,6 +163,37 @@ async def _close_session(state: Any, session_id: str, user_id: str) -> bool:
     return True
 
 
+@router.post("/{session_id}/reopen", response_model=SessionView)
+async def reopen_session(
+    session_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> SessionView:
+    """Re-open a previously closed session: clears `closed_at` so task
+    injection is accepted again. History/metadata are retained; cancelled
+    tasks and the GC'd file stash are NOT restored. Idempotent if already
+    open (no audit emitted); 404 if not the caller's."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            scope = queries.Scope.user(conn, principal.user_id)
+            existing = await scope.get_session(session_id)
+            if existing is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            if existing.closed_at is not None:
+                await scope.reopen_session(session_id)
+                await queries.append_audit_event(
+                    conn,
+                    actor_kind="user",
+                    actor_id=principal.user_id,
+                    event="session.reopened",
+                    target_kind="session",
+                    target_id=session_id,
+                )
+                existing = await scope.get_session(session_id)
+    return _session_to_view(existing)
+
+
 @router.get("", response_model=list[SessionView])
 async def list_sessions(
     request: Request,

@@ -20,6 +20,27 @@
 
 ## 2026-05-29
 
+### Added — session reopen (`POST /v1/sessions/{id}/reopen`)
+
+- **What:** A new router endpoint clears `closed_at` so a previously closed
+  session re-admits task injection (`bp_router/api/sessions.py::reopen_session`
+  + `queries.Scope.reopen_session`). Returns the `SessionView`, emits a
+  `session.reopened` audit event, is **idempotent** on an already-open session
+  (no-op, no audit), and 404s a session that isn't the caller's.
+- **Why:** the webapp's "Reopen" action (shown on closed rows in place of
+  "Close") needs to resume an archived conversation. `admit_task` already
+  gates on `closed_at IS NULL`, so clearing it is the whole mechanism.
+- **Shape:** **Added** — new surface; existing behavior unchanged. History,
+  metadata, and the suite `session_info` row are retained on close, so reopen
+  restores nothing suite-side. Cancelled tasks and the close-time file-name GC
+  are **not** restored (close is still destructive for in-flight work). The
+  `Scope.reopen_session` query is conditional (`closed_at IS NOT NULL`) and
+  user-scoped, returning whether a closed row was actually transitioned.
+- **Verified:** `tests/test_session_reopen.py` — Scope round-trip
+  (open → close → reopen → idempotent → cross-user-denied) against live
+  Postgres, plus webapp handler/template behaviour (resume-into-chat redirect,
+  404 on unowned, button toggle).
+
 ### Changed — ruff lint cleanup across vendored platform code
 
 - **What:** Brought the repo to a clean `ruff check` (config: `E,F,I,B,UP,

@@ -158,6 +158,25 @@ class Scope:
             _now(),
         )
 
+    async def reopen_session(self, session_id: str) -> bool:
+        """Clear `closed_at` so the session re-admits task injection
+        (`admit_task` gates on `closed_at IS NULL`). History and metadata are
+        retained; cancelled tasks and GC'd file-name rows are NOT restored.
+        Idempotent: a no-op on an already-open session. Returns True iff a
+        closed row was actually transitioned to open."""
+        user_id = self._require_user()
+        row = await self._conn.fetchrow(
+            """
+            UPDATE sessions
+            SET closed_at = NULL
+            WHERE session_id = $1 AND user_id = $2 AND closed_at IS NOT NULL
+            RETURNING session_id
+            """,
+            session_id,
+            user_id,
+        )
+        return row is not None
+
     async def get_session(self, session_id: str) -> SessionRow | None:
         user_id = self._require_user()
         row = await self._conn.fetchrow(

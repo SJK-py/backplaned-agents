@@ -106,6 +106,16 @@ class UpstreamClient:
             json={"metadata": metadata or {}},
         )
 
+    async def reopen_session(
+        self, *, access_token: str, session_id: str
+    ) -> dict[str, Any]:
+        """Re-open a closed session via `POST /v1/sessions/{id}/reopen`.
+        Idempotent — already-open sessions are returned unchanged."""
+        return await self.request(
+            "POST", f"/v1/sessions/{session_id}/reopen",
+            access_token=access_token,
+        )
+
     async def delete_session(
         self, *, access_token: str, session_id: str, purge: bool = False
     ) -> None:

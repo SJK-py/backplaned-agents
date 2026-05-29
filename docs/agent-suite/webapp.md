@@ -89,11 +89,14 @@ duplicating the logic — rejected (drift risk).
 ## 4. Feature panes (server-rendered, HTMX-swapped)
 
 **Session list** — `GET /v1/sessions` (user token). New (`POST`), **close**
-(`DELETE`), **remove** = **`DELETE …?purge=true`** (the new router
-hard-delete) **followed by suite-side cleanup** (`bp_suite`
-`session_history` / `session_info` / `cron_jobs` for that `session_id` —
-router purge doesn't reach the suite DB). Each row shows a **channel badge**;
-`channel=chatbot_telegram` rows get a **"Telegram"** flag.
+(`DELETE`), **reopen** (`POST …/reopen`, shown in place of close on a closed
+row — clears `closed_at` so injection is re-admitted, then lands in the chat;
+history/`session_info` are retained, so nothing suite-side needs restoring),
+**remove** = **`DELETE …?purge=true`** (the router hard-delete) **followed by
+suite-side cleanup** (`bp_suite` `session_history` / `session_info` /
+`cron_jobs` for that `session_id` — router purge doesn't reach the suite DB).
+Each row shows a **channel badge**; `channel=chatbot_telegram` rows get a
+**"Telegram"** flag.
   - *"progress won't show in chatbot":* whoever injects+awaits a task
     receives its progress/result. A Telegram-origin session continued here
     runs in the webapp, and Telegram won't mirror it. The flag is the UX
