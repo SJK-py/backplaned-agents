@@ -115,7 +115,6 @@ def test_nfc_normalize_applied_on_truncation() -> None:
     import inspect
 
     from bp_protocol import errors
-    from bp_protocol.errors import safe_validator_message
 
     src = inspect.getsource(errors.safe_validator_message)
     assert 'normalize("NFC"' in src

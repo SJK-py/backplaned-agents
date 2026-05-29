@@ -10,7 +10,6 @@ not here.
 from __future__ import annotations
 
 import inspect
-from typing import Any
 
 import pytest
 

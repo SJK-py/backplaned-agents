@@ -319,7 +319,6 @@ def test_sdk_helper_rejects_empty_patch() -> None:
     # Phase 10f: PeerClient.update_agent_info became a thin wrapper
     # over Agent.update_info; source pins follow.
     from bp_sdk.agent import Agent
-    from bp_sdk.peers import PeerClient
     src = inspect.getsource(Agent.update_info)
     assert "if all(" in src
     assert 'raise ValueError(' in src
@@ -334,7 +333,6 @@ def test_sdk_helper_builds_frame_with_all_fields() -> None:
     # Phase 10f: PeerClient.update_agent_info became a thin wrapper
     # over Agent.update_info; source pins follow.
     from bp_sdk.agent import Agent
-    from bp_sdk.peers import PeerClient
     src = inspect.getsource(Agent.update_info)
     for field in (
         "description", "groups", "capabilities",
@@ -352,7 +350,6 @@ def test_sdk_helper_awaits_ack_and_raises_on_rejection() -> None:
     # Phase 10f: PeerClient.update_agent_info became a thin wrapper
     # over Agent.update_info; source pins follow.
     from bp_sdk.agent import Agent
-    from bp_sdk.peers import PeerClient
     src = inspect.getsource(Agent.update_info)
     assert "pending_acks" in src
     assert "ack.accepted" in src
@@ -368,7 +365,6 @@ def test_sdk_helper_mutates_local_agent_info_on_success() -> None:
     # Phase 10f: PeerClient.update_agent_info became a thin wrapper
     # over Agent.update_info; source pins follow.
     from bp_sdk.agent import Agent
-    from bp_sdk.peers import PeerClient
     src = inspect.getsource(Agent.update_info)
     # The mutation loop walks each (field, value) pair and
     # setattr's on info when value is not None.
@@ -385,7 +381,6 @@ def test_sdk_helper_uses_correlation_id_for_ack_routing() -> None:
     # Phase 10f: PeerClient.update_agent_info became a thin wrapper
     # over Agent.update_info; source pins follow.
     from bp_sdk.agent import Agent
-    from bp_sdk.peers import PeerClient
     src = inspect.getsource(Agent.update_info)
     # Order of operations: register, send, await.
     register_idx = src.index("register_for_task")

@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import inspect
 import random
-from typing import Any
 
 import pytest
 

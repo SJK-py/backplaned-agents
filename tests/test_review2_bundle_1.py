@@ -85,7 +85,7 @@ def test_local_store_path_traversal_payload_does_not_escape_root(
     payloads = [
         "..\\windows\\system32",  # backslash variant
         "%2e%2e%2fpasswd",  # URL-encoded
-        "‮/admin",  # right-to-left override
+        "‮/admin",  # right-to-left override  # noqa: PLE2502
     ]
     for payload in payloads:
         with pytest.raises(ValueError):

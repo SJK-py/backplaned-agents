@@ -1129,7 +1129,6 @@ async def complete_task(
             owning_agent_id = row["agent_id"]
             active_agent_id = row["active_agent_id"]
             parent_task_id = row["parent_task_id"]
-            task_user_id = row["user_id"]
 
             # Auth: the agent currently executing the task is the
             # only one allowed to emit a terminal Result. Under

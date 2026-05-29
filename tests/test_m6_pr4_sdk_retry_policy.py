@@ -212,13 +212,14 @@ def _stream_attempt_pusher(
         # request.correlation_id BEFORE send(); replay onto it.
         q = disp._llm_streams[frame.correlation_id]
         for item in script:
+            out_item = item
             if isinstance(item, LlmResultFrame):
                 # Mirror the real receive loop, which fills in
                 # `ref_correlation_id` on the way through.
-                item = item.model_copy(
+                out_item = item.model_copy(
                     update={"ref_correlation_id": frame.correlation_id}
                 )
-            await q.put(item)
+            await q.put(out_item)
 
     disp.transport.send = _send  # type: ignore[method-assign]
 

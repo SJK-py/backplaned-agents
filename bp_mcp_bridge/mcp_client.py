@@ -22,6 +22,8 @@ codebase without a transitive-dep cascade.
 
 from __future__ import annotations
 
+import asyncio
+import json as _json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -284,12 +286,7 @@ class StreamableHttpMcpClient:
 #   - Notifications (`event: message` with no `id`) are currently
 #     dropped — tool-list-change handling is a Phase 10e concern.
 
-
-import asyncio
-import json as _json
-import logging as _logging
-
-_logger = _logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 def _default_port(scheme: str) -> int | None:

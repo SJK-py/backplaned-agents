@@ -199,7 +199,7 @@ def test_lifespan_wraps_boot_in_phase_aware_handler() -> None:
             continue
         for kw in node.keywords:
             if kw.arg == "extra" and isinstance(kw.value, ast.Dict):
-                for k, v in zip(kw.value.keys, kw.value.values):
+                for k, v in zip(kw.value.keys, kw.value.values, strict=False):
                     if (
                         isinstance(k, ast.Constant)
                         and k.value == "phase"

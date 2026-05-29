@@ -832,7 +832,7 @@ class Dispatcher:
             status = TaskStatus.FAILED
             status_code = exc.status_code
             error = {"code": type(exc).__name__, "message": str(exc)}
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # Catch-all for unclassified handler failures. Emit a
             # FIXED message — never `str(exc)` — because the result
             # frame flows back through the router to the calling

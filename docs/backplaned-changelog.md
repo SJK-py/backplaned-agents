@@ -18,6 +18,44 @@
 
 ---
 
+## 2026-05-29
+
+### Changed — ruff lint cleanup across vendored platform code
+
+- **What:** Brought the repo to a clean `ruff check` (config: `E,F,I,B,UP,
+  PLC,PLE,PLW`). The bulk was non-platform (ruff config + test hygiene);
+  the **platform-code** touches are all lint-only, behaviour-preserving:
+  - **Removed** unused imports (F401): `bp_router/acl.py`,
+    `bp_router/llm/presets.py` (`level_satisfies_tier`, `tier_index`),
+    `bp_sdk/peers.py` (`AgentInfoUpdateFrame`).
+  - **Removed** unused locals (F841): `task_user_id` in
+    `bp_router/tasks.py`; the unused `exc` binding on two blind-`except`
+    clauses (`bp_router/dispatch.py`, `bp_sdk/dispatch.py`) — the bodies
+    never referenced it.
+  - **Style:** split `;`-joined statements (E702) in
+    `bp_router/db/queries.py::update_mcp_server`; `raise … from None` on the
+    409 in `bp_router/api/admin.py::issue_invitation` (B904); renamed a
+    shadowing loop var in `bp_admin/pages/mcp_servers.py` (PLW2901);
+    `collections.abc.Iterator` import in `bp_router/lru_cache.py` (UP035);
+    hoisted drifted mid-file imports to the top of
+    `bp_mcp_bridge/mcp_client.py` (E402).
+  - **Suppressed (not rewritten):** intentional lazy/deferred imports kept
+    as-is with `# noqa: PLC0415` (`bp_router/__main__.py`, `bp_sdk/llm.py`,
+    `bp_admin/app.py`, `bp_admin/auth.py`) and a documented `# noqa: E402`
+    (`bp_admin/pages/llm_presets.py`); the deliberate `setattr(task,
+    "_bp_task_id", …)` on the C-level asyncio.Task kept with `# noqa: B010`
+    (direct assignment trips mypy and breaks the cancel-helper source pin).
+- **Config (project-level, not platform):** added
+  `flake8-bugbear.extend-immutable-calls` for FastAPI's
+  `Depends`/`Query`/`Form`/… (B008 is a false positive on every route) and
+  `per-file-ignores` for `tests/**` (`PLC0415`, `B017`, `E741`, `B011` —
+  idiomatic in tests). See `pyproject.toml`.
+- **Why:** keep the lint gate green and the platform diff explicit.
+- **Shape:** **Changed** — cosmetic/hygiene only; no API or behaviour
+  change (verified: full suite still 2596 passed, 0 failed).
+
+---
+
 ## 2026-05-28
 
 ### Added — session hard-delete (`DELETE /v1/sessions/{id}?purge=true`)

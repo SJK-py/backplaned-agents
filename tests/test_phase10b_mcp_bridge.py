@@ -15,7 +15,6 @@ file (Phase 10b's `live walkthrough` PR-description checklist).
 from __future__ import annotations
 
 import inspect
-import json
 from pathlib import Path
 
 import pytest
@@ -257,7 +256,7 @@ def test_mcp_client_initialize_round_trips(monkeypatch) -> None:  # type: ignore
     """Mock httpx to verify initialize() POSTs the right body and
     parses the response."""
     import asyncio
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
 
     from bp_mcp_bridge.mcp_client import StreamableHttpMcpClient
 
@@ -415,8 +414,8 @@ def test_agent_id_for_server_grammar_compliant() -> None:
     the agent_id grammar (`[A-Za-z_][A-Za-z0-9_-]{0,63}`) — no
     normalisation needed and the result fits the 64-char cap for
     any valid server_id."""
-    from bp_protocol.types import AGENT_ID_PATTERN  # noqa: PLC0415
     from bp_mcp_bridge.tool_agent import agent_id_for_server  # noqa: PLC0415
+    from bp_protocol.types import AGENT_ID_PATTERN  # noqa: PLC0415
 
     for sid in ("fs", "filesystem", "github_repo", "x_y_z"):
         aid = agent_id_for_server(sid)

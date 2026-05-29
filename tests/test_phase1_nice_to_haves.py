@@ -15,10 +15,6 @@ lands with Phase 2.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
 from bp_protocol.frames import NewTaskFrame
@@ -33,13 +29,12 @@ def test_spawn_defaults_priority_to_normal() -> None:
     """Backward-compat: agents that don't pass `priority=` still emit
     NORMAL on the wire."""
     pytest.importorskip("fastapi")
-    from bp_sdk.peers import PeerClient
-
-    sig = PeerClient.spawn.__annotations__
     # The defaulted parameter is keyword-only; just confirm the
     # function signature accepts `priority` and the default behaviour
     # is unchanged. The actual frame plumbing is exercised below.
     import inspect
+
+    from bp_sdk.peers import PeerClient
 
     params = inspect.signature(PeerClient.spawn).parameters
     assert "priority" in params

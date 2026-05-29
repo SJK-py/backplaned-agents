@@ -104,7 +104,7 @@ def _wire(
     )
 
     conn = MagicMock()
-    conn.transaction = lambda: _FakeTx()
+    conn.transaction = _FakeTx
     pool = MagicMock()
     pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)

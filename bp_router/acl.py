@@ -22,8 +22,6 @@ from pydantic import BaseModel, Field, field_validator
 from bp_router.principals import (
     LEVEL_PATTERN,
     is_valid_level,
-    level_satisfies_tier,
-    tier_index,
 )
 
 logger = logging.getLogger(__name__)

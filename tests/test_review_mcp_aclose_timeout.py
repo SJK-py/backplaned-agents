@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,7 +63,6 @@ def test_aclose_timeout_does_not_propagate(tmp_path: Path, monkeypatch) -> None:
     NOT block indefinitely or raise."""
     pytest.importorskip("fastapi")
     pytest.importorskip("bp_sdk")
-    from bp_mcp_bridge.server_bridge import ServerBridge
 
     bridge = _make_bridge(tmp_path)
 

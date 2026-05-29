@@ -118,7 +118,7 @@ def test_audit_event_lock_uses_constant_key() -> None:
         event="ev1",
     ))
     first_args = next(
-        args for q, args in zip(conn.queries, conn.exec_args)
+        args for q, args in zip(conn.queries, conn.exec_args, strict=False)
         if "pg_advisory_xact_lock" in q
     )
 
@@ -130,7 +130,7 @@ def test_audit_event_lock_uses_constant_key() -> None:
         event="ev2",
     ))
     second_args = next(
-        args for q, args in zip(conn2.queries, conn2.exec_args)
+        args for q, args in zip(conn2.queries, conn2.exec_args, strict=False)
         if "pg_advisory_xact_lock" in q
     )
 
@@ -154,7 +154,7 @@ def test_audit_event_chain_links_prev_hash_correctly() -> None:
     ))
 
     insert_args = next(
-        args for q, args in zip(conn.queries, conn.exec_args)
+        args for q, args in zip(conn.queries, conn.exec_args, strict=False)
         if "INSERT INTO audit_log" in q
     )
     # Args are positional matches the INSERT shape; prev_hash is one

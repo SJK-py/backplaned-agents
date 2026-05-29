@@ -212,7 +212,7 @@ def _login_url(request: Request, *, return_to: str) -> str:
     console-script). Hard-coding `/admin/login` here would
     break standalone mode with a 404.
     """
-    from urllib.parse import quote
+    from urllib.parse import quote  # noqa: PLC0415
 
     from bp_admin.asgi_utils import root_path as _root_path  # noqa: PLC0415
 

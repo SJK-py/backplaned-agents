@@ -11,7 +11,6 @@ the precedence rule.
 
 from __future__ import annotations
 
-import pytest
 from pydantic import BaseModel
 
 from bp_protocol.types import AgentInfo, AgentOutput

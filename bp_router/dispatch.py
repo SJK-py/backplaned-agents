@@ -43,6 +43,8 @@ from bp_protocol.frames import (
 from bp_protocol.types import TaskState
 from bp_router.attachments import (
     AttachmentResolutionError,
+)
+from bp_router.attachments import (
     derive_task_file_scope as _derive_task_scope,
 )
 from bp_router.delivery import fanout_frame
@@ -554,7 +556,10 @@ async def _handle_llm_request(
     # router-side asyncio.Task running the provider call wasn't
     # aborted, so provider tokens kept burning until the call
     # naturally finished.
-    setattr(task, "_bp_task_id", frame.task_id)
+    # `setattr` (not `task._bp_task_id = …`) is deliberate: it stamps a
+    # dynamic attribute on the C-level asyncio.Task without tripping the
+    # type checker, and the cancel helper reads it back via getattr.
+    setattr(task, "_bp_task_id", frame.task_id)  # noqa: B010
     entry.llm_tasks[frame.correlation_id] = task
 
     # R8 perf: also index by task_id so `cancel_task` can find the
@@ -678,7 +683,7 @@ async def _run_llm_call(
                     user_level = await state.llm_service.resolve_user_level(  # type: ignore[attr-defined]
                         conn, frame.user_id
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 logger.warning(
                     "llm_user_level_lookup_failed",
                     extra={

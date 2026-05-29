@@ -28,8 +28,6 @@ the API needs.
 """
 from __future__ import annotations
 
-import pytest
-
 from bp_router.llm.service import Message
 
 # ===========================================================================
