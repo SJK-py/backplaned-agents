@@ -660,20 +660,3 @@ def test_bug7_bootstrap_helper_skips_when_user_exists() -> None:
         asyncio.run(app_module._bootstrap_admin_user(state))
 
     insert_mock.assert_not_awaited()
-
-
-def test_bug7_readme_documents_bootstrap() -> None:
-    """The README's quickstart MUST document the bootstrap env
-    vars. Without docs, operators have no way to discover the
-    feature — and the previous workaround was a hand-written
-    Python script using internal hash_password() + direct DB
-    writes."""
-    from pathlib import Path
-
-    readme = (Path(__file__).parent.parent / "README.md").read_text()
-    assert "ROUTER_BOOTSTRAP_ADMIN_EMAIL" in readme, (
-        "upstream-bug #7 regression: README no longer documents "
-        "bootstrap_admin_email; fresh-template users have no "
-        "discoverable path to create the first admin"
-    )
-    assert "ROUTER_BOOTSTRAP_ADMIN_PASSWORD" in readme

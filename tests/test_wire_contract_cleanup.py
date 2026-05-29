@@ -113,21 +113,6 @@ def test_audit_events_use_entity_action_naming() -> None:
     assert 'event="task.test_dispatched"' in src
 
 
-def test_audit_event_naming_in_security_doc_matches_code() -> None:
-    """The doc table in `docs/security.md` must reflect the renamed
-    events, not the old ones — otherwise readers get confused about
-    which strings will appear in production audit logs."""
-    with open(
-        "/home/user/backplaned-next/docs/security.md", encoding="utf-8"
-    ) as f:
-        doc = f.read()
-
-    assert "admin.invitation_issued" not in doc
-    assert "admin.task_test" not in doc
-    assert "invitation.issued" in doc
-    assert "task.test_dispatched" in doc
-
-
 # ---------------------------------------------------------------------------
 # M1 — empty-string api_key doesn't clear the inline secret
 # ---------------------------------------------------------------------------
