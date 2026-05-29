@@ -139,8 +139,11 @@ services:
       # LLM provider-key secrets. Presets themselves live in the
       # llm_presets table (admin-managed via /admin); a preset's
       # api_key_ref (e.g. env://GEMINI_API_KEY) resolves to one of these.
-      # Add one per provider you configure.
+      # init-prod-env.sh fills in whichever provider you choose; the others
+      # stay empty (set one per provider you configure).
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     networks: [edge, backend, agents]
     # Not published directly — the edge proxy fronts it.
 
@@ -209,6 +212,13 @@ services:
       AGENT_STATE_DIR: /state
       SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
       SUITE_LANCE_ROOT: /lancedb
+      # Per-tier preset defaults seeded into a new user's config (chatbot
+      # approval). init-prod-env.sh wires these to the chosen provider's
+      # aliases; empty → the seeded `default` (Gemini).
+      SUITE_DEFAULT_PRESET_PRO: ${SUITE_DEFAULT_PRESET_PRO:-default}
+      SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
+      SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
+      SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
     networks: [agents, suite]
 
   chatbot:                         # gateway + session manager + scheduler

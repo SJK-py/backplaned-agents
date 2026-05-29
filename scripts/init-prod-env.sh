@@ -40,7 +40,41 @@ echo "Generating $OUT — answer a few prompts; the rest is auto-generated."
 ask PUBLIC_DOMAIN "Public domain (TLS via Caddy; 'localhost' for a local trial)" "localhost"
 ask ADMIN_EMAIL "Bootstrap admin email" "admin@example.com"
 read -rsp "Bootstrap admin password (blank = generate one): " ADMIN_PW || true; echo
-ask GEMINI_API_KEY "Gemini API key (LLM provider for the default presets)" ""
+
+# --- LLM provider → API key → per-tier preset aliases -----------------------
+# Pick the provider for the default chat tiers, capture its key, and wire the
+# suite's lite/balanced/pro (+ embedding) defaults to that provider's seeded
+# preset aliases (see bp_router/llm/presets_catalog.jsonc).
+echo
+echo "LLM provider for the default chat tiers:"
+echo "  1) Anthropic (Claude)"
+echo "  2) Gemini (Google)"
+echo "  3) OpenAI (GPT)"
+ask PROVIDER_CHOICE "Choose 1-3" "2"
+case "${PROVIDER_CHOICE,,}" in
+    1|anthropic) PROVIDER=anthropic ;;
+    2|gemini)    PROVIDER=gemini ;;
+    3|openai)    PROVIDER=openai ;;
+    *) echo "invalid provider choice: $PROVIDER_CHOICE" >&2; exit 1 ;;
+esac
+
+# provider → (key env var, lite, balanced, pro, embedding) preset aliases.
+case "$PROVIDER" in
+    anthropic)
+        KEY_VAR=ANTHROPIC_API_KEY
+        PRESET_LITE=claude-haiku; PRESET_BALANCED=claude; PRESET_PRO=claude-opus
+        PRESET_EMBEDDING=default_embedding ;;   # Anthropic has no embeddings
+    gemini)
+        KEY_VAR=GEMINI_API_KEY
+        PRESET_LITE=gemini-lite; PRESET_BALANCED=gemini; PRESET_PRO=gemini-pro
+        PRESET_EMBEDDING=default_embedding ;;
+    openai)
+        KEY_VAR=OPENAI_API_KEY
+        PRESET_LITE=gpt-nano; PRESET_BALANCED=gpt; PRESET_PRO=gpt-pro
+        PRESET_EMBEDDING=text-embedding-3-small ;;
+esac
+
+ask PROVIDER_KEY "$PROVIDER API key (resolves env://$KEY_VAR for the presets)" ""
 ask TELEGRAM "Telegram bot token (from @BotFather)" ""
 
 GENERATED_PW=0
@@ -74,8 +108,14 @@ if [[ -z "$ADMIN_PW" ]]; then ADMIN_PW="$(gen 20)"; GENERATED_PW=1; fi
     echo "S3_ACCESS_KEY=$(gen 20)"
     echo "S3_SECRET_KEY=$(gen 40)"
     echo
-    echo "# --- LLM provider key + channel ---"
-    echo "GEMINI_API_KEY=$GEMINI_API_KEY"
+    echo "# --- LLM provider key ($PROVIDER) + per-tier preset defaults ---"
+    echo "$KEY_VAR=$PROVIDER_KEY"
+    echo "SUITE_DEFAULT_PRESET_LITE=$PRESET_LITE"
+    echo "SUITE_DEFAULT_PRESET_BALANCED=$PRESET_BALANCED"
+    echo "SUITE_DEFAULT_PRESET_PRO=$PRESET_PRO"
+    echo "SUITE_DEFAULT_PRESET_EMBEDDING=$PRESET_EMBEDDING"
+    echo
+    echo "# --- Channel ---"
     echo "SUITE_TELEGRAM_BOT_TOKEN=$TELEGRAM"
     echo
     echo "# --- Agent invitation tokens (registered by the compose 'bootstrap' service) ---"
@@ -85,8 +125,14 @@ chmod 600 "$OUT"
 
 echo
 echo "Wrote $OUT (chmod 600)."
+echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
 [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"
-[[ -z "$GEMINI_API_KEY" ]] && echo "  WARNING: GEMINI_API_KEY is empty — set it before deploying."
+[[ -z "$PROVIDER_KEY" ]] && echo "  WARNING: $KEY_VAR is empty — set it before deploying."
+if [[ "$PROVIDER" == "anthropic" ]]; then
+    echo "  NOTE: Anthropic has no embeddings; memory/knowledge-base use"
+    echo "        $PRESET_EMBEDDING (Gemini). Set GEMINI_API_KEY too, or change"
+    echo "        SUITE_DEFAULT_PRESET_EMBEDDING to an OpenAI embedding preset + key."
+fi
 [[ -z "$TELEGRAM" ]] && echo "  WARNING: SUITE_TELEGRAM_BOT_TOKEN is empty — the chatbot won't poll Telegram."
 echo
 echo "Next:  docker compose -f docker-compose.prod.yml --env-file $OUT up -d"
