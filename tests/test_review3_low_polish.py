@@ -194,27 +194,32 @@ def test_l3_peek_does_not_lru_touch() -> None:
     assert next(iter(svc._user_level_cache)) == "u1"
 
 
-def test_l3_dispatch_call_site_peeks_before_pool_acquire() -> None:
-    """Source pin: `_run_llm_call` (or wherever the user-level
-    lookup lives in dispatch) must call `peek_user_level_cached`
-    BEFORE `pool.acquire()` so warm-cache hits skip the
-    pool acquire entirely."""
+def test_l3_dispatch_tier_lookup_is_task_derived_and_gated() -> None:
+    """The tier-gate user-level lookup in `_run_llm_call` must:
+
+      1. be skipped entirely for `*` presets (the hot default path) — the
+         pool acquire sits behind the `preset_needs_tier` guard; and
+      2. derive the caller's identity from the TASK (`_derive_task_scope`,
+         active-executor verified), NOT the agent-asserted `frame.user_id`.
+
+    This supersedes the old `peek_user_level_cached(frame.user_id)`
+    optimization, which was the bypass being closed: trusting the asserted
+    `frame.user_id` let a low-trust agent satisfy a tier gate as any user.
+    """
     pytest.importorskip("fastapi")
     from bp_router import dispatch
 
-    # The lookup is in `_run_llm_call`; locate it via source.
     src = inspect.getsource(dispatch._run_llm_call)
-    peek_idx = src.find("peek_user_level_cached")
+    guard_idx = src.find("if preset_needs_tier:")
+    derive_idx = src.find("_derive_task_scope(")
     pool_idx = src.find("state.db_pool.acquire")
-    assert peek_idx > 0, (
-        "review3-L3 regression: peek_user_level_cached call missing from "
-        "dispatch user-level lookup"
-    )
-    assert pool_idx > 0
-    assert peek_idx < pool_idx, (
-        "review3-L3: peek must precede the pool.acquire so warm-cache "
-        "hits skip the connection acquisition"
-    )
+    assert guard_idx > 0, "tier lookup must be gated on preset_needs_tier"
+    assert derive_idx > 0, "tier identity must come from _derive_task_scope"
+    # The pool acquire (and the derive) sit AFTER the preset_needs_tier guard.
+    assert guard_idx < pool_idx and guard_idx < derive_idx
+    # The gate must NOT resolve the level from the agent-asserted user_id.
+    assert "resolve_user_level(conn, frame.user_id)" not in src
+    assert "peek_user_level_cached" not in src
 
 
 def test_l3_resolve_user_level_unchanged_for_miss_path() -> None:

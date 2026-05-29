@@ -39,12 +39,16 @@ def _llm_request(
     kind: str = "generate",
     preset: str = "default",
     user_id: str = "usr_alice",
+    task_id: str | None = None,
     messages: list[dict[str, Any]] | None = None,
     text: list[str] | None = None,
     stream: bool = False,
 ) -> LlmRequestFrame:
     """Build a fully-formed `LlmRequestFrame`. The protocol envelope
-    (`type`, `trace_id`, etc.) is auto-filled."""
+    (`type`, `trace_id`, etc.) is auto-filled. `task_id` binds the call
+    to a task — required for a tier-gated preset, whose gate derives the
+    caller's level from the task row (active-executor verified), not the
+    agent-asserted `user_id`."""
     base = {
         "type": "LlmRequest",
         "trace_id": "trc_test",
@@ -52,6 +56,7 @@ def _llm_request(
         "agent_id": "agt_caller",
         "kind": kind,
         "preset": preset,
+        "task_id": task_id,
         "messages": messages if messages is not None else [
             {"role": "user", "content": "hi"}
         ],
@@ -72,8 +77,20 @@ class _StubOutbox:
         self.frames.append(frame)
 
 
-def _make_state(*, llm_service: Any) -> Any:
-    """Stub `AppState` with the bits `_run_llm_call` reads."""
+_DEFAULT_TASK_ROW = {
+    "user_id": "usr_alice",
+    "session_id": "ses_1",
+    "active_agent_id": "agt_caller",
+}
+
+
+def _make_state(*, llm_service: Any, task_row: Any = _DEFAULT_TASK_ROW) -> Any:
+    """Stub `AppState` with the bits `_run_llm_call` reads.
+
+    `task_row` is what the stub conn returns for the tier-gate's task lookup
+    (`derive_task_file_scope`). Pass `None` (no such task) or a row whose
+    `active_agent_id` differs from `agt_caller` to simulate a caller that is
+    NOT the task's active executor."""
     state = MagicMock()
     state.llm_service = llm_service
 
@@ -81,6 +98,13 @@ def _make_state(*, llm_service: Any) -> Any:
     pool = MagicMock()
     state.db_pool = pool
     conn = MagicMock()
+    # The tier-gate derives the trusted identity from the task row via
+    # `derive_task_file_scope`, which `await conn.fetchrow(...)`s. Default to
+    # a task the calling agent (agt_caller) is the active executor of, so a
+    # tier-gated request resolves a real level instead of being refused as
+    # unverifiable. (`*`-preset tests never reach this — the lookup is
+    # skipped for them.)
+    conn.fetchrow = AsyncMock(return_value=task_row)
     pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
     return state
@@ -187,10 +211,16 @@ def test_preset_not_allowed_maps_to_preset_not_allowed_code() -> None:
     svc = _stub_llm_service(generate=AsyncMock(side_effect=err))
     # The preset peeks `min_user_level=tier1` (gated).
     svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="tier1"))
+    # The tier gate resolves the (task-derived, verified) caller as tier3.
+    svc.resolve_user_level = AsyncMock(return_value="tier3")
     state = _make_state(llm_service=svc)
     entry = _make_entry()
 
-    asyncio.run(_run_llm_call(state, entry, _llm_request(preset="claude-opus")))
+    # task_id binds the gate to a task agt_caller executes; the SERVICE
+    # then raises PresetNotAllowedError (tier3 < tier1) which maps here.
+    asyncio.run(
+        _run_llm_call(state, entry, _llm_request(preset="claude-opus", task_id="tsk_1"))
+    )
 
     [result] = entry.outbox.frames
     assert result.error.code == ErrorCode.LLM_PRESET_NOT_ALLOWED
@@ -200,6 +230,104 @@ def test_preset_not_allowed_maps_to_preset_not_allowed_code() -> None:
     assert "tier1" in result.error.message
     # Tier denial is permanent for this caller — not retriable.
     assert result.error.retriable is False
+
+
+# ---------------------------------------------------------------------------
+# Tier gate: trusted identity comes from the TASK, never frame.user_id
+# ---------------------------------------------------------------------------
+
+
+def test_tier_gate_uses_task_user_id_not_asserted_user_id() -> None:
+    """The gate resolves the level from the task-derived user_id (usr_alice),
+    NOT the agent-asserted frame.user_id — so a low-trust agent can't claim a
+    privileged user to satisfy a tier-gated preset."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service(generate=AsyncMock(return_value=MagicMock(
+        text="ok", tool_calls=[], finish_reason="stop",
+        usage=MagicMock(input_tokens=1, output_tokens=1, total_tokens=2),
+        raw={},
+    )))
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="tier1"))
+    svc.resolve_user_level = AsyncMock(return_value="admin")  # task user passes
+    state = _make_state(llm_service=svc)
+    entry = _make_entry()
+
+    # The agent ASSERTS it is acting for an admin user; the task it executes
+    # belongs to usr_alice (the default task_row).
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="claude-opus", task_id="tsk_1", user_id="usr_admin_claimed",
+    )))
+
+    # resolve_user_level was called with the TASK's user_id, not the claim.
+    called_user = svc.resolve_user_level.await_args.args[1]
+    assert called_user == "usr_alice"
+    assert called_user != "usr_admin_claimed"
+
+
+def test_tier_gate_refuses_non_executor_agent() -> None:
+    """If the calling agent is NOT the task's active executor,
+    `derive_task_file_scope` returns None → no trusted identity → refuse."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service()
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="tier1"))
+    # Task is executed by a DIFFERENT agent → scope derivation returns None.
+    state = _make_state(
+        llm_service=svc,
+        task_row={"user_id": "usr_alice", "session_id": "ses_1",
+                  "active_agent_id": "agt_someone_else"},
+    )
+    entry = _make_entry()
+
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="claude-opus", task_id="tsk_1",
+    )))
+
+    [result] = entry.outbox.frames
+    assert result.error.code == ErrorCode.LLM_PRESET_NOT_ALLOWED
+    svc.generate.assert_not_awaited()  # never reached the provider
+
+
+def test_tier_gate_requires_task_context() -> None:
+    """A tier-gated preset with no task_id can't be bound to a trusted
+    identity → refuse (don't fall back to the asserted user_id)."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service()
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="tier1"))
+    state = _make_state(llm_service=svc)
+    entry = _make_entry()
+
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="claude-opus", task_id=None,
+    )))
+
+    [result] = entry.outbox.frames
+    assert result.error.code == ErrorCode.LLM_PRESET_NOT_ALLOWED
+    svc.resolve_user_level.assert_not_awaited()  # no lookup without a task
+    svc.generate.assert_not_awaited()
+
+
+def test_star_preset_skips_tier_lookup_entirely() -> None:
+    """A `*` preset never consults user_level → no task lookup, no
+    resolve_user_level (the hot default path pays zero DB cost)."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service(generate=AsyncMock(return_value=MagicMock(
+        text="ok", tool_calls=[], finish_reason="stop",
+        usage=MagicMock(input_tokens=1, output_tokens=1, total_tokens=2),
+        raw={},
+    )))
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="*"))
+    state = _make_state(llm_service=svc)
+    entry = _make_entry()
+
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="default", task_id="tsk_1",
+    )))
+
+    svc.resolve_user_level.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
