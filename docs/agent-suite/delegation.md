@@ -38,7 +38,7 @@ The channel owns `delegated_to` (`session.management`) and derives it from **who
 
 1. Channel spawns `T = orchestrator(message)`. The orchestrator's LLM elects to delegate to e.g. `computer_use`.
 2. Orchestrator writes the **`delegate_prompt` seed row** into the delegate thread ([sessions.md §6](./sessions.md)), then `ack = peers.delegate(computer_use, LLMData{instruction, context, prompt}, mode=on_delegation)` → router reassigns `T`.
-3. **On ack**, the orchestrator returns **without a Result** (SDK suppresses it). **On admit failure** it must produce a fallback instead (F1).
+3. **On ack**, the orchestrator returns **without a Result** (SDK suppresses it) — and writes a hidden **`assistant` marker** (`Delegated to <agent>.`) onto its **own** thread, closing the still-open pre-delegation user turn so the thread alternates (and framing the work as delegated, not its own). **On admit failure** it must produce a fallback instead (F1).
 4. `computer_use.on_delegation` runs the first delegated turn on `T`, streams via `ctx.progress`, appends to its thread, and **terminates `T`**.
 5. Channel (awaiting `T`) receives computer_use's `AgentOutput`, sends it to the user, and — observing `result.agent_id = computer_use ≠ orchestrator` — sets `delegated_to = computer_use`.
 
@@ -59,8 +59,8 @@ produces a Result on `T`. The episode ends later, in Phase 3, on a steady-state
 
 1. During some `Tn`, computer_use elects to end (its LLM calls the `end_delegation` local tool, or the user issues a slash command).
 2. `peers.delegate(orchestrator, {delegation_summary, exit_reason, user_prompt?}, mode=end_delegation)` → router reassigns `Tn`; computer_use returns **without a Result**.
-3. `orchestrator.end_delegation`: appends a `{delegate, summary, reason}` recap to the **main** thread (**`assistant`-role**, `(incumbent=T, hidden=T)`); flips the **delegate episode's** rows (including the `delegate_prompt` seed) `incumbent=false`; then **if `user_prompt`** runs the orchestrator loop on it, **else** returns a brief/empty `AgentOutput`. **Terminates `Tn`.**
-   - **Why `assistant`, not `user`:** the orchestrator handed off without answering the pre-delegation user turn, leaving it open. An `assistant` recap **closes** that turn, so the reloaded thread alternates; a `user` recap would leave back-to-back user rows (open prompt + recap + next message) and the model would answer the stale prompt alongside the new one. Hidden from the UI, reloaded for context. The channel's manual fold-back (`/undelegate`) writes the same `assistant` recap.
+3. `orchestrator.end_delegation`: appends a `{delegate, summary, reason}` recap to the **main** thread, then a short `assistant` ack — both `hidden`, `incumbent=T`; flips the **delegate episode's** rows (including the `delegate_prompt` seed) `incumbent=false`; then **if `user_prompt`** runs the orchestrator loop on it, **else** returns a brief/empty `AgentOutput`. **Terminates `Tn`.**
+   - **Recap roles:** the recap is a **`user`** row — the specialist's results return as *external input*, so the orchestrator won't later narrate them as its own work — and a hidden **`assistant` `Acknowledged.`** closes that turn. Combined with the Phase 1 hand-off marker, the orchestrator thread reads `user(prompt) → assistant(Delegated…) → user(recap) → assistant(Acknowledged) → user(next)`: cleanly alternating, no stale prompt re-answered, work correctly attributed. Hidden from the UI, reloaded for context. The channel's manual fold-back (`/undelegate`) writes the same recap + ack.
 4. Channel gets the orchestrator's Result and — observing `result.agent_id = orchestrator` — sets `delegated_to = null`. Next message routes to `orchestrator(message)`.
 
 → Symmetric with hand-off; `Tn` terminated by the orchestrator.

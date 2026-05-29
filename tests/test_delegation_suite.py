@@ -129,8 +129,15 @@ def test_orchestrator_hand_off(suite_db_url: str) -> None:
                 rows = await queries.reload_incumbent(
                     conn, session_id="ses_1", agent_id=_L1
                 )
+                orch = await queries.reload_incumbent(
+                    conn, session_id="ses_1", agent_id="orchestrator"
+                )
             assert rows and rows[0].role == "user"
             assert "reason about X" in rows[0].message
+            # Hand-off closed the orchestrator's open turn with a hidden
+            # `assistant` marker attributing the work to the delegate.
+            assert orch and orch[-1].role == "assistant" and orch[-1].hidden
+            assert f"Delegated to {_L1}" in orch[-1].message
         finally:
             await pool.close()
 
@@ -350,11 +357,15 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
         try:
             await _reset(pool)
             async with pool.acquire() as conn:
-                # The pre-delegation user prompt the orchestrator left OPEN
-                # when it handed off (no assistant turn).
+                # Post-hand-off orchestrator thread: the open user prompt was
+                # already closed by the hidden "Delegated to …" marker.
                 await queries.append_history(
                     conn, session_id="ses_1", agent_id="orchestrator",
                     role="user", message="do the thing",
+                )
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
                 )
                 # An l1 episode to retire.
                 await queries.append_history(
@@ -373,7 +384,6 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
             )
             assert out.content == ""
             async with pool.acquire() as conn:
-                # Recap appended to the MAIN thread.
                 main = await queries.reload_incumbent(
                     conn, session_id="ses_1", agent_id="orchestrator"
                 )
@@ -381,12 +391,13 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
                 l1_rows = await queries.reload_incumbent(
                     conn, session_id="ses_1", agent_id=_L1
                 )
-            assert any("solved it" in r.message for r in main)
             assert l1_rows == []
-            # The recap is an ASSISTANT turn that closes the open user prompt:
-            # the reloaded thread alternates, not ends in consecutive users.
-            assert [r.role for r in main] == ["user", "assistant"]
-            assert main[-1].role == "assistant" and "solved it" in main[-1].message
+            # Recap is a hidden `user` row (results as external input); a hidden
+            # `assistant` "Acknowledged." closes it — the thread alternates.
+            assert [r.role for r in main] == ["user", "assistant", "user", "assistant"]
+            recap, ack = main[-2], main[-1]
+            assert recap.role == "user" and recap.hidden and "solved it" in recap.message
+            assert ack.role == "assistant" and ack.hidden and ack.message == "Acknowledged."
         finally:
             await pool.close()
 
