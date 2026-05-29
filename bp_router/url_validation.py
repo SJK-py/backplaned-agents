@@ -77,7 +77,14 @@ _HOSTED_PROVIDERS = frozenset({
 
 
 def _is_local_provider(provider: str) -> bool:
-    return provider.startswith("openai-compatible")
+    # `mcp` is the MCP-bridge server URL: like a local LLM server it is
+    # commonly an INTERNAL endpoint (the point of bridging an on-prem MCP
+    # server), so loopback / private are allowed — but link-local
+    # (cloud-metadata 169.254.169.254), metadata hostnames, and
+    # multicast/reserved stay blocked for it like everyone else, and it is
+    # NOT in `_HOSTED_PROVIDERS` so http is permitted (internal MCP over
+    # http is common).
+    return provider.startswith("openai-compatible") or provider == "mcp"
 
 
 def _ip_is_blocked(
