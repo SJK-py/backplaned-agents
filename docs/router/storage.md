@@ -362,7 +362,7 @@ class Settings(BaseSettings):
     max_payload_bytes: int = 1_048_576
     per_socket_outbox_max: int = 256
     pending_ack_timeout_s: float = 30.0
-    default_task_deadline_s: int = 600
+    default_task_deadline_s: int = 900
     resume_window_s: int = 30
 
     # ACL

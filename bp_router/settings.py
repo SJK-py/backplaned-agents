@@ -200,7 +200,7 @@ class Settings(BaseSettings):
     cap. At ~50 bytes/entry the default 10k cap means ≤500 KiB
     RSS impact under sustained load."""
     pending_ack_timeout_s: float = Field(default=30.0, gt=0.0)
-    default_task_deadline_s: int = Field(default=600, ge=1)
+    default_task_deadline_s: int = Field(default=900, ge=1)
     resume_window_s: int = Field(default=30, ge=0)
     """0 disables the resume window — every disconnect goes straight to
     `fail_inflight_for_agent`. Negative values would underflow the

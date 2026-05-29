@@ -25,14 +25,15 @@
 - **What:** bumped two vendored-platform defaults to fit long multi-round
   turns (e.g. research with several web fetches):
   - `bp_sdk` `AgentConfig.pending_results_timeout_s` 60.0 → **480.0**
-  - `bp_router` `RouterSettings.default_task_deadline_s` 300 → **600**
+  - `bp_router` `RouterSettings.default_task_deadline_s` 300 → **900**
 - **Why:** the channel waits on an injected turn's result
   (`dispatch_result_timeout_s`, now 600 in `bp_agents`), and a single turn
   can run multiple `web_fetch_timeout_s` (now 120) fetches across up to
   `max_rounds` LLM rounds. The old 300s router deadline / 60s SDK result
   wait gave up while work was still in flight, surfacing a spurious failure
   to the user. New ordering: SDK result wait (480) < channel dispatch (600)
-  ≤ router deadline (600).
+  < router deadline (900), so the router keeps the task alive past the
+  channel's give-up point.
 - **Shape:** **Changed** — default-value only; both remain env-overridable.
   Suite-side companions (`bp_agents`, not tracked here):
   `dispatch_result_timeout_s` 180 → 600, `plan_step_timeout_s` 120 → 240,
