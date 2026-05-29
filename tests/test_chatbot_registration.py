@@ -87,14 +87,15 @@ async def _truncate(pool) -> None:
 
 def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        settings = SuiteSettings(database_url=suite_db_url)
+        pool = await open_pool(settings)
         try:
             await _truncate(pool)
             rec = ServicedSession(
                 user_id="usr_a", session_id="ses_1", external_id="tg1",
                 channel="chatbot_telegram", opened_at=datetime.now(UTC),
             )
-            n = await reconcile_serviced_sessions(pool, [rec])
+            n = await reconcile_serviced_sessions(pool, [rec], settings=settings)
             assert n == 1
 
             async with pool.acquire() as conn:
@@ -106,17 +107,50 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 assert await queries.get_session_info(conn, "ses_1") is not None
 
             # Idempotent: a re-poll maps nothing new.
-            assert await reconcile_serviced_sessions(pool, [rec]) == 0
+            assert await reconcile_serviced_sessions(
+                pool, [rec], settings=settings
+            ) == 0
 
             # A later /new moved the default; reconcile must NOT clobber it.
             async with pool.acquire() as conn:
                 await queries.set_default_session_id(
                     conn, user_id="usr_a", session_id="ses_2"
                 )
-            await reconcile_serviced_sessions(pool, [rec])
+            await reconcile_serviced_sessions(pool, [rec], settings=settings)
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, "usr_a")
             assert cfg.default_session_id == "ses_2"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_reconcile_seeds_tier_presets_from_settings(suite_db_url: str) -> None:
+    """A first-time user_config row picks up the operator's configured
+    per-tier preset defaults (`SUITE_DEFAULT_PRESET_*`)."""
+    async def _drive() -> None:
+        settings = SuiteSettings(
+            database_url=suite_db_url,
+            default_preset_pro="claude-opus",
+            default_preset_balanced="claude",
+            default_preset_lite="gemini-lite",
+            default_preset_embedding="text-embedding-3-small",
+        )
+        pool = await open_pool(settings)
+        try:
+            await _truncate(pool)
+            rec = ServicedSession(
+                user_id="usr_a", session_id="ses_1", external_id="tg1",
+                channel="chatbot_telegram", opened_at=datetime.now(UTC),
+            )
+            await reconcile_serviced_sessions(pool, [rec], settings=settings)
+            async with pool.acquire() as conn:
+                cfg = await queries.get_user_config(conn, "usr_a")
+            assert cfg.preset_pro == "claude-opus"
+            assert cfg.preset_balanced == "claude"
+            assert cfg.preset_lite == "gemini-lite"
+            assert cfg.preset_embedding == "text-embedding-3-small"
         finally:
             await pool.close()
 

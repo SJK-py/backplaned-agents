@@ -22,6 +22,8 @@ from bp_agents.db import queries
 if TYPE_CHECKING:
     import asyncpg
 
+    from bp_agents.settings import SuiteSettings
+
 logger = logging.getLogger(__name__)
 
 PLATFORM = "telegram"
@@ -29,11 +31,16 @@ CHANNEL = "chatbot_telegram"
 
 
 async def reconcile_serviced_sessions(
-    pool: asyncpg.Pool, records: list[ServicedSession]
+    pool: asyncpg.Pool, records: list[ServicedSession], *, settings: SuiteSettings
 ) -> int:
     """Write the suite-side identity for each discovered session. Returns
     the count of newly-mapped chats (an already-mapped chat is a no-op).
-    Idempotent — safe to call repeatedly with overlapping records."""
+    Idempotent — safe to call repeatedly with overlapping records.
+
+    A first-time `user_config` row seeds its per-tier LLM presets from
+    `settings.default_preset_*` (`SUITE_DEFAULT_PRESET_{PRO,BALANCED,LITE,
+    EMBEDDING}`), so an operator's configured tier defaults actually take
+    effect at registration."""
     newly_mapped = 0
     for rec in records:
         if not rec.external_id:
@@ -46,10 +53,14 @@ async def reconcile_serviced_sessions(
                 conn, platform=PLATFORM, chat_id=rec.external_id,
                 user_id=rec.user_id,
             )
-            # Seeds default_session_id on first create; a no-op for an
-            # existing config (so a later /new isn't clobbered).
+            # Seeds default_session_id + per-tier presets on first create;
+            # a no-op for an existing config (so a later /new isn't clobbered).
             await queries.create_user_config(
-                conn, user_id=rec.user_id, default_session_id=rec.session_id
+                conn, user_id=rec.user_id, default_session_id=rec.session_id,
+                preset_pro=settings.default_preset_pro,
+                preset_balanced=settings.default_preset_balanced,
+                preset_lite=settings.default_preset_lite,
+                preset_embedding=settings.default_preset_embedding,
             )
             await queries.create_session_info(
                 conn, session_id=rec.session_id, user_id=rec.user_id,
@@ -72,6 +83,7 @@ async def approval_poll_loop(
     *,
     credentials: ChannelCredentials,
     pool: asyncpg.Pool,
+    settings: SuiteSettings,
     stop: asyncio.Event,
     interval_s: float = 30.0,
 ) -> None:
@@ -86,7 +98,7 @@ async def approval_poll_loop(
                 channel=CHANNEL, since=cursor
             )
             if records:
-                await reconcile_serviced_sessions(pool, records)
+                await reconcile_serviced_sessions(pool, records, settings=settings)
                 cursor = max(r.opened_at for r in records)
         except Exception:  # noqa: BLE001
             logger.exception(

@@ -126,6 +126,21 @@ scripts/init-prod-env.sh                                     # generates deploy/
 docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
 ```
 
+`init-prod-env.sh` first asks which **LLM provider** to use (Anthropic /
+Gemini / OpenAI / Custom), captures that provider's API key into the matching
+env var (`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY`), and wires
+the suite's per-tier defaults to that provider's seeded aliases — e.g.
+Anthropic → `lite=claude-haiku`, `balanced=claude`, `pro=claude-opus` (Gemini
+and OpenAI have analogous `gemini-lite/gemini/gemini-pro` and
+`gpt-nano/gpt/gpt-pro` mappings). Anthropic has no embedding model, so
+embeddings stay on `default_embedding` (Gemini) — set `GEMINI_API_KEY` too, or
+repoint `SUITE_DEFAULT_PRESET_EMBEDDING` to an OpenAI embedding preset.
+
+The **Custom** option asks for no key and wires the generic tier slots
+(`lite` / `default` / `pro` — preset names seeded to Gemini placeholders in the
+catalogue); set the provider key(s) and repoint those presets to any
+provider/model via the admin webUI (`/admin`) afterward.
+
 `compose up` resolves the whole order via `depends_on`: `postgres` →
 `migrate` + `suite-migrate` (schemas) → `router` (healthy) → `bootstrap`
 (`python -m bp_agents.bootstrap` — registers the pre-supplied invitation
