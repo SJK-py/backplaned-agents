@@ -358,13 +358,22 @@ class Scope:
         )
         return [TaskRow.model_validate(dict(r)) for r in rows]
 
-    async def find_idempotent(self, idempotency_key: str) -> TaskRow | None:
+    async def find_idempotent(
+        self, idempotency_key: str, *, caller_agent_id: str
+    ) -> TaskRow | None:
+        """Dedup lookup, scoped to `(caller_agent_id, user_id,
+        idempotency_key)` — per AGENT per user (matching the
+        `tasks_idempotency_unique` constraint). A different caller agent
+        reusing the same key string for the same user gets its OWN task,
+        never this one's replayed terminal (no cross-agent leak)."""
         user_id = self._require_user()
         row = await self._conn.fetchrow(
             """
             SELECT * FROM tasks
-            WHERE user_id = $1 AND idempotency_key = $2
+            WHERE caller_agent_id = $1 AND user_id = $2
+              AND idempotency_key = $3
             """,
+            caller_agent_id,
             user_id,
             idempotency_key,
         )

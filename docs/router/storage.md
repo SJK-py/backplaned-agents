@@ -41,7 +41,7 @@ tasks(task_id PK, parent_task_id FK, root_task_id, user_id FK,
       session_id FK, agent_id FK,
       caller_agent_id FK, active_agent_id FK,
       state, status_code,
-      idempotency_key UNIQUE(user_id, idempotency_key),
+      idempotency_key UNIQUE(caller_agent_id, user_id, idempotency_key),
       priority, deadline, created_at, updated_at,
       input JSONB, output JSONB, error JSONB)
   -- `agent_id` is the destination the task was admitted to.

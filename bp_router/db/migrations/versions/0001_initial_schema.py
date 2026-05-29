@@ -181,7 +181,7 @@ def upgrade() -> None:
             input            jsonb NOT NULL DEFAULT '{}'::jsonb,
             output           jsonb,
             error            jsonb,
-            CONSTRAINT tasks_idempotency_unique UNIQUE (user_id, idempotency_key),
+            CONSTRAINT tasks_idempotency_unique UNIQUE (caller_agent_id, user_id, idempotency_key),
             CONSTRAINT tasks_deadline_after_create CHECK (deadline IS NULL OR deadline > created_at)
         )
     """)
