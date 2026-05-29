@@ -42,6 +42,12 @@ export SUITE_DATABASE_URL
 # writable by a non-root dev user, so `mkdir` would fail on the first bash.
 : "${SUITE_SANDBOX_ROOT:=/tmp/bp-suite-sandbox}"
 export SUITE_SANDBOX_ROOT
+# Per-agent state (credentials.json) MUST be durable: agents onboard ONCE
+# (invitation tokens are single-use) and resume from persisted creds forever
+# after. /tmp is wiped on reboot — losing creds while the router keeps the
+# agent registered leaves it un-onboardable (409) with no recovery short of a
+# router DB reset. So default to a stable XDG state dir, overridable.
+: "${BP_SUITE_STATE_ROOT:=${XDG_STATE_HOME:-$HOME/.local/state}/bp-suite}"
 # The webapp agent serves a browser UI (FastAPI) and needs a cookie-signing
 # secret + (over http://localhost) a non-secure cookie. Default insecure dev
 # values so `run-suite.sh` works out of the box; override for anything real.
@@ -119,6 +125,16 @@ sys.exit(0)
 PY
 }
 
+# Router-side registration status for $1, or empty if not registered (404).
+# Used to pre-empt the cryptic onboard 409 when we're about to mint for an
+# agent the router already knows but we have no local creds for.
+agent_status() {
+    curl -sf -H "Authorization: Bearer $TOKEN" \
+        "$ROUTER_URL/v1/admin/agents/$1" 2>/dev/null \
+        | "$PYTHON_BIN" -c "import json,sys;print(json.load(sys.stdin).get('status',''))" \
+        2>/dev/null || true
+}
+
 # Agent roster: name:provisions_service_user. Only the chatbot owns the
 # service identity (registration submit + per-user mint); the rest are
 # plain agents.
@@ -147,15 +163,28 @@ trap cleanup EXIT INT TERM
 for entry in "${AGENTS[@]}"; do
     name="${entry%%:*}"
     prov="${entry##*:}"
-    state="/tmp/bp-suite/$name"
+    state="$BP_SUITE_STATE_ROOT/$name"
     mkdir -p "$state"
     token=""
     if creds_resumable "$state"; then
         log "$name: resuming from persisted creds"
     else
+        # No usable local creds. If the router already has this agent
+        # registered, a fresh onboard would 409 with no recovery — surface
+        # that as actionable guidance instead of a cryptic per-agent crash.
+        st=$(agent_status "$name")
+        if [[ -n "$st" && "$st" != "pending" ]]; then
+            fail "$name is registered on the router (status=$st) but has no usable creds at
+  $state — a fresh onboard will be rejected (409). Recover by either:
+    • restoring that agent's credentials.json, or
+    • resetting the dev router DB and re-onboarding all agents:
+        docker compose -f docker-compose.dev.yml down -v && scripts/dev-up.sh
+        # then re-migrate (router + bp_suite) + re-bootstrap admin, and rerun.
+  (Creds now persist under \$BP_SUITE_STATE_ROOT=$BP_SUITE_STATE_ROOT, not /tmp,
+   so this won't recur across reboots.)"
+        fi
         # Fresh, or stale/expired/corrupt creds → drop them and re-mint so
-        # onboarding has a usable invitation (self-heals a prior failed run /
-        # a router reset).
+        # onboarding has a usable invitation (self-heals a prior failed run).
         if [[ -e "$state/credentials.json" ]]; then
             log "$name: persisted creds unusable — re-minting"
             rm -f "$state/credentials.json"
