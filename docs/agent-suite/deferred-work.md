@@ -31,7 +31,18 @@
   and the one router-side seam (`serviced-sessions`) has its own test.
 - **unverified — `scripts/run-suite.sh`** dev launcher.
   *Why:* **needs-live-stack** — needs a router, a Telegram token, and an
-  LLM key; bash glue with no unit surface. Syntax-checked only.
+  LLM key; bash glue with no unit surface. Syntax-checked only. The launcher
+  now: (a) persists per-agent creds under a **durable** `$BP_SUITE_STATE_ROOT`
+  (XDG state, was ephemeral `/tmp/bp-suite`) — agents onboard once
+  (invitation tokens are single-use) and resume forever after, so a reboot no
+  longer strands a router-registered agent with no creds; (b) **re-mints when
+  persisted creds are unusable** (`creds_resumable`: missing/empty/expired
+  `auth_token`, mirroring the SDK resume check); and (c) **pre-flights the
+  router's registration** so a lost-creds-but-already-registered agent fails
+  with actionable recovery guidance instead of a cryptic onboard **409**
+  (there is no de-register endpoint — `evict` is terminal — so recovery is a
+  dev-DB reset). The credential logic is unit-exercised; the full live boot
+  is still needs-live-stack.
 
 ## Sessions / summarization
 
