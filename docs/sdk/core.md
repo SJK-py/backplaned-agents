@@ -93,6 +93,25 @@ a router-managed file-store name (`{filename}` or
 `ctx.files.store(...)`. The names ride inside `output.files`; the
 bytes never cross the frame (see `bp_protocol.types.AgentOutput`).
 
+**The two standard types** (`bp_protocol.types`) — the default I/O for
+LLM-backed agents, referenced throughout these docs:
+
+```python
+class LLMData(BaseModel):              # the common inbound payload
+    prompt: str
+    agent_instruction: str | None = None   # → a system Message (NOT provider_options)
+    context: str | None = None             # optional extra context blob
+
+class AgentOutput(BaseModel):          # what handlers return
+    content: str | None = None
+    files: list[str] = []              # file-store NAMES (not bytes) — §7 / services.md §2
+    metadata: dict[str, Any] = {}      # free-form (token usage, citations, …)
+```
+
+Agents are free to declare their own Pydantic payload models (the
+mode is the model's class name — see §3); `LLMData` is just the
+conventional shape channel/orchestrator agents forward.
+
 ## 3. `Agent` object
 
 The top-level entry point. One per process for external agents; one
@@ -116,6 +135,7 @@ class Agent:
         *,
         mode: str | None = None,    # default: payload model's class name
         tool: bool = True,          # False → control-plane (non_tool_modes)
+        description: str | None = None,  # per-mode tool description (see below)
     ) -> HandlerFn | Callable[[HandlerFn], HandlerFn]: ...
 
     def on_startup(self, fn: Callable[[], Awaitable[None]]) -> None: ...
@@ -166,6 +186,13 @@ that handles only one shape needs one decorator and callers can omit
 `mode`. A `dict`-input handler has no model name to default from, so
 it **requires** an explicit `mode=`; two handlers resolving to the
 same mode raise at registration (fail fast, no silent shadowing).
+
+`@agent.handler(description="…")` sets that mode's **per-mode tool
+description**, published as `AgentInfo.mode_descriptions[mode]`. A
+calling LLM sees it on the generated `call_<agent>[_<mode>]` tool
+instead of the agent-level `description` — use it on a multi-mode
+agent so each tool reads distinctly. `mode=` and `tool=` compose with
+it freely (e.g. `@agent.handler(mode="summarize", tool=False)`).
 
 `@agent.handler(tool=False)` registers a **control-plane** mode:
 still validated and dispatched normally, but its mode is listed in
@@ -338,14 +365,15 @@ class PeerClient:
     async def spawn(
         self,
         destination_agent_id: str,
-        payload: BaseModel,
+        payload: BaseModel | dict[str, Any],   # dict: passed as-is (LLM-tool path)
         *,
         wait: bool = True,
         stream: bool = False,
         timeout_s: float | None = None,
         idempotency_key: str | None = None,
+        priority: TaskPriority = TaskPriority.NORMAL,
         mode: str | None = None,
-    ) -> ResultFrame | SpawnStream | str: ...
+    ) -> ResultFrame | SpawnStream | str: ...   # await before `async with` when stream=True
 
     async def delegate(
         self,
@@ -443,12 +471,13 @@ class PeerClient:
   patches your own published surface at runtime (e.g. an MCP bridge
   re-publishing a changed input schema).
 
-**Streaming a child (the safe form).** Always use `async with` — it
-`aclose()`s the subscription on early break/error (the bare form
-leaks until the correlation timeout):
+**Streaming a child (the safe form).** Always use `async with await …`
+— it `aclose()`s the subscription on early break/error (the bare form
+leaks until the correlation timeout). `spawn` is a coroutine, so
+`await` it before entering the `async with`:
 
 ```python
-async with ctx.peers.spawn(dest, payload, stream=True) as s:
+async with await ctx.peers.spawn(dest, payload, stream=True) as s:
     async for pf in s:            # child ProgressFrames
         ctx.progress.status(f"child:{pf.event}")
     result = await s.result()     # terminal ResultFrame

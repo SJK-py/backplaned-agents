@@ -5,7 +5,7 @@ Demonstrates the `ctx.peers` surface end to end:
   * Discovery — `peers.find(capability)` and `peers.describe(id)`
     against the ACL-filtered catalog (already scoped to the task's
     user level).
-  * Streaming spawn — `async with peers.spawn(..., stream=True)`:
+  * Streaming spawn — `async with await peers.spawn(..., stream=True)`:
     consume the child's `ProgressFrame`s live, then await its
     terminal `ResultFrame`.
   * Typed peer errors — `SpawnRejected` / `ResultTimeout` /
@@ -86,10 +86,12 @@ async def handle_call(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 
     chunks: list[str] = []
     try:
-        # Streaming spawn: `async with` is the safe form — it always
-        # `aclose()`s the subscription even on early break / error
-        # (the un-managed form leaks until the correlation timeout).
-        async with ctx.peers.spawn(
+        # Streaming spawn: `async with await …` is the safe form — it
+        # always `aclose()`s the subscription even on early break /
+        # error (the un-managed form leaks until the correlation
+        # timeout). `spawn` is a coroutine, so it must be `await`ed
+        # before entering the context manager.
+        async with await ctx.peers.spawn(
             target,
             payload,
             stream=True,
