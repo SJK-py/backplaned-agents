@@ -284,7 +284,7 @@ Tier gate on fallback targets:
 | `gemini-2.5` / `gemini-2.5-pro` | gemini | `gemini-2.5-pro` |
 | `gemini-2.5-flash` | gemini | `gemini-2.5-flash` |
 | `gemini-3` / `gemini-3-flash` | gemini | `gemini-3-flash-preview` |
-| `claude` / `claude-opus` / `claude-opus-4-7` | anthropic | `claude-opus-4-7` |
+| `claude-opus` / `claude-opus-4-8` | anthropic | `claude-opus-4-8` |
 | `claude-sonnet` / `claude-sonnet-4-6` | anthropic | `claude-sonnet-4-6` |
 | `claude-haiku` / `claude-haiku-4-5` | anthropic | `claude-haiku-4-5` |
 | `openai` / `gpt` / `gpt-5.5` | openai | `gpt-5.5` |

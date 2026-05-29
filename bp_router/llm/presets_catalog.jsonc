@@ -69,6 +69,19 @@
     "concrete_model": "gemini-3.1-pro-preview",
     "api_key_ref": "env://GEMINI_API_KEY"
   },
+  // Friendly tier aliases (point at the current lite / pro Gemini models).
+  {
+    "name": "gemini-lite",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.1-flash-lite",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  {
+    "name": "gemini-pro",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.1-pro-preview",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
   // Gemini embeddings ride the same provider adapter — its `embed()` uses
   // `concrete_model`, so no separate embeddings provider is needed.
   {
@@ -90,13 +103,13 @@
   {
     "name": "claude-opus",
     "provider": "anthropic",
-    "concrete_model": "claude-opus-4-7",
+    "concrete_model": "claude-opus-4-8",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
-    "name": "claude-opus-4-7",
+    "name": "claude-opus-4-8",
     "provider": "anthropic",
-    "concrete_model": "claude-opus-4-7",
+    "concrete_model": "claude-opus-4-8",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
@@ -189,6 +202,19 @@
     "name": "gpt-4-1",
     "provider": "openai",
     "concrete_model": "gpt-4.1",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  // Friendly tier aliases (point at the current nano / pro GPT models).
+  {
+    "name": "gpt-nano",
+    "provider": "openai",
+    "concrete_model": "gpt-5.4-nano",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-pro",
+    "provider": "openai",
+    "concrete_model": "gpt-5.5-pro",
     "api_key_ref": "env://OPENAI_API_KEY"
   },
 

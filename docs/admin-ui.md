@@ -134,7 +134,7 @@ agents reference at call time:
   local servers (vLLM, LM Studio, llama.cpp, Ollama OpenAI-mode,
   etc.) and reveal an additional **Endpoint base URL** field.
 - **Concrete model** — the upstream's model id
-  (`gemini-2.5-flash`, `claude-opus-4-7`, `gpt-5.5`,
+  (`gemini-2.5-flash`, `claude-opus-4-8`, `gpt-5.5`,
   `text-embedding-3-small`, `qwen2.5-32b`, etc.). No validation —
   operators may experiment with new model snapshots before they're
   added to defaults.
@@ -203,7 +203,7 @@ in audit payloads, and clearing an inline key shows up as
 `api_key_cleared: true`.
 
 **Operational tip.** Cost-sensitive deployments: gate
-`gpt-5.5-pro`, `claude-opus-4-7`, and high-effort reasoning presets
+`gpt-5.5-pro`, `claude-opus-4-8`, and high-effort reasoning presets
 to `tier0` or `service` (exclude `tier3+`). Cheap presets stay at
 `*`. The full grammar from `docs/acl.md` §3.4 applies — `tier0` is
 the most privileged non-admin level, `tier3+` is the least.

@@ -536,8 +536,8 @@ def test_default_aliases_include_claude() -> None:
         return b.provider, b.concrete_model
 
     assert _resolve("claude") == ("anthropic", "claude-sonnet-4-6")
-    assert _resolve("claude-opus") == ("anthropic", "claude-opus-4-7")
-    assert _resolve("claude-opus-4-7") == ("anthropic", "claude-opus-4-7")
+    assert _resolve("claude-opus") == ("anthropic", "claude-opus-4-8")
+    assert _resolve("claude-opus-4-8") == ("anthropic", "claude-opus-4-8")
     assert _resolve("claude-sonnet") == ("anthropic", "claude-sonnet-4-6")
     assert _resolve("claude-sonnet-4-6") == ("anthropic", "claude-sonnet-4-6")
     assert _resolve("claude-haiku") == ("anthropic", "claude-haiku-4-5")

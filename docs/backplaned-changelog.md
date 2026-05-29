@@ -20,6 +20,20 @@
 
 ## 2026-05-29
 
+### Changed — refresh the LLM preset catalogue (opus 4-8, new tier aliases)
+
+- **What:** updated `bp_router/llm/presets_catalog.jsonc`: Claude Opus bumped
+  to `claude-opus-4-8` (the `claude-opus` alias now points there, and the
+  version-pinned preset is renamed `claude-opus-4-7` → `claude-opus-4-8`).
+  Added four friendly tier aliases — `gemini-lite` (→ `gemini-3.1-flash-lite`),
+  `gemini-pro` (→ `gemini-3.1-pro-preview`), `gpt-nano` (→ `gpt-5.4-nano`),
+  `gpt-pro` (→ `gpt-5.5-pro`).
+- **Why:** keep the seed catalogue current as models change; provide stable,
+  human-friendly alias names that survive version churn.
+- **Shape:** **Changed** — seed-data only (affects fresh seeds / the in-memory
+  fallback; already-seeded DBs are admin-managed). Catalogue-pinning tests and
+  the preset reference docs were updated to match.
+
 ### Changed — `bp_router` preset seed catalogue moved to a commentable JSONC file
 
 - **What:** the built-in LLM preset list that `default_presets()` returns (the
