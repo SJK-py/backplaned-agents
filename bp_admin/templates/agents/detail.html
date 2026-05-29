@@ -119,12 +119,52 @@
   <div class="bg-white border border-brand-500/10 rounded-md p-5 shadow-sm space-y-4">
     <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">Actions</h2>
 
+    {# Reprovision: reset to pending + mint a fresh invitation. Available
+       whenever the agent isn't terminally removed — recovers a stuck agent
+       (expired token after long downtime, wiped state dir). #}
+    {% macro reprovision_button() %}
+      <div x-data="{ confirming: false }">
+        <template x-if="!confirming">
+          <button type="button" @click="confirming = true"
+                  class="w-full rounded bg-sky-100 hover:bg-sky-200 text-sky-900
+                         text-sm font-medium px-3 py-2 ring-1 ring-inset ring-sky-600/20">
+            Reset &amp; reprovision
+          </button>
+        </template>
+        <template x-if="confirming">
+          <form method="post" action="/admin/agents/{{ agent.agent_id }}/reprovision"
+                class="space-y-2 rounded border border-sky-200 bg-sky-50 p-3">
+            {% include "_partials/csrf.html" %}
+            <p class="text-xs text-sky-900">
+              Resets the agent to <strong>pending</strong> and mints a fresh
+              one-time invitation to restart it with. Any live socket is
+              dropped and in-flight tasks fail.
+            </p>
+            <div class="flex items-center gap-2">
+              <button type="submit"
+                      class="flex-1 rounded bg-sky-700 hover:bg-sky-800 text-white
+                             text-sm font-medium px-3 py-2">
+                Confirm — reset &amp; mint token
+              </button>
+              <button type="button" @click="confirming = false"
+                      class="rounded text-sm text-brand-500 hover:text-brand-900
+                             px-3 py-2 underline underline-offset-2">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </template>
+      </div>
+    {% endmacro %}
+
     {% if agent.status == "active" %}
       <a href="/admin/test-task?agent_id={{ agent.agent_id }}"
          class="block w-full text-center rounded bg-brand-900 hover:bg-brand-700
                 text-white text-sm font-medium px-3 py-2">
         Send test task →
       </a>
+
+      {{ reprovision_button() }}
 
       <!-- Suspend (two-step confirm; reversible) -->
       <div x-data="{ confirming: false }">
@@ -208,6 +248,8 @@
         </button>
       </form>
 
+      {{ reprovision_button() }}
+
       <!-- Even when suspended, evict is still available. -->
       <div x-data="{ open: false, typed: '' }">
         <template x-if="!open">
@@ -253,9 +295,12 @@
 
     {% elif agent.status == "pending" %}
       <p class="text-sm text-brand-500">
-        Pending registration. No actions available until the agent
-        completes onboarding.
+        Pending registration — waiting for the agent to onboard with its
+        invitation. If it lost its invitation (e.g. a wiped state dir), mint
+        a fresh one below.
       </p>
+
+      {{ reprovision_button() }}
     {% endif %}
   </div>
 

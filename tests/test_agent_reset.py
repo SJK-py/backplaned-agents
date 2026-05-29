@@ -41,6 +41,26 @@ def test_reset_endpoint_contract() -> None:
     assert "agent_reset" in src
 
 
+def test_reprovision_endpoint_contract() -> None:
+    src = inspect.getsource(admin_mod.reprovision_agent)
+    # Resets to pending (only when not already) + mints an invitation + audits.
+    assert "reset_agent_to_pending(conn, agent_id)" in src
+    assert "insert_invitation(" in src
+    assert 'event="agent.reprovision"' in src
+    # Mirrors original provisioning: service flag derived from whether the
+    # co-located service principal exists.
+    assert "service_user_id_for_agent(agent_id)" in src
+    assert "get_user_by_id(conn, svc_id)" in src
+    assert "provisions_service_user=provisions_service_user" in src
+    # Refuses removed (terminal) with 409; the token is returned plaintext.
+    assert '"removed"' in src
+    assert "409" in src
+    assert "invitation_token=token" in src
+    # Forces the agent offline so it must re-onboard.
+    assert "fail_inflight_for_agent" in src
+    assert "agent_reprovision" in src
+
+
 def test_reset_agent_to_pending_roundtrip(test_db_url: str) -> None:
     """active/suspended → pending; pending + removed are left untouched."""
 

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Agent reprovisioned — bp_admin{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">Agent reprovisioned</h1>
+  <p class="text-sm text-brand-500 mt-1">
+    <code class="bg-brand-50 rounded px-1">{{ agent_id }}</code> was reset to
+    <strong>pending</strong> and a fresh invitation minted. The raw token
+    below is shown <em>once</em> — the router stored only its SHA-256 hash.
+  </p>
+</header>
+
+<section class="rounded-md border border-amber-300 bg-amber-50 p-4 mb-6">
+  <h2 class="text-sm font-semibold text-amber-900 mb-1">⚠ Save this token now</h2>
+  <p class="text-xs text-amber-800">
+    Restart the stuck agent with this invitation
+    (<code class="bg-amber-100 rounded px-1">AGENT_INVITATION_TOKEN</code>) — on
+    re-onboard it keeps its <code class="bg-amber-100 rounded px-1">agent_id</code>,
+    capabilities, and groups{% if provisions_service_user %}, and re-mints its
+    service principal's refresh token{% endif %}. Once you leave this page the
+    token cannot be recovered.
+  </p>
+</section>
+
+<section class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-5"
+         x-data="{ copied: false }">
+  {% if failed_tasks %}
+  <div class="rounded bg-orange-50 border border-orange-200 px-3 py-2 text-xs text-orange-900">
+    {{ failed_tasks }} in-flight task(s) were failed when the agent was reset.
+  </div>
+  {% endif %}
+
+  <div>
+    <div class="text-xs font-medium text-brand-700 mb-1">Provisions service user</div>
+    <div class="text-sm text-brand-900">
+      {{ "yes — channel agent (service refresh token re-minted on re-onboard)"
+         if provisions_service_user else "no" }}
+    </div>
+  </div>
+
+  <div>
+    <div class="text-xs font-medium text-brand-700 mb-1">Expires at</div>
+    <div class="text-sm text-brand-900">{{ expires_at | dt }}</div>
+  </div>
+
+  <div>
+    <div class="flex items-center justify-between mb-1">
+      <span class="text-xs font-medium text-brand-700">Invitation token</span>
+      <button type="button"
+              x-on:click="
+                navigator.clipboard.writeText($refs.token.textContent.trim())
+                  .then(() => { copied = true; setTimeout(() => copied = false, 1500); });
+              "
+              class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2">
+        <span x-show="!copied">Copy to clipboard</span>
+        <span x-show="copied" x-cloak class="text-emerald-700">Copied!</span>
+      </button>
+    </div>
+    <pre x-ref="token"
+         class="rounded bg-brand-900 text-brand-50 px-3 py-3 font-mono text-xs
+                whitespace-pre-wrap break-all select-all">{{ invitation_token }}</pre>
+  </div>
+
+  <div class="border-t border-brand-500/10 pt-4 flex items-center gap-3">
+    <a href="/admin/agents/{{ agent_id }}"
+       class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-3 py-2">
+      I've saved it — back to agent
+    </a>
+  </div>
+</section>
+{% endblock %}
