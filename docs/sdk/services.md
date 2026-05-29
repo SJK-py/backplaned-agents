@@ -514,7 +514,7 @@ aggressive retries), pass a tuned `RetryPolicy` to
 `generate / embed / count_tokens`:
 
 ```python
-from bp_sdk.llm import RetryPolicy
+from bp_sdk import RetryPolicy        # part of the stable public surface
 
 resp = await ctx.llm.generate(
     messages,
@@ -1140,7 +1140,7 @@ model neutrally; agents pass provider-specific part dicts through
 The `image_part()` helper builds the neutral shape:
 
 ```python
-from bp_sdk.llm import Message, image_part
+from bp_sdk import Message, image_part
 
 # From a path — mime_type inferred from the extension.
 await ctx.llm.generate([
@@ -1407,6 +1407,24 @@ be dropped if the per-socket outbox is full
 (`protocol.md` §4.5). Returns immediately — no agent code is ever
 blocked on a slow consumer.
 
+**The received side** — when you stream a child
+(`async with await ctx.peers.spawn(..., stream=True)`, `core.md` §7),
+each iterated item is a `ProgressFrame`:
+
+```python
+class ProgressFrame:
+    event: str                 # "thinking" | "tool_call" | "tool_result"
+                               # | "chunk" | "status" | <custom>
+    content: str = ""          # the text payload (e.g. the token for "chunk")
+    metadata: dict[str, Any]   # structured extras (tool args/results, etc.)
+```
+
+The convenience emitters map to `event` values: `chunk(t)` →
+`event="chunk", content=t`; `status(s)` → `event="status"`;
+`tool_call`/`tool_result` set the matching event with structured
+`metadata`. So a caller filters with `if pf.event == "chunk":
+buf.append(pf.content)`.
+
 **Implementation note.** The fire-and-forget convenience methods
 (`chunk`, `status`, `tool_call`, `tool_result`) schedule each
 emit on the event loop via `asyncio.create_task` and park the
@@ -1464,6 +1482,30 @@ tools = build_tools(
     provider="anthropic",                   # |"openai"|"gemini"
 )
 ```
+
+> **`build_tools` emits PROVIDER-NATIVE dicts; `ctx.llm.generate`
+> wants neutral `ToolSpec`s.** The two surfaces target different
+> consumers. `build_tools` is for handing tools straight to a
+> provider SDK you call yourself (it produces e.g. OpenAI's
+> `{"type": "function", "function": {name, description, parameters}}`).
+> When you instead drive the model through `ctx.llm.generate(tools=)`
+> — the common path — re-wrap each entry into a `ToolSpec` so the LLM
+> service does the per-provider translation. Picking any `provider=`
+> works as long as you read the matching key shape; the
+> `examples/test_drive/gemini_agent.py` helper uses `provider="openai"`
+> and reads `f["function"][...]`:
+>
+> ```python
+> fns = build_tools(ctx.peers.visible(), provider="openai")
+> tools = [ToolSpec(name=f["function"]["name"],
+>                   description=f["function"]["description"],
+>                   parameters=f["function"]["parameters"]) for f in fns]
+> resp = await ctx.llm.generate(messages, tools=tools)
+> ```
+>
+> The tool NAMES are identical either way, so `spawn_from_tool_call`
+> round-trips a model-chosen tool back to the right `(agent, mode)`
+> regardless of which path you used.
 
 `ctx.peers.visible()` returns the cached catalog filtered by
 `callable_user_levels` against the active task's `user_level`, so the
