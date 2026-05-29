@@ -54,7 +54,7 @@ FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (
 | `ROUTER_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | seed the first admin (idempotent) |
 | provider key secrets (e.g. `GEMINI_API_KEY`) | resolved by preset `api_key_ref` |
 
-LLM **presets** are rows in the router's `llm_presets` table, admin-managed via `/admin`; a preset's `api_key_ref` (e.g. `env://GEMINI_API_KEY`) resolves to the env secrets above. Build an image from this repo (no Dockerfile existed before — [`Dockerfile`](../Dockerfile) adds one).
+LLM **presets** are rows in the router's `llm_presets` table, admin-managed via `/admin`; a preset's `api_key_ref` (e.g. `env://GEMINI_API_KEY`) resolves to the env secrets above. The table is auto-seeded on first boot from a commentable JSONC catalogue (`bp_router/llm/presets_catalog.jsonc`, or `ROUTER_LLM_PRESET_CATALOG_PATH`) — edit that to set a deployment's initial model list. Build an image from this repo (no Dockerfile existed before — [`Dockerfile`](../Dockerfile) adds one).
 
 ### docker 2 — Postgres 16
 Hosts both `bp_router` and `bp_suite`. The router DB is migrated by this repo's alembic; the suite DB by the suite repo's migrations. Persistent volume + backups. Reachable by the router (router DB) and the suite session-manager/agents (suite DB) — **never by the sandbox**. The second DB is created on first init by [`deploy/postgres-init/`](../deploy/postgres-init/).

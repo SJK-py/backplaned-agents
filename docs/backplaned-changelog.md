@@ -20,6 +20,26 @@
 
 ## 2026-05-29
 
+### Changed — `bp_router` preset seed catalogue moved to a commentable JSONC file
+
+- **What:** the built-in LLM preset list that `default_presets()` returns (the
+  first-boot seed for `llm_presets` and the in-memory fallback) moved from a
+  hardcoded Python list into `bp_router/llm/presets_catalog.jsonc`. Added a
+  string-aware JSONC reader (`strip_jsonc_comments` / `load_catalog`) and a
+  `Settings.llm_preset_catalog_path` (`ROUTER_LLM_PRESET_CATALOG_PATH`) so a
+  deployment can point at its own catalogue outside the package. `.jsonc` is
+  added to the wheel artifacts.
+- **Why:** models change frequently; a commentable, separately-editable file
+  is far easier to maintain than an inline dataclass list, and an env-pointable
+  path lets operators keep their model list out of source.
+- **Shape:** **Changed** — `default_presets()` keeps the same signature and
+  return value (now `default_presets(path=None)`); the bundled catalogue
+  reproduces the prior list exactly, so seeding/back-compat is unchanged. A
+  malformed catalogue (bad JSON, unknown key, missing required field) fails
+  loud at load. Comment stripping preserves `://` inside string values and
+  newlines (for accurate parse-error line numbers); trailing commas are not
+  supported.
+
 ### Changed — raise default task/result timeouts for long agent turns
 
 - **What:** bumped two vendored-platform defaults to fit long multi-round

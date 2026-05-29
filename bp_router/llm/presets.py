@@ -19,15 +19,20 @@ Two design decisions made up-front:
    matches, `tierN` is "this tier or stricter" (lower number).
 
 3. **Default-seed fallback** — on first startup the database is empty;
-   the service seeds it from `DEFAULT_PRESETS` (which mirror the
-   pre-preset built-in alias map). After that, presets live in the
-   `llm_presets` DB table and are admin-managed via the webUI.
+   the service seeds it from `default_presets()`, which loads a JSONC
+   catalogue (`presets_catalog.jsonc`, or the operator's
+   `Settings.llm_preset_catalog_path`). After that, presets live in the
+   `llm_presets` DB table and are admin-managed via the webUI. Keeping the
+   catalogue in a commentable file makes it easy to maintain as models change.
 """
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -251,206 +256,111 @@ def walk_fallback_chain(
 # ---------------------------------------------------------------------------
 
 
-def default_presets() -> list[Preset]:
-    """Built-in presets seeded into an empty `llm_presets` table on
-    first startup. Mirrors the pre-preset alias map exactly so
-    deployments using the old `model="..."` kwarg keep working
-    unchanged.
+# The bundled catalogue ships beside this module. An operator can override
+# the path (`Settings.llm_preset_catalog_path`) to keep their model list in a
+# commentable file outside the package — see `default_presets`.
+BUNDLED_CATALOG_PATH = Path(__file__).with_name("presets_catalog.jsonc")
 
-    Default `min_user_level="*"` (any tier) preserves the prior
-    no-gate behaviour. Operators can tighten via the admin webUI.
+# The `Preset` fields a catalogue entry may set (keys outside this set are a
+# typo → load fails loud rather than silently ignoring them).
+_PRESET_FIELD_NAMES = frozenset(f.name for f in fields(Preset))
+
+
+def strip_jsonc_comments(text: str) -> str:
+    """Strip `//` line comments and `/* ... */` block comments from JSONC,
+    leaving everything inside string literals untouched (so values like
+    `env://KEY` or `https://host` survive) and preserving newlines (so a
+    later `json` parse error still points at the right line). Trailing
+    commas are NOT handled — the result must be valid JSON."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_str = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:  # keep the escaped char verbatim
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] != "\n":
+                i += 1
+            continue  # leaves the newline for the next iteration
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                if text[i] == "\n":
+                    out.append("\n")  # keep block-comment newlines for line nums
+                i += 1
+            i += 2  # consume the closing */
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def load_catalog(path: str | Path | None = None) -> list[Preset]:
+    """Parse a JSONC preset catalogue (a top-level array of preset objects)
+    into `Preset`s. `path=None` loads the bundled catalogue. An unknown key
+    or a missing required field surfaces as a `ValueError` so a malformed
+    catalogue fails loud at startup rather than serving a broken map."""
+    src = Path(path) if path is not None else BUNDLED_CATALOG_PATH
+    raw = src.read_text(encoding="utf-8")
+    try:
+        data = json.loads(strip_jsonc_comments(raw))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"preset catalogue {src} is not valid JSON(C): {exc}") from exc
+    if not isinstance(data, list):
+        raise ValueError(
+            f"preset catalogue {src} must be a JSON array of preset objects"
+        )
+    presets: list[Preset] = []
+    for idx, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise ValueError(f"preset catalogue {src} entry #{idx} is not an object")
+        unknown = set(entry) - _PRESET_FIELD_NAMES
+        if unknown:
+            raise ValueError(
+                f"preset catalogue {src} entry #{idx} "
+                f"({entry.get('name', '?')!r}) has unknown keys: {sorted(unknown)}"
+            )
+        try:
+            presets.append(Preset(**entry))
+        except TypeError as exc:  # missing a required field
+            raise ValueError(
+                f"preset catalogue {src} entry #{idx} "
+                f"({entry.get('name', '?')!r}): {exc}"
+            ) from exc
+    return presets
+
+
+@lru_cache(maxsize=8)
+def _load_catalog_cached(path: str | None) -> tuple[Preset, ...]:
+    return tuple(load_catalog(path))
+
+
+def default_presets(path: str | Path | None = None) -> list[Preset]:
+    """Built-in presets seeded into an empty `llm_presets` table on first
+    startup (and the in-memory fallback before the DB load). Loaded from a
+    JSONC catalogue — the bundled `presets_catalog.jsonc` when `path` is
+    None, else the operator-supplied file. The result is cached per path.
+
+    Default `min_user_level="*"` (any tier) preserves the prior no-gate
+    behaviour. Operators tighten via the admin webUI after seeding, or by
+    editing the catalogue before first boot.
     """
-    return [
-        # ----- Gemini family -----
-        Preset(
-            name="default",
-            provider="gemini",
-            concrete_model="gemini-3.5-flash",
-            api_key_ref="env://GEMINI_API_KEY",
-            description="Default fast Gemini model. Open to all tiers.",
-        ),
-        Preset(
-            name="default_embedding",
-            provider="gemini",
-            concrete_model="gemini-embedding-2",
-            api_key_ref="env://GEMINI_API_KEY",
-            description="Default embedding model (Gemini). Open to all tiers.",
-            default_provider_options={"output_dimensionality": 1536},
-        ),
-        # Preset NAMES use `-` instead of `.` because the
-        # `llm_presets.name` CHECK constraint disallows `.`
-        # (`^[a-z][a-z0-9_-]{0,63}$`). The `concrete_model`
-        # field — which is the actual upstream model identifier
-        # the provider SDK sees — keeps the dotted form
-        # (`gemini-3.5-flash` etc.) since that's what google-genai
-        # expects on the wire.
-        Preset(
-            name="gemini",
-            provider="gemini",
-            concrete_model="gemini-3.5-flash",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-2-5-pro",
-            provider="gemini",
-            concrete_model="gemini-2.5-pro",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-3-5-flash",
-            provider="gemini",
-            concrete_model="gemini-3.5-flash",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-3-1-flash-lite",
-            provider="gemini",
-            concrete_model="gemini-3.1-flash-lite",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        Preset(
-            name="gemini-3-1-pro",
-            provider="gemini",
-            concrete_model="gemini-3.1-pro-preview",
-            api_key_ref="env://GEMINI_API_KEY",
-        ),
-        # Gemini embeddings ride the same provider adapter — its `embed()`
-        # uses `concrete_model`, so no separate embeddings provider is needed.
-        Preset(
-            name="gemini-embedding-2",
-            provider="gemini",
-            concrete_model="gemini-embedding-2",
-            api_key_ref="env://GEMINI_API_KEY",
-            default_provider_options={"output_dimensionality": 1536},
-        ),
-        # ----- Anthropic / Claude family -----
-        Preset(
-            name="claude",
-            provider="anthropic",
-            concrete_model="claude-sonnet-4-6",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-            description="General-purpose Claude (Sonnet). Open to all tiers.",
-        ),
-        Preset(
-            name="claude-opus",
-            provider="anthropic",
-            concrete_model="claude-opus-4-7",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        Preset(
-            name="claude-opus-4-7",
-            provider="anthropic",
-            concrete_model="claude-opus-4-7",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        Preset(
-            name="claude-sonnet",
-            provider="anthropic",
-            concrete_model="claude-sonnet-4-6",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        Preset(
-            name="claude-sonnet-4-6",
-            provider="anthropic",
-            concrete_model="claude-sonnet-4-6",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        Preset(
-            name="claude-haiku",
-            provider="anthropic",
-            concrete_model="claude-haiku-4-5",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        Preset(
-            name="claude-haiku-4-5",
-            provider="anthropic",
-            concrete_model="claude-haiku-4-5",
-            api_key_ref="env://ANTHROPIC_API_KEY",
-        ),
-        # ----- OpenAI / GPT family -----
-        Preset(
-            name="openai",
-            provider="openai",
-            concrete_model="gpt-5.5",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt",
-            provider="openai",
-            concrete_model="gpt-5.5",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        # Same `-` for `.` substitution as the gemini-2-5 family above.
-        # `concrete_model` keeps the dotted form
-        # since that's what the OpenAI SDK passes upstream.
-        Preset(
-            name="gpt-5-5",
-            provider="openai",
-            concrete_model="gpt-5.5",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-5-pro",
-            provider="openai",
-            concrete_model="gpt-5.5-pro",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-4",
-            provider="openai",
-            concrete_model="gpt-5.4",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-4-mini",
-            provider="openai",
-            concrete_model="gpt-5.4-mini",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-4-nano",
-            provider="openai",
-            concrete_model="gpt-5.4-nano",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5",
-            provider="openai",
-            concrete_model="gpt-5",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-mini",
-            provider="openai",
-            concrete_model="gpt-5-mini",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-5-nano",
-            provider="openai",
-            concrete_model="gpt-5-nano",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="gpt-4-1",
-            provider="openai",
-            concrete_model="gpt-4.1",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        # ----- OpenAI embeddings (separate adapter) -----
-        Preset(
-            name="text-embedding-3-small",
-            provider="openai-embeddings",
-            concrete_model="text-embedding-3-small",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-        Preset(
-            name="text-embedding-3-large",
-            provider="openai-embeddings",
-            concrete_model="text-embedding-3-large",
-            api_key_ref="env://OPENAI_API_KEY",
-        ),
-    ]
+    return list(_load_catalog_cached(str(path) if path is not None else None))
 
 
 # ---------------------------------------------------------------------------

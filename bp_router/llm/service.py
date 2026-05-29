@@ -275,7 +275,9 @@ class LlmService:
         # Preset map populated by `load_presets_from_db` at startup.
         # Empty until then; falls back to default_presets() if the DB
         # call hasn't been made yet (test harnesses, in-process tests).
-        self._presets: dict[str, Preset] = {p.name: p for p in default_presets()}
+        self._presets: dict[str, Preset] = {
+            p.name: p for p in default_presets(self._catalog_path())
+        }
         self._adapters: dict[str, ProviderAdapter] = {}
         # OrderedDict drives the LRU: move-to-end on hit/insert, then
         # popitem(last=False) past the cap.
@@ -284,6 +286,12 @@ class LlmService:
     # ------------------------------------------------------------------
     # Preset management
     # ------------------------------------------------------------------
+
+    def _catalog_path(self) -> str | None:
+        """The operator-configured JSONC preset catalogue path, if any
+        (`None` → the bundled catalogue). Tolerant of settings stubs that
+        predate the field."""
+        return getattr(self.settings, "llm_preset_catalog_path", None) or None
 
     async def load_presets_from_db(self, conn: asyncpg.Connection) -> int:
         """Read the `llm_presets` table into the in-memory map.
@@ -311,7 +319,7 @@ class LlmService:
             # the next startup, so the seed branch never runs again,
             # and the operator has to manually `TRUNCATE llm_presets`
             # to recover.
-            seeded = default_presets()
+            seeded = default_presets(self._catalog_path())
             async with conn.transaction():
                 for p in seeded:
                     await queries.insert_llm_preset(

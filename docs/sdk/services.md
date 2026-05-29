@@ -54,7 +54,13 @@ Presets live in the `llm_presets` DB table and are admin-managed via
 the webUI (`/admin/llm/presets`) or the `/v1/admin/llm/presets`
 JSON API. On first router startup the table is auto-seeded with
 default presets that match the pre-preset alias map exactly, so
-existing agents using `model="..."` keep working unchanged.
+existing agents using `model="..."` keep working unchanged. The seed
+list is a **commentable JSONC catalogue** —
+`bp_router/llm/presets_catalog.jsonc` (bundled), or the file named by
+`ROUTER_LLM_PRESET_CATALOG_PATH` — so the model list is easy to maintain
+as models change. The catalogue is only read on first boot (empty table)
+and as the in-memory fallback; once seeded, edits go through the admin
+surface, not the file.
 
 **Tier gate.** Each preset carries a `min_user_level` that gates
 which callers may use it. The grammar matches ACL rules:

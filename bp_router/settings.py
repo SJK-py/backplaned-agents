@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     Bounds the stream/base64 work one request can trigger — keyed
     access does not imply unbounded fan-out."""
 
+    llm_preset_catalog_path: str | None = None
+    """Path to a JSONC preset catalogue used to seed an empty `llm_presets`
+    table (and as the in-memory fallback). Unset → the catalogue bundled with
+    the package (`bp_router/llm/presets_catalog.jsonc`). Set it to keep a
+    deployment's model list in a commentable file outside the package, so it
+    can be updated as models change without editing source. Only consulted on
+    first boot (empty table) and as the pre-DB fallback; once seeded, presets
+    live in the DB and are admin-managed."""
+
     max_request_body_bytes: int = Field(default=64 * 1024, ge=1024)  # 64 KiB
     """Per-request HTTP body cap enforced by `BodySizeLimitMiddleware`
     for every endpoint EXCEPT `/v1/files` (which has its own larger
