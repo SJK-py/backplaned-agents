@@ -78,20 +78,17 @@ async def submit_registration(
     Admin approval then auto-grants the channel agent servicing
     rights on the newly-created user (`users.serviced_by`).
 
-    Rate-limit: per-`(channel, external_id)` via `state.login_quota`.
-    Denial returns 429 + Retry-After; audited as
-    `registration.rate_limited`.
+    Rate-limit (two buckets via `state.login_quota`): a per-submitting-
+    principal aggregate cap (bounds the enumerate-distinct-external_ids
+    flood) AND the per-`(channel, external_id)` cap. Denial returns 429 +
+    Retry-After; audited as `registration.rate_limited` with a `scope`.
     """
     state = request.app.state.bp
     settings = state.settings
 
-    bucket_key = f"registration:{req.channel}:{req.external_id}"
-    decision = await state.login_quota.try_consume(
-        bucket_key,
-        rate_per_s=settings.registration_rate_limit_per_external_per_s,
-        burst=settings.registration_rate_limit_per_external_burst,
-    )
-    if not decision.allowed:
+    async def _deny(decision: Any, *, scope: str) -> None:
+        """Audit + raise 429 for a rate-limit denial. `scope` distinguishes
+        the per-submitter aggregate cap from the per-external one."""
         retry_after_s = max(decision.retry_after_s, 1.0)
         retry_after = max(int(retry_after_s + 0.999), 1)
         async with state.db_pool.acquire() as conn:
@@ -102,6 +99,7 @@ async def submit_registration(
                     "channel": req.channel,
                     "external_id": req.external_id,
                     "retry_after_s": retry_after,
+                    "scope": scope,
                 },
             )
         raise HTTPException(
@@ -109,6 +107,25 @@ async def submit_registration(
             detail="too many registration submissions; retry later",
             headers={"Retry-After": str(retry_after)},
         )
+
+    # Aggregate cap per submitting principal FIRST — bounds the
+    # enumerate-distinct-external_ids flood before it touches the DB.
+    submitter_decision = await state.login_quota.try_consume(
+        f"registration_submitter:{principal.user_id}",
+        rate_per_s=settings.registration_rate_limit_per_submitter_per_s,
+        burst=settings.registration_rate_limit_per_submitter_burst,
+    )
+    if not submitter_decision.allowed:
+        await _deny(submitter_decision, scope="per_submitter")
+
+    bucket_key = f"registration:{req.channel}:{req.external_id}"
+    decision = await state.login_quota.try_consume(
+        bucket_key,
+        rate_per_s=settings.registration_rate_limit_per_external_per_s,
+        burst=settings.registration_rate_limit_per_external_burst,
+    )
+    if not decision.allowed:
+        await _deny(decision, scope="per_external")
 
     # Capture submitter's user_id ONLY if they're a service principal.
     # Admins / regular users submitting on behalf of someone are

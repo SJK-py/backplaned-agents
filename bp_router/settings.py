@@ -447,6 +447,20 @@ class Settings(BaseSettings):
     )
     registration_rate_limit_per_external_burst: int = Field(default=5, ge=1)
 
+    # Aggregate cap per SUBMITTING principal, across ALL external_ids. The
+    # per-external bucket alone is per-`(channel, external_id)`, so one
+    # authenticated caller (typically a service channel agent) can enumerate
+    # distinct external_ids — each getting its own fresh bucket — to create
+    # unbounded `pending_user_registrations` rows (a table-growth /
+    # admin-queue-flood DoS). This second bucket bounds the aggregate rate one
+    # principal can create registrations at. Default is generous (a busy
+    # channel legitimately onboards many users) but FINITE, so growth from any
+    # one principal is bounded by rate × time instead of unbounded.
+    registration_rate_limit_per_submitter_per_s: float = Field(
+        default=1.0, ge=0.0
+    )
+    registration_rate_limit_per_submitter_burst: int = Field(default=60, ge=1)
+
     # Phase 10e: AgentInfo updates. Each update triggers a
     # CatalogUpdate broadcast (O(agents²) per push); rate-limit
     # per-agent to bound the load. Default 1/sec, burst 5 — fine
