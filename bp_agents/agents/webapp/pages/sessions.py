@@ -38,6 +38,12 @@ class SessionRow:
     def is_telegram(self) -> bool:
         return self.channel == TELEGRAM_CHANNEL
 
+    @property
+    def closable(self) -> bool:
+        """Open + not Telegram-linked. A chatbot-owned session can only be
+        retired from the chatbot (`/new`), which then releases its channel."""
+        return not self.closed and self.channel != TELEGRAM_CHANNEL
+
 
 async def _load_rows(request: Request) -> list[SessionRow]:
     upstream = request.app.state.upstream
@@ -95,6 +101,25 @@ async def session_list(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/sidebar/sessions", response_class=HTMLResponse)
+async def sidebar_sessions(request: Request) -> HTMLResponse:
+    """The left-panel session list (HTMX partial). Loaded on page load and
+    re-fetched whenever a mutation fires the `sessionsChanged` body event."""
+    templates = request.app.state.templates
+    try:
+        rows = await _load_rows(request)
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_sidebar_sessions_failed",
+            extra={"event": "webapp_sidebar_sessions_failed",
+                   "status_code": exc.status_code},
+        )
+        rows = []
+    return templates.TemplateResponse(
+        request, "sessions/_sidebar.html", {"rows": rows}
+    )
+
+
 @router.post("/sessions")
 async def new_session(request: Request) -> Response:
     """Open a router session (user token) + its suite `session_info`, then
@@ -146,9 +171,17 @@ async def reopen_session(session_id: str, request: Request) -> Response:
 
 @router.post("/sessions/{session_id}/close")
 async def close_session(session_id: str, request: Request) -> Response:
-    """Archive the session (router `DELETE`). History/config are kept."""
-    if await owned_session(request, session_id) is None:
+    """Archive the session (router `DELETE`). History/config are kept. A
+    Telegram-linked session can't be closed here — it's retired from the
+    chatbot (`/new`), which releases it ([webapp.md] §4)."""
+    info = await owned_session(request, session_id)
+    if info is None:
         raise HTTPException(status_code=404)
+    if info.channel == TELEGRAM_CHANNEL:
+        raise HTTPException(
+            status_code=409,
+            detail="Telegram-linked session can't be closed from the web app.",
+        )
     access = request.session["access_token"]
     try:
         await request.app.state.upstream.delete_session(
@@ -160,7 +193,7 @@ async def close_session(session_id: str, request: Request) -> Response:
             extra={"event": "webapp_session_close_failed", "status_code": exc.status_code},
         )
         raise HTTPException(status_code=502) from exc
-    return Response(status_code=204, headers={"HX-Redirect": "/"})
+    return Response(status_code=204, headers={"HX-Trigger": "sessionsChanged"})
 
 
 @router.post("/sessions/{session_id}/remove")
@@ -185,4 +218,4 @@ async def remove_session(session_id: str, request: Request) -> Response:
     # Suite-side cleanup — atomic, after the router purge ([webapp.md] §9).
     async with pool.acquire() as conn, conn.transaction():
         await queries.purge_session_suite_data(conn, session_id)
-    return Response(status_code=204, headers={"HX-Redirect": "/"})
+    return Response(status_code=204, headers={"HX-Trigger": "sessionsChanged"})

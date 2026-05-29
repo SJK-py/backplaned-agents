@@ -55,6 +55,8 @@ class ChannelCredentials(Protocol):
         self, *, user_id: str, metadata: dict[str, Any] | None = None
     ) -> str: ...
 
+    async def close_session(self, *, user_id: str, session_id: str) -> None: ...
+
     async def cancel_task(self, *, user_id: str, task_id: str) -> None: ...
 
     async def mint_password_reset_token(self, *, user_id: str) -> str: ...
@@ -216,6 +218,19 @@ class HttpChannelCredentials:
         )
         resp.raise_for_status()
         return resp.json()["session_id"]
+
+    async def close_session(self, *, user_id: str, session_id: str) -> None:
+        """Archive a session (router `DELETE /v1/sessions/{id}`, no purge) on
+        the user's behalf — used by `/new` to retire the previous session. A
+        404 (already gone / not the user's) is swallowed as a no-op."""
+        token = await self._user_token(user_id)
+        resp = await self._client.delete(
+            f"{self._http_url}/v1/sessions/{session_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code == 404:
+            return
+        resp.raise_for_status()
 
     async def cancel_task(self, *, user_id: str, task_id: str) -> None:
         token = await self._user_token(user_id)

@@ -88,19 +88,40 @@ duplicating the logic — rejected (drift risk).
 
 ## 4. Feature panes (server-rendered, HTMX-swapped)
 
-**Session list** — `GET /v1/sessions` (user token). New (`POST`), **close**
-(`DELETE`), **reopen** (`POST …/reopen`, shown in place of close on a closed
-row — clears `closed_at` so injection is re-admitted, then lands in the chat;
-history/`session_info` are retained, so nothing suite-side needs restoring),
-**remove** = **`DELETE …?purge=true`** (the router hard-delete) **followed by
-suite-side cleanup** (`bp_suite` `session_history` / `session_info` /
-`cron_jobs` for that `session_id` — router purge doesn't reach the suite DB).
-Each row shows a **channel badge**; `channel=chatbot_telegram` rows get a
-**"Telegram"** flag.
+**Session list (left panel)** — the **collapsible sidebar** (in `base.html`,
+present on every authenticated page) hosts the list, loaded as an HTMX partial
+(`GET /sidebar/sessions`, `hx-trigger="load, sessionsChanged from:body"`); the
+full `/` page renders the same data as a table and self-refreshes on the same
+event. Source: `GET /v1/sessions` (user token) enriched with `session_info`
+(channel / `delegated_to`). Rows are grouped **Open / Closed**:
+
+  - **Open** — clickable (→ `/chat/{id}`), shows the **channel flag** (a
+    **"Telegram"** badge for `channel=chatbot_telegram`), and a **Close**
+    button **unless** Telegram-linked. A chatbot-owned session **can't be
+    closed from the web app** (the handler returns **409**) — it's retired
+    from the chatbot.
+  - **Closed** — **not** clickable, no flag; exposes **Reopen**
+    (`POST …/reopen` — clears `closed_at`, lands in the chat) and **Remove**
+    (`DELETE …?purge=true` + suite-side cleanup of `session_history` /
+    `session_info` / `cron_jobs`, which the router purge doesn't reach).
+    Remove is **closed-only** (close first, then remove).
+
+New (`POST /sessions`) opens a router session + `session_info` and lands in
+the chat. Close/Remove reply `204` + `HX-Trigger: sessionsChanged` to refresh
+the panel in place (no full navigation).
+
+**Channel release on chatbot `/new`** — a Telegram session is "owned" by the
+chatbot while open; the web app only flags it. When the user runs `/new` in
+the chatbot, the gateway **closes the previous session** (router `DELETE`) and
+**clears its `session_info.channel`** (now nullable) — *releasing* it. Once
+released the row is a plain closed session the web app can **Reopen** or
+**Remove** (and a reopened one is webapp-controllable, so closable). This is
+the only path that closes a Telegram session.
+
   - *"progress won't show in chatbot":* whoever injects+awaits a task
-    receives its progress/result. A Telegram-origin session continued here
-    runs in the webapp, and Telegram won't mirror it. The flag is the UX
-    warning (+ a one-time note on open).
+    receives its progress/result. A Telegram-origin session continued in the
+    web app runs there, and Telegram won't mirror it — the flag is the UX
+    warning.
 
 **Main chat pane** — history from `bp_suite` (`reload_incumbent` for the
 active thread: orchestrator or current delegate) + input. Send → HTMX
