@@ -122,6 +122,28 @@ async def new_session(request: Request) -> Response:
     return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
 
 
+@router.post("/sessions/{session_id}/reopen")
+async def reopen_session(session_id: str, request: Request) -> Response:
+    """Re-open a closed session (router `POST …/reopen`), then land in the
+    chat to resume it. History/config are retained; the suite `session_info`
+    row was kept on close, so nothing suite-side needs restoring."""
+    if await owned_session(request, session_id) is None:
+        raise HTTPException(status_code=404)
+    access = request.session["access_token"]
+    try:
+        await request.app.state.upstream.reopen_session(
+            access_token=access, session_id=session_id
+        )
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_session_reopen_failed",
+            extra={"event": "webapp_session_reopen_failed",
+                   "status_code": exc.status_code},
+        )
+        raise HTTPException(status_code=502) from exc
+    return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
+
+
 @router.post("/sessions/{session_id}/close")
 async def close_session(session_id: str, request: Request) -> Response:
     """Archive the session (router `DELETE`). History/config are kept."""

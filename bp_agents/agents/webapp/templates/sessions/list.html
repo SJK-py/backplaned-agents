@@ -67,7 +67,13 @@
              class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
             Open
           </a>
-          {% if not row.closed %}
+          {% if row.closed %}
+            <button hx-post="/sessions/{{ row.session_id }}/reopen"
+                    hx-confirm="Reopen this conversation?"
+                    class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
+              Reopen
+            </button>
+          {% else %}
             <button hx-post="/sessions/{{ row.session_id }}/close"
                     hx-confirm="Close this conversation?"
                     class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
