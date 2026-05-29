@@ -539,11 +539,25 @@ does not lose the result.
 
 ### 4.3 Idempotency
 
-`NewTask` from agents may carry an optional `idempotency_key` (string,
-unique per agent within a 24h window). The router deduplicates: a
-second `NewTask` with the same key does not create a new task. Safe
-retries on flaky networks. The key is not visible to the destination
-agent.
+`NewTask` from agents may carry an optional `idempotency_key`
+(string). The router deduplicates per **`(caller_agent_id, user_id,
+idempotency_key)`** (the `tasks_idempotency_unique` constraint): a
+second `NewTask` with the same key, from the same caller agent for the
+same user, does not create a new task. Safe retries on flaky networks.
+The key is not visible to the destination agent.
+
+The dedup is **per caller agent**, so a *different* caller agent that
+reuses the same key string for the same user gets its OWN task — it
+never receives another agent's result (no cross-agent leak).
+
+The dedup is **permanent** — there is no expiry window. A key is
+effectively single-use for the lifetime of its task row: reusing it
+always replays the original outcome (below) rather than starting a
+fresh task. Callers that want a fresh task per logical operation must
+use a fresh key (e.g. a UUID); a deterministic/semantic key is a
+*deliberate* "run this at most once, ever" contract. (A future GC
+sweep could free keys past a TTL to add a true reuse window; until
+then, treat keys as permanent.)
 
 The dedup response depends on the existing task's state:
 

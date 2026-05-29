@@ -634,7 +634,9 @@ async def admit_task(
         async with pool.acquire() as conn:
             existing = await queries.Scope.user(
                 conn, frame.user_id
-            ).find_idempotent(frame.idempotency_key)
+            ).find_idempotent(
+                frame.idempotency_key, caller_agent_id=caller_agent_id
+            )
         if existing is not None:
             # The retry FOUND the row (it was created + committed
             # before this lookup). Reconstruct the terminal replay
@@ -904,7 +906,9 @@ async def admit_task(
                 async with pool.acquire() as conn2:
                     racer = await queries.Scope.user(
                         conn2, frame.user_id
-                    ).find_idempotent(frame.idempotency_key)
+                    ).find_idempotent(
+                        frame.idempotency_key, caller_agent_id=caller_agent_id
+                    )
                 if racer is None:
                     # Defensive: the constraint fired but the row
                     # isn't visible (should be impossible — the
