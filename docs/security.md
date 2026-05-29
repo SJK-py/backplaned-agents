@@ -221,6 +221,12 @@ checked by a single helper used by every read path.
   remaining lifetime. Cheap to check on every frame admit.
 - Admin can revoke an agent (`POST /v1/admin/agents/{id}/suspend`)
   or a user session via the same mechanism.
+- Admin can **reset** an agent to `pending`
+  (`POST /v1/admin/agents/{id}/reset`) so it can re-onboard with a fresh
+  invitation — recovery for an agent whose persisted credentials were lost
+  (registered row, but a fresh onboard would `409`). Re-onboard still
+  requires an admin invitation, so the `agent_id` is never freed for silent
+  reuse; `removed` (evicted) agents are terminal and refused.
 - Mass revocation (e.g. signing key rotation) is supported by
   bumping a global `key_version` and rejecting JWTs signed against
   earlier versions.
@@ -487,7 +493,7 @@ session.opened              session.closed
 
 agent.onboarded             agent.onboard_rejected
 agent.suspended             agent.unsuspended         agent.evicted
-agent.info_updated          agent.service_principal_provisioned
+agent.reset                 agent.info_updated        agent.service_principal_provisioned
 
 acl.rules_replaced          acl.rule_added            acl.rule_updated
 acl.rule_removed            acl.rules_reordered

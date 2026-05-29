@@ -2000,6 +2000,69 @@ async def unsuspend_agent(
     return {"agent_id": agent_id, "failed_tasks": 0}
 
 
+@router.post("/agents/{agent_id}/reset", status_code=202)
+async def reset_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Reset a registered agent back to `pending` so it can **re-onboard**
+    with a fresh invitation.
+
+    Recovery for an agent whose persisted credentials were lost (e.g. an
+    ephemeral state dir wiped on reboot): the row is registered but the agent
+    can't resume, and a fresh `POST /v1/onboard` would `409 already
+    registered`. Resetting to `pending` re-opens the onboard path (which
+    keeps the row, re-mints a service principal's refresh token if any, and
+    issues a fresh agent JWT) — without freeing the `agent_id` for arbitrary
+    reuse, since re-onboard still requires an admin-issued invitation.
+
+    Idempotent on `pending`. Refuses `removed` (eviction is terminal — a
+    retired `agent_id` is never reusable). Force-closes any live socket and
+    fails in-flight tasks, since the agent must re-onboard to operate again.
+    """
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        agent = await queries.get_agent(conn, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        if agent.status == "pending":
+            return {"agent_id": agent_id, "status": "pending", "failed_tasks": 0}
+        if agent.status == "removed":
+            raise HTTPException(
+                status_code=409,
+                detail="evicted agents are terminal and cannot be reset",
+            )
+        # Atomic reset + audit.
+        async with conn.transaction():
+            await queries.reset_agent_to_pending(conn, agent_id)
+            await queries.append_audit_event(
+                conn,
+                actor_kind="admin",
+                actor_id=principal.user_id,
+                event="agent.reset",
+                target_kind="agent",
+                target_id=agent_id,
+            )
+
+    # Drop any live socket + fail in-flight tasks — the agent is now pending
+    # and must re-onboard before it can serve again.
+    entry = state.socket_registry.get(agent_id)
+    if entry is not None:
+        try:
+            await entry.websocket.close(code=4003, reason="agent_reset")
+        except Exception:  # noqa: BLE001
+            pass
+        entry.closed.set()
+
+    from bp_router.catalog import push_catalog_update_to_all  # noqa: PLC0415
+    from bp_router.tasks import fail_inflight_for_agent  # noqa: PLC0415
+
+    failed = await fail_inflight_for_agent(state, agent_id, reason="agent_reset")
+    await push_catalog_update_to_all(state)
+    return {"agent_id": agent_id, "status": "pending", "failed_tasks": failed}
+
+
 @router.post("/agents/{agent_id}/evict", status_code=202)
 async def evict_agent(
     agent_id: str,
