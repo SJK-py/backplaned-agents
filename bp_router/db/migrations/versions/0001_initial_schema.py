@@ -34,6 +34,15 @@ Folded in (previously standalone migrations 0002–0008):
     a future relaxation has a stable handle. The pre-0008 (strict)
     regex is not reproduced — a consolidated baseline has no
     history to be faithful to, only the final shape.
+  * fk-cascade — every FK to agents(agent_id) / users(user_id) is
+    declared `ON UPDATE CASCADE` inline (15 constraints) so an
+    agent/service-principal PK rename on eviction propagates to
+    dependent rows. Delete behaviour is unchanged — only
+    password_reset_tokens.user_id keeps ON DELETE CASCADE and
+    pending_user_registrations.submitted_by_service_user_id keeps
+    ON DELETE SET NULL. The standalone migration recreated the FKs
+    with ALTER; on a fresh schema they're declared cascading from
+    the start.
 
 Revision ID: 0001_initial_schema
 Revises:
@@ -111,7 +120,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE sessions (
             session_id   text PRIMARY KEY,
-            user_id      text NOT NULL REFERENCES users(user_id),
+            user_id      text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             opened_at    timestamptz NOT NULL DEFAULT now(),
             closed_at    timestamptz,
             metadata     jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -154,11 +163,11 @@ def upgrade() -> None:
             task_id          text PRIMARY KEY,
             parent_task_id   text REFERENCES tasks(task_id),
             root_task_id     text NOT NULL,
-            user_id          text NOT NULL REFERENCES users(user_id),
+            user_id          text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             session_id       text NOT NULL REFERENCES sessions(session_id),
-            agent_id         text NOT NULL REFERENCES agents(agent_id),
-            caller_agent_id  text NOT NULL REFERENCES agents(agent_id),
-            active_agent_id  text NOT NULL REFERENCES agents(agent_id),
+            agent_id         text NOT NULL REFERENCES agents(agent_id) ON UPDATE CASCADE,
+            caller_agent_id  text NOT NULL REFERENCES agents(agent_id) ON UPDATE CASCADE,
+            active_agent_id  text NOT NULL REFERENCES agents(agent_id) ON UPDATE CASCADE,
             state            text NOT NULL CHECK (state IN (
                 'QUEUED','RUNNING','WAITING_CHILDREN',
                 'SUCCEEDED','FAILED','CANCELLED','TIMED_OUT'
@@ -227,7 +236,7 @@ def upgrade() -> None:
         CREATE TABLE files (
             file_id            text PRIMARY KEY,
             sha256             text NOT NULL,
-            user_id            text NOT NULL REFERENCES users(user_id),
+            user_id            text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             session_id         text REFERENCES sessions(session_id),
             task_id            text REFERENCES tasks(task_id),
             byte_size          bigint NOT NULL,
@@ -261,7 +270,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE file_names (
-            user_id     text NOT NULL REFERENCES users(user_id),
+            user_id     text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             scope       text NOT NULL,
             filename    text NOT NULL,
             file_id     text NOT NULL REFERENCES files(file_id),
@@ -296,7 +305,7 @@ def upgrade() -> None:
             caller_pattern  text NOT NULL,
             callee_pattern  text NOT NULL,
             created_at      timestamptz NOT NULL DEFAULT now(),
-            created_by      text REFERENCES users(user_id)
+            created_by      text REFERENCES users(user_id) ON UPDATE CASCADE
         )
     """)
     op.execute(
@@ -397,7 +406,7 @@ def upgrade() -> None:
             expires_at       timestamptz NOT NULL,
             used_at          timestamptz,
             used_by          text,
-            created_by       text NOT NULL REFERENCES users(user_id),
+            created_by       text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             created_at       timestamptz NOT NULL DEFAULT now(),
             idempotency_key  text,
             provisions_service_user boolean NOT NULL DEFAULT false
@@ -415,7 +424,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE auth_refresh_tokens (
             token_hash    text PRIMARY KEY,
-            user_id       text NOT NULL REFERENCES users(user_id),
+            user_id       text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             issued_at     timestamptz NOT NULL DEFAULT now(),
             expires_at    timestamptz NOT NULL,
             used_at       timestamptz,
@@ -434,11 +443,11 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE password_reset_tokens (
             token_hash   text PRIMARY KEY,
-            user_id      text NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            user_id      text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE ON DELETE CASCADE,
             issued_at    timestamptz NOT NULL DEFAULT now(),
             expires_at   timestamptz NOT NULL,
             used_at      timestamptz,
-            created_by   text REFERENCES users(user_id)
+            created_by   text REFERENCES users(user_id) ON UPDATE CASCADE
         )
     """)
     op.execute(
@@ -485,7 +494,7 @@ def upgrade() -> None:
             created_at                 timestamptz NOT NULL DEFAULT now(),
             updated_at                 timestamptz NOT NULL DEFAULT now(),
             -- created_by may be NULL for default-seeded rows.
-            created_by                 text REFERENCES users(user_id),
+            created_by                 text REFERENCES users(user_id) ON UPDATE CASCADE,
             CONSTRAINT llm_presets_base_url_check CHECK (
                 provider NOT IN ('openai-compatible',
                                  'openai-compatible-embeddings')
@@ -520,7 +529,7 @@ def upgrade() -> None:
             attempts                     integer        NOT NULL DEFAULT 1,
             last_attempt_at              timestamptz    NOT NULL DEFAULT now(),
             submitted_by_service_user_id text           REFERENCES users(user_id)
-                                                        ON DELETE SET NULL,
+                                                        ON UPDATE CASCADE ON DELETE SET NULL,
             CONSTRAINT pending_user_registrations_channel_check
                 CHECK (channel ~ '^[a-z][a-z0-9_-]{0,31}$'),
             UNIQUE (channel, external_id)
@@ -576,7 +585,7 @@ def upgrade() -> None:
             refresh_requested_at timestamptz,
             created_at           timestamptz  NOT NULL DEFAULT now(),
             last_connected_at    timestamptz,
-            created_by           text         REFERENCES users(user_id),
+            created_by           text         REFERENCES users(user_id) ON UPDATE CASCADE,
             CONSTRAINT mcp_servers_server_id_check
                 CHECK (server_id ~ '^[a-z][a-z0-9_]+$'),
             CONSTRAINT mcp_servers_auth_consistent CHECK (

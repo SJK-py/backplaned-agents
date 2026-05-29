@@ -339,8 +339,9 @@ All three push a `CatalogUpdate` to remaining peers and emit
 (`deleted_<id>_<epoch>`), and the co-located service principal
 (`usr_service_<id>`) the same way, so the original `agent_id` is **freed for
 a brand-new agent to onboard**. The row and all its `tasks`/`audit` history
-are preserved under the tombstone id via FK `ON UPDATE CASCADE` (migration
-`0002_fk_on_update_cascade`); an `agent.id_released` audit event records the
+are preserved under the tombstone id via FK `ON UPDATE CASCADE` (declared
+inline in the consolidated `0001_initial_schema` baseline); an
+`agent.id_released` audit event records the
 mapping. The freed id is reusable only via a fresh admin invitation
 (onboarding still requires one), so it is never *silently* re-pointed.
 Re-onboarding with an `agent_id` whose row exists with status `≠ 'pending'`
