@@ -328,9 +328,18 @@ class ChannelCore:
         )
         recap = f"[Returned from {pretty_agent(delegate)}] {summary or '(no summary)'}"
         async with self._pool.acquire() as conn:
+            # Mirror `orchestrator.end_delegation`: a hidden `user` recap (the
+            # specialist's results as external input — not the orchestrator's
+            # own work) followed by a hidden `assistant` ack that closes the
+            # turn, so the reloaded thread alternates. The pre-delegation user
+            # turn was already closed by the hand-off marker.
             await queries.append_history(
                 conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
                 role="user", message=recap, incumbent=True, hidden=True,
+            )
+            await queries.append_history(
+                conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                role="assistant", message="Acknowledged.", incumbent=True, hidden=True,
             )
             await queries.demote_thread(conn, session_id=session_id, agent_id=delegate)
             await queries.update_session_info(

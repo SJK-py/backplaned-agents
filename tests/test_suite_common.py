@@ -22,6 +22,7 @@ from bp_agents.common import (
     text_output,
     user_config_note,
 )
+from bp_agents.common.loop import _FINAL_ANSWER_NUDGE
 from bp_agents.common.progress import LOOP_PROGRESS_KEY, LoopProgress
 from bp_agents.db.models import UserConfigRow
 from bp_protocol.frames import ResultFrame
@@ -260,6 +261,42 @@ def test_run_llm_loop_dispatches_local_and_peer_tools() -> None:
         if LOOP_PROGRESS_KEY in md
     ]
     assert "thinking" in kinds and "tool_call" in kinds and "tool_result" in kinds
+
+
+def test_run_llm_loop_forces_final_answer_at_round_limit() -> None:
+    """If the model keeps calling tools until `max_rounds`, the loop must
+    not return an empty tool-call turn. It makes one final tools-disabled
+    generate (nudged) so the user gets a synthesized answer."""
+    tool_round = LlmResponse(
+        text="",
+        tool_calls=[ToolCall(id="c1", name="current_time", args={})],
+    )
+    final = LlmResponse(text="Here is what I found.", tool_calls=[])
+    # max_rounds=2 → two tool rounds, then the forced final generate (3rd).
+    llm = _StubLlm([tool_round, tool_round, final])
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress())
+    messages: list[Message] = [Message(role="user", content="go")]
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages,
+            preset="default",
+            local_tools=LocalToolset([make_current_time_tool("UTC")]),
+            use_peer_tools=False,
+            max_rounds=2,
+        )
+    )
+
+    # Non-empty synthesized answer, not the empty tool-call turn.
+    assert resp.text == "Here is what I found."
+    assert len(llm.calls) == 3  # 2 tool rounds + 1 forced final
+    # The final generate disabled tools to force text.
+    assert llm.calls[-1].get("tools") is None
+    # The nudge was injected before the final generate.
+    assert any(
+        m.role == "user" and m.content == _FINAL_ANSWER_NUDGE for m in messages
+    )
 
 
 def test_run_llm_loop_emits_progress_for_terminal_tool() -> None:

@@ -250,6 +250,18 @@ async def _do_hand_off(
             )
         raise
 
+    # Reassignment succeeded. Close the orchestrator's open user turn with a
+    # hidden `assistant` marker that the work was DELEGATED — not done by the
+    # orchestrator. This keeps the reloaded thread alternating AND frames the
+    # specialist's later results (a hidden `user` recap on hand-back) as
+    # external input, so the model can't narrate them as its own work.
+    async with pool.acquire() as conn:
+        await queries.append_history(
+            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+            role="assistant", message=f"Delegated to {dest}.",
+            incumbent=True, hidden=True,
+        )
+
 
 async def _run_hand_off_fallback(
     ctx: TaskContext,
@@ -333,9 +345,18 @@ async def run_orchestrator_end_delegation(
     user_prompt = payload.get("user_prompt")
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
     async with pool.acquire() as conn:
+        # The recap is `user`-role (hidden): the specialist's results return as
+        # EXTERNAL input, not the orchestrator's own work — so the model can't
+        # later claim them as such. A hidden `assistant` ack then closes this
+        # turn so the reloaded thread alternates (the pre-delegation user turn
+        # was already closed by the hand-off marker).
         await queries.append_history(
             conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
             role="user", message=recap, incumbent=True, hidden=True,
+        )
+        await queries.append_history(
+            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+            role="assistant", message="Acknowledged.", incumbent=True, hidden=True,
         )
         # Retire the whole delegate episode (incl. the seed row).
         if ctx.delegating_agent_id:

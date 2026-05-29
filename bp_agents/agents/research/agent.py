@@ -21,14 +21,33 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_AGENT_ID = "research"
 
-_SUBAGENT_SYSTEM = """\
-You are a research specialist. Use web search + fetch to find current \
-information, and the knowledge base (call_knowledge_base_*) to store and \
-recall documents. Cite sources (URLs).\
+# Shared search discipline — web tools are a means, not a reflex. Keeps the
+# loop from burning rounds on redundant searches (and hitting the limit with
+# nothing synthesised).
+_SEARCH_DISCIPLINE = """\
+Search deliberately, not reflexively:
+- If you can already answer from the conversation, the knowledge base, or \
+your own knowledge, do so WITHOUT searching.
+- Search only for facts that are current, niche, or that you're unsure of. \
+Use focused queries; one or two good searches usually suffice.
+- Fetch a page only when a snippet is not enough, and only the most relevant \
+results — don't fetch every hit.
+- Stop as soon as you can answer. Then synthesise a concise, sourced reply \
+(cite URLs); do not keep searching for more.\
 """
-_DELEGATION_SYSTEM = """\
-You specialise in web + document research. Find, read, and synthesise \
-information for the user; store useful material in the knowledge base.\
+
+_SUBAGENT_SYSTEM = f"""\
+You are a research specialist. You can search + fetch the web and use the \
+knowledge base (call_knowledge_base_*) to store and recall documents.
+
+{_SEARCH_DISCIPLINE}\
+"""
+_DELEGATION_SYSTEM = f"""\
+You specialise in web + document research: find, read, and synthesise \
+information for the user, and store genuinely useful material in the \
+knowledge base.
+
+{_SEARCH_DISCIPLINE}\
 """
 
 
