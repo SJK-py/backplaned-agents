@@ -30,8 +30,6 @@ of system blocks; pass `cache_control` markers through verbatim.
 """
 from __future__ import annotations
 
-import pytest
-
 from bp_router.llm.service import Message
 
 

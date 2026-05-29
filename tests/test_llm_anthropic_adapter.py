@@ -9,9 +9,11 @@ pure helpers with stub objects standing in for SDK responses.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,7 +31,7 @@ from bp_router.llm.providers.anthropic import (
     _is_thinking_enabled,
     _map_stop_reason,
 )
-from bp_router.llm.service import LlmService, Message, ToolSpec
+from bp_router.llm.service import LlmDelta, LlmService, Message, ToolSpec
 
 # ---------------------------------------------------------------------------
 # Part translation
@@ -894,9 +896,6 @@ def test_full_extended_thinking_tool_use_round_trip() -> None:
 # Streaming — SSE event translation
 # ---------------------------------------------------------------------------
 
-import asyncio
-from types import SimpleNamespace
-
 
 def _ev(type: str, **kw) -> SimpleNamespace:
     """Build a stub SSE event with attribute access."""
@@ -947,7 +946,7 @@ class _StubStream:
 class _StubMessagesAPI:
     def __init__(self, events: list[Any]) -> None:
         self._events = events
-        self.stream_kwargs: Optional[dict[str, Any]] = None
+        self.stream_kwargs: dict[str, Any] | None = None
 
     def stream(self, **kwargs: Any) -> _StubStream:
         self.stream_kwargs = kwargs

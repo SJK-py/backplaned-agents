@@ -169,7 +169,6 @@ def test_drain_in_flight_hard_cancels_handler_task() -> None:
 
 def test_subscribe_progress_closes_displaced_subscriber() -> None:
     pytest.importorskip("pydantic")
-    from bp_sdk.dispatch import Dispatcher
     from bp_sdk.peers import _STREAM_CLOSED
 
     async def _run() -> None:
@@ -191,7 +190,6 @@ def test_subscribe_progress_no_sentinel_when_no_prior() -> None:
     """First subscribe (no prior subscriber) must NOT inject the
     sentinel — the fresh queue starts empty."""
     pytest.importorskip("pydantic")
-    from bp_sdk.dispatch import Dispatcher
 
     async def _run() -> None:
         disp = _bare_dispatcher()
@@ -255,7 +253,6 @@ def test_handle_llm_delta_drops_when_consumer_not_draining() -> None:
     pytest.importorskip("pydantic")
     from bp_protocol.frames import LlmDeltaFrame
     from bp_sdk import llm
-    from bp_sdk.dispatch import Dispatcher
 
     async def _run() -> None:
         disp = _bare_dispatcher()

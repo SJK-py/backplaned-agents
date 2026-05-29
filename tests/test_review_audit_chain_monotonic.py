@@ -33,8 +33,6 @@ class _FakeConn:
         self.execute_sql: list[tuple[str, tuple]] = []
 
     def transaction(self):  # type: ignore[no-untyped-def]
-        conn = self
-
         class _Txn:
             async def __aenter__(self) -> None:
                 return None

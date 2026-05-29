@@ -330,6 +330,7 @@ def test_m7_log_prompts_not_referenced_anywhere() -> None:
          "/home/user/backplaned-next/bp_protocol"],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.stdout == "", (
         f"review3-M7 regression: log_prompts is still referenced:\n"

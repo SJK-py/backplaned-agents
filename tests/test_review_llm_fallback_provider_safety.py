@@ -29,7 +29,6 @@ preset's `provider` get skipped (with a metric +
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 

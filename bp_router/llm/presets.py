@@ -30,8 +30,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from bp_router.principals import level_satisfies_tier, tier_index
-
 # ---------------------------------------------------------------------------
 # Neutral preset shape
 # ---------------------------------------------------------------------------

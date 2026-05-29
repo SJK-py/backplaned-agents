@@ -195,7 +195,7 @@ def main() -> None:
     on its own port talking to a remote router. For same-process
     deployment use `bp-router`, which mounts the admin app
     automatically when `ROUTER_SERVE_ADMIN_UI=true` (the default)."""
-    import uvicorn
+    import uvicorn  # noqa: PLC0415
 
     config = AdminConfig()  # type: ignore[call-arg]
     uvicorn.run(

@@ -248,7 +248,7 @@ def test_audit_failure_propagates_through_outer_transaction(
             return False
 
     conn = MagicMock()
-    conn.transaction = lambda: _FakeTx()
+    conn.transaction = _FakeTx
     state = MagicMock()
     pool = MagicMock()
     state.db_pool = pool

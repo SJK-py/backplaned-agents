@@ -136,3 +136,27 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "PLC", "PLE", "PLW"]
 ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are *designed* to be called in
+# argument defaults (`def route(x = Depends(dep))`). They behave as
+# immutable sentinels, so B008 (function-call-in-default-argument) is a
+# false positive on every route signature.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Security",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use patterns that are smells in library code:
+# inline imports (import the unit under test, or re-import after
+# monkeypatching), broad `pytest.raises(Exception)`, single-letter loop
+# vars in table-driven cases, and `assert False` as an unreachable guard.
+"tests/**" = ["PLC0415", "B017", "E741", "B011"]

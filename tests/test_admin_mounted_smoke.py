@@ -291,4 +291,5 @@ def test_bug5_auth_middleware_uses_strip_root_path() -> None:
     # implementation, so it's shared). Citation pin lives there.
     from bp_admin import asgi_utils
 
-    helper_src = inspect.getsource(asgi_utils.strip_root_path)
+    # The shared helper must exist and be sourceable in its new home.
+    assert inspect.getsource(asgi_utils.strip_root_path)

@@ -458,7 +458,6 @@ def test_change_password_revokes_after_db_commit(
     assert revoke_idx > pool_block_idx
     # And it's outside the indented block (zero leading indent on
     # the `if state.redis is not None:` check just before).
-    revoke_section = src[pool_block_idx:revoke_idx]
     # The block ends with a dedent before the revoke (the line
     # immediately before the `if` is unindented relative to the
     # acquire block).

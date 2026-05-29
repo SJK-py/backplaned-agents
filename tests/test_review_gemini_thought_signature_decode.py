@@ -20,8 +20,6 @@ from __future__ import annotations
 import base64
 import inspect
 
-import pytest
-
 
 def test_convert_part_decodes_string_signature_to_bytes() -> None:
     """The bug: a `thought_signature` arriving as a base64 string

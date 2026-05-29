@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -175,7 +174,7 @@ def test_admin_client_record_refreshed_payload_shape() -> None:
 def test_admin_client_raise_on_non_2xx() -> None:
     """Non-2xx surfaces as AdminApiError carrying status_code +
     detail message extracted from the JSON body (or text fallback)."""
-    from bp_mcp_bridge.admin_client import AdminApiError, AdminClient
+    from bp_mcp_bridge.admin_client import AdminClient
 
     src = inspect.getsource(AdminClient._raise_or_json)
     assert "raise AdminApiError" in src

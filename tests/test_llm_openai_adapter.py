@@ -23,6 +23,7 @@ import pytest
 from bp_router.llm.providers.openai import (
     _DEFAULT_INCLUDES,
     OpenAIAdapter,
+    OpenAIEmbeddingsAdapter,
     _build_create_kwargs,
     _convert_messages,
     _convert_response,
@@ -32,7 +33,7 @@ from bp_router.llm.providers.openai import (
     _derive_finish_reason,
     _reasoning_item_to_dict,
 )
-from bp_router.llm.service import LlmService, Message, ToolSpec
+from bp_router.llm.service import LlmDelta, LlmService, Message, ToolSpec
 
 # ---------------------------------------------------------------------------
 # User content-part translation
@@ -919,9 +920,6 @@ def test_count_tokens_omits_instructions_when_unset() -> None:
 # ---------------------------------------------------------------------------
 
 
-from bp_router.llm.providers.openai import OpenAIEmbeddingsAdapter
-from bp_router.llm.service import LlmDelta
-
 
 def _ev(type: str, **kw) -> SimpleNamespace:
     """Build a stub SSE event with attribute access."""
@@ -964,7 +962,7 @@ class _StubResponseStream:
 class _StubResponsesAPIStreaming:
     def __init__(self, events: list[Any]) -> None:
         self._events = events
-        self.stream_kwargs: Optional[dict[str, Any]] = None
+        self.stream_kwargs: dict[str, Any] | None = None
 
     def stream(self, **kwargs: Any) -> _StubResponseStream:
         self.stream_kwargs = kwargs

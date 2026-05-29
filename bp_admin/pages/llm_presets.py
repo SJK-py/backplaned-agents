@@ -42,6 +42,8 @@ router = APIRouter()
 # to `SUPPORTED_PROVIDERS`. Listed = ordered for UI consistency.
 from bp_router.llm.presets import (  # noqa: E402
     PROVIDERS_REQUIRING_BASE_URL as PROVIDERS_WITH_BASE_URL,  # noqa: F401  # re-export
+)
+from bp_router.llm.presets import (  # noqa: E402
     SUPPORTED_PROVIDERS,
 )
 

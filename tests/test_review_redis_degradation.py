@@ -47,7 +47,6 @@ def test_mem_fallback_evicts_under_unbounded_distinct_keys() -> None:
     """The OOM scenario: Redis is None (forced fallback) and a flood
     of DISTINCT keys arrives (fleet reconnect / credential sweep).
     The table must stay bounded, not grow unbounded."""
-    from bp_router.security import rate_limit as rl
     from bp_router.security.rate_limit import TokenBucket
 
     # Shrink the cap so the test is fast but exercises eviction.

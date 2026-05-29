@@ -45,8 +45,8 @@ def _parse_groups(raw: str) -> list[str]:
     while preserving order."""
     seen: set[str] = set()
     out: list[str] = []
-    for g in raw.split(","):
-        g = g.strip()
+    for raw_group in raw.split(","):
+        g = raw_group.strip()
         if g and g not in seen:
             seen.add(g)
             out.append(g)

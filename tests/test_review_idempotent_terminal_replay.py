@@ -201,11 +201,9 @@ def test_handle_new_task_emits_ack_then_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pytest.importorskip("fastapi")
+    from bp_protocol.frames import ResultFrame
     from bp_router import dispatch
     from bp_router.tasks import AdmitResult
-
-    replay = _task_row(state=TaskState.FAILED)
-    from bp_protocol.frames import ResultFrame
 
     rr = ResultFrame(
         agent_id="agt_worker", trace_id="a" * 32, span_id="b" * 16,
@@ -217,7 +215,8 @@ def test_handle_new_task_emits_ack_then_replay(
     async def _stub_admit(*a: Any, **k: Any) -> AdmitResult:
         return AdmitResult(task_id="tsk_x", replay_result=rr)
 
-    import bp_router.tasks as _tm; monkeypatch.setattr(_tm, "admit_task", _stub_admit)
+    import bp_router.tasks as _tm
+    monkeypatch.setattr(_tm, "admit_task", _stub_admit)
 
     entry = _socket_entry()
     state = MagicMock()
@@ -244,7 +243,8 @@ def test_handle_new_task_no_replay_emits_only_ack(
     async def _stub_admit(*a: Any, **k: Any) -> AdmitResult:
         return AdmitResult(task_id="tsk_new")  # replay_result=None
 
-    import bp_router.tasks as _tm; monkeypatch.setattr(_tm, "admit_task", _stub_admit)
+    import bp_router.tasks as _tm
+    monkeypatch.setattr(_tm, "admit_task", _stub_admit)
     entry = _socket_entry()
     asyncio.run(
         dispatch._handle_new_task(MagicMock(), entry, _idem_frame())

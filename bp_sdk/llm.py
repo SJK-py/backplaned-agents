@@ -552,7 +552,7 @@ def _compute_backoff(
     production calls leave it None and use the module-global RNG.
     Mirrors the router-side helper's signature exactly.
     """
-    import random
+    import random  # noqa: PLC0415
 
     # Defensive clamp on a misconfigured cap. `random.uniform(0, -5)`
     # returns a negative number, which `asyncio.sleep` silently

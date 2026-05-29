@@ -31,8 +31,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 
-import pytest
-
 from bp_mcp_bridge.mcp_client import McpError, SseMcpClient
 
 

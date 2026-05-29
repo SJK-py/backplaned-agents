@@ -9,10 +9,10 @@ from __future__ import annotations
 
 
 def main() -> None:
-    import uvicorn
+    import uvicorn  # noqa: PLC0415
 
-    from bp_router.app import create_app
-    from bp_router.settings import load_settings
+    from bp_router.app import create_app  # noqa: PLC0415
+    from bp_router.settings import load_settings  # noqa: PLC0415
 
     settings = load_settings()
     uvicorn.run(

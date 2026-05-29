@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from bp_protocol.frames import (
     AckFrame,
-    AgentInfoUpdateFrame,
     NewTaskFrame,
     ProgressFrame,
     ResultFrame,

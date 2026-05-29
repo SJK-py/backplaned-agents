@@ -359,7 +359,7 @@ async def issue_invitation(
                             "provisions_service_user) — refusing "
                             "to overwrite"
                         ),
-                    )
+                    ) from None
                 expires_at = existing.expires_at
 
     return InvitationCreated(invitation_token=token, expires_at=expires_at)

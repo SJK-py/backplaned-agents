@@ -33,7 +33,7 @@ import inspect
 
 import pytest
 
-from bp_router.llm.service import LlmResponse, Message, TokenUsage
+from bp_router.llm.service import Message
 
 # ===========================================================================
 # #6 openai_compatible: neutral function_call assistant turn preserved

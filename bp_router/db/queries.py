@@ -2716,22 +2716,30 @@ async def update_mcp_server(
     sets: list[str] = []
     args: list[Any] = [server_id]
     if description is not None:
-        args.append(description); sets.append(f"description = ${len(args)}")
+        args.append(description)
+        sets.append(f"description = ${len(args)}")
     if url is not None:
-        args.append(url); sets.append(f"url = ${len(args)}")
+        args.append(url)
+        sets.append(f"url = ${len(args)}")
     if transport is not None:
-        args.append(transport); sets.append(f"transport = ${len(args)}")
+        args.append(transport)
+        sets.append(f"transport = ${len(args)}")
     if auth_kind is not None:
-        args.append(auth_kind); sets.append(f"auth_kind = ${len(args)}")
+        args.append(auth_kind)
+        sets.append(f"auth_kind = ${len(args)}")
         # When the caller sets auth_kind, ALSO write the
         # ref/header columns (callers pass through what they want;
         # `None` in Python becomes NULL in PostgreSQL).
-        args.append(auth_value_ref); sets.append(f"auth_value_ref = ${len(args)}")
-        args.append(auth_header_name); sets.append(f"auth_header_name = ${len(args)}")
+        args.append(auth_value_ref)
+        sets.append(f"auth_value_ref = ${len(args)}")
+        args.append(auth_header_name)
+        sets.append(f"auth_header_name = ${len(args)}")
     if groups is not None:
-        args.append(groups); sets.append(f"groups = ${len(args)}")
+        args.append(groups)
+        sets.append(f"groups = ${len(args)}")
     if expose_to_llm is not None:
-        args.append(expose_to_llm); sets.append(f"expose_to_llm = ${len(args)}")
+        args.append(expose_to_llm)
+        sets.append(f"expose_to_llm = ${len(args)}")
     if not sets:
         return await get_mcp_server(conn, server_id)
     row = await conn.fetchrow(

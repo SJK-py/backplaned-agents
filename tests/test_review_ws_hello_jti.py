@@ -13,7 +13,6 @@ until its natural expiry. This test pins the missing guard.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
