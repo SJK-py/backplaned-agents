@@ -13,26 +13,36 @@ SDK service. Handlers call it directly, never through a peer
 and consistent error mapping across providers.
 
 ```python
-class LLMService:
+class LlmServiceClient:           # ctx.llm
     async def generate(
         self,
         prompt: str | list[Message],
         *,
-        model: str = "default",
+        preset: str | None = None,        # recommended — see §1.1
+        model: str = "default",           # legacy alias path (kept for back-compat)
         tools: list[ToolSpec] | None = None,
         tool_choice: ToolChoice | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         stream: bool = False,
         provider_options: dict[str, Any] | None = None,
-    ) -> LLMResponse | AsyncIterator[LLMDelta]: ...
+        retry: RetryPolicy | None = None,  # None ⇒ RetryPolicy() (§1.2.1)
+    ) -> LlmResponse | AsyncIterator[LlmDelta]: ...
 
     async def embed(self, text: str | list[str], *,
-                    model: str = "default") -> list[list[float]]: ...
+                    preset: str | None = None,
+                    model: str = "text-embedding-3-small") -> list[list[float]]: ...
 
     async def count_tokens(self, prompt: str | list[Message], *,
+                           preset: str | None = None,
                            model: str = "default") -> int: ...
 ```
+
+`ctx.llm` is a `LlmServiceClient` instance (the type exported as
+`LlmServiceClient` from `bp_sdk`). `preset` is the recommended way to
+select a model (§1.1); the bare `model=` alias path is kept for
+back-compat. `generate` / `embed` / `count_tokens` **retry by
+default** — see §1.2.1.
 
 ### 1.1 Provider routing — presets
 
@@ -605,12 +615,16 @@ service translates to provider-native formats. Tool call results are
 typed:
 
 ```python
-class LLMResponse:
+class LlmResponse:                     # what generate(stream=False) returns
     text: str
     tool_calls: list[ToolCall]
-    finish_reason: Literal["stop","length","tool_calls","content_filter"]
-    usage: TokenUsage
+    finish_reason: str                 # "stop" | "length" | "tool_calls" | "content_filter" (provider-normalised)
+    usage: TokenUsage                  # input_tokens, output_tokens, thoughts_tokens,
+                                       # cache_read_tokens, cache_write_tokens, cost_microusd
     raw: dict[str, Any]                # provider-specific extras
+    thought_summary: str | None        # visible thinking text (§1.3.1 / §1.3.3)
+    thought_signature: str | None      # Gemini round-trip signature
+    reasoning_blocks: list[dict]       # Anthropic/OpenAI round-trip blocks (§1.3.3 / §1.3.5)
 ```
 
 For Gemini-native features (grounding, code execution, URL context,
@@ -741,7 +755,9 @@ text-only responses.
 When the LLM's tool call is dispatched to a peer agent
 (`ctx.peers.spawn_from_tool_call(tc)`), the child returns a
 `ResultFrame` whose `output.content` is text and whose
-`attachments` may carry files the child wants the LLM to see.
+`output.files` may carry the NAMES of files the child wants the LLM
+to see (there is no separate `attachments` channel — files ride as
+names on `output.files`, per §2.1 and `core.md` §7).
 `Message.tool_response_from_result(...)` packages both into a
 single tool-response message without per-tool branching:
 
@@ -1223,7 +1239,7 @@ is over budget gets the spawn rejected with
 at the LLM call) are still **not yet wired** — they're the planned
 counter-table half of the quota work. Today LLM calls succeed
 unless the provider rejects them or the deployment hits a manual
-ceiling. The SDK records `LLMResponse.usage` and emits it on
+ceiling. The SDK records `LlmResponse.usage` and emits it on
 `router_llm_tokens_total`, so the data is in place for those
 counters once they land.
 
@@ -1417,7 +1433,7 @@ async def handle(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 ```
 
 The cancel token is also wired into the SDK's internal `await`
-helpers (`ctx.llm.generate`, `ctx.peers.spawn`, `ctx.files.fetch`),
+helpers (`ctx.llm.generate`, `ctx.peers.spawn`, `ctx.files.read`),
 so cooperative agent code that does most of its waiting via SDK
 helpers gets cancellation for free. Pure CPU loops must check the
 token themselves.
@@ -1561,28 +1577,27 @@ returning the terminal `ResultFrame`.
 
 ## 8. Worked example: Gemini agent
 
-A realistic agent that uses streaming, tool calls, files, and
-provider-specific options. Roughly the shape we'd build the Gemini
-suite from.
+A realistic agent that uses the LLM service, the model-driven tool
+loop (the model calls peer agents), native provider options, and
+usage accounting. This is the digest; the **runnable, end-to-end**
+version — plus a streaming variant using `StreamAccumulator` — lives
+in [`examples/test_drive/gemini_agent.py`](../../examples/test_drive/gemini_agent.py)
+and is the canonical reference. Build from that file, not this snippet.
 
 ```python
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
-from bp_sdk import Agent, TaskContext
+from bp_sdk import (
+    Agent, Message, RetryPolicy, TaskContext, ToolSpec, UpstreamError,
+    LlmCallError,
+)
+from bp_sdk.tools import build_tools
 
 agent = Agent(
     info=AgentInfo(
         agent_id="gemini_main",
-        description=(
-            "Gemini-backed conversational agent with web search, "
-            "code execution, and image generation."
-        ),
+        description="Gemini-backed conversational agent with peer-tool calling.",
         groups=["rank1", "provider:gemini"],
-        capabilities=[
-            "llm.generate.text",
-            "llm.generate.image",
-            "search.web",
-            "exec.code.python",
-        ],
+        capabilities=["llm.generate.text", "search.web"],
     ),
 )
 
@@ -1591,39 +1606,61 @@ async def handle(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     ctx.log.info("gemini_main.start")
     ctx.progress.status("thinking")
 
-    response = await ctx.llm.generate(
-        prompt=payload.prompt,
-        model="gemini-2.5",
-        stream=True,
-        provider_options={
-            "system_instruction": payload.agent_instruction,
-            "tools": [
-                {"google_search": {}},
-                {"code_execution": {}},
-            ],
-            "thinking_budget_tokens": 4096,
+    # System instruction is a system Message — NOT a provider_options key.
+    messages: list[Message] = []
+    if payload.agent_instruction:
+        messages.append(Message(role="system", content=payload.agent_instruction))
+    messages.append(Message(role="user", content=payload.prompt))
+
+    # Project the ACL-filtered peer catalog into neutral ToolSpecs so the
+    # model can call other agents; spawn_from_tool_call round-trips the name.
+    fns = build_tools(ctx.peers.visible(), provider="openai")
+    tools = [ToolSpec(name=f["function"]["name"],
+                      description=f["function"]["description"],
+                      parameters=f["function"]["parameters"]) for f in fns]
+
+    try:
+        for _ in range(4):  # bounded tool-call rounds
+            # `preset=` selects the model (§1.1). max_tokens left unset:
+            # on Gemini 2.5+ it's the TOTAL budget shared with hidden
+            # thinking, so a small cap truncates the visible answer.
+            resp = await ctx.llm.generate(
+                messages, preset="default", tools=tools or None,
+                retry=RetryPolicy(),
+                provider_options={"tools": [{"google_search": {}}]},
+            )
+            # Round-trip the assistant turn verbatim — carries the Gemini-3
+            # thought-signature the next call requires (§1.3.1).
+            messages.append(Message.assistant_from_response(resp))
+            if not resp.tool_calls:
+                break
+            for tc in resp.tool_calls:
+                ctx.progress.tool_call(tc.name, tc.args)
+                child = await ctx.peers.spawn_from_tool_call(tc)
+                # Threads any child output.files (NAMES) as file_ref parts
+                # the router resolves into the next provider call (§1.3.1.1).
+                messages.append(Message.tool_response_from_result(
+                    tool_call_id=tc.id, name=tc.name, result=child))
+    except LlmCallError as exc:
+        raise UpstreamError(f"LLM call failed: {exc}") from exc
+
+    return AgentOutput(
+        content=resp.text,
+        metadata={
+            "finish_reason": resp.finish_reason,
+            "input_tokens": resp.usage.input_tokens,
+            "output_tokens": resp.usage.output_tokens,
+            "thoughts_tokens": resp.usage.thoughts_tokens,
+            "cost_microusd": resp.usage.cost_microusd,
         },
     )
-
-    text_parts: list[str] = []
-    files: list[str] = []
-
-    async for delta in response:
-        if delta.text:
-            text_parts.append(delta.text)
-        if delta.tool_call and delta.tool_call.name == "image_generation":
-            ctx.progress.tool_call("image_generation", delta.tool_call.args)
-            image_bytes = await delta.tool_call.await_result()
-            name = await ctx.files.store(
-                image_bytes,
-                filename="generated.png",
-                mime_type="image/png",
-            )
-            files.append(name)   # use the RETURNED name (dedup may rename)
-            ctx.progress.tool_result("image_generation", {"name": name})
-
-    return AgentOutput(content="".join(text_parts), files=files)
 ```
+
+> Image / audio generation is **not** an LLM tool call inside
+> `generate` — it belongs in a dedicated agent that owns storage and
+> returns a file-store name (§1.5). Call such an agent like any peer
+> (it shows up in `build_tools` / `spawn_from_tool_call` above); its
+> produced files arrive as names on `result.output.files`.
 
 Notice what the agent does **not** do: no socket code, no `/receive`
 endpoint, no manual ack, no token refresh, no progress fan-out

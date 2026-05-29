@@ -338,14 +338,15 @@ class PeerClient:
     async def spawn(
         self,
         destination_agent_id: str,
-        payload: BaseModel,
+        payload: BaseModel | dict[str, Any],   # dict: passed as-is (LLM-tool path)
         *,
         wait: bool = True,
         stream: bool = False,
         timeout_s: float | None = None,
         idempotency_key: str | None = None,
+        priority: TaskPriority = TaskPriority.NORMAL,
         mode: str | None = None,
-    ) -> ResultFrame | SpawnStream | str: ...
+    ) -> ResultFrame | SpawnStream | str: ...   # await before `async with` when stream=True
 
     async def delegate(
         self,
@@ -443,12 +444,13 @@ class PeerClient:
   patches your own published surface at runtime (e.g. an MCP bridge
   re-publishing a changed input schema).
 
-**Streaming a child (the safe form).** Always use `async with` — it
-`aclose()`s the subscription on early break/error (the bare form
-leaks until the correlation timeout):
+**Streaming a child (the safe form).** Always use `async with await …`
+— it `aclose()`s the subscription on early break/error (the bare form
+leaks until the correlation timeout). `spawn` is a coroutine, so
+`await` it before entering the `async with`:
 
 ```python
-async with ctx.peers.spawn(dest, payload, stream=True) as s:
+async with await ctx.peers.spawn(dest, payload, stream=True) as s:
     async for pf in s:            # child ProgressFrames
         ctx.progress.status(f"child:{pf.event}")
     result = await s.result()     # terminal ResultFrame
