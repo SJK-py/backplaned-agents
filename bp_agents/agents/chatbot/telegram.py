@@ -17,6 +17,38 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Telegram rejects a sendMessage whose text exceeds 4096 UTF-16 code units
+# (400 "message is too long") or is empty. LLM replies routinely exceed it,
+# so outbound text is split into chunks. Budget below the hard cap because
+# `len(str)` counts code points while Telegram counts UTF-16 units (an emoji
+# is 1 code point but 2 units).
+TELEGRAM_MAX_CHARS = 4096
+_CHUNK_CHARS = 4000
+
+
+def _split_for_telegram(text: str, *, limit: int = _CHUNK_CHARS) -> list[str]:
+    """Split `text` into ≤`limit`-char chunks for Telegram's per-message cap,
+    preferring a newline then a space boundary in the second half of the
+    window; hard-cuts a boundary-free run. The boundary char split on is
+    dropped (it would start the next chunk)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        window = rest[:limit]
+        cut = window.rfind("\n")
+        if cut < limit // 2:
+            sp = window.rfind(" ")
+            cut = sp if sp >= limit // 2 else limit
+        chunks.append(rest[:cut])
+        rest = rest[cut:]
+        if rest[:1] in ("\n", " "):
+            rest = rest[1:]
+    if rest:
+        chunks.append(rest)
+    return chunks
+
 
 @dataclass
 class Update:
@@ -85,11 +117,18 @@ class HttpTelegramClient:
         return [u for raw in body.get("result", []) if (u := _parse_update(raw))]
 
     async def send_message(self, *, chat_id: str, text: str) -> None:
-        resp = await self._client.post(
-            f"{self._base}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-        )
-        resp.raise_for_status()
+        # Skip blank text (Telegram 400s on an empty message) and chunk
+        # anything over the per-message cap.
+        if not text.strip():
+            return
+        for chunk in _split_for_telegram(text):
+            if not chunk:
+                continue
+            resp = await self._client.post(
+                f"{self._base}/sendMessage",
+                json={"chat_id": chat_id, "text": chunk},
+            )
+            resp.raise_for_status()
 
     async def send_chat_action(self, *, chat_id: str, action: str = "typing") -> None:
         # Shows "typing…" in the chat; the status auto-clears after ~5s, so
