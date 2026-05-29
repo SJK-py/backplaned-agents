@@ -22,6 +22,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bp_agents.common import text_output
 from bp_agents.common.payloads import MemAdd, MemRetrieve
@@ -43,13 +44,42 @@ MEMORY_AGENT_ID = "memory"
 _MAX_FACTS_PER_TURN = 10
 _VALID_KINDS = {"preference", "personal_info", "event", "project"}
 
-_EXTRACT_SYSTEM = """\
+_EXTRACT_INSTRUCTIONS = """\
 Extract durable facts about the user worth remembering long-term from this \
 turn — preferences, personal info, ongoing events, projects. Ignore \
-small talk and transient/piecemeal detail. Return ONLY JSON:
+small talk and transient/piecemeal detail.
+
+Resolve every relative or partial time expression to an ABSOLUTE timestamp \
+using the current time given above, and bake it into the fact so it stands \
+alone without the conversation. Compute concrete dates from the weekday and \
+date provided (e.g. "next Monday", "tomorrow", "in two weeks", "this \
+evening"). For example, "we'll release the example project next Monday at \
+9am" becomes a fact like "Example project release is scheduled for \
+2025-06-09 09:00". Use the `YYYY-MM-DD HH:MM` format (24-hour; omit the time \
+if only a date was given); append the timezone only when it differs from the \
+user's local one. Leave facts that carry no time untouched.
+
+Return ONLY JSON:
 {"facts": [{"fact": "<self-contained statement>", "kind": "preference|personal_info|event|project"}]}
 Return {"facts": []} if nothing is worth keeping.\
 """
+
+
+def _now_line(timezone: str) -> str:
+    """`2026-05-29 14:30 America/New_York (Friday)` in the user's timezone
+    (falling back to UTC on an unknown tz) — the anchor for resolving
+    relative time expressions during extraction."""
+    try:
+        tz = ZoneInfo(timezone)
+        label = timezone
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+        label = "UTC"
+    return datetime.now(tz).strftime(f"%Y-%m-%d %H:%M {label} (%A)")
+
+
+def _extract_system(now_line: str) -> str:
+    return f"The current time is {now_line}.\n\n{_EXTRACT_INSTRUCTIONS}"
 
 _RECONCILE_SYSTEM = """\
 You maintain a user's long-term memory. Given a NEW candidate fact and the \
@@ -169,6 +199,16 @@ async def _presets(ctx: TaskContext, settings: SuiteSettings) -> tuple[str, str]
     if cfg is None:
         return settings.default_preset_lite, settings.default_preset_embedding
     return cfg.preset_lite, cfg.preset_embedding
+
+
+async def _user_timezone(ctx: TaskContext) -> str:
+    """The user's IANA timezone (for resolving relative time in extraction);
+    UTC when there's no pool/config — mirrors `_presets`' degradation."""
+    if _pool is None:
+        return "UTC"
+    async with _pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    return cfg.timezone if cfg else "UTC"
 
 
 async def _store_for(ctx: TaskContext, settings: SuiteSettings) -> MemoryStore:
@@ -338,9 +378,11 @@ async def run_memory_add(
     if lite_preset is None or embed_preset is None:
         lite_preset, embed_preset = await _presets(ctx, settings)
 
-    # Phase 1 — extract (+ batch dedup).
+    # Phase 1 — extract (+ batch dedup). The system prompt carries the
+    # current time so the LLM resolves relative dates to absolute ones.
+    now_line = _now_line(await _user_timezone(ctx))
     extracted = await _llm_json(
-        ctx, preset=lite_preset, system=_EXTRACT_SYSTEM,
+        ctx, preset=lite_preset, system=_extract_system(now_line),
         user=f"User: {payload.user_prompt}\nAssistant: {payload.assistant_response}",
     )
     raw = extracted.get("facts", []) or []

@@ -14,7 +14,7 @@ from bp_agents.agents.memory import (
     run_memory_add,
     run_memory_retrieve,
 )
-from bp_agents.agents.memory.agent import gc_sweep
+from bp_agents.agents.memory.agent import _extract_system, _now_line, gc_sweep
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
@@ -210,3 +210,56 @@ def test_memory_gc_sweep(suite_db_url: str, tmp_path) -> None:
             await pool.close()
 
     asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# Relative → absolute time in extraction
+# ---------------------------------------------------------------------------
+
+
+def test_now_line_has_date_weekday_and_tz_with_utc_fallback() -> None:
+    import datetime as _dt
+
+    today = _dt.datetime.now(_dt.UTC)
+    line = _now_line("UTC")
+    assert today.strftime("%Y-%m-%d") in line
+    assert today.strftime("%A") in line  # day of week present
+    assert "UTC" in line
+    assert "UTC" in _now_line("Not/AZone")  # unknown tz → UTC
+
+
+def test_extract_system_instructs_absolute_time_conversion() -> None:
+    sys = _extract_system("2025-06-06 09:00 UTC (Friday)")
+    assert "The current time is 2025-06-06 09:00 UTC (Friday)." in sys
+    assert "ABSOLUTE" in sys
+    assert "YYYY-MM-DD HH:MM" in sys
+    assert "next Monday" in sys  # the worked example is present
+
+
+class _CaptureLlm(_ScriptLlm):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.systems: list[str] = []
+
+    async def generate(self, messages, **kw) -> LlmResponse:
+        self.systems.append(messages[0].content)
+        return await super().generate(messages, **kw)
+
+
+def test_extract_prompt_carries_current_time(tmp_path) -> None:
+    import datetime as _dt
+
+    async def _drive() -> str:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        llm = _CaptureLlm(['{"facts": []}'])
+        await run_memory_add(
+            _Ctx(llm),
+            MemAdd(user_prompt="ship it next monday 9am", assistant_response="ok"),
+            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+        )
+        return llm.systems[0]
+
+    system = asyncio.run(_drive())
+    assert "The current time is" in system
+    assert _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d") in system  # today, UTC
+    assert "ABSOLUTE" in system
