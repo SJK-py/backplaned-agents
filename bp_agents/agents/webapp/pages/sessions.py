@@ -25,6 +25,9 @@ router = APIRouter()
 
 WEBAPP_CHANNEL = "webapp"
 
+# Cap a user-supplied title to the same length as auto-generated ones.
+_MAX_NAME_LEN = 60
+
 
 @dataclass
 class SessionRow:
@@ -33,6 +36,12 @@ class SessionRow:
     closed: bool
     channel: str | None
     delegated_to: str | None
+    name: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        """The conversation title, falling back to the raw id when unnamed."""
+        return self.name or self.session_id
 
     @property
     def is_telegram(self) -> bool:
@@ -71,6 +80,7 @@ async def _load_rows(request: Request) -> list[SessionRow]:
                 closed=bool(s.get("closed_at")),
                 channel=getattr(info, "channel", None),
                 delegated_to=getattr(info, "delegated_to", None),
+                name=getattr(info, "session_name", None),
             )
         )
     return rows
@@ -145,6 +155,20 @@ async def new_session(request: Request) -> Response:
             conn, session_id=session_id, user_id=user_id, channel=WEBAPP_CHANNEL,
         )
     return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
+
+
+@router.post("/sessions/{session_id}/rename")
+async def rename_session(session_id: str, request: Request) -> Response:
+    """Set the conversation title (suite-side `session_info.session_name`).
+    The new name arrives in the `HX-Prompt` header (HTMX `hx-prompt`)."""
+    if await owned_session(request, session_id) is None:
+        raise HTTPException(status_code=404)
+    name = (request.headers.get("HX-Prompt") or "").strip()[:_MAX_NAME_LEN]
+    if not name:
+        raise HTTPException(status_code=400, detail="empty name")
+    async with request.app.state.pool.acquire() as conn:
+        await queries.update_session_info(conn, session_id, session_name=name)
+    return Response(status_code=204, headers={"HX-Trigger": "sessionsChanged"})
 
 
 @router.post("/sessions/{session_id}/reopen")

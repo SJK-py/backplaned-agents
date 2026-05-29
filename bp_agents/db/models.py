@@ -24,6 +24,7 @@ class SessionInfoRow(_Row):
     session_id: str
     user_id: str
     channel: str | None = None  # chatbot_telegram | webapp | None (released)
+    session_name: str | None = None  # human-friendly title (auto + rename)
     chat_id: str | None = None
     delegated_to: str | None = None
     history_summary: str | None = None

@@ -93,7 +93,12 @@ present on every authenticated page) hosts the list, loaded as an HTMX partial
 (`GET /sidebar/sessions`, `hx-trigger="load, sessionsChanged from:body"`); the
 full `/` page renders the same data as a table and self-refreshes on the same
 event. Source: `GET /v1/sessions` (user token) enriched with `session_info`
-(channel / `delegated_to`). Rows are grouped **Open / Closed**:
+(channel / `delegated_to` / `session_name`). Each row is labelled by its
+**`session_name`** (falling back to the raw `session_id` when unset). The name
+is **auto-generated from the first user message** — the channel fires a lite
+`history_summarizer` (`session_name` mode) post-turn, once, and writes the
+title — and **editable** on open rows via **Rename** (`POST …/rename`, the new
+name carried in the `HX-Prompt` header). Rows are grouped **Open / Closed**:
 
   - **Open** — clickable (→ `/chat/{id}`), shows the **channel flag** (a
     **"Telegram"** badge for `channel=chatbot_telegram`), and a **Close**

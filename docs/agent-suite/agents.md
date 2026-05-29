@@ -153,8 +153,9 @@ Rolling summarization; reached only by the channel.
 | --- | --- | --- |
 | `summarize_incumbent` | `{agent_id, up_to, previous_summary?}` | no |
 | `summarize_all` | `{agent_id?, summarize_after?}` | no |
+| `session_name` | `{user_prompt}` | no |
 
-Read-only over `session_history`; returns `AgentOutput(content=<summary>)`. The **channel** applies the result (writes the summary, flips `incumbent`). See [sessions.md](./sessions.md). `non_tool_modes`: both.
+Read-only over `session_history`; returns `AgentOutput(content=<summary>)`. The **channel** applies the result (writes the summary, flips `incumbent`). `session_name` returns a short conversation title generated from the first user message (lite preset) — the channel writes it to `session_info.session_name` ([webapp.md](./webapp.md) §4). See [sessions.md](./sessions.md). `non_tool_modes`: all.
 
 ---
 

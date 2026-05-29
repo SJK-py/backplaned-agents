@@ -105,8 +105,10 @@ async def create_session_info(
 
 _SESSION_INFO_MUTABLE = frozenset(
     # `channel=None` releases a Telegram-owned session on chatbot close so the
-    # webapp can reopen/remove it ([webapp.md] §4).
-    {"channel", "chat_id", "delegated_to", "history_summary", "delegate_summary"}
+    # webapp can reopen/remove it ([webapp.md] §4). `session_name` is the
+    # auto-generated / user-renamed conversation title.
+    {"channel", "chat_id", "delegated_to", "history_summary", "delegate_summary",
+     "session_name"}
 )
 
 

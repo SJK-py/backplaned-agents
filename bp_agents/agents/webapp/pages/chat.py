@@ -184,6 +184,7 @@ async def chat_stream(
                     ctx = await core.after_result(session_id, dest, result)
                     await core.maybe_summarize(session_id, dest, ctx)
                 core.fire_memory_add(user_id, session_id, text, reply)
+                core.fire_name_session(user_id, session_id, text)
                 await queue.put(("result", _answer(result.agent_id, reply, files)))
             except Exception:  # noqa: BLE001
                 logger.exception(

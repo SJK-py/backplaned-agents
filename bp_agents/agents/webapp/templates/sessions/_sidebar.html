@@ -11,9 +11,9 @@
   </div>
   {% for row in open_rows %}
     <div class="group flex items-center gap-1 px-3 py-1.5 hover:bg-brand-700/40">
-      <a href="/chat/{{ row.session_id }}"
-         class="min-w-0 flex-1 truncate font-mono text-xs text-brand-50/90 hover:text-white">
-        {{ row.session_id }}
+      <a href="/chat/{{ row.session_id }}" title="{{ row.session_id }}"
+         class="min-w-0 flex-1 truncate text-xs text-brand-50/90 hover:text-white">
+        {{ row.display_name }}
       </a>
       {% if row.is_telegram %}
         <span class="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] text-sky-200"
@@ -23,6 +23,11 @@
         <span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200"
               title="Delegated to {{ row.delegated_to.replace('_', ' ').title() }}">&rarr;</span>
       {% endif %}
+      <button hx-post="/sessions/{{ row.session_id }}/rename"
+              hx-prompt="New conversation name"
+              class="rounded px-1.5 py-0.5 text-[10px] text-brand-50/60
+                     opacity-0 group-hover:opacity-100 hover:bg-brand-50/10 hover:text-white"
+              title="Rename">Rename</button>
       {% if row.closable %}
         <button hx-post="/sessions/{{ row.session_id }}/close"
                 hx-confirm="Close this conversation?"
@@ -41,8 +46,8 @@
     </div>
     {% for row in closed_rows %}
       <div class="group flex items-center gap-1 px-3 py-1.5">
-        <span class="min-w-0 flex-1 truncate font-mono text-xs text-brand-50/40"
-              title="Closed — reopen to continue.">{{ row.session_id }}</span>
+        <span class="min-w-0 flex-1 truncate text-xs text-brand-50/40"
+              title="{{ row.session_id }} — closed; reopen to continue.">{{ row.display_name }}</span>
         <button hx-post="/sessions/{{ row.session_id }}/reopen"
                 hx-confirm="Reopen this conversation?"
                 class="rounded px-1.5 py-0.5 text-[10px] text-brand-50/70 hover:bg-brand-50/10 hover:text-white"

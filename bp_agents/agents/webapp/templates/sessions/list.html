@@ -43,8 +43,9 @@
         {# ---- Open ---- #}
         {% for row in open_rows %}
         <tr class="hover:bg-brand-50/60">
-          <td class="px-4 py-2 font-mono text-xs text-brand-700">
-            <a href="/chat/{{ row.session_id }}" class="hover:underline">{{ row.session_id }}</a>
+          <td class="px-4 py-2 text-brand-700">
+            <a href="/chat/{{ row.session_id }}" class="hover:underline">{{ row.display_name }}</a>
+            <div class="font-mono text-[10px] text-brand-500/60">{{ row.session_id }}</div>
           </td>
           <td class="px-4 py-2 text-brand-700">{{ row.opened_at | dt }}</td>
           <td class="px-4 py-2">
@@ -67,6 +68,11 @@
                class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
               Open
             </a>
+            <button hx-post="/sessions/{{ row.session_id }}/rename"
+                    hx-prompt="New conversation name"
+                    class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">
+              Rename
+            </button>
             {% if row.closable %}
               <button hx-post="/sessions/{{ row.session_id }}/close"
                       hx-confirm="Close this conversation?"
@@ -81,7 +87,10 @@
         {# ---- Closed (not clickable; reopen or remove) ---- #}
         {% for row in closed_rows %}
         <tr class="text-brand-500">
-          <td class="px-4 py-2 font-mono text-xs">{{ row.session_id }}</td>
+          <td class="px-4 py-2">
+            {{ row.display_name }}
+            <div class="font-mono text-[10px] text-brand-400/70">{{ row.session_id }}</div>
+          </td>
           <td class="px-4 py-2">{{ row.opened_at | dt }}</td>
           <td class="px-4 py-2">
             <span class="rounded bg-brand-500/10 px-2 py-0.5 text-xs">Closed</span>
