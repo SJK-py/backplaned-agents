@@ -1834,10 +1834,26 @@ async def find_expired_tasks(
 async def find_expired_files(
     conn: asyncpg.Connection, *, now: datetime, limit: int = 1000
 ) -> list[FileRow]:
+    """Blobs the GC may reclaim: the upload-TTL (`expires_at`) has
+    elapsed AND **no `file_names` directory row references the blob**.
+
+    The name-existence guard is the refcount sweep the file-store
+    contract relies on (see `docs/design/router-managed-file-store.md`
+    §3/§11.1 and the `repoint`/`delete`/`purge_session` docstrings):
+    binding a name to a blob keeps it alive past its upload TTL, so a
+    `persist/{name}` (or any still-named session blob) is NOT reaped
+    while a name points at it. `expires_at` is purely the eligibility
+    timer once the blob is nameless (a never-bound orphan upload, or a
+    blob whose last name was deleted). Index-backed by
+    `file_names_file_idx`.
+    """
     rows = await conn.fetch(
         """
         SELECT * FROM files
         WHERE expires_at IS NOT NULL AND expires_at < $1
+          AND NOT EXISTS (
+              SELECT 1 FROM file_names fn WHERE fn.file_id = files.file_id
+          )
         ORDER BY expires_at ASC
         LIMIT $2
         """,

@@ -1640,6 +1640,14 @@ async def _file_write(
                     original_filename=cmd.filename,
                 ),
             )
+            # Same upload-TTL timer as the upload-with-grant path. The
+            # blob is bound to a name immediately below, and a named blob
+            # is never reaped (find_expired_files requires zero names), so
+            # this TTL only governs reclamation AFTER the name is later
+            # deleted. Leaving it NULL (the old behaviour) made an
+            # inline-written blob un-reclaimable forever once unbound.
+            from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
             blob = await sq.insert_file(
                 sha256=sha,
                 session_id=None if cmd.persistent else session_id,
@@ -1648,7 +1656,8 @@ async def _file_write(
                 mime_type="text/plain; charset=utf-8",
                 storage_url=storage_url,
                 original_filename=cmd.filename,
-                expires_at=None,
+                expires_at=datetime.now(UTC)
+                + timedelta(seconds=settings.file_default_ttl_s),
             )
         saved, err, _added = await _allocate_name(
             sq, scope=scope, filename=cmd.filename, file_id=blob.file_id,
