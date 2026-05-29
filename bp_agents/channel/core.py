@@ -61,7 +61,7 @@ class ChannelCore:
         dispatcher: Any,
         pool: asyncpg.Pool,
         delegatable_agents: frozenset[str] = frozenset(),
-        result_timeout_s: float = 180.0,
+        result_timeout_s: float = 600.0,
         fire_memory: bool = False,
         redis: Any | None = None,
     ) -> None:

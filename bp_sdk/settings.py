@@ -56,7 +56,7 @@ class AgentConfig(BaseSettings):
     """ISO-8601 expiry of `service_refresh_token` (string, to match the
     credentials.json round-trip)."""
 
-    pending_results_timeout_s: float = 60.0
+    pending_results_timeout_s: float = 480.0
     pending_acks_timeout_s: float = 30.0
     progress_buffer_size: int = 256
     reconnect_initial_backoff_s: float = 0.5
