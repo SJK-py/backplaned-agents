@@ -174,7 +174,7 @@ def test_service_seeds_default_presets() -> None:
     assert "default" in names
     # Preset names with `-` replacing `.` per upstream-bug #2.
     assert "gpt-5-5" in names
-    assert "claude-opus-4-7" in names
+    assert "claude-opus-4-8" in names
     assert "text-embedding-3-small" in names
 
 
@@ -330,15 +330,15 @@ def test_default_presets_cover_known_aliases() -> None:
         # Gemini
         "default", "default_embedding", "gemini", "gemini-2-5-pro",
         "gemini-3-5-flash", "gemini-3-1-flash-lite", "gemini-3-1-pro",
-        "gemini-embedding-2",
+        "gemini-lite", "gemini-pro", "gemini-embedding-2",
         # Anthropic
-        "claude", "claude-opus", "claude-opus-4-7",
+        "claude", "claude-opus", "claude-opus-4-8",
         "claude-sonnet", "claude-sonnet-4-6",
         "claude-haiku", "claude-haiku-4-5",
         # OpenAI
         "openai", "gpt", "gpt-5-5", "gpt-5-5-pro",
         "gpt-5-4", "gpt-5-4-mini", "gpt-5-4-nano", "gpt-5", "gpt-5-mini",
-        "gpt-5-nano", "gpt-4-1",
+        "gpt-5-nano", "gpt-4-1", "gpt-nano", "gpt-pro",
         # Embeddings
         "text-embedding-3-small", "text-embedding-3-large",
     }
