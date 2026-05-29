@@ -223,11 +223,18 @@ class ChannelCore:
 
         new_summary = (result.output.content if result.output else "") or ""
         field = "history_summary" if is_main else "delegate_summary"
+        # Atomic: the summary write and the demotion of the rows it folded in
+        # must commit together. A crash between them would either re-fold the
+        # same rows into the summary next pass (double-count) or demote rows
+        # whose content never made the summary.
         async with self._pool.acquire() as conn:
-            await queries.update_session_info(conn, session_id, **{field: new_summary})
-            await queries.demote_incumbent_through(
-                conn, session_id=session_id, agent_id=agent_id, up_to_id=up_to
-            )
+            async with conn.transaction():
+                await queries.update_session_info(
+                    conn, session_id, **{field: new_summary}
+                )
+                await queries.demote_incumbent_through(
+                    conn, session_id=session_id, agent_id=agent_id, up_to_id=up_to
+                )
 
     # -- user-driven delegation switch ([delegation.md] §6 path b) -------
 
@@ -261,12 +268,18 @@ class ChannelCore:
                 "The user has delegated this conversation to you; continue "
                 "helping them directly."
             )
+            # Atomic: the delegate seed row and the `delegated_to` flag must
+            # commit together, or a crash leaves a seed with no active
+            # delegation (or a delegation flag with no seed thread).
             async with self._pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id=session_id, agent_id=target,
-                    role="user", message=seed, incumbent=True, hidden=True,
-                )
-                await queries.update_session_info(conn, session_id, delegated_to=target)
+                async with conn.transaction():
+                    await queries.append_history(
+                        conn, session_id=session_id, agent_id=target,
+                        role="user", message=seed, incumbent=True, hidden=True,
+                    )
+                    await queries.update_session_info(
+                        conn, session_id, delegated_to=target
+                    )
         return (
             f"Delegated to {pretty_agent(target)} — it'll handle your messages "
             "until /undelegate."
@@ -327,24 +340,33 @@ class ChannelCore:
             previous=info.delegate_summary if info else None,
         )
         recap = f"[Returned from {pretty_agent(delegate)}] {summary or '(no summary)'}"
+        # Atomic: the two recap rows, the delegate-thread demotion, and the
+        # flag clear must commit together. A crash mid-sequence could leave a
+        # session whose `delegated_to` is set but whose delegate thread is
+        # already demoted (or recap rows with the delegation never cleared).
         async with self._pool.acquire() as conn:
-            # Mirror `orchestrator.end_delegation`: a hidden `user` recap (the
-            # specialist's results as external input — not the orchestrator's
-            # own work) followed by a hidden `assistant` ack that closes the
-            # turn, so the reloaded thread alternates. The pre-delegation user
-            # turn was already closed by the hand-off marker.
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                role="user", message=recap, incumbent=True, hidden=True,
-            )
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                role="assistant", message="Acknowledged.", incumbent=True, hidden=True,
-            )
-            await queries.demote_thread(conn, session_id=session_id, agent_id=delegate)
-            await queries.update_session_info(
-                conn, session_id, delegate_summary=None, delegated_to=None
-            )
+            async with conn.transaction():
+                # Mirror `orchestrator.end_delegation`: a hidden `user` recap
+                # (the specialist's results as external input — not the
+                # orchestrator's own work) followed by a hidden `assistant`
+                # ack that closes the turn, so the reloaded thread alternates.
+                # The pre-delegation user turn was already closed by the
+                # hand-off marker.
+                await queries.append_history(
+                    conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                    role="user", message=recap, incumbent=True, hidden=True,
+                )
+                await queries.append_history(
+                    conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
+                    role="assistant", message="Acknowledged.", incumbent=True,
+                    hidden=True,
+                )
+                await queries.demote_thread(
+                    conn, session_id=session_id, agent_id=delegate
+                )
+                await queries.update_session_info(
+                    conn, session_id, delegate_summary=None, delegated_to=None
+                )
 
     # -- memory ----------------------------------------------------------
 
