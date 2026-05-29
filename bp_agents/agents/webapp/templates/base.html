@@ -89,6 +89,14 @@
       </div>
 
       <div class="px-4 py-3 border-t border-brand-700/50 text-xs text-brand-50/70">
+        <a href="/memory"
+           class="block pb-2 {% if active_section == 'memory' %}text-white{% else %}text-brand-50/80 hover:text-white{% endif %}">
+          Memory
+        </a>
+        <a href="/knowledge"
+           class="block pb-2 {% if active_section == 'knowledge' %}text-white{% else %}text-brand-50/80 hover:text-white{% endif %}">
+          Knowledge base
+        </a>
         <a href="/config"
            class="block pb-2 {% if active_section == 'config' %}text-white{% else %}text-brand-50/80 hover:text-white{% endif %}">
           Settings

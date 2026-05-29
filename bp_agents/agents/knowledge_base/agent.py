@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from bp_agents.agents.knowledge_base.chunking import chunk_markdown
 from bp_agents.common import text_output
+from bp_agents.common.payloads import MAX_PAGE, KbBrowse, KbDelete
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
@@ -366,6 +367,74 @@ async def list_mode(ctx: TaskContext, payload: KbList) -> AgentOutput:
 )
 async def remove_mode(ctx: TaskContext, payload: KbRemove) -> AgentOutput:
     return await run_kb_remove(ctx, payload, settings=_settings)
+
+
+# ---------------------------------------------------------------------------
+# Webapp Knowledge base page — browse / delete (tool:false, JSON)
+# ---------------------------------------------------------------------------
+
+
+def _doc_item(d: dict) -> dict:
+    return {
+        "doc_id": d.get("doc_id", ""),
+        "title": d["title"],
+        "collection": d["collection"],
+        "tags": d.get("tags") or [],
+        "description": d.get("description", ""),
+        "created_at": d.get("created_at", ""),
+        "updated_at": d.get("updated_at", ""),
+    }
+
+
+async def run_kb_browse(
+    ctx: TaskContext,
+    payload: KbBrowse,
+    *,
+    settings: SuiteSettings,
+    store: KnowledgeStore | None = None,
+) -> AgentOutput:
+    store = store or await _store_for(ctx, settings)
+    docs = await store.list_documents(
+        collection=payload.collection, tag=payload.tag, query=payload.query
+    )
+    # Recency-sorted (most recently updated first).
+    docs.sort(
+        key=lambda d: d.get("updated_at") or d.get("created_at") or "", reverse=True
+    )
+    start = max(0, payload.start)
+    end = max(start, min(payload.end, start + MAX_PAGE))
+    items = [_doc_item(d) for d in docs[start:end]]
+    return text_output(json.dumps({"items": items, "total": len(docs)}))
+
+
+async def run_kb_delete(
+    ctx: TaskContext,
+    payload: KbDelete,
+    *,
+    settings: SuiteSettings,
+    store: KnowledgeStore | None = None,
+) -> AgentOutput:
+    store = store or await _store_for(ctx, settings)
+    n = await store.remove_document(title=payload.title, collection=payload.collection)
+    return text_output(json.dumps({"deleted": n}))
+
+
+@agent.handler(
+    mode="browse", tool=False,
+    description="List documents for the Knowledge base page (JSON; "
+    "recency-sorted, title/collection/tag-filterable, paged).",
+)
+async def browse_mode(ctx: TaskContext, payload: KbBrowse) -> AgentOutput:
+    return await run_kb_browse(ctx, payload, settings=_settings)
+
+
+@agent.handler(
+    mode="delete", tool=False,
+    description="Delete a knowledge-base document by title (+ collection) "
+    "from the Knowledge base page.",
+)
+async def delete_mode(ctx: TaskContext, payload: KbDelete) -> AgentOutput:
+    return await run_kb_delete(ctx, payload, settings=_settings)
 
 
 if __name__ == "__main__":

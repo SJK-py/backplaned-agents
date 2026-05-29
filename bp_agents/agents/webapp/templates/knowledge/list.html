@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Knowledge base — backplaned{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-brand-900">Knowledge base</h1>
+  <p class="mt-1 text-sm text-brand-500">
+    Documents you've saved. Add documents from chat or a file upload; manage them here.
+  </p>
+</div>
+
+<form id="kb-filters" hx-get="/knowledge/list" hx-target="#kb-items" hx-swap="innerHTML"
+      hx-trigger="submit, change, keyup changed delay:400ms, knowledgeChanged from:body"
+      class="mb-3 flex flex-wrap items-center gap-2">
+  <input name="query" value="{{ query }}" placeholder="Search titles…"
+         class="min-w-[12rem] flex-1 rounded border border-brand-500/20 px-2 py-1 text-sm" />
+  <input name="collection" value="{{ collection }}" placeholder="Collection"
+         class="w-40 rounded border border-brand-500/20 px-2 py-1 text-sm" />
+  <input name="tag" value="{{ tag }}" placeholder="Tag"
+         class="w-32 rounded border border-brand-500/20 px-2 py-1 text-sm" />
+  <input type="hidden" name="page" value="0" />
+</form>
+
+<div id="kb-items">
+  {% include "knowledge/_items.html" %}
+</div>
+{% endblock %}

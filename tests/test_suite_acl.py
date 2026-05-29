@@ -43,3 +43,4 @@ def test_core_flows_present() -> None:
     assert ("channel/*", "l3/memory.add") in pairs
     assert ("channel/*", "l3/summarize.history") in pairs
     assert ("*/database.*", "l3/database.*") in pairs
+    assert ("channel/*", "l3/database.*") in pairs    # webapp Knowledge base page

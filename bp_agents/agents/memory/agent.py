@@ -25,7 +25,14 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bp_agents.common import text_output
-from bp_agents.common.payloads import MemAdd, MemRetrieve
+from bp_agents.common.payloads import (
+    MAX_PAGE,
+    MemAdd,
+    MemDelete,
+    MemList,
+    MemManualAdd,
+    MemRetrieve,
+)
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
@@ -397,6 +404,25 @@ async def run_memory_add(
     if not facts:
         return text_output("")
 
+    await _reconcile_and_store(
+        ctx, store, facts, settings=settings,
+        lite_preset=lite_preset, embed_preset=embed_preset,
+    )
+    return text_output("")
+
+
+async def _reconcile_and_store(
+    ctx: TaskContext,
+    store: MemoryStore,
+    facts: list[dict[str, str]],
+    *,
+    settings: SuiteSettings,
+    lite_preset: str,
+    embed_preset: str,
+) -> None:
+    """Phases 2–4: reconcile each candidate fact against its nearest
+    neighbours (NEW / UPDATE / REMOVE), wire edges, then propagate. Shared by
+    the post-turn `add` (after extraction) and the webapp `manual_add`."""
     related_anchors: list[str] = []  # NEW/UPDATE'd uids that gained edges
     updated_uids: list[str] = []
 
@@ -460,7 +486,111 @@ async def run_memory_add(
         except Exception:  # noqa: BLE001
             logger.debug("memory_phase4_failed", exc_info=True)
 
-    return text_output("")
+
+# ---------------------------------------------------------------------------
+# Webapp Memory page — list / delete / manual_add (tool:false, JSON)
+# ---------------------------------------------------------------------------
+
+
+def _fact_item(f: dict[str, Any], *, score: float | None = None) -> dict[str, Any]:
+    item = {
+        "uid": f["uid"],
+        "fact": f["fact"],
+        "kind": f.get("kind", ""),
+        "created_at": f.get("created_at", ""),
+        "last_used_at": f.get("last_used_at", ""),
+    }
+    if score is not None:
+        item["score"] = round(score, 4)
+    return item
+
+
+async def run_memory_list(
+    ctx: TaskContext,
+    payload: MemList,
+    *,
+    settings: SuiteSettings,
+    store: MemoryStore | None = None,
+    embed_preset: str | None = None,
+) -> AgentOutput:
+    store = store or await _store_for(ctx, settings)
+    start = max(0, payload.start)
+    end = max(start, min(payload.end, start + MAX_PAGE))
+    query = (payload.query or "").strip()
+
+    if not query:
+        # No query → newest first by last_used_at.
+        facts = await store.all_facts()
+        if payload.kind:
+            facts = [f for f in facts if f.get("kind") == payload.kind]
+        facts.sort(key=lambda f: f.get("last_used_at", ""), reverse=True)
+        items = [_fact_item(f) for f in facts[start:end]]
+        return text_output(json.dumps({"items": items, "total": len(facts)}))
+
+    # Query → hybrid pool ranked by the retrieval formula (relevance × decay),
+    # without graph expansion or touch (browsing must not reset decay).
+    if embed_preset is None:
+        _lite, embed_preset = await _presets(ctx, settings)
+    limit = settings.memory_retrieve_pool
+    qv = (await ctx.llm.embed([query], preset=embed_preset))[0]
+    vec_pool = await store.search(query_vector=qv, limit=limit)
+    try:
+        bm_pool = await store.search_bm25(query=query, limit=limit)
+    except Exception:  # noqa: BLE001 — survive an FTS parse error
+        logger.debug("memory_list_bm25_failed", exc_info=True)
+        bm_pool = []
+    relevance: dict[str, float] = {}
+    for rows in (vec_pool, bm_pool):
+        for rank, f in enumerate(rows):
+            relevance[f["uid"]] = relevance.get(f["uid"], 0.0) + 1.0 / (60 + rank + 1)
+    by_uid = {f["uid"]: f for f in (*vec_pool, *bm_pool)}
+    pool = list(by_uid.values())
+    if payload.kind:
+        pool = [f for f in pool if f.get("kind") == payload.kind]
+
+    def _score(f: dict[str, Any]) -> float:
+        return relevance[f["uid"]] * _decay(f["last_used_at"], settings)
+
+    ranked = sorted(pool, key=_score, reverse=True)
+    items = [_fact_item(f, score=_score(f)) for f in ranked[start:end]]
+    return text_output(json.dumps({"items": items, "total": len(ranked)}))
+
+
+async def run_memory_delete(
+    ctx: TaskContext,
+    payload: MemDelete,
+    *,
+    settings: SuiteSettings,
+    store: MemoryStore | None = None,
+) -> AgentOutput:
+    store = store or await _store_for(ctx, settings)
+    if await store.get_fact(payload.uid) is None:
+        return text_output(json.dumps({"deleted": False}))
+    await store.remove_fact(payload.uid)
+    return text_output(json.dumps({"deleted": True}))
+
+
+async def run_memory_manual_add(
+    ctx: TaskContext,
+    payload: MemManualAdd,
+    *,
+    settings: SuiteSettings,
+    store: MemoryStore | None = None,
+    lite_preset: str | None = None,
+    embed_preset: str | None = None,
+) -> AgentOutput:
+    store = store or await _store_for(ctx, settings)
+    if lite_preset is None or embed_preset is None:
+        lite_preset, embed_preset = await _presets(ctx, settings)
+    fact = payload.fact.strip()
+    if not fact:
+        return text_output(json.dumps({"added": False}))
+    kind = payload.kind if payload.kind in _VALID_KINDS else "personal_info"
+    await _reconcile_and_store(
+        ctx, store, [{"fact": fact, "kind": kind}],
+        settings=settings, lite_preset=lite_preset, embed_preset=embed_preset,
+    )
+    return text_output(json.dumps({"added": True}))
 
 
 @agent.handler(
@@ -482,6 +612,34 @@ async def retrieve_mode(ctx: TaskContext, payload: MemRetrieve) -> AgentOutput:
 async def add_mode(ctx: TaskContext, payload: MemAdd) -> AgentOutput:
     async with _user_lock(ctx.user_id):
         return await run_memory_add(ctx, payload, settings=_settings)
+
+
+@agent.handler(
+    mode="list", tool=False,
+    description="List/browse the user's stored facts for the Memory page "
+    "(JSON; newest-first or query-ranked, kind-filterable, paged).",
+)
+async def list_mode(ctx: TaskContext, payload: MemList) -> AgentOutput:
+    return await run_memory_list(ctx, payload, settings=_settings)
+
+
+@agent.handler(
+    mode="delete", tool=False,
+    description="Delete one stored fact by uid (Memory page).",
+)
+async def delete_mode(ctx: TaskContext, payload: MemDelete) -> AgentOutput:
+    async with _user_lock(ctx.user_id):
+        return await run_memory_delete(ctx, payload, settings=_settings)
+
+
+@agent.handler(
+    mode="manual_add", tool=False,
+    description="Store a user-authored fact, bypassing extraction (Memory "
+    "page); reconciles against existing facts like a normal add.",
+)
+async def manual_add_mode(ctx: TaskContext, payload: MemManualAdd) -> AgentOutput:
+    async with _user_lock(ctx.user_id):
+        return await run_memory_manual_add(ctx, payload, settings=_settings)
 
 
 if __name__ == "__main__":

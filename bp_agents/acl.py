@@ -23,7 +23,10 @@ _RULES: list[tuple[str, str, str, str, str]] = [
     ("allow", "*", "l1/*", "channel/*", "delegate → channel push"),
     # Memory
     ("allow", "*", "*/assistant.*", "l3/memory.retrieval", "assistant recall"),
-    ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add"),
+    ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add + webapp Memory page"),
+    # Knowledge base — the webapp Knowledge base page (browse/delete) reaches
+    # it directly; the channel otherwise has no database.* capability.
+    ("allow", "*", "channel/*", "l3/database.*", "webapp Knowledge base page"),
     # Summarization
     ("allow", "*", "channel/*", "l3/summarize.history", "channel summarizer"),
     # User config + cron management (both hosted on the config agent)

@@ -7,6 +7,7 @@ vectors) + a real MemoryStore on a tmp LanceDB. No router/provider.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from bp_agents.agents.memory import (
     MemAdd,
@@ -14,7 +15,15 @@ from bp_agents.agents.memory import (
     run_memory_add,
     run_memory_retrieve,
 )
-from bp_agents.agents.memory.agent import _extract_system, _now_line, gc_sweep
+from bp_agents.agents.memory.agent import (
+    _extract_system,
+    _now_line,
+    gc_sweep,
+    run_memory_delete,
+    run_memory_list,
+    run_memory_manual_add,
+)
+from bp_agents.common.payloads import MemDelete, MemList, MemManualAdd
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
@@ -263,3 +272,100 @@ def test_extract_prompt_carries_current_time(tmp_path) -> None:
     assert "The current time is" in system
     assert _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d") in system  # today, UTC
     assert "ABSOLUTE" in system
+
+
+# ---------------------------------------------------------------------------
+# Webapp Memory page modes — list / delete / manual_add
+# ---------------------------------------------------------------------------
+
+
+async def _seed_facts(store) -> dict[str, str]:
+    """Insert three facts directly; return name→uid."""
+    uids = {}
+    for name, kind in [("likes cats", "preference"),
+                       ("has a dog", "preference"),
+                       ("lives in paris", "personal_info")]:
+        uids[name] = await store.insert_fact(
+            fact=name, kind=kind, embedding=_kw_vec(name)
+        )
+    return uids
+
+
+def test_memory_list_no_query_returns_all_with_kind_filter(tmp_path) -> None:
+    async def _drive() -> tuple[dict, dict]:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_facts(store)
+        allout = await run_memory_list(
+            _Ctx(_ScriptLlm([])), MemList(), settings=_settings(),
+            store=store, embed_preset="e",
+        )
+        prefout = await run_memory_list(
+            _Ctx(_ScriptLlm([])), MemList(kind="preference"),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        return json.loads(allout.content), json.loads(prefout.content)
+
+    allres, prefres = asyncio.run(_drive())
+    assert allres["total"] == 3 and len(allres["items"]) == 3
+    assert {i["fact"] for i in prefres["items"]} == {"likes cats", "has a dog"}
+    assert all("score" not in i for i in allres["items"])  # no query → no score
+
+
+def test_memory_list_query_ranks_by_relevance(tmp_path) -> None:
+    async def _drive() -> dict:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_facts(store)
+        out = await run_memory_list(
+            _Ctx(_ScriptLlm([])), MemList(query="cat"),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        return json.loads(out.content)
+
+    res = asyncio.run(_drive())
+    assert res["items"], "query returned no items"
+    assert res["items"][0]["fact"] == "likes cats"  # cat vector ranks first
+    assert "score" in res["items"][0]
+
+
+def test_memory_list_paging_caps_at_50(tmp_path) -> None:
+    async def _drive() -> int:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        for i in range(60):
+            await store.insert_fact(fact=f"f{i}", kind="event", embedding=_kw_vec("x"))
+        out = await run_memory_list(
+            _Ctx(_ScriptLlm([])), MemList(start=0, end=999),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        return len(json.loads(out.content)["items"])
+
+    assert asyncio.run(_drive()) == 50  # end clamped to start + MAX_PAGE
+
+
+def test_memory_delete_removes_fact(tmp_path) -> None:
+    async def _drive() -> tuple[dict, int]:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        uids = await _seed_facts(store)
+        out = await run_memory_delete(
+            _Ctx(_ScriptLlm([])), MemDelete(uid=uids["has a dog"]),
+            settings=_settings(), store=store,
+        )
+        return json.loads(out.content), len(await store.all_facts())
+
+    res, remaining = asyncio.run(_drive())
+    assert res["deleted"] is True and remaining == 2
+
+
+def test_memory_manual_add_bypasses_extraction(tmp_path) -> None:
+    async def _drive() -> tuple[dict, list]:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        # Only a reconcile decision is needed (no extraction call).
+        llm = _ScriptLlm(['{"action": "NEW", "related": []}'])
+        out = await run_memory_manual_add(
+            _Ctx(llm), MemManualAdd(fact="allergic to peanuts", kind="personal_info"),
+            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+        )
+        return json.loads(out.content), await store.all_facts()
+
+    res, facts = asyncio.run(_drive())
+    assert res["added"] is True
+    assert [f["fact"] for f in facts] == ["allergic to peanuts"]

@@ -43,7 +43,10 @@ allow * l1/*                    -> channel/*               # delegated agent →
 
 # Memory (recall vs write)
 allow * */assistant.*           -> l3/memory.retrieval     # assistant agents recall mid-loop
-allow * channel/*               -> l3/memory.add           # channel fire-and-forget add after a turn
+allow * channel/*               -> l3/memory.add           # channel add after a turn + webapp Memory page
+
+# Knowledge base (webapp page)
+allow * channel/*               -> l3/database.*           # webapp Knowledge base page browse/delete
 
 # Summarization
 allow * channel/*               -> l3/summarize.history    # channel (session manager) fires the summarizer

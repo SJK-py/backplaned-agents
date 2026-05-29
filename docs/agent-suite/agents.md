@@ -123,8 +123,10 @@ Per-user document store + retrieval (LanceDB). All modes tool-visible (research'
 | `remove` | `title`, `collection?` |
 | `list` | `query?`, `collection?`, `tag?` |
 | `retrieve` | `query`, `collection?`, `title?`, `tags?`, `search_type?`(hybrid\|vector\|bm25), `count?`(=3) |
+| `browse` | `query?`, `collection?`, `tag?`, `start?=0`, `end?=50` — **no** (webapp KB page; JSON, recency-sorted, ≤50/page) |
+| `delete` | `title`, `collection?` — **no** (webapp KB page) |
 
-`store` behavior: non-`.md` files are converted via `md_converter.convert` first; missing `title`/`tags`/`description` are LLM-generated (head 8k + tail 2k chars, env-configurable); content-addressed dedup enforced. Chunking + schema in [data-model.md](./data-model.md). `non_tool_modes`: `[]`.
+`store` behavior: non-`.md` files are converted via `md_converter.convert` first; missing `title`/`tags`/`description` are LLM-generated (head 8k + tail 2k chars, env-configurable); content-addressed dedup enforced. Chunking + schema in [data-model.md](./data-model.md). `non_tool_modes`: `[browse, delete]`. `browse` returns JSON `{items:[{doc_id,title,collection,tags,description,created_at,updated_at}], total}`; it's the read side of the webapp Knowledge base page (`delete` is the write side — tool-facing `list`/`remove` stay for the orchestrator).
 
 ---
 
@@ -138,8 +140,11 @@ Per-user fact graph (LanceDB). See [memory.md](./memory.md) for the full pipelin
 | --- | --- | --- |
 | `retrieve` | `{query, count?=3, child_count?=2}` | **yes** — assistant agents recall mid-loop |
 | `add` | `{user_prompt, assistant_response}` | no — channel fire-and-forget after a turn |
+| `list` | `{query?, kind?, start?=0, end?=50}` | no — webapp Memory page (JSON; ≤50/page) |
+| `delete` | `{uid}` | no — webapp Memory page |
+| `manual_add` | `{fact, kind?}` | no — webapp Memory page (skips extraction; still reconciled) |
 
-`non_tool_modes`: `[add]`. Uses an **embedding** preset (distinct from the chat presets) + the lite chat preset for extraction/decision calls.
+`non_tool_modes`: `[add, list, delete, manual_add]`. Uses an **embedding** preset (distinct from the chat presets) + the lite chat preset for extraction/decision calls. `list` returns JSON `{items:[{uid,fact,kind,created_at,last_used_at,score?}], total}` — newest-first by `last_used_at`, or ranked by the retrieval formula (relevance × decay) when a query is given (no graph expansion, no `touch`).
 
 ---
 

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Memory — backplaned{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-brand-900">Memory</h1>
+  <p class="mt-1 text-sm text-brand-500">Facts the assistant remembers about you.</p>
+</div>
+
+{# Add a fact manually (bypasses extraction; still reconciled). #}
+<form hx-post="/memory/add"
+      hx-on::after-request="if (event.detail.successful) this.reset()"
+      class="mb-4 flex flex-wrap items-end gap-2 rounded-md border border-brand-500/10 bg-white p-3 shadow-sm">
+  <div class="min-w-[16rem] flex-1">
+    <label class="mb-1 block text-xs text-brand-500">New memory</label>
+    <input name="fact" required placeholder="e.g. Prefers metric units"
+           class="w-full rounded border border-brand-500/20 px-2 py-1 text-sm" />
+  </div>
+  <select name="kind" class="rounded border border-brand-500/20 px-2 py-1 text-sm">
+    {% for k in kinds %}<option value="{{ k }}">{{ k.replace("_", " ") }}</option>{% endfor %}
+  </select>
+  <button class="rounded bg-brand-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700">
+    Add
+  </button>
+</form>
+
+{# Filters — re-fetch the list on change, and after any add/delete. #}
+<form id="mem-filters" hx-get="/memory/list" hx-target="#mem-items" hx-swap="innerHTML"
+      hx-trigger="submit, change, keyup changed delay:400ms, memoryChanged from:body"
+      class="mb-3 flex flex-wrap items-center gap-2">
+  <input name="query" value="{{ query }}" placeholder="Search memories…"
+         class="min-w-[12rem] flex-1 rounded border border-brand-500/20 px-2 py-1 text-sm" />
+  <select name="kind" class="rounded border border-brand-500/20 px-2 py-1 text-sm">
+    <option value="">All kinds</option>
+    {% for k in kinds %}
+      <option value="{{ k }}" {% if k == kind %}selected{% endif %}>{{ k.replace("_", " ") }}</option>
+    {% endfor %}
+  </select>
+  <input type="hidden" name="page" value="0" />
+</form>
+
+<div id="mem-items">
+  {% include "memory/_items.html" %}
+</div>
+{% endblock %}
