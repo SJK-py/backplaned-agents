@@ -203,6 +203,7 @@ class AgentInfoUpdateFrame(_FrameBase):
                 "produces_schema",
                 "produces_files",
                 "non_tool_modes",
+                "mode_descriptions",
                 "hidden",
                 "documentation_url",
             )

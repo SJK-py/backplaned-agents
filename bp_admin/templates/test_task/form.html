@@ -27,8 +27,8 @@
         hx-swap="outerHTML"
         x-data="{
           wait: {{ 'true' if form.wait else 'false' }},
-          destination: {{ form.destination_agent_id | tojson }},
-          agentInfo: {{ agent_schema_lookup | tojson }},
+          destination: {{ form.destination_agent_id | tojson | forceescape }},
+          agentInfo: {{ agent_schema_lookup | tojson | forceescape }},
           get selected() { return this.agentInfo[this.destination] || null; }
         }">
 

@@ -21,7 +21,7 @@
             <span class="rounded bg-brand-500/10 px-2 py-0.5 text-xs text-brand-500">{{ item.kind.replace("_", " ") }}</span>
           </td>
           <td class="px-4 py-2 text-xs text-brand-500">
-            {% if queried %}{{ "%.3f"|format(item.score or 0) }}{% else %}{{ item.last_used_at[:10] }}{% endif %}
+            {% if queried %}{{ "%.3f"|format(item.score or 0) }}{% else %}{{ (item.last_used_at or '')[:10] }}{% endif %}
           </td>
           <td class="px-4 py-2 text-right">
             <form hx-post="/memory/delete" hx-confirm="Delete this memory?" class="inline">
