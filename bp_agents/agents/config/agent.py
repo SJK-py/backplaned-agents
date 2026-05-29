@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.config_edit import EDITABLE_FIELDS, ConfigError, coerce_config_value
+from bp_agents.config_edit import (
+    ConfigError,
+    coerce_config_value,
+    editable_fields,
+    preset_choices_from_settings,
+)
 from bp_agents.cron_manage import run_cron_management
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -23,34 +28,61 @@ logger = logging.getLogger(__name__)
 CONFIG_AGENT_ID = "config"
 
 # Editable fields + value coercion are shared with the webapp config form
-# (bp_agents.config_edit) so the NL path and the structured form agree.
+# (bp_agents.config_edit) so the NL path and the structured form agree. The
+# per-tier LLM-preset fields are added only when the operator opts in via
+# `SuiteSettings.selectable_presets_*` (an allow-list per tier).
 
-_SYSTEM = """\
-You manage the user's settings. Use `get_config` to read current values and \
-`set_config` to change one. Editable fields: full_name, timezone (IANA), \
-language, verbose_default (true/false), custom_note, max_context_token_limit. \
-ALWAYS end your reply by stating the relevant settings in plain language: on \
-a read, list the current values; after a change, restate the field's new \
-value. Never reply with only an acknowledgement like "done".\
-"""
+_SYSTEM_BASE = (
+    "You manage the user's settings. Use `get_config` to read current values "
+    "and `set_config` to change one. Editable fields: full_name, timezone "
+    "(IANA), language, verbose_default (true/false), custom_note, "
+    "max_context_token_limit."
+)
+_SYSTEM_TAIL = (
+    " ALWAYS end your reply by stating the relevant settings in plain "
+    "language: on a read, list the current values; after a change, restate "
+    "the field's new value. Never reply with only an acknowledgement like "
+    '"done".'
+)
 
 
-def _format_config(cfg: Any) -> str:
+def _system_prompt(preset_choices: dict[str, list[str]]) -> str:
+    """The config system prompt, with a sentence per opted-in preset tier
+    listing the names the user may pick (so the model offers real choices)."""
+    lines = [_SYSTEM_BASE]
+    for field, choices in preset_choices.items():
+        if choices:
+            lines.append(
+                f" The {field} (LLM model tier) may be set to one of: "
+                f"{', '.join(choices)}."
+            )
+    lines.append(_SYSTEM_TAIL)
+    return "".join(lines)
+
+
+def _format_config(cfg: Any, preset_choices: dict[str, list[str]]) -> str:
     if cfg is None:
         return "No settings found."
-    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in EDITABLE_FIELDS)
+    fields = editable_fields(preset_choices)
+    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in fields)
 
 
-async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
+async def _build_tools(
+    pool: asyncpg.Pool, preset_choices: dict[str, list[str]]
+) -> LocalToolset:
+    fields = editable_fields(preset_choices)
+
     async def _get(ctx: TaskContext, args: dict[str, Any]) -> str:
         async with pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, ctx.user_id)
-        return _format_config(cfg)
+        return _format_config(cfg, preset_choices)
 
     async def _set(ctx: TaskContext, args: dict[str, Any]) -> str:
         field = args.get("field")
         try:
-            value = coerce_config_value(field, args.get("value"))
+            value = coerce_config_value(
+                field, args.get("value"), preset_choices=preset_choices
+            )
         except ConfigError as exc:
             return str(exc)
         async with pool.acquire() as conn:
@@ -71,7 +103,7 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
                 parameters={
                     "type": "object",
                     "properties": {
-                        "field": {"type": "string", "enum": sorted(EDITABLE_FIELDS)},
+                        "field": {"type": "string", "enum": sorted(fields)},
                         "value": {"type": "string"},
                     },
                     "required": ["field", "value"],
@@ -117,9 +149,10 @@ async def run_config(
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
     preset = cfg.preset_lite if cfg else settings.default_preset_lite
-    tools = await _build_tools(pool)
+    preset_choices = preset_choices_from_settings(settings)
+    tools = await _build_tools(pool, preset_choices)
     messages = [
-        Message(role="system", content=_SYSTEM),
+        Message(role="system", content=_system_prompt(preset_choices)),
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
@@ -132,7 +165,7 @@ async def run_config(
     # the current settings rather than a bare "Done." that hides the result.
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    return text_output(_format_config(cfg))
+    return text_output(_format_config(cfg, preset_choices))
 
 
 @agent.handler(

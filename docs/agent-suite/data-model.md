@@ -43,10 +43,10 @@ Index `(session_id, agent_id, incumbent, created_at)` to serve the reload query 
 | `user_id` | text PK | |
 | `full_name` | text | |
 | `timezone` | text | IANA tz |
-| `preset_pro` | text | deep_reasoning |
-| `preset_balanced` | text | orchestrator |
-| `preset_lite` | text | summarizer / memory / knowledge |
-| `preset_embedding` | text | vector search (distinct from chat presets) |
+| `preset_pro` | text | deep_reasoning; user-selectable iff `SuiteSettings.selectable_presets_pro` is non-empty (tier-gated allow-list), else system-managed |
+| `preset_balanced` | text | orchestrator / research; user-selectable iff `selectable_presets_balanced` non-empty |
+| `preset_lite` | text | summarizer / memory / knowledge / config; user-selectable iff `selectable_presets_lite` non-empty |
+| `preset_embedding` | text | vector search (distinct from chat presets); always system-managed |
 | `max_context_token_limit` | int | soft summarization trigger |
 | `verbose_default` | bool | default verbose mode ([channel.md](./channel.md) §5); `verbose` is a reserved word in Postgres |
 | `language` | text | preference |
