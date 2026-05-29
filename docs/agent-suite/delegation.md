@@ -59,7 +59,8 @@ produces a Result on `T`. The episode ends later, in Phase 3, on a steady-state
 
 1. During some `Tn`, computer_use elects to end (its LLM calls the `end_delegation` local tool, or the user issues a slash command).
 2. `peers.delegate(orchestrator, {delegation_summary, exit_reason, user_prompt?}, mode=end_delegation)` → router reassigns `Tn`; computer_use returns **without a Result**.
-3. `orchestrator.end_delegation`: appends a `{delegate, summary, reason}` recap to the **main** thread (`user`-role, `(incumbent=T, hidden=T)`); flips the **delegate episode's** rows (including the `delegate_prompt` seed) `incumbent=false`; then **if `user_prompt`** runs the orchestrator loop on it, **else** returns a brief/empty `AgentOutput`. **Terminates `Tn`.**
+3. `orchestrator.end_delegation`: appends a `{delegate, summary, reason}` recap to the **main** thread (**`assistant`-role**, `(incumbent=T, hidden=T)`); flips the **delegate episode's** rows (including the `delegate_prompt` seed) `incumbent=false`; then **if `user_prompt`** runs the orchestrator loop on it, **else** returns a brief/empty `AgentOutput`. **Terminates `Tn`.**
+   - **Why `assistant`, not `user`:** the orchestrator handed off without answering the pre-delegation user turn, leaving it open. An `assistant` recap **closes** that turn, so the reloaded thread alternates; a `user` recap would leave back-to-back user rows (open prompt + recap + next message) and the model would answer the stale prompt alongside the new one. Hidden from the UI, reloaded for context. The channel's manual fold-back (`/undelegate`) writes the same `assistant` recap.
 4. Channel gets the orchestrator's Result and — observing `result.agent_id = orchestrator` — sets `delegated_to = null`. Next message routes to `orchestrator(message)`.
 
 → Symmetric with hand-off; `Tn` terminated by the orchestrator.

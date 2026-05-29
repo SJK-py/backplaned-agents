@@ -333,9 +333,14 @@ async def run_orchestrator_end_delegation(
     user_prompt = payload.get("user_prompt")
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
     async with pool.acquire() as conn:
+        # `assistant` (not `user`): this recap closes the still-open
+        # pre-delegation user turn (the orchestrator handed off without
+        # answering it). As a user row it would leave the reloaded thread
+        # ending in consecutive user turns — the model then answers the old
+        # prompt AND the new one. Hidden from the UI; reloaded for context.
         await queries.append_history(
             conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-            role="user", message=recap, incumbent=True, hidden=True,
+            role="assistant", message=recap, incumbent=True, hidden=True,
         )
         # Retire the whole delegate episode (incl. the seed row).
         if ctx.delegating_agent_id:

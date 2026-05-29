@@ -349,8 +349,14 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            # An l1 episode to retire.
             async with pool.acquire() as conn:
+                # The pre-delegation user prompt the orchestrator left OPEN
+                # when it handed off (no assistant turn).
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="user", message="do the thing",
+                )
+                # An l1 episode to retire.
                 await queries.append_history(
                     conn, session_id="ses_1", agent_id=_L1,
                     role="user", message="seed",
@@ -377,6 +383,10 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
                 )
             assert any("solved it" in r.message for r in main)
             assert l1_rows == []
+            # The recap is an ASSISTANT turn that closes the open user prompt:
+            # the reloaded thread alternates, not ends in consecutive users.
+            assert [r.role for r in main] == ["user", "assistant"]
+            assert main[-1].role == "assistant" and "solved it" in main[-1].message
         finally:
             await pool.close()
 

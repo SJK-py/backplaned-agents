@@ -328,9 +328,13 @@ class ChannelCore:
         )
         recap = f"[Returned from {pretty_agent(delegate)}] {summary or '(no summary)'}"
         async with self._pool.acquire() as conn:
+            # `assistant` (not `user`): closes the open pre-delegation user
+            # turn so the orchestrator's reloaded thread alternates instead of
+            # ending in back-to-back user turns. Hidden from the UI; reloaded
+            # for context. Mirrors `orchestrator.end_delegation`.
             await queries.append_history(
                 conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                role="user", message=recap, incumbent=True, hidden=True,
+                role="assistant", message=recap, incumbent=True, hidden=True,
             )
             await queries.demote_thread(conn, session_id=session_id, agent_id=delegate)
             await queries.update_session_info(

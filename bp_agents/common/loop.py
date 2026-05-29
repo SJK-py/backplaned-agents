@@ -81,6 +81,15 @@ def _detail_tail(text: str | None, limit: int) -> str | None:
     return f"…{tail[-limit:]}" if len(tail) > limit else tail
 
 
+# Injected when the loop hits `max_rounds` mid-tool-use, to force a final
+# text answer instead of returning an empty tool-call turn.
+_FINAL_ANSWER_NUDGE = (
+    "You've reached the tool-use limit for this turn. Do not call any more "
+    "tools. Give your best final answer now using the information already "
+    "gathered; if it's incomplete, say what you found and what's still open."
+)
+
+
 def _message_text(msg: Message) -> str | None:
     """The plain-text body of a tool-response message, or `None` when it's
     multimodal/structured (e.g. a `read_file` `file_ref` part)."""
@@ -199,8 +208,25 @@ async def run_llm_loop(
                     detail=_detail_tail(_message_text(result_msg), detail_chars),
                 )
 
-    # Exhausted max_rounds with tool calls still pending — return the
-    # last response so the caller surfaces partial progress rather than
-    # hanging. `resp` is non-None (max_rounds >= 1).
+    # Exhausted max_rounds with tool calls still pending. The model has the
+    # latest tool results in `messages` but hasn't synthesised them, and the
+    # last `resp` is a tool-call turn (often empty text) — returning it gives
+    # the user a blank reply. Force ONE final answer with tools disabled so
+    # the model must produce text from what it gathered.
     assert resp is not None
-    return resp
+    if not resp.tool_calls:
+        return resp
+    if emit_progress:
+        await emit_loop_progress(
+            ctx, kind="thinking", round=max_rounds, detail="wrapping up",
+        )
+    messages.append(Message(role="user", content=_FINAL_ANSWER_NUDGE))
+    try:
+        final = await ctx.llm.generate(
+            messages, preset=preset, tools=None,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+    except LlmCallError as exc:
+        raise UpstreamError(f"LLM call failed: {exc}") from exc
+    messages.append(Message.assistant_from_response(final))
+    return final
