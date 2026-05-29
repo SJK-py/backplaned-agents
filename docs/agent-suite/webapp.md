@@ -192,15 +192,18 @@ structured forms over the DB**, not NL round-trips:
 
 Forms give immediate, deterministic UX; the agents stay the NL path.
 
-## 6. Decision 3 — cron delivery deferred to channel-agnostic routing (chosen)
+## 6. Decision 3 — cron delivery via channel-agnostic routing (landed)
 
-Cron **firing** delivers via the scheduler in the chatbot → Telegram today.
-A webapp-session cron needs the deferred **channel-agnostic cron routing**
-([cron.md §6]): *fire → resolve the user's reachable channel → route*. For
-v1 the webapp can **manage** jobs (create/list/remove on a webapp session),
-but reliable **delivery** to the webapp is gated on that routing work. The
-cron pane will note this until §6 lands. (Telegram-session cron is
-unaffected.)
+Cron **firing** runs in the chatbot's scheduler. A webapp-session cron now
+delivers via **channel-agnostic routing** ([cron.md §6]): the result row is
+persisted to the webapp session (the canonical record), and — since the
+scheduler can't push to a browser — a **pointer nudge** is routed to the
+user's Telegram mapping so they know to open the webapp. A user with no
+Telegram mapping sees the result on their next webapp visit (the row is the
+record). A native webapp push primitive (notification table / web-push)
+would slot in later as another reachable channel; until then Telegram is the
+out-of-band carrier. (Telegram-session cron — full content to the chat — is
+unchanged.)
 
 ## 7. File stash pane
 

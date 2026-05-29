@@ -103,9 +103,6 @@
   *Why:* **bounded-scope (rare edge)** — falls back to the job's
   `session_id` today; the open-fresh-and-move-pointer path is an
   uncommon-case refinement.
-- **deferred — v2 channel-agnostic cron routing** ([cron.md] §6).
-  *Why:* **v2** — only matters once `webapp` exists (v1 is Telegram-only,
-  every session is reachable).
 - **lean — cron report decision** is a second lite LLM call after the loop.
   *Why:* **bounded-scope** — works; a single structured-output call would
   be tidier/cheaper.
@@ -195,3 +192,9 @@ as a short record; the detail lives in the commit/PR history.
 - `/password` slash command ([channel.md] §6) — mints a one-time
   password-setup token via the service principal's `serviced_by` rights
   (`gateway.py::_cmd_password` + `credentials.py::mint_password_reset_token`).
+- Channel-agnostic cron routing ([cron.md] §6) — a fired cron whose target
+  session isn't live-reachable by the scheduler (a `webapp`/released session,
+  no Telegram `chat_id`) persists the result row there and routes a pointer
+  nudge to the user's Telegram mapping (`list_platform_mappings_for_user`);
+  with no mapping, the persisted row is the record. The full-content path for
+  Telegram-reachable sessions is unchanged (`cron.py::_nudge_unreachable`).

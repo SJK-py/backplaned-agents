@@ -198,6 +198,85 @@ def test_scheduler_no_report_logs_only(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_scheduler_webapp_session_nudges_telegram(suite_db_url: str) -> None:
+    """A cron whose target session is a webapp session (no Telegram chat_id)
+    persists the result there AND sends a pointer nudge to the user's
+    Telegram mapping ([cron.md] §6)."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                # Webapp session: channel='webapp', no chat_id.
+                await queries.create_session_info(
+                    conn, session_id="ses_web", user_id="usr_a", channel="webapp",
+                )
+                # The user is also reachable on Telegram.
+                await queries.upsert_platform_mapping(
+                    conn, platform="telegram", chat_id="tg1", user_id="usr_a"
+                )
+                await queries.create_cron_job(
+                    conn, cron_id="c1", user_id="usr_a", session_id="ses_web",
+                    cron_expression="* * * * *", cron_message="digest",
+                    report="case_by_case",
+                )
+            tg = _Telegram()
+            disp = _CronDispatcher(content="Web digest body", report=True)
+            sched = _scheduler(pool, _settings(suite_db_url), disp, tg)
+
+            assert await sched.tick() == 1
+            # Pointer nudge to Telegram — NOT the full content.
+            assert len(tg.sent) == 1
+            chat_id, text = tg.sent[0]
+            assert chat_id == "tg1"
+            assert "web app" in text and "Web digest body" not in text
+            # Canonical result still landed in the webapp session.
+            async with pool.acquire() as conn:
+                rows = await queries.reload_incumbent(
+                    conn, session_id="ses_web", agent_id="orchestrator"
+                )
+            assert rows and rows[-1].message == "Web digest body"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_scheduler_webapp_session_no_mapping_persists_only(suite_db_url: str) -> None:
+    """No out-of-band channel (webapp session, no Telegram mapping): the row
+    is the record, nothing is sent — no crash, no spurious send."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.create_session_info(
+                    conn, session_id="ses_web", user_id="usr_a", channel="webapp",
+                )
+                await queries.create_cron_job(
+                    conn, cron_id="c1", user_id="usr_a", session_id="ses_web",
+                    cron_expression="* * * * *", cron_message="digest",
+                    report="case_by_case",
+                )
+            tg = _Telegram()
+            disp = _CronDispatcher(content="Web digest body", report=True)
+            sched = _scheduler(pool, _settings(suite_db_url), disp, tg)
+
+            assert await sched.tick() == 1
+            assert tg.sent == []  # no reachable channel
+            async with pool.acquire() as conn:
+                rows = await queries.reload_incumbent(
+                    conn, session_id="ses_web", agent_id="orchestrator"
+                )
+                execs = await conn.fetch("SELECT * FROM cron_executions")
+            assert rows and rows[-1].message == "Web digest body"
+            assert len(execs) == 1 and execs[0]["reported"] is True
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 # --------------------------------------------------------------------------- #
 # management loops + orchestrator cron_message
 # --------------------------------------------------------------------------- #

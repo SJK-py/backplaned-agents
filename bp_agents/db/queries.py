@@ -401,6 +401,28 @@ async def upsert_platform_mapping(
     return PlatformMappingRow.model_validate(dict(row))
 
 
+async def list_platform_mappings_for_user(
+    conn: asyncpg.Connection, *, user_id: str, platform: str | None = None
+) -> list[PlatformMappingRow]:
+    """Reverse lookup `user_id → mappings` (uses the `user_id` index).
+    Optionally filtered to one `platform`. Used by the cron scheduler to
+    find a user's out-of-band channel (e.g. their Telegram `chat_id`) when
+    a fired job's target session can't be live-reached ([cron.md] §6)."""
+    if platform is not None:
+        rows = await conn.fetch(
+            "SELECT * FROM suite_platform_mappings "
+            "WHERE user_id = $1 AND platform = $2 ORDER BY created_at",
+            user_id, platform,
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT * FROM suite_platform_mappings "
+            "WHERE user_id = $1 ORDER BY created_at",
+            user_id,
+        )
+    return [PlatformMappingRow.model_validate(dict(r)) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # cron_jobs / cron_executions  (chatbot scheduler — [cron.md])
 # ---------------------------------------------------------------------------
