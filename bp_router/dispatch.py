@@ -648,16 +648,23 @@ async def _run_llm_call(
             error=error_payload,
         )
 
-    # Look up the caller's user level for the tier gate.
+    # Resolve the caller's user level for the preset tier gate.
     #
-    # Failure handling: if the DB is unreachable, we *fail-closed for
-    # tier-gated presets* but proceed for `*` presets (those don't
-    # consult user_level anyway). The original code silently swallowed
-    # the exception and continued with `user_level=None`, which made
-    # tier-pinned routing collapse into "everyone gets `*` only" — a
-    # quiet, hard-to-debug degradation. Now we surface a clean
-    # `auth_lookup_failed` error code when the requested preset needs
-    # the gate, so admins notice the DB outage immediately.
+    # The level is derived from the TRUSTED task identity — the
+    # `tasks` row the router admitted, with active-executor verified
+    # (`_derive_task_scope`) — NEVER the agent-asserted `frame.user_id`.
+    # An authenticated-but-low-trust agent could otherwise set
+    # `frame.user_id` to a privileged user to satisfy a tier-gated
+    # preset's `min_user_level` (and charge that tenant). This mirrors
+    # the named-file-store authz, whose `file_ref` resolution below
+    # already derives `(user_id, session_id)` from the task and ignores
+    # the asserted field. `*` presets don't consult `user_level`, so the
+    # lookup is skipped for them entirely (also avoids a DB hit on the
+    # hot default-preset path).
+    #
+    # Failure handling (tier-gated only): a DB outage → `auth_lookup_failed`;
+    # an unverifiable caller (no task context, or not the task's active
+    # executor, or unknown user) → `preset_not_allowed`. Both fail closed.
     preset_obj = None
     try:
         preset_obj = state.llm_service.get_preset(preset_name)  # type: ignore[attr-defined]
@@ -669,38 +676,51 @@ async def _run_llm_call(
     )
 
     user_level: str | None = None
-    if frame.user_id:
-        # Peek the cache BEFORE acquiring a DB connection.
-        # Most calls hit the warm cache; without
-        # the peek, every LLM request paid the pool-acquire cost
-        # even when no DB query was needed.
-        user_level = state.llm_service.peek_user_level_cached(  # type: ignore[attr-defined]
-            frame.user_id
-        )
-        if user_level is None:
-            try:
-                async with state.db_pool.acquire() as conn:
-                    user_level = await state.llm_service.resolve_user_level(  # type: ignore[attr-defined]
-                        conn, frame.user_id
-                    )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "llm_user_level_lookup_failed",
-                    extra={
-                        "event": "llm_user_level_lookup_failed",
-                        "bp.user_id": frame.user_id,
-                        "bp.agent_id": entry.agent_id,
-                        "preset_needs_tier": preset_needs_tier,
-                    },
-                    exc_info=True,
+    if preset_needs_tier:
+        if frame.task_id is None:
+            # No task to bind a trusted identity to (e.g. a spawn-context
+            # LLM call). The gate can't be evaluated → refuse.
+            await _send(_err_result(
+                "tier-gated preset requires a task context to verify the "
+                "caller's level",
+                code=ErrorCode.LLM_PRESET_NOT_ALLOWED,
+            ))
+            return
+        try:
+            async with state.db_pool.acquire() as conn:
+                scope_t = await _derive_task_scope(
+                    conn, frame.task_id, entry.agent_id
                 )
-                if preset_needs_tier:
-                    await _send(_err_result(
-                        "user-level lookup unavailable; tier gate cannot be "
-                        "evaluated for this preset",
-                        code=ErrorCode.LLM_AUTH_LOOKUP_FAILED,
-                    ))
-                    return
+                if scope_t is not None:
+                    user_level = await state.llm_service.resolve_user_level(  # type: ignore[attr-defined]
+                        conn, scope_t[0]
+                    )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "llm_user_level_lookup_failed",
+                extra={
+                    "event": "llm_user_level_lookup_failed",
+                    "bp.task_id": frame.task_id,
+                    "bp.agent_id": entry.agent_id,
+                    "preset_needs_tier": preset_needs_tier,
+                },
+                exc_info=True,
+            )
+            await _send(_err_result(
+                "user-level lookup unavailable; tier gate cannot be "
+                "evaluated for this preset",
+                code=ErrorCode.LLM_AUTH_LOOKUP_FAILED,
+            ))
+            return
+        if user_level is None:
+            # scope_t was None: the connected agent is not this task's
+            # active executor (or the task/user is unknown). We cannot
+            # establish a trusted, tier-bearing identity → refuse opaquely.
+            await _send(_err_result(
+                "caller could not be verified for this tier-gated preset",
+                code=ErrorCode.LLM_PRESET_NOT_ALLOWED,
+            ))
+            return
 
     try:
         # Resolve any `file_ref` parts (router-proxy / http /
