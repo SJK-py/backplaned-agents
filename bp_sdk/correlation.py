@@ -56,6 +56,12 @@ class PendingMap:
         """Reaper deadline applied when `register(timeout_s=None)`."""
         return self._default_timeout
 
+    def __contains__(self, correlation_id: object) -> bool:
+        """True while a future for `correlation_id` is still pending (not yet
+        resolved/rejected). Lets callers distinguish "awaiting this id" from
+        "never registered / already settled"."""
+        return correlation_id in self._pending
+
     def register(
         self, correlation_id: str, *, timeout_s: float | None = None
     ) -> asyncio.Future:
