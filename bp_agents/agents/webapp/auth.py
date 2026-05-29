@@ -113,8 +113,16 @@ async def ensure_fresh_token(
     request.session["access_expires_at"] = body["expires_at"]
     request.session["refresh_token"] = body["refresh_token"]
     request.session["level"] = body.get("level", "")
-    # Rotate the CSRF token at each refresh boundary (bounds replay window).
-    request.session["csrf_token"] = _issue_csrf_token()
+    # NOTE: do NOT rotate the CSRF token here. This refresh runs in the auth
+    # middleware BEFORE call_next reaches the (inner) CSRF middleware, which
+    # validates the client's submitted token against session["csrf_token"].
+    # Rotating it mid-request invalidated the token the browser already held,
+    # so every write that happened to land in a refresh window (a recurring
+    # ~buffer_s window per token lifetime) failed with a spurious 403 until
+    # the user reloaded. The CSRF token is minted at login and lives in the
+    # signed session cookie for the browser session — a double-submit token
+    # in a tamper-proof cookie gains negligible security from per-refresh
+    # rotation, and not rotating it removes the race entirely.
 
 
 def make_auth_middleware(config: WebappConfig, upstream: UpstreamClient):  # type: ignore[no-untyped-def]
