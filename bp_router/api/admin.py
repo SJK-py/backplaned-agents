@@ -2191,14 +2191,17 @@ async def evict_agent(
 ) -> dict[str, Any]:
     """Permanently remove an agent from the catalog.
 
-    Sets status to 'removed' (terminal — agents in this state cannot be
-    re-onboarded with the same `agent_id`; the row is preserved so
-    foreign keys from `tasks` and `audit_log` stay valid). Force-closes
-    the live socket, fails in-flight tasks, and pushes a CatalogUpdate
-    to remaining peers.
+    Sets status to 'removed' (terminal — the agent never serves again) and
+    then **renames the row's PK to a tombstone** (`deleted_<id>_<epoch>`) so
+    the original `agent_id` is freed for a brand-new agent to onboard. The
+    row (and all its `tasks` history) is preserved under the tombstone id via
+    FK `ON UPDATE CASCADE`; the co-located service principal
+    (`usr_service_<id>`) is tombstoned the same way so a CHANNEL agent's id is
+    reusable too. Force-closes the live socket, fails in-flight tasks, and
+    pushes a CatalogUpdate to remaining peers.
 
-    Distinct from `/suspend`: suspend is reversible (unsuspend endpoint
-    pending), evict is final.
+    Distinct from `/suspend` (reversible) and `/reset` (recover the SAME id):
+    evict retires the agent and releases its id.
     """
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
@@ -2230,9 +2233,40 @@ async def evict_agent(
     from bp_router.catalog import push_catalog_update_to_all  # noqa: PLC0415
     from bp_router.tasks import fail_inflight_for_agent  # noqa: PLC0415
 
+    # Fail in-flight tasks FIRST — they key off the live `agent_id`. Only
+    # then rename the PK to a tombstone (the rename cascades onto the now-
+    # terminal task rows, preserving history under the new id).
     failed = await fail_inflight_for_agent(state, agent_id, reason="agent_evicted")
+
+    epoch = int(_now().timestamp())
+    svc_id = service_user_id_for_agent(agent_id)
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            svc_exists = await queries.get_user_by_id(conn, svc_id) is not None
+            new_agent_id, new_svc_id = await queries.rename_evicted_agent(
+                conn, agent_id, epoch=epoch,
+                service_user_id=svc_id if svc_exists else None,
+            )
+            await queries.append_audit_event(
+                conn,
+                actor_kind="admin",
+                actor_id=principal.user_id,
+                event="agent.id_released",
+                target_kind="agent",
+                target_id=agent_id,
+                payload={
+                    "tombstone_agent_id": new_agent_id,
+                    "tombstone_service_user_id": new_svc_id,
+                },
+            )
+
     await push_catalog_update_to_all(state)
-    return {"agent_id": agent_id, "failed_tasks": failed}
+    return {
+        "agent_id": agent_id,
+        "failed_tasks": failed,
+        "tombstone_agent_id": new_agent_id,
+        "id_released": new_agent_id != agent_id,
+    }
 
 
 # ---------------------------------------------------------------------------
