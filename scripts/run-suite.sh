@@ -89,6 +89,36 @@ mint_invite() {
         | "$PYTHON_BIN" -c "import json,sys;print(json.load(sys.stdin)['invitation_token'])"
 }
 
+# Can this agent resume from its persisted creds? True iff
+# <state>/credentials.json holds a non-empty auth_token that is either
+# non-expiring or not yet expired — mirroring the SDK's onboard_or_resume
+# load check. Stale/expired/corrupt creds (e.g. a wiped router, a lapsed
+# onboard token) return false so the caller re-mints instead of starting an
+# agent that can't onboard (the bug behind "no auth_token and no
+# invitation_token" on every agent).
+creds_resumable() {
+    local f="$1/credentials.json"
+    [[ -f "$f" ]] || return 1
+    "$PYTHON_BIN" - "$f" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+if not d.get("auth_token"):
+    sys.exit(1)
+exp = d.get("expires_at")
+if exp:
+    try:
+        if datetime.fromisoformat(exp.replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+            sys.exit(1)
+    except ValueError:
+        pass  # unparseable expiry → let the SDK decide
+sys.exit(0)
+PY
+}
+
 # Agent roster: name:provisions_service_user. Only the chatbot owns the
 # service identity (registration submit + per-user mint); the rest are
 # plain agents.
@@ -120,12 +150,19 @@ for entry in "${AGENTS[@]}"; do
     state="/tmp/bp-suite/$name"
     mkdir -p "$state"
     token=""
-    if [[ ! -f "$state/credentials.json" ]]; then
+    if creds_resumable "$state"; then
+        log "$name: resuming from persisted creds"
+    else
+        # Fresh, or stale/expired/corrupt creds → drop them and re-mint so
+        # onboarding has a usable invitation (self-heals a prior failed run /
+        # a router reset).
+        if [[ -e "$state/credentials.json" ]]; then
+            log "$name: persisted creds unusable — re-minting"
+            rm -f "$state/credentials.json"
+        fi
         log "$name: minting invitation (provisions_service_user=$prov)"
         token=$(mint_invite "$name-$(date +%s)" "$prov")
         [[ -n "$token" ]] || fail "$name invitation mint returned empty"
-    else
-        log "$name: resuming from persisted creds"
     fi
     if [[ "$name" == "sandbox" ]]; then
         log "WARNING: 'sandbox' runs UNCONTAINED on this host — LLM/user bash"
