@@ -20,6 +20,18 @@
 
 ## 2026-05-29
 
+### Added — generic `lite` / `pro` tier-slot presets in the catalogue
+
+- **What:** added two presets to `bp_router/llm/presets_catalog.jsonc` —
+  `lite` (→ `gemini-3.1-flash-lite`) and `pro` (→ `gemini-3.1-pro-preview`).
+  Together with the existing `default`, these are stable, generic tier-slot
+  names (lite / default / pro) intended to be repointed to any provider/model
+  via the admin webUI. They back the prod-init "Custom" provider option, which
+  wires `SUITE_DEFAULT_PRESET_{LITE,BALANCED,PRO}` to `lite` / `default` / `pro`.
+- **Why:** let an operator stand up a deployment whose tier defaults are stable
+  names and configure the actual models/keys later in the admin UI.
+- **Shape:** **Added** — seed-data only; catalogue-pinning tests updated.
+
 ### Changed — refresh the LLM preset catalogue (opus 4-8, new tier aliases)
 
 - **What:** updated `bp_router/llm/presets_catalog.jsonc`: Claude Opus bumped

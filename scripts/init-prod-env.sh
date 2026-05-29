@@ -50,15 +50,20 @@ echo "LLM provider for the default chat tiers:"
 echo "  1) Anthropic (Claude)"
 echo "  2) Gemini (Google)"
 echo "  3) OpenAI (GPT)"
-ask PROVIDER_CHOICE "Choose 1-3" "2"
+echo "  4) Custom — wire the generic lite/default/pro slots; set models + keys"
+echo "             later via the admin webUI"
+ask PROVIDER_CHOICE "Choose 1-4" "2"
 case "${PROVIDER_CHOICE,,}" in
     1|anthropic) PROVIDER=anthropic ;;
     2|gemini)    PROVIDER=gemini ;;
     3|openai)    PROVIDER=openai ;;
+    4|custom)    PROVIDER=custom ;;
     *) echo "invalid provider choice: $PROVIDER_CHOICE" >&2; exit 1 ;;
 esac
 
 # provider → (key env var, lite, balanced, pro, embedding) preset aliases.
+# `custom` wires the generic tier slots (lite / default / pro) the operator
+# repoints via the admin webUI, and asks for no key (configure it there).
 case "$PROVIDER" in
     anthropic)
         KEY_VAR=ANTHROPIC_API_KEY
@@ -72,9 +77,17 @@ case "$PROVIDER" in
         KEY_VAR=OPENAI_API_KEY
         PRESET_LITE=gpt-nano; PRESET_BALANCED=gpt; PRESET_PRO=gpt-pro
         PRESET_EMBEDDING=text-embedding-3-small ;;
+    custom)
+        KEY_VAR=""
+        PRESET_LITE=lite; PRESET_BALANCED=default; PRESET_PRO=pro
+        PRESET_EMBEDDING=default_embedding ;;
 esac
 
-ask PROVIDER_KEY "$PROVIDER API key (resolves env://$KEY_VAR for the presets)" ""
+if [[ -n "$KEY_VAR" ]]; then
+    ask PROVIDER_KEY "$PROVIDER API key (resolves env://$KEY_VAR for the presets)" ""
+else
+    PROVIDER_KEY=""
+fi
 ask TELEGRAM "Telegram bot token (from @BotFather)" ""
 
 GENERATED_PW=0
@@ -108,8 +121,13 @@ if [[ -z "$ADMIN_PW" ]]; then ADMIN_PW="$(gen 20)"; GENERATED_PW=1; fi
     echo "S3_ACCESS_KEY=$(gen 20)"
     echo "S3_SECRET_KEY=$(gen 40)"
     echo
-    echo "# --- LLM provider key ($PROVIDER) + per-tier preset defaults ---"
-    echo "$KEY_VAR=$PROVIDER_KEY"
+    echo "# --- LLM provider ($PROVIDER) + per-tier preset defaults ---"
+    if [[ -n "$KEY_VAR" ]]; then
+        echo "$KEY_VAR=$PROVIDER_KEY"
+    else
+        echo "# custom: set provider key(s) + repoint the lite/default/pro"
+        echo "# presets via the admin webUI (/admin)."
+    fi
     echo "SUITE_DEFAULT_PRESET_LITE=$PRESET_LITE"
     echo "SUITE_DEFAULT_PRESET_BALANCED=$PRESET_BALANCED"
     echo "SUITE_DEFAULT_PRESET_PRO=$PRESET_PRO"
@@ -127,7 +145,13 @@ echo
 echo "Wrote $OUT (chmod 600)."
 echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
 [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"
-[[ -z "$PROVIDER_KEY" ]] && echo "  WARNING: $KEY_VAR is empty — set it before deploying."
+if [[ "$PROVIDER" == "custom" ]]; then
+    echo "  NOTE: custom — the lite/default/pro presets are seeded to Gemini"
+    echo "        placeholders. Set provider keys and repoint these presets in"
+    echo "        the admin webUI (/admin) before they'll work."
+elif [[ -z "$PROVIDER_KEY" ]]; then
+    echo "  WARNING: $KEY_VAR is empty — set it before deploying."
+fi
 if [[ "$PROVIDER" == "anthropic" ]]; then
     echo "  NOTE: Anthropic has no embeddings; memory/knowledge-base use"
     echo "        $PRESET_EMBEDDING (Gemini). Set GEMINI_API_KEY too, or change"
