@@ -46,6 +46,15 @@ agent = Agent(
             "file.full",
             "session.history",
             "session.management",
+            # The Memory + Knowledge base pages consume those services
+            # directly. `database.*` routes the KB page through the existing
+            # `*/database.* -> l3/database.*` rule (no broad channel grant);
+            # `memory.*` declares the dependency (memory is reached via the
+            # `channel/* -> memory.add` rule the webapp already holds).
+            "database.retrieval",
+            "database.manage",
+            "memory.retrieval",
+            "memory.add",
         ],
         hidden=True,
     ),

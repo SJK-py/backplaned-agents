@@ -156,10 +156,12 @@ generic `ChannelCore.call_agent(dest, mode, payload)`. Since memory/KB are
 per-**user** but root-task admit needs an **open** session, the page rides a
 **carrier session** — `carrier_session()` picks the user's
 `default_session_id` if open, else the newest open session; with none open the
-pane shows an empty state ("Start a conversation…"). Reaching these agents
-needs ACL: `channel/* → l3/memory.add` (already present) covers memory; a new
-`channel/* → l3/database.*` rule covers the KB ([acl.md](./acl.md) §3). ACL is
-**agent-level**, so one rule authorizes all of an agent's modes.
+pane shows an empty state ("Start a conversation…"). Reaching these agents is
+**capability-scoped**: the webapp agent carries `database.*` (KB, via the
+existing `*/database.* → l3/database.*` rule) and `memory.*` (memory, reached
+via the `channel/* → l3/memory.add` rule it already holds) — so the chatbot,
+also `channel`, gains no KB access ([acl.md](./acl.md) §3, §6). ACL is
+**agent-level**, so reaching an agent authorizes all of its modes.
 
 - **Memory** — paged, filterable by `kind`, searchable. No query → newest
   first (`last_used_at`); query → ranked by the retrieval formula. A **manual

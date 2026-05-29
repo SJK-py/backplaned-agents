@@ -8,7 +8,12 @@ CreateRuleRequest model + pattern/level validators.
 from __future__ import annotations
 
 from bp_agents.acl import acl_replace_payload, suite_acl_rules
-from bp_router.acl import is_valid_pattern, is_valid_rule_user_level
+from bp_router.acl import (
+    Rule,
+    is_allowed_for,
+    is_valid_pattern,
+    is_valid_rule_user_level,
+)
 from bp_router.api.admin import CreateRuleRequest
 
 
@@ -43,4 +48,45 @@ def test_core_flows_present() -> None:
     assert ("channel/*", "l3/memory.add") in pairs
     assert ("channel/*", "l3/summarize.history") in pairs
     assert ("*/database.*", "l3/database.*") in pairs
-    assert ("channel/*", "l3/database.*") in pairs    # webapp Knowledge base page
+    # No broad channel→database grant: the webapp reaches the KB via its own
+    # database.* capability, so the chatbot (channel, no database cap) can't.
+    assert ("channel/*", "l3/database.*") not in pairs
+
+
+# Agent capability/group sets the webapp Memory/Knowledge pages depend on.
+_WEBAPP = {
+    "caller_id": "webapp",
+    "caller_groups": ["channel", "inbound"],
+    "caller_capabilities": [
+        "channel.webapp", "user.auth", "file.full", "session.history",
+        "session.management", "database.retrieval", "database.manage",
+        "memory.retrieval", "memory.add",
+    ],
+}
+_CHATBOT_CAPS = [
+    "channel.telegram", "user.auth", "user.registration", "user.cron",
+    "file.full", "session.history", "session.management",
+]
+_KB = {
+    "callee_id": "knowledge_base", "callee_groups": ["l3"],
+    "callee_capabilities": [
+        "database.manage", "database.retrieval", "file.full", "document.convert",
+    ],
+}
+_MEMORY = {
+    "callee_id": "memory", "callee_groups": ["l3"],
+    "callee_capabilities": ["memory.add", "memory.retrieval"],
+}
+
+
+def test_webapp_reaches_kb_and_memory_least_privilege() -> None:
+    rules = [Rule(**r) for r in suite_acl_rules()]
+    # webapp → KB via its own database.* capability (the */database.* rule).
+    assert is_allowed_for(rules, **_WEBAPP, **_KB, user_level="tier0").allow
+    # webapp → memory via the channel→memory.add rule it already holds.
+    assert is_allowed_for(rules, **_WEBAPP, **_MEMORY, user_level="tier0").allow
+    # The chatbot (channel, but no database.* capability) CANNOT reach the KB.
+    assert not is_allowed_for(
+        rules, caller_id="chatbot", caller_groups=["channel", "inbound"],
+        caller_capabilities=_CHATBOT_CAPS, **_KB, user_level="tier0",
+    ).allow

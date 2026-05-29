@@ -79,9 +79,11 @@
   `memory_retrieve_pool` returns empty for a query.
   *Why:* **bounded-scope** — browse, not exhaustive recall; scoring every
   fact would embed the whole graph per page.
-- **operator step — the new `channel/* → l3/database.*` ACL rule** must be
-  applied with the rest of the set (`python -m bp_agents.load_acl`) before the
-  KB page can reach the agent. (Memory is already covered by `memory.add`.)
+- **note — KB-page reach is capability-scoped, not a new rule.** The webapp
+  carries `database.*`, so the existing `*/database.* → l3/database.*` rule
+  covers the KB page (no broad `channel/* → database` grant; the chatbot can't
+  reach the KB). This takes effect when the webapp re-registers its `AgentInfo`
+  (handshake) — no ACL change to re-apply. Memory rides `channel/* → memory.add`.
 
 ## Cron / channel files
 

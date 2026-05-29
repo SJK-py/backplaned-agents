@@ -24,9 +24,9 @@ _RULES: list[tuple[str, str, str, str, str]] = [
     # Memory
     ("allow", "*", "*/assistant.*", "l3/memory.retrieval", "assistant recall"),
     ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add + webapp Memory page"),
-    # Knowledge base — the webapp Knowledge base page (browse/delete) reaches
-    # it directly; the channel otherwise has no database.* capability.
-    ("allow", "*", "channel/*", "l3/database.*", "webapp Knowledge base page"),
+    # (Knowledge base: the webapp reaches it via its own `database.*`
+    # capability through the `*/database.* -> l3/database.*` rule below — no
+    # broad channel grant, so the chatbot can't reach the KB.)
     # Summarization
     ("allow", "*", "channel/*", "l3/summarize.history", "channel summarizer"),
     # User config + cron management (both hosted on the config agent)
