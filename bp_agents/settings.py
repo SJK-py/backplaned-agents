@@ -83,7 +83,7 @@ class SuiteSettings(BaseSettings):
     telegram_poll_timeout_s: int = Field(default=25, ge=0)
     """Long-poll `getUpdates` timeout."""
 
-    dispatch_result_timeout_s: float = Field(default=180.0, gt=0.0)
+    dispatch_result_timeout_s: float = Field(default=600.0, gt=0.0)
     """How long the channel waits for an injected turn's result before
     surfacing a failure to the user."""
 
@@ -99,7 +99,7 @@ class SuiteSettings(BaseSettings):
     """Hard cap on planner decision rounds (mutations + executions +
     finalize attempts), so a plan always terminates."""
 
-    plan_step_timeout_s: float = Field(default=120.0, gt=0.0)
+    plan_step_timeout_s: float = Field(default=240.0, gt=0.0)
     """Per-step `execute_step` → `orchestrator(subagent)` result timeout."""
 
     # ------------------------------------------------------------------
@@ -158,7 +158,7 @@ class SuiteSettings(BaseSettings):
     """Brave-API-compatible search endpoint (e.g. a SearXNG instance).
     When unset, web_search returns an unavailable notice."""
     web_fetch_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
-    web_fetch_timeout_s: float = Field(default=150.0, gt=0.0)
+    web_fetch_timeout_s: float = Field(default=120.0, gt=0.0)
 
 
 def load_suite_settings() -> SuiteSettings:
