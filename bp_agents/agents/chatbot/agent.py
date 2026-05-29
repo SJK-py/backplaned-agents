@@ -106,7 +106,9 @@ async def _startup() -> None:
             http_url=_http_url(), config=agent.config
         )
         _approval_task = asyncio.create_task(
-            approval_poll_loop(credentials=_credentials, pool=_pool, stop=_stop)
+            approval_poll_loop(
+                credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
+            )
         )
 
     if not _settings.telegram_bot_token:
