@@ -20,6 +20,29 @@
 
 ## 2026-05-29
 
+### Fixed — `bp_sdk` dispatch buffers/floods progress for wait-only spawns
+
+- **What:** `Dispatcher._handle_progress` now **drops** a ProgressFrame when
+  there's no progress subscriber **but a Result is already pending** for that
+  `task_id` — i.e. a wait-only `peers.spawn(stream=False)` (the subagent
+  tool-call path, `spawn_from_tool_call`). Previously such frames were
+  buffered in `_pending_progress_buffer` up to the per-task cap, so a chatty
+  subagent (e.g. `research` running web search) flooded
+  `progress_buffer_per_task_cap` warnings and churned the buffer for frames
+  no one would ever drain. Added `PendingMap.__contains__` to make the
+  "Result pending?" check clean.
+- **Why:** a `stream=False` spawn explicitly opts out of progress; the
+  router still fans progress to the caller (lineage), so the SDK is the right
+  place to discard it. The pre-subscribe buffer is retained for the
+  **streamed**-spawn race (`subscribe_progress` lands just after the ack).
+- **Shape:** **Fixed** — no API change; behaviour change is "drop instead of
+  buffer+warn" for progress the caller didn't subscribe to. Streamed spawns,
+  the channel's `open_spawn_stream` root, and any manual `subscribe_progress`
+  are unaffected (they have a subscriber → delivered).
+- **Verified:** `tests/test_review_progress_buffer_before_subscribe.py` —
+  wait-only (pending Result, no sub) → dropped; no-sub + no-pending-Result →
+  still buffered (race); `PendingMap.__contains__` round-trip.
+
 ### Added — agent reset to `pending` (`POST /v1/admin/agents/{id}/reset`)
 
 - **What:** A new admin endpoint moves a registered agent (`active` /

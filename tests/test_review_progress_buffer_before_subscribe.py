@@ -255,3 +255,53 @@ def test_source_pin_subscribe_drains_buffer() -> None:
 
     src = inspect.getsource(dispatch.Dispatcher.subscribe_progress)
     assert "_pending_progress_buffer.pop" in src
+
+
+# ---------------------------------------------------------------------------
+# Wait-only spawn (stream=False): progress is dropped, not buffered.
+# A pending RESULT with no progress subscriber means the caller opted out of
+# progress, so chatty subagents (research/web-search) must not flood the
+# per-task buffer cap.
+# ---------------------------------------------------------------------------
+
+
+def test_wait_only_spawn_progress_is_dropped_not_buffered() -> None:
+    async def _run() -> None:
+        disp = _make_dispatcher()
+        # Simulate a wait-only spawn: a pending Result, no progress subscriber.
+        disp.pending_results.register("task_waitonly")
+        for i in range(5):
+            await disp._handle_progress(
+                _make_progress_frame("task_waitonly", f"c{i}")
+            )
+        # Dropped silently — never buffered.
+        assert "task_waitonly" not in disp._pending_progress_buffer
+
+    asyncio.run(_run())
+
+
+def test_no_subscriber_and_no_pending_result_still_buffers() -> None:
+    """The pre-subscribe race (streamed spawn) is unaffected: with neither a
+    subscriber nor a pending result yet, frames buffer for the imminent
+    `subscribe_progress` to drain."""
+    async def _run() -> None:
+        disp = _make_dispatcher()
+        await disp._handle_progress(_make_progress_frame("task_race", "c0"))
+        assert "task_race" in disp._pending_progress_buffer
+
+    asyncio.run(_run())
+
+
+def test_pending_map_contains() -> None:
+    from bp_sdk.correlation import PendingMap
+
+    async def _run() -> None:
+        pm = PendingMap(default_timeout_s=5.0)
+        assert "k" not in pm
+        pm.register("k")
+        assert "k" in pm
+        pm.resolve("k", object())
+        assert "k" not in pm
+
+    asyncio.run(_run())
+

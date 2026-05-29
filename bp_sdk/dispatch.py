@@ -958,11 +958,20 @@ class Dispatcher:
         # the recv loop.
         queue = self._progress_subscribers.get(frame.task_id)
         if queue is None:
-            # No subscriber yet — could be the spawn-Ack-but-not-yet-
-            # subscribed window. Buffer up to a per-task cap so the
-            # eventual `subscribe_progress` can drain. Bounded so a
-            # truly-orphan task_id (no spawner ever asked) can't grow
-            # forever.
+            # No progress subscriber. If we're already awaiting this task's
+            # RESULT, this is a wait-only `spawn(stream=False)` (e.g. a
+            # subagent tool call): the caller explicitly opted out of
+            # progress, so DROP it rather than buffer frames nobody will
+            # drain. A chatty subagent (research / web-search) otherwise
+            # floods `progress_buffer_per_task_cap`. The pre-subscribe
+            # buffer below stays for the streamed-spawn race, where
+            # `subscribe_progress` lands just after the ack.
+            if frame.task_id in self.pending_results:
+                return
+            # Else the spawn-Ack-but-not-yet-subscribed window (or a
+            # truly-orphan task_id) — buffer up to a per-task cap so the
+            # eventual `subscribe_progress` can drain, bounded so an orphan
+            # can't grow forever.
             self._buffer_pending_progress(frame)
             return
         try:
