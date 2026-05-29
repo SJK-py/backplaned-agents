@@ -58,6 +58,12 @@ The structured `report` bool is the anti-spam mechanism: a job like "tell me if 
 | C5 | report=true but the channel send fails | the conversation row is still appended (user sees it next open); log the send failure |
 | C6 | cron fires mid-conversation | the **apply** op serializes with the user's turns — the reminder interleaves correctly |
 
-## 6. v2 — channel-agnostic routing
+## 6. Channel-agnostic routing
 
-"Non-chatbot session → notify via the default channel" only matters once `webapp` exists. If the resolved session's `channel ≠` the channel that can reach the user now, the scheduler sends a "your scheduled task ran in {channel}" nudge via the user's **default reachable** channel. For v1 (Telegram-only) every session is Telegram-sendable, so this is moot — but it's why the scheduler should become channel-agnostic in v2: **fire → resolve the user's reachable channel → route**.
+The **assistant result row is the canonical record** — it's appended to the target session's history (the apply step, §2) regardless of which channel, if any, can deliver a live notification. Live delivery is the channel-specific part:
+
+- **Target session is Telegram-reachable** (`channel=chatbot_telegram`, has `chat_id`) → the scheduler sends the full result (text + files) to that chat, as before.
+- **Target session is NOT live-reachable by the scheduler** (a `webapp` or released session — no Telegram `chat_id`) → the result is already persisted there; the scheduler routes a **pointer nudge** ("⏰ A scheduled task just ran in your web app. Open it to see the result.") to the user's **Telegram** mapping (`list_platform_mappings_for_user(user_id, platform="telegram")`), so they know to open the session. The nudge carries no content — the full result lives in the webapp thread.
+- **No out-of-band channel** (webapp session, user has no Telegram mapping) → the persisted row is the record; the user sees it on their next webapp visit. Nothing is sent (no crash, no spurious delivery).
+
+This is **fire → persist → resolve the user's reachable channel → route the nudge**. The scheduler still runs in the chatbot process and holds the Telegram client; Telegram is currently the only channel with out-of-band push (the webapp delivers via SSE only while a tab is open), so it's the nudge carrier. A future webapp push primitive (notification table / web-push) would slot in as an additional reachable channel without changing this split.

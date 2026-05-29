@@ -156,7 +156,9 @@ class CronScheduler:
             out_files = []
 
         if reported and (message or out_files):
-            # Apply step — serialized with the user's turns ([cron.md] §2).
+            # Apply step — serialized with the user's turns ([cron.md] §2). The
+            # assistant row is the canonical record; it lands regardless of
+            # which channel (if any) can deliver a live notification.
             async with self._session_lock(session_id):
                 async with self._pool.acquire() as conn:
                     if message:
@@ -166,6 +168,8 @@ class CronScheduler:
                         )
                     info = await queries.get_session_info(conn, session_id)
             if self._telegram is not None and info and info.chat_id:
+                # The target session is itself Telegram-reachable — deliver
+                # the full result there.
                 if message:
                     try:
                         await self._telegram.send_message(chat_id=info.chat_id, text=message)
@@ -178,6 +182,13 @@ class CronScheduler:
                         chat_id=info.chat_id, user_id=job.user_id,
                         session_id=session_id, name=name,
                     )
+            else:
+                # The target session isn't live-reachable by this scheduler
+                # (a webapp / released session, no Telegram chat_id). The
+                # result is already persisted there; route a pointer nudge to
+                # the user's reachable channel so they know to open it
+                # ([cron.md] §6, channel-agnostic routing).
+                await self._nudge_unreachable(job, session_id, info)
 
         async with self._pool.acquire() as conn:
             await queries.record_cron_execution(
@@ -187,6 +198,33 @@ class CronScheduler:
             )
             if job.execute_until is not None and now >= job.execute_until:
                 await queries.deactivate_cron_job(conn, job.cron_id)
+
+    async def _nudge_unreachable(
+        self, job: CronJobRow, session_id: str, info: Any
+    ) -> None:
+        """Channel-agnostic fallback ([cron.md] §6): the cron's result landed
+        in a session this scheduler can't deliver to live (e.g. a webapp
+        session — no Telegram `chat_id`). Send a pointer to the user's
+        Telegram chat so they know to open the session; the full result is
+        already persisted there. Best-effort — a user with no Telegram
+        mapping simply sees it on their next visit (the row is the record)."""
+        if self._telegram is None:
+            return
+        async with self._pool.acquire() as conn:
+            mappings = await queries.list_platform_mappings_for_user(
+                conn, user_id=job.user_id, platform="telegram"
+            )
+        if not mappings:
+            return  # no out-of-band channel — the persisted row is the record
+        where = "your web app" if info and info.channel == "webapp" else "another session"
+        nudge = f"⏰ A scheduled task just ran in {where}. Open it to see the result."
+        for m in mappings:
+            try:
+                await self._telegram.send_message(chat_id=m.chat_id, text=nudge)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "cron_nudge_failed", extra={"event": "cron_nudge_failed"}
+                )
 
 
 def _effective_report(policy: str, llm_report: bool) -> bool:
