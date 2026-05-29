@@ -358,6 +358,29 @@ class ChatbotGateway:
         if self._credentials is None:
             await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
             return
+        # Retire the previous conversation: close it on the router (archive)
+        # and release its channel-origin flag so the webapp can reopen/remove
+        # it ([webapp.md] §4). Best-effort — a failure here must not block
+        # starting the new conversation.
+        prev_session = None
+        async with self._pool.acquire() as conn:
+            cfg = await queries.get_user_config(conn, user_id)
+            prev_session = cfg.default_session_id if cfg else None
+        if prev_session is not None:
+            try:
+                await self._credentials.close_session(
+                    user_id=user_id, session_id=prev_session
+                )
+                async with self._pool.acquire() as conn:
+                    await queries.update_session_info(
+                        conn, prev_session, channel=None
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "new_close_prev_failed",
+                    extra={"event": "new_close_prev_failed"},
+                )
+
         new_session = await self._credentials.open_session(
             user_id=user_id,
             metadata={"kind": CHANNEL, "external_id": chat_id},

@@ -223,13 +223,13 @@ def test_remove_session_purges_router_and_suite(suite_db_url: str) -> None:
                 async with pool.acquire() as conn:
                     info = await queries.get_session_info(conn, "ses_1")
                     jobs = await queries.list_cron_jobs(conn, user_id="usr_a")
-            return r.status_code, r.headers.get("HX-Redirect"), up.deleted, info, len(jobs)
+            return r.status_code, r.headers.get("HX-Trigger"), up.deleted, info, len(jobs)
         finally:
             await pool.close()
 
-    status, redirect, deleted, info, n_jobs = asyncio.run(_drive())
+    status, trigger, deleted, info, n_jobs = asyncio.run(_drive())
     assert status == 204
-    assert redirect == "/"
+    assert trigger == "sessionsChanged"  # refreshes the sidebar / list in place
     assert deleted == [("ses_1", True)]  # purge
     assert info is None and n_jobs == 0  # suite rows reclaimed
 
@@ -270,7 +270,9 @@ def test_session_list_shows_new_and_action_buttons(suite_db_url: str) -> None:
             await _seed(pool)
             up = _Upstream(sessions=[
                 {"session_id": "ses_1", "opened_at": "2026-05-01T00:00:00Z",
-                 "closed_at": None},
+                 "closed_at": None},  # open
+                {"session_id": "ses_2", "opened_at": "2026-05-01T00:00:00Z",
+                 "closed_at": "2026-05-02T00:00:00Z"},  # closed
             ])
             app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
@@ -284,6 +286,11 @@ def test_session_list_shows_new_and_action_buttons(suite_db_url: str) -> None:
 
     html = asyncio.run(_drive())
     assert 'hx-post="/sessions"' in html  # New session
+    # Open row → Close, but Remove is closed-only now.
     assert 'hx-post="/sessions/ses_1/close"' in html
-    assert 'hx-post="/sessions/ses_1/remove"' in html
+    assert 'hx-post="/sessions/ses_1/remove"' not in html
+    # Closed row → Reopen + Remove (not Close).
+    assert 'hx-post="/sessions/ses_2/reopen"' in html
+    assert 'hx-post="/sessions/ses_2/remove"' in html
+    assert 'hx-post="/sessions/ses_2/close"' not in html
     assert "hx-confirm" in html  # remove is confirmed (irreversible)

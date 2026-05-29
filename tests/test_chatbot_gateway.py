@@ -432,3 +432,55 @@ def test_delegate_switch_folds_old_then_seeds_new(suite_db_url: str) -> None:
             await pool.close()
 
     asyncio.run(_drive())
+
+
+class _FakeCreds:
+    """Minimal ChannelCredentials for the `/new` lifecycle: open returns a
+    fresh id, close records the (user, session) pair."""
+
+    def __init__(self, *, new_session: str = "ses_2") -> None:
+        self._new = new_session
+        self.opened: list[str] = []
+        self.closed: list[tuple[str, str]] = []
+
+    async def open_session(self, *, user_id, metadata=None) -> str:
+        self.opened.append(user_id)
+        return self._new
+
+    async def close_session(self, *, user_id, session_id) -> None:
+        self.closed.append((user_id, session_id))
+
+
+def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
+    """`/new` archives the prior session on the router AND clears its
+    channel-origin flag so the webapp can reopen/remove it, then opens +
+    points default at the fresh session."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)  # default_session_id = ses_1 (chatbot_telegram)
+            creds = _FakeCreds(new_session="ses_2")
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=_FakeTelegram(), credentials=creds,
+            )
+
+            await gw.handle_update("tg1", "/new")
+
+            # Previous session closed on the router.
+            assert creds.closed == [("usr_a", "ses_1")]
+            assert creds.opened == ["usr_a"]
+            async with pool.acquire() as conn:
+                prev = await queries.get_session_info(conn, "ses_1")
+                new = await queries.get_session_info(conn, "ses_2")
+                cfg = await queries.get_user_config(conn, "usr_a")
+            # Released: prev row kept (history intact) but channel cleared.
+            assert prev is not None and prev.channel is None
+            # New session tracked + made default.
+            assert new is not None and new.channel == "chatbot_telegram"
+            assert cfg.default_session_id == "ses_2"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())

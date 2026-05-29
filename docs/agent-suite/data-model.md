@@ -13,7 +13,7 @@
 | --- | --- | --- |
 | `session_id` | text PK | router session id |
 | `user_id` | text, indexed | end-user (FK-ish to the router's user) |
-| `channel` | enum(`chatbot_telegram`,`webapp`) | |
+| `channel` | enum(`chatbot_telegram`,`webapp`) **null** | origin channel; **NULL = released** — the chatbot clears it on `/new` close so the web app can reopen/remove the session ([webapp.md](./webapp.md) §4) |
 | `chat_id` | text null | channel-native id for outbound sends |
 | `delegated_to` | text null | active delegate `agent_id`; channel-maintained ([delegation.md](./delegation.md)) |
 | `history_summary` | text null | rolling summary of the orchestrator thread |
