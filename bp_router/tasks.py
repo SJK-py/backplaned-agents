@@ -1221,7 +1221,7 @@ async def complete_task(
             ),
             await_ack=False,
         )
-    except AgentNotConnected:
+    except (AgentNotConnected, asyncio.QueueFull):
         logger.info(
             "caller_offline_result_dropped",
             extra={
@@ -1394,7 +1394,7 @@ async def cancel_task(
                 ),
                 await_ack=False,
             )
-        except AgentNotConnected:
+        except (AgentNotConnected, asyncio.QueueFull):
             logger.info(
                 "caller_offline_cancel_result_dropped",
                 extra={
@@ -1416,7 +1416,7 @@ async def cancel_task(
                 ),
                 await_ack=False,
             )
-        except AgentNotConnected:
+        except (AgentNotConnected, asyncio.QueueFull):
             pass
 
     return cancelled
@@ -1621,7 +1621,7 @@ async def fail_task(
                 ),
                 await_ack=False,
             )
-        except AgentNotConnected:
+        except (AgentNotConnected, asyncio.QueueFull):
             pass
         # CancelFrame to the executor doing the work so it stops.
         try:
@@ -1637,7 +1637,7 @@ async def fail_task(
                 ),
                 await_ack=False,
             )
-        except AgentNotConnected:
+        except (AgentNotConnected, asyncio.QueueFull):
             pass
 
     if parent_row_data["parent_task_id"] is None:
@@ -1672,7 +1672,7 @@ async def fail_task(
             ),
             await_ack=False,
         )
-    except AgentNotConnected:
+    except (AgentNotConnected, asyncio.QueueFull):
         pass
 
 
