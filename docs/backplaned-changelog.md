@@ -20,6 +20,30 @@
 
 ## 2026-05-29
 
+### Added — agent reset to `pending` (`POST /v1/admin/agents/{id}/reset`)
+
+- **What:** A new admin endpoint moves a registered agent (`active` /
+  `suspended`) back to `pending` so it can **re-onboard** with a fresh
+  invitation (`bp_router/api/admin.py::reset_agent` +
+  `queries.reset_agent_to_pending`). Idempotent on `pending`; refuses
+  `removed` (eviction stays terminal); force-closes any live socket + fails
+  in-flight tasks; audits `agent.reset`.
+- **Why:** an agent whose persisted credentials are lost (e.g. an ephemeral
+  state dir wiped on reboot) is *registered* but can't resume, and a fresh
+  `POST /v1/onboard` returns `409 already registered` — previously
+  unrecoverable without a full router DB reset (there's no de-register path;
+  `evict` is terminal). Reset re-opens onboarding's existing `pending` path
+  (keeps the row, re-mints a service principal's refresh token, issues a
+  fresh agent JWT).
+- **Shape:** **Added** — new admin surface; no change to existing flows. The
+  `agent_id` is **not** freed for arbitrary reuse: re-onboard still requires
+  an admin-issued invitation, and `removed` agents remain irreversibly
+  retired. The `agents.status` enum (`active|suspended|pending|removed`) is
+  unchanged — no migration.
+- **Verified:** `tests/test_agent_reset.py` — query transitions against the
+  live schema (active/suspended → pending; pending/removed untouched) + the
+  endpoint contract (status guards, `agent.reset` audit, in-flight fail).
+
 ### Added — session reopen (`POST /v1/sessions/{id}/reopen`)
 
 - **What:** A new router endpoint clears `closed_at` so a previously closed

@@ -1575,6 +1575,21 @@ async def evict_agent(conn: asyncpg.Connection, agent_id: str) -> None:
     )
 
 
+async def reset_agent_to_pending(conn: asyncpg.Connection, agent_id: str) -> bool:
+    """Move an `active` or `suspended` agent back to `pending` so it can
+    re-onboard with a fresh invitation (recovery for lost credentials — the
+    row is registered but the agent can't resume, and a fresh onboard would
+    409). The status guard never resurrects a `removed` (terminal) row nor
+    touches an already-`pending` one. Returns True iff a row was transitioned."""
+    row = await conn.fetchrow(
+        "UPDATE agents SET status = 'pending' "
+        "WHERE agent_id = $1 AND status IN ('active', 'suspended') "
+        "RETURNING agent_id",
+        agent_id,
+    )
+    return row is not None
+
+
 async def task_has_ancestor_with_agent(
     conn: asyncpg.Connection,
     *,
