@@ -1,0 +1,58 @@
+{% if unavailable %}
+  <div class="rounded-md border border-dashed border-brand-500/20 bg-white p-8 text-center text-sm text-brand-500">
+    Start a conversation first — memory management needs an open session.
+  </div>
+{% elif items %}
+  <div class="overflow-x-auto rounded-md border border-brand-500/10 bg-white shadow-sm">
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-left text-xs uppercase tracking-wide text-brand-500">
+        <tr>
+          <th class="px-4 py-2 font-medium">Fact</th>
+          <th class="px-4 py-2 font-medium">Kind</th>
+          <th class="px-4 py-2 font-medium">{% if queried %}Score{% else %}Last used{% endif %}</th>
+          <th class="px-4 py-2 font-medium text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for item in items %}
+        <tr class="hover:bg-brand-50/60">
+          <td class="px-4 py-2 text-brand-800">{{ item.fact }}</td>
+          <td class="px-4 py-2">
+            <span class="rounded bg-brand-500/10 px-2 py-0.5 text-xs text-brand-500">{{ item.kind.replace("_", " ") }}</span>
+          </td>
+          <td class="px-4 py-2 text-xs text-brand-500">
+            {% if queried %}{{ "%.3f"|format(item.score or 0) }}{% else %}{{ item.last_used_at[:10] }}{% endif %}
+          </td>
+          <td class="px-4 py-2 text-right">
+            <form hx-post="/memory/delete" hx-confirm="Delete this memory?" class="inline">
+              <input type="hidden" name="uid" value="{{ item.uid }}" />
+              <button class="rounded border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50">
+                Delete
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="mt-3 flex items-center justify-between text-sm">
+    <span class="text-brand-500">{{ total }} total</span>
+    <div class="flex gap-2">
+      {% if has_prev %}
+        <button hx-get="/memory/list?query={{ query|urlencode }}&kind={{ kind|urlencode }}&page={{ page - 1 }}"
+                hx-target="#mem-items"
+                class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">Prev</button>
+      {% endif %}
+      {% if has_next %}
+        <button hx-get="/memory/list?query={{ query|urlencode }}&kind={{ kind|urlencode }}&page={{ page + 1 }}"
+                hx-target="#mem-items"
+                class="rounded border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-50">Next</button>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="rounded-md border border-dashed border-brand-500/20 bg-white p-8 text-center text-sm text-brand-500">
+    {% if queried %}No matching memories.{% else %}No memories yet.{% endif %}
+  </div>
+{% endif %}

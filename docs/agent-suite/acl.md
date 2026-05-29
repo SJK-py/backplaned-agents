@@ -43,7 +43,7 @@ allow * l1/*                    -> channel/*               # delegated agent →
 
 # Memory (recall vs write)
 allow * */assistant.*           -> l3/memory.retrieval     # assistant agents recall mid-loop
-allow * channel/*               -> l3/memory.add           # channel fire-and-forget add after a turn
+allow * channel/*               -> l3/memory.add           # channel add after a turn + webapp Memory page
 
 # Summarization
 allow * channel/*               -> l3/summarize.history    # channel (session manager) fires the summarizer
@@ -54,7 +54,7 @@ allow * channel/*               -> l2/user.config          # webapp config UI (v
 
 # Infra + converters
 allow * */computer.*            -> infra/computer.*        # computer_use → sandbox
-allow * */database.*            -> l3/database.*           # research → knowledge_base
+allow * */database.*            -> l3/database.*           # research + webapp KB page → knowledge_base
 allow * */document.*            -> */document.*            # knowledge_base / research → md_converter (file→md)
 allow * */web.fetch             -> */web.convert           # research webpage → md_converter
 ```
@@ -73,7 +73,7 @@ allow * */web.fetch             -> */web.convert           # research webpage �
 | `channel/* -> l3/summarize.history` | the channel (session manager) triggers rolling summarization |
 | `l0/* -> l2/user.config` | the orchestrator applies conversational config changes |
 | `*/computer.* -> infra/computer.*` | computer_use → sandbox |
-| `*/database.* -> l3/database.*` | research → knowledge_base |
+| `*/database.* -> l3/database.*` | research **and the webapp KB page** → knowledge_base (the webapp carries `database.*`, so no broad channel grant is needed) |
 | `*/document.* -> */document.*` | knowledge_base (store conversion) and research (`document.convert`) → md_converter |
 | `*/web.fetch -> */web.convert` | research's `html_fetch` → `md_converter.webpage` |
 
@@ -90,4 +90,5 @@ deny  tier0  */*  ->  @deep_reasoning      # free tier can't reach deep_reasonin
 - `research`: `database.search` → `database.retrieval`; **+** `document.convert`.
 - `knowledge_base`: group `infra` → **`l3`** (so the callee pattern is `l3/database.*`).
 - `chatbot` / `webapp`: **+** `session.management` (they are the session managers).
+- `webapp`: **+** `database.retrieval` / `database.manage` (KB page reaches `knowledge_base` via `*/database.* -> l3/database.*`) **+** `memory.retrieval` / `memory.add` (Memory page; memory itself is reached via `channel/* -> memory.add`). Capability-scoped so the chatbot — also `channel` — gains no KB access.
 - `orchestrator`: **−** `session.management` (keeps `session.history`).

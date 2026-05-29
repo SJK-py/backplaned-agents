@@ -22,9 +22,12 @@ from bp_agents.agents.knowledge_base.agent import (
     KbRemove,
     KbRetrieve,
     KbStore,
+    run_kb_browse,
+    run_kb_delete,
     run_kb_modify,
 )
 from bp_agents.agents.knowledge_base.chunking import chunk_markdown
+from bp_agents.common.payloads import KbBrowse, KbDelete
 from bp_agents.lance import connect
 from bp_agents.lance.knowledge import KnowledgeStore
 from bp_agents.settings import SuiteSettings
@@ -224,3 +227,77 @@ def test_kb_store_converts_non_text(tmp_path) -> None:
         assert "Report" in listed.content
 
     asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# Webapp Knowledge base page modes — browse / delete
+# ---------------------------------------------------------------------------
+
+
+async def _seed_docs(store) -> None:
+    for title, coll, tags in [
+        ("Cats 101", "pets", ["cat"]),
+        ("Dogs 101", "pets", ["dog"]),
+        ("Paris guide", "travel", ["fr"]),
+    ]:
+        await store.store_document(
+            collection=coll, title=title, tags=tags, description="d",
+            sha256=title, source_name=f"{title}.md",
+            chunks=[(0, title, _kw_vec(title))],
+        )
+
+
+def test_kb_browse_filters_and_fields(tmp_path) -> None:
+    async def _drive() -> tuple[dict, dict, dict]:
+        store = KnowledgeStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_docs(store)
+        ctx = _StubCtx("usr_a", None, _StubLlm())
+        allout = await run_kb_browse(ctx, KbBrowse(), settings=_settings(), store=store)
+        pets = await run_kb_browse(
+            ctx, KbBrowse(collection="pets"), settings=_settings(), store=store
+        )
+        titled = await run_kb_browse(
+            ctx, KbBrowse(query="paris"), settings=_settings(), store=store
+        )
+        return (json.loads(allout.content), json.loads(pets.content),
+                json.loads(titled.content))
+
+    allres, pets, titled = asyncio.run(_drive())
+    assert allres["total"] == 3
+    assert {i["title"] for i in pets["items"]} == {"Cats 101", "Dogs 101"}
+    assert [i["title"] for i in titled["items"]] == ["Paris guide"]
+    first = allres["items"][0]
+    assert {"doc_id", "title", "collection", "tags", "updated_at"} <= set(first)
+
+
+def test_kb_browse_paging_caps_at_50(tmp_path) -> None:
+    async def _drive() -> int:
+        store = KnowledgeStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        for i in range(55):
+            await store.store_document(
+                collection="c", title=f"doc {i}", tags=[], description="",
+                sha256=f"s{i}", source_name=f"{i}.md",
+                chunks=[(0, f"doc {i}", _kw_vec("x"))],
+            )
+        out = await run_kb_browse(
+            _StubCtx("usr_a", None, _StubLlm()), KbBrowse(start=0, end=999),
+            settings=_settings(), store=store,
+        )
+        return len(json.loads(out.content)["items"])
+
+    assert asyncio.run(_drive()) == 50
+
+
+def test_kb_delete_removes_by_title(tmp_path) -> None:
+    async def _drive() -> tuple[dict, int]:
+        store = KnowledgeStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_docs(store)
+        out = await run_kb_delete(
+            _StubCtx("usr_a", None, _StubLlm()),
+            KbDelete(title="Dogs 101", collection="pets"),
+            settings=_settings(), store=store,
+        )
+        return json.loads(out.content), len(await store.list_documents())
+
+    res, remaining = asyncio.run(_drive())
+    assert res["deleted"] == 1 and remaining == 2

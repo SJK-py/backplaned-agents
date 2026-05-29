@@ -64,6 +64,27 @@
   update-propagation as "enhancement, safe to skip"; phases 1–2 (the facts
   + edges that matter) are robust.
 
+## Webapp Memory / Knowledge base pages
+
+- **lean — the pages ride a carrier session** (`webapp/pages/_common.py::
+  carrier_session`). Memory/KB are per-**user**, but root-task admit requires
+  an **open** session, so a management query rides the user's
+  `default_session_id` (or the newest open session); with **none open** the
+  pane shows an empty state instead of dispatching.
+  *Why:* **bounded-scope** — avoids a router admit change for a session-less
+  "management" task class. A session-less management capability is the fuller
+  fix (router-side), deferred.
+- **lean — Memory `list` query mode scores the hybrid pool, not all facts**
+  (`memory/agent.py::run_memory_list`). Deep pagination past
+  `memory_retrieve_pool` returns empty for a query.
+  *Why:* **bounded-scope** — browse, not exhaustive recall; scoring every
+  fact would embed the whole graph per page.
+- **note — KB-page reach is capability-scoped, not a new rule.** The webapp
+  carries `database.*`, so the existing `*/database.* → l3/database.*` rule
+  covers the KB page (no broad `channel/* → database` grant; the chatbot can't
+  reach the KB). This takes effect when the webapp re-registers its `AgentInfo`
+  (handshake) — no ACL change to re-apply. Memory rides `channel/* → memory.add`.
+
 ## Cron / channel files
 
 - **deferred — cron C4 fallback** (`cron.py::_resolve_session`): open a

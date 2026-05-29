@@ -33,3 +33,56 @@ class MemRetrieve(BaseModel):
     query: str
     count: int = 3
     child_count: int = 2
+
+
+# -- webapp Memory page (tool:false management modes) -----------------------
+
+# A single request returns at most this many items (the page paginates).
+MAX_PAGE = 50
+
+
+class MemList(BaseModel):
+    """memory `list` — browse facts for the Memory page. No query → newest
+    first (by `last_used_at`); with query → ranked by the retrieval formula."""
+
+    query: str | None = None
+    kind: str | None = None
+    start: int = 0
+    end: int = MAX_PAGE
+
+
+class MemDelete(BaseModel):
+    """memory `delete` — remove one fact by uid."""
+
+    uid: str
+
+
+class MemManualAdd(BaseModel):
+    """memory `manual_add` — store a user-authored fact, bypassing phase-1
+    extraction (kind overrides the reconcile default)."""
+
+    fact: str
+    kind: str = "personal_info"
+
+
+# -- webapp Knowledge base page (tool:false management modes) ---------------
+
+
+class KbBrowse(BaseModel):
+    """knowledge_base `browse` — list documents for the KB page, newest
+    first, with optional title-substring / collection / tag filters."""
+
+    query: str | None = None
+    collection: str | None = None
+    tag: str | None = None
+    start: int = 0
+    end: int = MAX_PAGE
+
+
+class KbDelete(BaseModel):
+    """knowledge_base `delete` — remove a document by title (+ collection to
+    disambiguate duplicate titles across collections)."""
+
+    title: str
+    collection: str | None = None
+

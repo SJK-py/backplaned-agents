@@ -147,6 +147,30 @@ deterministic path, [delegation.md §6 (b)]). A persistent **status badge**
 ("Talking to: Research Agent" / "Main assistant") from
 `session_info.delegated_to`.
 
+**Memory pane** (`/memory`) and **Knowledge base pane** (`/knowledge`) —
+unlike config/cron (suite-DB forms), memory and the KB live in **per-user
+LanceDB owned by their agents**, so these panes **dispatch to the agent** and
+render the JSON `AgentOutput` (new `tool:false` modes: `memory.list/delete/
+manual_add`, `knowledge_base.browse/delete`). The dispatch goes through a
+generic `ChannelCore.call_agent(dest, mode, payload)`. Since memory/KB are
+per-**user** but root-task admit needs an **open** session, the page rides a
+**carrier session** — `carrier_session()` picks the user's
+`default_session_id` if open, else the newest open session; with none open the
+pane shows an empty state ("Start a conversation…"). Reaching these agents is
+**capability-scoped**: the webapp agent carries `database.*` (KB, via the
+existing `*/database.* → l3/database.*` rule) and `memory.*` (memory, reached
+via the `channel/* → l3/memory.add` rule it already holds) — so the chatbot,
+also `channel`, gains no KB access ([acl.md](./acl.md) §3, §6). ACL is
+**agent-level**, so reaching an agent authorizes all of its modes.
+
+- **Memory** — paged, filterable by `kind`, searchable. No query → newest
+  first (`last_used_at`); query → ranked by the retrieval formula. A **manual
+  add** form (fact + kind) bypasses extraction but still reconciles; a
+  **delete** per row (by `uid`). Mutations fire `memoryChanged` to refresh.
+- **Knowledge base** — paged, recency-sorted, filterable by title query /
+  collection / tag; **delete** per row (by title + collection). Documents are
+  added via chat / file upload, not here. Mutations fire `knowledgeChanged`.
+
 ## 5. Decision 2 — config & cron as structured forms (chosen)
 
 The webapp is a suite process with the `bp_suite` pool, so the **panes are

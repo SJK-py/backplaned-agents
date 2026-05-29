@@ -122,6 +122,21 @@ class ChannelCore:
             task_id, timeout_s=self._result_timeout_s, on_progress=on_progress,
         )
 
+    async def call_agent(
+        self, *, user_id: str, session_id: str, dest: str, mode: str, payload: Any
+    ) -> Any:
+        """One-shot management dispatch to `dest` (e.g. the Memory / Knowledge
+        pages querying their per-user store), returning the terminal result.
+        No progress stream, no history write, no summarization. `session_id`
+        is only the admit carrier — the target agent works per-user. Returns
+        the `ResultFrame`; the caller reads JSON from `output.content`."""
+        task_id = await self._dispatcher.spawn_root_for_user(
+            dest, payload, user_id=user_id, session_id=session_id, mode=mode,
+        )
+        return await self._dispatcher.await_root_result(
+            task_id, timeout_s=self._result_timeout_s,
+        )
+
     # -- post-turn: delegated_to maintenance + summarization ------------
 
     async def after_result(self, session_id: str, dest: str, result: Any) -> int | None:
