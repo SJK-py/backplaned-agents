@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from bp_agents.channel import ChannelCore
+    from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,13 @@ def create_app(
     upstream: UpstreamClient,
     pool: asyncpg.Pool | None = None,
     core: ChannelCore | None = None,
+    suite_settings: SuiteSettings | None = None,
 ) -> FastAPI:
     """Build the webapp. `upstream` (router HTTP, user-token) is required;
     `pool` (suite DB) and `core` (the channel engine; required for the chat
-    pane to inject turns) are optional so tests can build a read-only app."""
+    pane to inject turns) are optional so tests can build a read-only app.
+    `suite_settings` supplies the per-tier preset allow-lists for the config
+    form; when omitted, the LLM-tier fields stay system-managed (hidden)."""
     app = FastAPI(
         title="bp_webapp",
         version="0.1.0",
@@ -88,6 +92,7 @@ def create_app(
     app.state.upstream = upstream
     app.state.pool = pool
     app.state.core = core
+    app.state.suite_settings = suite_settings
     # turn_id → pending {session_id, user_id, text}; handed off from the
     # POST that records a turn to the SSE GET that streams it. Bounded so a
     # tab that never opens the stream can't grow it without limit.

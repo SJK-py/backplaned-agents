@@ -66,6 +66,19 @@ class SuiteSettings(BaseSettings):
     seeded `default` chat preset; embeddings default to `default_embedding`
     (a real embedding model — `default` is chat-only and can't embed)."""
 
+    selectable_presets_pro: list[str] = []
+    selectable_presets_balanced: list[str] = []
+    selectable_presets_lite: list[str] = []
+    """Preset names a user may self-select for each chat tier (deep_reasoning
+    / orchestrator+research / lite helpers), via the config agent or the
+    webapp settings form. EMPTY (the default) means that tier's preset is
+    system-managed and NOT user-editable — preserving the prior behaviour.
+    Populate per tier to opt in, e.g.
+    `SUITE_SELECTABLE_PRESETS_BALANCED='["default","claude"]'`. Only list
+    presets the router has actually seeded and that suit your users' level —
+    the router still enforces each preset's `min_user_level` at call time as
+    a backstop. Embeddings stay system-managed (not exposed)."""
+
     # ------------------------------------------------------------------
     # chatbot channel (Telegram)
     # ------------------------------------------------------------------

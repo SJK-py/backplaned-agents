@@ -36,7 +36,7 @@ class _Upstream:
         pass
 
 
-def _build_app(*, pool):
+def _build_app(*, pool, suite_settings=None):
     pytest.importorskip("fastapi")
     pytest.importorskip("itsdangerous")
     pytest.importorskip("jinja2")
@@ -46,7 +46,10 @@ def _build_app(*, pool):
     from bp_agents.agents.webapp.config import WebappConfig  # noqa: PLC0415
 
     cfg = WebappConfig(session_secret=SecretStr("x" * 32), session_cookie_secure=False)
-    return create_app(cfg, upstream=_Upstream(), pool=pool, core=None)
+    return create_app(
+        cfg, upstream=_Upstream(), pool=pool, core=None,
+        suite_settings=suite_settings,
+    )
 
 
 async def _seed(pool) -> None:
@@ -90,6 +93,37 @@ def test_config_edit_coercion_and_rejection() -> None:
         coerce_config_value("preset_pro", "x")  # not user-editable
 
 
+def test_preset_fields_are_tier_gated() -> None:
+    """A preset/tier field is editable only when the operator opts in with a
+    non-empty allow-list, and only to a value in that list."""
+    from bp_agents.config_edit import (  # noqa: PLC0415
+        editable_fields,
+        preset_choices_from_settings,
+    )
+
+    # Off by default: empty allow-lists → preset fields not editable.
+    empty = preset_choices_from_settings(SuiteSettings())
+    assert "preset_balanced" not in editable_fields(empty)
+    with pytest.raises(ConfigError):
+        coerce_config_value("preset_balanced", "claude", preset_choices=empty)
+
+    # Opted in via settings: the tier becomes editable, gated to the list.
+    choices = preset_choices_from_settings(
+        SuiteSettings(selectable_presets_balanced=["default", "claude"])
+    )
+    assert "preset_balanced" in editable_fields(choices)
+    assert (
+        coerce_config_value("preset_balanced", "claude", preset_choices=choices)
+        == "claude"
+    )
+    # A name outside the allow-list is rejected, even though it's a real tier.
+    with pytest.raises(ConfigError):
+        coerce_config_value("preset_balanced", "gpt", preset_choices=choices)
+    # Other tiers stay closed unless they too have a list.
+    with pytest.raises(ConfigError):
+        coerce_config_value("preset_pro", "default", preset_choices=choices)
+
+
 def test_config_agent_uses_shared_editable_fields() -> None:
     """The config agent must source its editable set + coercion from
     config_edit, so the NL path and the form can't drift."""
@@ -101,7 +135,7 @@ def test_config_agent_uses_shared_editable_fields() -> None:
     # importlib returns the real module (the package __init__ rebinds the
     # `agent` attribute to the Agent instance, shadowing the submodule).
     src = inspect.getsource(importlib.import_module("bp_agents.agents.config.agent"))
-    assert "coerce_config_value" in src and "EDITABLE_FIELDS" in src
+    assert "coerce_config_value" in src and "editable_fields" in src
     assert "max_context_token_limit" in EDITABLE_FIELDS
 
 
@@ -172,6 +206,53 @@ def test_config_save_persists_via_shared_validation(suite_db_url: str) -> None:
     assert cfg.max_context_token_limit == 9000
     assert cfg.verbose_default is True
     assert cfg.custom_note == "be concise"
+
+
+def test_config_preset_select_renders_and_persists(suite_db_url: str) -> None:
+    """With an opted-in tier allow-list, the form renders a <select> and a
+    POST persists a value in the list; a disallowed value is rejected."""
+    pytest.importorskip("fastapi")
+
+    settings = SuiteSettings(selectable_presets_balanced=["default", "claude"])
+
+    async def _drive() -> object:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            app = _build_app(pool=pool, suite_settings=settings)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                page = await client.get("/config")
+                assert 'name="preset_balanced"' in page.text
+                assert "preset_pro" not in page.text  # tier not opted in
+
+                token = await _csrf(client, "/config")
+                ok = await client.post(
+                    "/config",
+                    data={"csrf_token": token, "preset_balanced": "claude"},
+                    follow_redirects=False,
+                )
+                assert ok.status_code == 303, ok.text[:300]
+
+                # A name outside the allow-list is rejected (400, not saved).
+                token = await _csrf(client, "/config")
+                bad = await client.post(
+                    "/config",
+                    data={"csrf_token": token, "preset_balanced": "gpt"},
+                    follow_redirects=False,
+                )
+                assert bad.status_code == 400, bad.text[:300]
+
+                async with pool.acquire() as conn:
+                    cfg = await queries.get_user_config(conn, "usr_a")
+            return cfg
+        finally:
+            await pool.close()
+
+    cfg = asyncio.run(_drive())
+    assert cfg.preset_balanced == "claude"
 
 
 def test_config_save_unchecked_checkbox_is_false(suite_db_url: str) -> None:
