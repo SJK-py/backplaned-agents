@@ -1437,8 +1437,19 @@ async def fail_task(
     error: dict[str, Any] | None = None,
     actor_agent_id: str | None = None,
     conn: Any | None = None,
+    terminal_state: TaskState = TaskState.FAILED,
 ) -> None:
-    """Transition a task to FAILED and propagate a Result to the parent.
+    """Transition a task to a non-terminal-failure state (`FAILED` by
+    default, or `TIMED_OUT` for the deadline sweep) and propagate a
+    matching Result to the parent.
+
+    `terminal_state` MUST be `FAILED` or `TIMED_OUT` — the two
+    router-initiated failure terminals. It drives BOTH the task's own
+    state change and the `status` on the parent fan-out Result, so a
+    deadline-expired task is reported `timed_out` (not `failed`) to its
+    caller, in audit, and on idempotent replay. The descendant subtree
+    is cascade-CANCELLED regardless (the children are abandoned either
+    way).
 
     `conn` is an optional caller-held DB connection. When provided,
     `fail_task` reuses it for both the transition transaction AND
@@ -1476,7 +1487,7 @@ async def fail_task(
                 await task_transition(
                     c,
                     task_id,
-                    TaskState.FAILED,
+                    terminal_state,
                     reason=reason,
                     actor_agent_id=actor_agent_id,
                     status_code=status_code,
@@ -1666,7 +1677,7 @@ async def fail_task(
                 span_id="0" * 16,
                 task_id=task_id,
                 parent_task_id=parent_row_data["parent_task_id"],
-                status=TaskStatus.FAILED,
+                status=_STATUS_FROM_STATE[terminal_state],
                 status_code=status_code,
                 error=error or {"code": reason},
             ),
@@ -1816,6 +1827,7 @@ async def _sweep_once(state: AppState) -> int:
                     reason="deadline_exceeded",
                     error={"code": "deadline_exceeded"},
                     conn=conn,
+                    terminal_state=TaskState.TIMED_OUT,
                 )
                 timed_out += 1
             except Exception:  # noqa: BLE001
