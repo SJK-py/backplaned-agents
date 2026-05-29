@@ -62,6 +62,20 @@ _poll_task: asyncio.Task | None = None
 _approval_task: asyncio.Task | None = None
 _cron_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
+
+
+def _on_update_done(task: asyncio.Task) -> None:
+    """Done-callback for a per-message `handle_update` task: drop it from the
+    in-flight set and surface any exception as a structured log instead of an
+    unretrieved-task warning (the handler is fire-and-forget, so nothing else
+    awaits it)."""
+    _inflight.discard(task)
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error(
+            "handle_update_failed",
+            extra={"event": "handle_update_failed"},
+            exc_info=exc,
+        )
 _stop = asyncio.Event()
 
 
@@ -185,7 +199,7 @@ async def _poll_loop(
                 )
             )
             _inflight.add(task)
-            task.add_done_callback(_inflight.discard)
+            task.add_done_callback(_on_update_done)
 
 
 if __name__ == "__main__":
