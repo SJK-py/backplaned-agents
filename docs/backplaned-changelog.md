@@ -27,9 +27,10 @@
   tombstone** (`deleted_<id>_<epoch>`) and renames the co-located service
   principal (`usr_service_<id>`) the same way — so the original `agent_id`
   (and a channel agent's service-user id) is freed for a brand-new agent to
-  onboard. History is preserved: a new migration (`0002_fk_on_update_cascade`)
-  adds `ON UPDATE CASCADE` to all 15 FKs referencing `agents(agent_id)` /
-  `users(user_id)`, so dependent `tasks` rows follow the rename instead of
+  onboard. History is preserved: the consolidated `0001_initial_schema`
+  baseline declares `ON UPDATE CASCADE` on all 15 FKs referencing
+  `agents(agent_id)` / `users(user_id)`, so dependent `tasks` rows follow
+  the rename instead of
   blocking it. New query `rename_evicted_agent` / helper `tombstone_agent_id`
   (CHECK/64-char-safe). Audited as `agent.id_released`. Endpoint response
   gains `tombstone_agent_id` + `id_released`.
