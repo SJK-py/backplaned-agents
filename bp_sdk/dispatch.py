@@ -108,6 +108,10 @@ class Dispatcher:
         )
         self._active: dict[str, _ActiveTask] = {}
         self._loops: list[asyncio.Task] = []
+        # Set during graceful shutdown: stop ADMITTING new tasks, but keep
+        # the recv loop running so in-flight handlers still receive the
+        # Ack/Result/LlmResult frames they're awaiting and can finish.
+        self._draining: bool = False
         # correlation_id → asyncio.Queue used by streaming LLM calls.
         # Keyed on the LlmRequest.correlation_id; LlmDelta frames are
         # pushed in arrival order and the terminal LlmResult is pushed
@@ -166,20 +170,30 @@ class Dispatcher:
         stop_task = asyncio.create_task(stop_event.wait())
         recv_death: BaseException | None = None
         try:
-            done, pending = await asyncio.wait(
+            done, _pending = await asyncio.wait(
                 [recv_loop, stop_task], return_when=asyncio.FIRST_COMPLETED
             )
-            for t in pending:
-                t.cancel()
-            # asyncio.wait swallows a completed task's exception —
-            # capture the recv loop's so a permanently-dead
-            # transport surfaces as a non-zero exit (HIGH-1) instead
-            # of an indistinguishable clean return. recv_loop is in
-            # `done` only if it finished on its own (we cancel
-            # `pending`, not `done`), so `.exception()` won't raise.
-            if recv_loop in done and not recv_loop.cancelled():
+            # Stop admitting NEW tasks for the rest of shutdown, but DON'T
+            # cancel the recv loop yet (the finally does that). Keeping it
+            # alive through the drain is the whole point: in-flight handlers
+            # blocked on `await ctx.llm.generate(...)` / `ctx.peers.spawn(...)`
+            # still need the recv loop to dispatch the Ack/Result/LlmResult
+            # frames that unblock them. Cancelling it before the drain (the
+            # old behaviour) starved every mid-call handler, so all of them
+            # hit the hard-cancel deadline instead of finishing cooperatively.
+            self._draining = True
+            stop_task.cancel()  # done waiting on the stop signal either way
+            recv_alive = recv_loop not in done
+            # asyncio.wait swallows a completed task's exception — capture the
+            # recv loop's so a permanently-dead transport surfaces as a
+            # non-zero exit (HIGH-1) instead of an indistinguishable clean
+            # return. recv_loop is in `done` only if it finished on its own.
+            if not recv_alive and not recv_loop.cancelled():
                 recv_death = recv_loop.exception()
-            await self._drain_in_flight(grace_s=30.0)
+            # A dead transport can deliver none of the awaited frames, so
+            # don't burn the full grace window waiting for them — trip + reap
+            # promptly. A live transport gets the full cooperative grace.
+            await self._drain_in_flight(grace_s=30.0 if recv_alive else 0.0)
         finally:
             # Unconditional teardown — runs on clean stop AND on recv
             # death. Pre-fix only `self._loops` (recv loop) was
@@ -395,6 +409,22 @@ class Dispatcher:
     # ------------------------------------------------------------------
 
     async def _handle_new_task(self, frame: NewTaskFrame) -> None:
+        # During graceful shutdown we keep dispatching frames (so in-flight
+        # handlers can finish) but refuse to ADMIT new work — otherwise a
+        # task admitted at the drain boundary would be hard-cancelled at the
+        # deadline before it could make progress. Reject so the caller
+        # re-routes immediately instead of waiting on its spawn timeout.
+        if self._draining:
+            await self.transport.send(AckFrame(
+                agent_id=self.agent.info.agent_id,
+                trace_id=frame.trace_id,
+                span_id=frame.span_id,
+                ref_correlation_id=frame.correlation_id,
+                accepted=False,
+                reason="agent_shutting_down",
+            ))
+            return
+
         # Acknowledge admission immediately; the handler runs in the
         # background and emits a Result frame on completion.
         ack = AckFrame(
