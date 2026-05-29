@@ -158,6 +158,36 @@ async def unsuspend_agent(request: Request, agent_id: str) -> Response:
     )
 
 
+@router.post("/{agent_id}/reprovision", response_class=HTMLResponse)
+async def reprovision_agent(request: Request, agent_id: str) -> Response:
+    """Reset the agent to pending + mint a fresh invitation, then reveal the
+    one-time token so the operator can restart the stuck agent with it."""
+    try:
+        body = await upstream(request).admin_request(
+            "POST",
+            f"/agents/{agent_id}/reprovision",
+            access_token=access_token(request),
+        )
+    except UpstreamError as exc:
+        return redirect_with_flash(
+            request, f"/admin/agents/{agent_id}", detail_message(exc)
+        )
+
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "agents/reprovisioned.html",
+        {
+            "active_section": "agents",
+            "agent_id": agent_id,
+            "invitation_token": body["invitation_token"],
+            "expires_at": body["expires_at"],
+            "failed_tasks": body.get("failed_tasks", 0),
+            "provisions_service_user": body.get("provisions_service_user", False),
+        },
+    )
+
+
 @router.post("/{agent_id}/evict", response_class=HTMLResponse)
 async def evict_agent(
     request: Request,

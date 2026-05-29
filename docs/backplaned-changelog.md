@@ -20,6 +20,26 @@
 
 ## 2026-05-29
 
+### Added — one-click agent reprovision (admin webUI + router endpoint)
+
+- **What:** a **Reset & reprovision** button on the admin agent-detail page
+  (`bp_admin`) and a new `POST /v1/admin/agents/{id}/reprovision` endpoint
+  (`bp_router`). It atomically resets the agent to `pending`, mints a fresh
+  invitation (7-day TTL), drops the live socket + fails in-flight tasks, and
+  reveals the one-time token so the operator can restart the agent with it.
+  `provisions_service_user` is **auto-detected** from whether the agent's
+  co-located service principal (`usr_service_{id}`) exists, so a channel
+  agent's service refresh token is re-minted on re-onboard. Refuses `removed`
+  (terminal).
+- **Why:** recovers an agent that can't reconnect on its own — e.g. its agent
+  JWT expired after >24h downtime, or its state dir was wiped — without hand-
+  running SQL + the invitation-mint flow. The button is offered for
+  active/suspended/pending agents.
+- **Shape:** **Added** — new endpoint + BFF route + `reprovisioned.html`
+  reveal template; reuses `reset_agent_to_pending` / `insert_invitation`.
+  Audited as `agent.reprovision`.
+
+
 ### Added — generic `lite` / `pro` tier-slot presets in the catalogue
 
 - **What:** added two presets to `bp_router/llm/presets_catalog.jsonc` —

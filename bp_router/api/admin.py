@@ -20,7 +20,11 @@ from bp_router.acl import (
     is_valid_rule_user_level,
 )
 from bp_router.db import queries
-from bp_router.principals import SERVICE_USER_ID_PREFIX, is_valid_level
+from bp_router.principals import (
+    SERVICE_USER_ID_PREFIX,
+    is_valid_level,
+    service_user_id_for_agent,
+)
 from bp_router.quota import (
     BUCKET_PASSWORD_RESET_MINT,
     BUCKET_SERVICE_MINT_REFRESH_TOKEN,
@@ -231,6 +235,26 @@ class IssueInvitationRequest(BaseModel):
 class InvitationCreated(BaseModel):
     invitation_token: str
     expires_at: datetime
+
+
+# TTL for a reprovision invitation. 7 days gives an operator a comfortable
+# window to restart the stuck agent after clicking the button (the conventional
+# agent invite — `IssueInvitationRequest` — defaults to 24h; recovery wants
+# more slack since a human is in the loop).
+_REPROVISION_INVITATION_TTL_S = 7 * 86_400
+
+
+class AgentReprovisioned(BaseModel):
+    """Result of resetting an agent to `pending` AND minting a fresh
+    invitation it can re-onboard with. `invitation_token` is the plaintext
+    token — shown ONCE, never retrievable again."""
+
+    agent_id: str
+    status: str
+    failed_tasks: int
+    invitation_token: str
+    expires_at: datetime
+    provisions_service_user: bool
 
 
 @router.post("/invitations", response_model=InvitationCreated, status_code=201)
@@ -2061,6 +2085,102 @@ async def reset_agent(
     failed = await fail_inflight_for_agent(state, agent_id, reason="agent_reset")
     await push_catalog_update_to_all(state)
     return {"agent_id": agent_id, "status": "pending", "failed_tasks": failed}
+
+
+@router.post(
+    "/agents/{agent_id}/reprovision",
+    response_model=AgentReprovisioned,
+    status_code=202,
+)
+async def reprovision_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> AgentReprovisioned:
+    """Reset an agent to `pending` AND mint a fresh invitation in one step,
+    so an operator can recover a stuck agent (e.g. one whose token expired
+    after >24h downtime, or whose state dir was wiped) with a single click.
+
+    Mirrors the original provisioning so the agent reconnects unchanged:
+    `provisions_service_user` is set iff the agent has a co-located service
+    principal (`usr_service_{agent_id}`) — restoring a channel agent's
+    service refresh token on re-onboard. The invitation is issued at
+    `tier1` (the conventional agent level; level is invitation metadata and
+    does not propagate onto the agent).
+
+    Refuses `removed` (eviction is terminal). The returned
+    `invitation_token` is plaintext, shown ONCE.
+    """
+    state = request.app.state.bp
+    token = _secrets.token_urlsafe(32)
+    expires_at = _now() + timedelta(seconds=_REPROVISION_INVITATION_TTL_S)
+
+    async with state.db_pool.acquire() as conn:
+        agent = await queries.get_agent(conn, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        if agent.status == "removed":
+            raise HTTPException(
+                status_code=409,
+                detail="evicted agents are terminal and cannot be reprovisioned",
+            )
+        # Mirror the original provisioning: a co-located service principal
+        # means this was a channel agent — the fresh invitation must re-mint
+        # its service refresh token on re-onboard, or it reconnects without
+        # its service identity.
+        svc_id = service_user_id_for_agent(agent_id)
+        provisions_service_user = (
+            await queries.get_user_by_id(conn, svc_id)
+        ) is not None
+
+        # Atomic: reset (if needed) + mint invitation + audit. All-or-nothing
+        # so we never ship a live invitation whose creation isn't audited,
+        # nor reset an agent without giving it a way back in.
+        async with conn.transaction():
+            if agent.status != "pending":
+                await queries.reset_agent_to_pending(conn, agent_id)
+            await queries.insert_invitation(
+                conn,
+                token_hash=_hash(token),
+                level="tier1",
+                expires_at=expires_at,
+                created_by=principal.user_id,
+                idempotency_key=None,
+                provisions_service_user=provisions_service_user,
+            )
+            await queries.append_audit_event(
+                conn,
+                actor_kind="admin",
+                actor_id=principal.user_id,
+                event="agent.reprovision",
+                target_kind="agent",
+                target_id=agent_id,
+                payload={"provisions_service_user": provisions_service_user},
+            )
+
+    # Drop any live socket + fail in-flight tasks — the agent is now pending
+    # and must re-onboard with the fresh invitation before serving again.
+    entry = state.socket_registry.get(agent_id)
+    if entry is not None:
+        try:
+            await entry.websocket.close(code=4003, reason="agent_reprovision")
+        except Exception:  # noqa: BLE001
+            pass
+        entry.closed.set()
+
+    from bp_router.catalog import push_catalog_update_to_all  # noqa: PLC0415
+    from bp_router.tasks import fail_inflight_for_agent  # noqa: PLC0415
+
+    failed = await fail_inflight_for_agent(state, agent_id, reason="agent_reprovision")
+    await push_catalog_update_to_all(state)
+    return AgentReprovisioned(
+        agent_id=agent_id,
+        status="pending",
+        failed_tasks=failed,
+        invitation_token=token,
+        expires_at=expires_at,
+        provisions_service_user=provisions_service_user,
+    )
 
 
 @router.post("/agents/{agent_id}/evict", status_code=202)
