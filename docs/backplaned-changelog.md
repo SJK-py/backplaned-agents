@@ -20,6 +20,30 @@
 
 ## 2026-05-29
 
+### Changed — eviction frees the agent_id for reuse (tombstone rename)
+
+- **What:** `POST /v1/admin/agents/{id}/evict` now, after marking the agent
+  `removed` and failing its in-flight tasks, **renames the row's PK to a
+  tombstone** (`deleted_<id>_<epoch>`) and renames the co-located service
+  principal (`usr_service_<id>`) the same way — so the original `agent_id`
+  (and a channel agent's service-user id) is freed for a brand-new agent to
+  onboard. History is preserved: a new migration (`0002_fk_on_update_cascade`)
+  adds `ON UPDATE CASCADE` to all 15 FKs referencing `agents(agent_id)` /
+  `users(user_id)`, so dependent `tasks` rows follow the rename instead of
+  blocking it. New query `rename_evicted_agent` / helper `tombstone_agent_id`
+  (CHECK/64-char-safe). Audited as `agent.id_released`. Endpoint response
+  gains `tombstone_agent_id` + `id_released`.
+- **Why:** previously a `removed` row squatted on the `agent_id` forever (PK
+  uniqueness + onboard's `≠ pending` 409), so the only way to reuse an id was
+  manual SQL. Reuse still requires a fresh admin invitation, so it stays
+  deliberate and audited — never silent.
+- **Shape:** **Changed** — `agents.status` enum and the soft-delete (row
+  preserved) are unchanged; the row's *id* is now tombstoned rather than left
+  on the live name. Migration is constraint-redefinition only (no data
+  change). The `reset`/`reprovision`/`unsuspend` "refuse removed" guards are
+  unaffected (a tombstone is queried by its new id).
+
+
 ### Added — one-click agent reprovision (admin webUI + router endpoint)
 
 - **What:** a **Reset & reprovision** button on the admin agent-detail page

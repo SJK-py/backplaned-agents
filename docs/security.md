@@ -226,7 +226,15 @@ checked by a single helper used by every read path.
   invitation — recovery for an agent whose persisted credentials were lost
   (registered row, but a fresh onboard would `409`). Re-onboard still
   requires an admin invitation, so the `agent_id` is never freed for silent
-  reuse; `removed` (evicted) agents are terminal and refused.
+  reuse.
+- **Evict** (`POST /v1/admin/agents/{id}/evict`) retires an agent and
+  **frees its `agent_id`**: the `removed` row's PK is renamed to a tombstone
+  (`deleted_<id>_<epoch>`, with its co-located service principal renamed the
+  same way), and `tasks`/`audit` history is preserved under the tombstone via
+  FK `ON UPDATE CASCADE`. The freed id is re-onboardable, but only with a
+  fresh admin invitation — so reuse is deliberate and audited
+  (`agent.id_released`), never silent. The evicted instance itself is
+  terminal and never serves again.
 - Mass revocation (e.g. signing key rotation) is supported by
   bumping a global `key_version` and rejecting JWTs signed against
   earlier versions.

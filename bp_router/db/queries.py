@@ -1575,6 +1575,60 @@ async def evict_agent(conn: asyncpg.Connection, agent_id: str) -> None:
     )
 
 
+# Tombstone name: `deleted_<id>_<epoch>`, kept inside the agents.agent_id
+# CHECK (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$` — ≤64 chars, underscore/dash only,
+# no `.`/`:`). The original id is truncated if needed so the suffix always
+# fits; the row is preserved (history intact), only the PK is freed for reuse.
+_TOMBSTONE_MAX = 64
+
+
+def tombstone_agent_id(agent_id: str, *, epoch: int) -> str:
+    suffix = f"_{epoch}"
+    head = f"deleted_{agent_id}"
+    return f"{head[: _TOMBSTONE_MAX - len(suffix)]}{suffix}"
+
+
+async def rename_evicted_agent(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    *,
+    epoch: int,
+    service_user_id: str | None = None,
+) -> tuple[str, str | None]:
+    """Free an evicted `agent_id` for reuse by renaming the `removed` row's
+    PK to a tombstone (`deleted_<id>_<epoch>`). FK `ON UPDATE CASCADE`
+    (migration 0002) rewrites every dependent `tasks` row, so history is
+    preserved under the tombstone id. When `service_user_id` is supplied and
+    that co-located service principal exists, it is renamed the same way (its
+    user FKs cascade too) so a CHANNEL agent's id is reusable as well.
+
+    Returns `(new_agent_id, new_service_user_id_or_None)`. Run inside a
+    transaction AFTER failing in-flight tasks (which key off the old
+    `agent_id`). Only renames a `removed` row; a no-op otherwise."""
+    new_agent_id = tombstone_agent_id(agent_id, epoch=epoch)
+    row = await conn.fetchrow(
+        "UPDATE agents SET agent_id = $2 "
+        "WHERE agent_id = $1 AND status = 'removed' "
+        "RETURNING agent_id",
+        agent_id, new_agent_id,
+    )
+    if row is None:
+        return (agent_id, None)
+
+    new_svc_id: str | None = None
+    if service_user_id is not None:
+        candidate = tombstone_agent_id(service_user_id, epoch=epoch)
+        svc_row = await conn.fetchrow(
+            "UPDATE users SET user_id = $2 "
+            "WHERE user_id = $1 AND level = 'service' "
+            "RETURNING user_id",
+            service_user_id, candidate,
+        )
+        if svc_row is not None:
+            new_svc_id = candidate
+    return (new_agent_id, new_svc_id)
+
+
 async def reset_agent_to_pending(conn: asyncpg.Connection, agent_id: str) -> bool:
     """Move an `active` or `suspended` agent back to `pending` so it can
     re-onboard with a fresh invitation (recovery for lost credentials — the

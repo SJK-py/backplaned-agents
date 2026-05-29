@@ -325,7 +325,7 @@ no catalog churn under network flaps.
 | `pending`   | no          | reject (not active) | no         | (reserved — unused) | manual                                    |
 | `active`    | yes         | accept              | yes        | onboarding / unsuspend | suspend / evict                        |
 | `suspended` | no          | reject              | no         | admin suspend       | admin unsuspend                           |
-| `removed`   | no          | reject              | no         | admin evict         | terminal — `agent_id` cannot be re-onboarded |
+| `removed`   | no          | reject              | no         | admin evict         | terminal for that agent; the `agent_id` is freed for a NEW agent |
 
 Admin endpoints driving the transitions:
 `POST /v1/admin/agents/{id}/suspend` (active → suspended),
@@ -334,11 +334,17 @@ Admin endpoints driving the transitions:
 All three push a `CatalogUpdate` to remaining peers and emit
 `agent.{suspended,unsuspended,evicted}` audit events.
 
-`removed` is the eviction sentinel. The row is preserved so foreign
-keys from `tasks` and `audit_log` remain valid; admins who truly
-need to reuse an `agent_id` after eviction must touch the database
-directly. Re-onboarding with an `agent_id` whose row exists with
-status `≠ 'pending'` returns HTTP 409.
+`removed` is the eviction sentinel — terminal for *that agent instance*
+(it never serves again). Eviction **renames the row's PK to a tombstone**
+(`deleted_<id>_<epoch>`), and the co-located service principal
+(`usr_service_<id>`) the same way, so the original `agent_id` is **freed for
+a brand-new agent to onboard**. The row and all its `tasks`/`audit` history
+are preserved under the tombstone id via FK `ON UPDATE CASCADE` (migration
+`0002_fk_on_update_cascade`); an `agent.id_released` audit event records the
+mapping. The freed id is reusable only via a fresh admin invitation
+(onboarding still requires one), so it is never *silently* re-pointed.
+Re-onboarding with an `agent_id` whose row exists with status `≠ 'pending'`
+returns HTTP 409.
 
 ## 10. AgentInfo identity
 
