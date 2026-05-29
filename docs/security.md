@@ -170,14 +170,18 @@ soft-deleted or non-service row already holding the reserved name.
 ### 3.3 Optional agent identity (asymmetric)
 
 For higher-assurance deployments, agents may register with an
-ed25519 public key. On `Hello`, the agent signs a server-issued
-challenge with its private key. This raises the bar from
-"compromised JWT" to "compromised host key."
+ed25519 public key at onboarding (POST `/v1/onboard` carries the
+public key, which the router stores on the agent row).
 
-Agent identity registration happens at onboarding (POST
-`/v1/onboard` carries the public key). Loss of the key requires
-admin re-issuance; the router does not support self-service key
-rotation for now.
+> **Status — not yet enforced.** The public key is *stored* but the
+> router does **not** currently issue a `Hello` challenge or verify a
+> signature; the WS handshake authenticates by JWT alone. The
+> challenge/response that would raise the bar from "compromised JWT"
+> to "compromised host key" is scaffolding for a future release —
+> don't rely on it as a control today.
+
+Loss of the key requires admin re-issuance; the router does not
+support self-service key rotation for now.
 
 ## 4. Authorization
 

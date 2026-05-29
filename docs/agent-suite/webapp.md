@@ -2,7 +2,9 @@
 
 > A browser channel alongside the Telegram bot: log in, manage sessions,
 > chat with live progress, configure settings/cron, delegate to specialists,
-> and manage the file stash. This is a **design**; status is *planned*. It
+> and manage the file stash. **Status: shipped** (v1) — implemented in
+> `bp_agents/agents/webapp/` and run as a first-class suite service. (This
+> doc began as the design and still reads as the rationale of record.) It
 > builds on the channel machinery in [`channel.md`](./channel.md),
 > [`delegation.md`](./delegation.md), [`sessions.md`](./sessions.md), and the
 > distributed session lock ([`sessions.md` §4](./sessions.md)).

@@ -17,8 +17,9 @@
 - **Topology:** **one external SDK process per agent**, each connecting to
   the router over WS — matches the gateway/agent model in the docs and gives
   clean isolation + independent restart. A dev launcher starts them all.
-- **Scope:** **v1** = the full roster except `webapp`. Single channel
-  (Telegram); cron scheduler + routing live in the chatbot.
+- **Scope:** **v1** = the full roster, including both channels (`chatbot`
+  Telegram + `webapp` browser). The cron scheduler + routing live in the
+  chatbot; cron result delivery is channel-agnostic ([cron.md §6](./cron.md)).
 
 ### Platform prerequisites — confirmed present
 

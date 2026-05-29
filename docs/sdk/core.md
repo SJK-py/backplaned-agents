@@ -165,9 +165,9 @@ to override programmatically. Every field maps to `AGENT_<FIELD>`:
 | `AGENT_STATE_DIR` | path | `./agent_state` | Where `credentials.json` (0600) is persisted. |
 | `AGENT_ONBOARD_URL` | str | — | Override the onboarding HTTP endpoint. |
 | `AGENT_EMBEDDED` | bool | `false` | Run in-process inside the router (no WS / onboarding). |
-| `AGENT_PENDING_RESULTS_TIMEOUT_S` | float | `60.0` | Cap on awaiting a peer/LLM result. |
+| `AGENT_PENDING_RESULTS_TIMEOUT_S` | float | `480.0` | Cap on awaiting a peer/LLM result (also the default `SpawnStream.result()` / `await_root_result` bound). |
 | `AGENT_PENDING_ACKS_TIMEOUT_S` | float | `30.0` | Cap on awaiting a frame ack. |
-| `AGENT_PROGRESS_BUFFER_SIZE` | int | `256` | Outbound queue depth before progress coalescing. |
+| `AGENT_PROGRESS_BUFFER_SIZE` | int | `256` | Max depth of the agent's outbound frame queue (governs ALL outbound frames, not just progress). |
 | `AGENT_RECONNECT_INITIAL_BACKOFF_S` | float | `0.5` | First reconnect backoff. |
 | `AGENT_RECONNECT_MAX_BACKOFF_S` | float | `30.0` | Reconnect backoff ceiling. |
 | `AGENT_RECV_CONSECUTIVE_FAILURES_MAX` | int | `16` | Consecutive recv failures before the agent gives up (→ non-zero exit, §8). |

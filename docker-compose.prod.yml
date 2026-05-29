@@ -1,10 +1,10 @@
 # Backplaned production topology (skeleton).
 #
-# Brings up the PLATFORM this repo owns: edge proxy, router (+ a one-shot
-# `migrate`), Postgres (router + suite DBs), Redis, and rustfs (S3). The
-# AGENT SUITE (chatbot, sandbox, orchestrator/l1, stores, helpers,
-# searxng) lives in the suite repo — its service shapes are at the bottom
-# as the wire-up CONTRACT; add them from there once those images exist.
+# Brings up the full stack from THIS monorepo: edge proxy, router (+ a
+# one-shot `migrate`), Postgres (router + suite DBs), Redis, rustfs (S3),
+# and the AGENT SUITE (chatbot, webapp, sandbox, orchestrator/l1, stores,
+# helpers, searxng) — all defined below and built from this repo's
+# Dockerfile / Dockerfile.suite. See docs/agent-suite/deployment.md.
 #
 # Secrets: this skeleton reads ${VARS} from a `.env` file for brevity.
 # For real deploys use Docker/host secrets (never a committed .env), and
@@ -152,10 +152,9 @@ services:
   # agent via $SUITE_AGENT and onboards with its OWN admin-issued
   # invitation (the chatbot's flagged `provisions_service_user`). NONE
   # hold provider / S3 / JWT secrets — they call ctx.llm and the router's
-  # file endpoints. The suite schema is applied once by `suite-migrate`.
-  # Apply the ACL rule set once after first boot:
-  #   docker compose run --rm -e ... suite-acl
-  # See docs/agent-suite/deployment.md.
+  # file endpoints. The suite schema is applied once by `suite-migrate`,
+  # and the suite ACL rule set is applied by the `bootstrap` one-shot
+  # (no separate `suite-acl` service). See docs/agent-suite/deployment.md.
   # ======================================================================
 
   suite-migrate:                   # one-shot: apply the suite DB schema

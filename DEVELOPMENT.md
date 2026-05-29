@@ -63,14 +63,15 @@ missing, that's a misconfiguration:
 | `acl_rules_loaded` | Bootstrap ACL rows present (3 from migration 0001) |
 | `admin_console_agent_ensured` | Synthetic `admin_console` agent inserted |
 | `bootstrap_admin_created` (or `_exists`) | First-admin seeding fired (only when env vars set) |
-| `llm_presets_seeded count=27` (first boot) or `llm_presets_loaded count=27` | LLM presets table populated |
+| `llm_presets_seeded count=34` (first boot) or `llm_presets_loaded count=34` | LLM presets table populated (count = the seeded `presets_catalog.jsonc` size) |
 | `router_started` | Lifespan complete |
 | `Application startup complete.` | uvicorn ready to serve |
 
 ## Smoke tests
 
-The repo's CI runs three categories of admin-side smoke test. If
-you change anything in `bp_admin/`, run at least these three:
+There are three categories of admin-side smoke test. (Automated CI is
+not yet configured — run these locally; if you change anything in
+`bp_admin/`, run at least these three:)
 
 ```bash
 pytest tests/test_admin_smoke.py            # standalone bp-admin
