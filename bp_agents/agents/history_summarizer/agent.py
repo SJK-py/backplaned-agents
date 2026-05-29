@@ -51,6 +51,31 @@ class SummarizeAll(BaseModel):
     """When set, only rows with `id > summarize_after` are summarized."""
 
 
+class NameSession(BaseModel):
+    user_prompt: str
+    """The first user message; the title is generated from it."""
+
+
+_NAME_SYSTEM = """\
+You name conversations. Given the user's first message, reply with a short, \
+specific title (3–6 words) that captures the topic — like a chat sidebar \
+label. No quotes, no trailing punctuation, no preamble. Output only the \
+title.\
+"""
+
+# A generated title is a UI label, not prose — keep it short and single-line.
+_NAME_MAX_LEN = 60
+
+
+def _clean_title(raw: str) -> str:
+    """First line, stripped of surrounding quotes/whitespace, length-capped."""
+    title = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    title = title.strip("\"'“”").strip()
+    if len(title) > _NAME_MAX_LEN:
+        title = title[:_NAME_MAX_LEN].rstrip()
+    return title
+
+
 agent = Agent(
     info=AgentInfo(
         agent_id=HISTORY_SUMMARIZER_AGENT_ID,
@@ -143,6 +168,34 @@ async def run_summarize_all(
     return await _summarize(
         ctx, rows=rows, previous_summary=None, pool=pool, settings=settings
     )
+
+
+async def run_name_session(
+    ctx: TaskContext,
+    payload: NameSession,
+    *,
+    pool: asyncpg.Pool,
+    settings: SuiteSettings,
+) -> AgentOutput:
+    async with pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, ctx.user_id)
+    preset = cfg.preset_lite if cfg else settings.default_preset_lite
+    messages = [
+        Message(role="system", content=_NAME_SYSTEM),
+        Message(role="user", content=payload.user_prompt),
+    ]
+    resp = await ctx.llm.generate(messages, preset=preset)
+    return text_output(_clean_title(resp.text))
+
+
+@agent.handler(
+    mode="session_name", tool=False,
+    description="Generate a short conversation title from the first user "
+    "message (channel-driven, lite LLM).",
+)
+async def session_name(ctx: TaskContext, payload: NameSession) -> AgentOutput:
+    assert _pool is not None
+    return await run_name_session(ctx, payload, pool=_pool, settings=_settings)
 
 
 @agent.handler(

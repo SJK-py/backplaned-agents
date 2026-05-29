@@ -161,3 +161,71 @@ def test_close_telegram_session_is_blocked(suite_db_url: str) -> None:
     assert web_status == 204
     assert deleted == [("ses_web", False)]
     assert web_trigger == ["sessionsChanged"]
+
+
+def test_rename_sets_name_via_hx_prompt(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, str | None, str | None, int, int]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool, [("ses_web", "webapp")])
+            app = _build_app(upstream=_Upstream(), pool=pool)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client, "/")
+                ok = await client.post(
+                    "/sessions/ses_web/rename",
+                    headers={"X-CSRF-Token": token, "HX-Prompt": "Trip to Japan"},
+                )
+                empty = await client.post(
+                    "/sessions/ses_web/rename",
+                    headers={"X-CSRF-Token": token, "HX-Prompt": "   "},
+                )
+                missing = await client.post(
+                    "/sessions/ses_nope/rename",
+                    headers={"X-CSRF-Token": token, "HX-Prompt": "x"},
+                )
+                async with pool.acquire() as conn:
+                    info = await queries.get_session_info(conn, "ses_web")
+            return (ok.status_code, ok.headers.get("HX-Trigger"),
+                    info.session_name, empty.status_code, missing.status_code)
+        finally:
+            await pool.close()
+
+    status, trigger, name, empty_status, missing_status = asyncio.run(_drive())
+    assert status == 204 and trigger == "sessionsChanged"
+    assert name == "Trip to Japan"
+    assert empty_status == 400   # blank name rejected
+    assert missing_status == 404  # not the caller's session
+
+
+def test_sidebar_shows_session_name_over_id(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> str:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool, [("ses_web", "webapp")])
+            async with pool.acquire() as conn:
+                await queries.update_session_info(
+                    conn, "ses_web", session_name="Weekend trip plan"
+                )
+            up = _Upstream(sessions=[
+                {"session_id": "ses_web", "opened_at": _TS, "closed_at": None},
+            ])
+            app = _build_app(upstream=up, pool=pool)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                return (await client.get("/sidebar/sessions")).text
+        finally:
+            await pool.close()
+
+    html = asyncio.run(_drive())
+    assert "Weekend trip plan" in html  # the friendly title is shown
+    assert 'hx-post="/sessions/ses_web/rename"' in html  # rename available on open
+    assert 'href="/chat/ses_web"' in html  # still links to the chat

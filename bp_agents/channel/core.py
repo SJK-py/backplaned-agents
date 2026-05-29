@@ -75,6 +75,8 @@ class ChannelCore:
         self._session_locks = SessionLockManager(redis)
         # Detached fire-and-forget memory.add tasks (tracked for cleanup).
         self._memory_tasks: set[asyncio.Task] = set()
+        # Detached fire-and-forget session-name tasks (first-turn titling).
+        self._name_tasks: set[asyncio.Task] = set()
 
     @property
     def delegatable_agents(self) -> frozenset[str]:
@@ -321,6 +323,56 @@ class ChannelCore:
             )
 
     # -- memory ----------------------------------------------------------
+
+    def fire_name_session(
+        self, user_id: str, session_id: str, user_prompt: str
+    ) -> None:
+        """Title the conversation from its first message, fire-and-forget,
+        OUTSIDE the session lock. A no-op once the session already has a name,
+        so it effectively runs only on the first turn. Best-effort: a failure
+        leaves the name unset and a later turn retries."""
+        if not user_prompt.strip():
+            return
+        task = asyncio.create_task(
+            self._name_session(user_id, session_id, user_prompt)
+        )
+        self._name_tasks.add(task)
+        task.add_done_callback(self._name_tasks.discard)
+
+    async def _name_session(
+        self, user_id: str, session_id: str, user_prompt: str
+    ) -> None:
+        from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
+            NameSession,
+        )
+
+        try:
+            async with self._pool.acquire() as conn:
+                info = await queries.get_session_info(conn, session_id)
+            if info is None or info.session_name:
+                return  # session gone, or already named — nothing to do
+            task_id = await self._dispatcher.spawn_root_for_user(
+                HISTORY_SUMMARIZER_AGENT_ID,
+                NameSession(user_prompt=user_prompt),
+                user_id=user_id, session_id=session_id, mode="session_name",
+            )
+            result = await self._dispatcher.await_root_result(
+                task_id, timeout_s=self._result_timeout_s,
+            )
+            title = (
+                (result.output.content or "").strip()
+                if result.output is not None else ""
+            )
+            if not title:
+                return
+            async with self._pool.acquire() as conn:
+                await queries.update_session_info(
+                    conn, session_id, session_name=title
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "session_name_failed", extra={"event": "session_name_failed"}
+            )
 
     def fire_memory_add(
         self, user_id: str, session_id: str, user_prompt: str, reply: str

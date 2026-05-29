@@ -565,6 +565,8 @@ class ChatbotGateway:
         # extraction, so it runs OUTSIDE the session lock, fire-and-forget
         # ([overview.md] §2.2). No-op unless `fire_memory` and a real reply.
         self._core.fire_memory_add(user_id, session_id, text, reply)
+        # Title the conversation from its first message (first turn only).
+        self._core.fire_name_session(user_id, session_id, text)
 
     async def _save_inbound_file(
         self, user_id: str, session_id: str, dest: str,

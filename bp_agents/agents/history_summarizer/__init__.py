@@ -10,18 +10,22 @@ summarizer never writes ([sessions.md] §3).
 
 from bp_agents.agents.history_summarizer.agent import (
     HISTORY_SUMMARIZER_AGENT_ID,
+    NameSession,
     SummarizeAll,
     SummarizeIncumbent,
     agent,
+    run_name_session,
     run_summarize_all,
     run_summarize_incumbent,
 )
 
 __all__ = [
     "HISTORY_SUMMARIZER_AGENT_ID",
+    "NameSession",
     "SummarizeAll",
     "SummarizeIncumbent",
     "agent",
+    "run_name_session",
     "run_summarize_all",
     "run_summarize_incumbent",
 ]
