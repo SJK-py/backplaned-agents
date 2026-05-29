@@ -1,0 +1,208 @@
+// bp_router — built-in LLM preset catalogue.
+//
+// Seeded into an empty `llm_presets` table on first startup, and used as the
+// in-memory fallback before the DB load. After the first seed, presets live
+// in the DB and are admin-managed via the webUI — editing this file does NOT
+// retroactively change an already-seeded deployment.
+//
+// This file is JSONC: `//` line comments and `/* ... */` block comments are
+// allowed (and stripped before parsing); trailing commas are NOT. Point a
+// deployment at a different copy via `ROUTER_LLM_PRESET_CATALOG_PATH`.
+//
+// Each entry mirrors the `Preset` dataclass (bp_router/llm/presets.py).
+//   Required: name, provider, concrete_model, api_key_ref
+//   Optional: description, min_user_level (default "*"), default_temperature,
+//             default_max_tokens, default_provider_options, api_key,
+//             base_url, fallback_preset, max_retries
+//
+// NAMING: preset `name` must match ^[a-z][a-z0-9_-]{0,63}$ (the DB CHECK
+// constraint) — so dots are NOT allowed and versions use `-` (e.g.
+// `gemini-2-5-pro`). `concrete_model` is the real upstream identifier the
+// provider SDK sees and KEEPS its dotted form (e.g. `gemini-2.5-pro`).
+//
+// `min_user_level` defaults to "*" (any tier) to preserve no-gate behaviour;
+// tighten per preset via the admin UI (or here, before first seed).
+[
+  // ===================== Gemini family =====================
+  {
+    "name": "default",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.5-flash",
+    "api_key_ref": "env://GEMINI_API_KEY",
+    "description": "Default fast Gemini model. Open to all tiers."
+  },
+  {
+    "name": "default_embedding",
+    "provider": "gemini",
+    "concrete_model": "gemini-embedding-2",
+    "api_key_ref": "env://GEMINI_API_KEY",
+    "description": "Default embedding model (Gemini). Open to all tiers.",
+    "default_provider_options": { "output_dimensionality": 1536 }
+  },
+  {
+    "name": "gemini",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.5-flash",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  {
+    "name": "gemini-2-5-pro",
+    "provider": "gemini",
+    "concrete_model": "gemini-2.5-pro",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  {
+    "name": "gemini-3-5-flash",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.5-flash",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  {
+    "name": "gemini-3-1-flash-lite",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.1-flash-lite",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  {
+    "name": "gemini-3-1-pro",
+    "provider": "gemini",
+    "concrete_model": "gemini-3.1-pro-preview",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
+  // Gemini embeddings ride the same provider adapter — its `embed()` uses
+  // `concrete_model`, so no separate embeddings provider is needed.
+  {
+    "name": "gemini-embedding-2",
+    "provider": "gemini",
+    "concrete_model": "gemini-embedding-2",
+    "api_key_ref": "env://GEMINI_API_KEY",
+    "default_provider_options": { "output_dimensionality": 1536 }
+  },
+
+  // ===================== Anthropic / Claude family =====================
+  {
+    "name": "claude",
+    "provider": "anthropic",
+    "concrete_model": "claude-sonnet-4-6",
+    "api_key_ref": "env://ANTHROPIC_API_KEY",
+    "description": "General-purpose Claude (Sonnet). Open to all tiers."
+  },
+  {
+    "name": "claude-opus",
+    "provider": "anthropic",
+    "concrete_model": "claude-opus-4-7",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  {
+    "name": "claude-opus-4-7",
+    "provider": "anthropic",
+    "concrete_model": "claude-opus-4-7",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  {
+    "name": "claude-sonnet",
+    "provider": "anthropic",
+    "concrete_model": "claude-sonnet-4-6",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  {
+    "name": "claude-sonnet-4-6",
+    "provider": "anthropic",
+    "concrete_model": "claude-sonnet-4-6",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  {
+    "name": "claude-haiku",
+    "provider": "anthropic",
+    "concrete_model": "claude-haiku-4-5",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  {
+    "name": "claude-haiku-4-5",
+    "provider": "anthropic",
+    "concrete_model": "claude-haiku-4-5",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+
+  // ===================== OpenAI / GPT family =====================
+  {
+    "name": "openai",
+    "provider": "openai",
+    "concrete_model": "gpt-5.5",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt",
+    "provider": "openai",
+    "concrete_model": "gpt-5.5",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-5",
+    "provider": "openai",
+    "concrete_model": "gpt-5.5",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-5-pro",
+    "provider": "openai",
+    "concrete_model": "gpt-5.5-pro",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-4",
+    "provider": "openai",
+    "concrete_model": "gpt-5.4",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-4-mini",
+    "provider": "openai",
+    "concrete_model": "gpt-5.4-mini",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-4-nano",
+    "provider": "openai",
+    "concrete_model": "gpt-5.4-nano",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5",
+    "provider": "openai",
+    "concrete_model": "gpt-5",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-mini",
+    "provider": "openai",
+    "concrete_model": "gpt-5-mini",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-5-nano",
+    "provider": "openai",
+    "concrete_model": "gpt-5-nano",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "gpt-4-1",
+    "provider": "openai",
+    "concrete_model": "gpt-4.1",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+
+  // ===================== OpenAI embeddings (separate adapter) =====================
+  {
+    "name": "text-embedding-3-small",
+    "provider": "openai-embeddings",
+    "concrete_model": "text-embedding-3-small",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  {
+    "name": "text-embedding-3-large",
+    "provider": "openai-embeddings",
+    "concrete_model": "text-embedding-3-large",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  }
+]

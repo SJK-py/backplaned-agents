@@ -123,6 +123,7 @@ packages = ["bp_admin", "bp_agents", "bp_protocol", "bp_router", "bp_sdk"]
 artifacts = [
     "bp_admin/templates/**", "bp_admin/static/**",
     "bp_agents/agents/webapp/templates/**", "bp_agents/agents/webapp/static/**",
+    "bp_router/llm/*.jsonc",
 ]
 
 [tool.pytest.ini_options]

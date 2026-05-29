@@ -463,19 +463,22 @@ def test_bug13_default_preset_is_gemini_with_env_keyref() -> None:
       - api_key_ref == "env://GEMINI_API_KEY"
       - concrete_model is a real Gemini model (e.g. 2.5-flash)
     A future seed-loop refactor that renames the default or moves
-    it to a different provider silently breaks the smoke runner."""
-    from bp_router.llm import presets as presets_module
+    it to a different provider silently breaks the smoke runner.
 
-    src = inspect.getsource(presets_module)
-    # The default preset must exist and must be wired to Gemini
-    # via env://GEMINI_API_KEY. The bare-minimum source pin
-    # tolerates dict/list rewrites of the seed loop.
-    assert '"default"' in src or "'default'" in src
-    assert "env://GEMINI_API_KEY" in src, (
+    The seed list lives in the JSONC catalogue now, so this pins the
+    loaded `default` preset rather than the module source text."""
+    from bp_router.llm.presets import default_presets
+
+    by_name = {p.name: p for p in default_presets()}
+    assert "default" in by_name, "the `default` preset was renamed/removed"
+    default = by_name["default"]
+    assert default.provider == "gemini"
+    assert default.api_key_ref == "env://GEMINI_API_KEY", (
         "upstream-bug #13 audit: default preset's `api_key_ref` "
         "is no longer `env://GEMINI_API_KEY` — the test-drive "
         "smoke runner can't resolve the key without it"
     )
+    assert default.concrete_model.startswith("gemini-"), default.concrete_model
 
 
 def test_bug13_token_usage_exposes_thoughts_tokens_field() -> None:
