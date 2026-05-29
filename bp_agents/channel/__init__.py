@@ -19,6 +19,7 @@ from bp_agents.channel.render import (
     UNTAGGED_AGENTS,
     VERBOSE_PREFIX,
     agent_tag,
+    progress_producer,
     render_progress_line,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "ChannelCore",
     "agent_tag",
     "pretty_agent",
+    "progress_producer",
     "render_progress_line",
 ]

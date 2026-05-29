@@ -7,7 +7,7 @@ the channel's verbose `on_progress` renders one message per frame
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
@@ -49,4 +49,37 @@ async def emit_loop_progress(
     lp = LoopProgress(kind=kind, round=round, tool=tool, detail=detail)
     await ctx.progress.emit(
         kind, content=detail or "", **{LOOP_PROGRESS_KEY: lp.model_dump()}
+    )
+
+
+# metadata key carrying the ORIGINAL producing agent_id through forwarding.
+# A forwarded frame's own `agent_id` is the relay (the parent), so the channel
+# reads this to tag the line with the specialist that actually ran the step.
+PROGRESS_PRODUCER_KEY = "progress_producer"
+
+# Subagent progress kinds bubbled up to the user — the *actions*, not the
+# subagent's `thinking` heartbeats (the parent's umbrella `tool_call` already
+# signals "the specialist is working").
+_FORWARDED_KINDS = frozenset({"tool_call", "tool_result"})
+
+
+async def relay_subagent_progress(ctx: TaskContext, child_frame: Any) -> None:
+    """Re-emit a subagent's `ProgressFrame` on the PARENT's task so it bubbles
+    up to the root subscriber (the channel) in verbose mode.
+
+    Forwards only action frames (`tool_call` / `tool_result`); preserves the
+    original producing agent in `metadata[PROGRESS_PRODUCER_KEY]` so the
+    channel tags it (the re-emitted frame's `agent_id` is the relay). The
+    producer is taken from the child's existing marker when present, so the
+    original specialist survives arbitrary nesting. Best-effort — the emit
+    swallows transport errors."""
+    meta = getattr(child_frame, "metadata", None) or {}
+    lp = meta.get(LOOP_PROGRESS_KEY)
+    if not lp or lp.get("kind") not in _FORWARDED_KINDS:
+        return
+    producer = meta.get(PROGRESS_PRODUCER_KEY) or getattr(child_frame, "agent_id", None)
+    await ctx.progress.emit(
+        getattr(child_frame, "event", "") or "tool_call",
+        content=getattr(child_frame, "content", "") or "",
+        **{LOOP_PROGRESS_KEY: lp, PROGRESS_PRODUCER_KEY: producer},
     )

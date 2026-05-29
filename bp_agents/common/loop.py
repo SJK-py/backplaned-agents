@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from bp_agents.common.progress import emit_loop_progress
+from bp_agents.common.progress import emit_loop_progress, relay_subagent_progress
 from bp_agents.common.tools import LocalToolset, peer_tool_specs
 from bp_sdk import (
     LlmCallError,
@@ -37,20 +37,34 @@ async def _dispatch_tool_call(
     local_tools: LocalToolset | None,
     *,
     file_tools_enabled: bool = False,
+    forward_subagent_progress: bool = True,
 ) -> Message:
     """Route one model tool call to a local tool, a file-store tool, or a
     peer agent, and return the tool-response `Message`. A peer-call failure
     is fed back as the result so the model can recover instead of the turn
     dying. A `read_file` call returns a name `file_ref` part that the router
     resolves into multimodal content on the next `generate` ([sessions.md]
-    §2)."""
+    §2).
+
+    When `forward_subagent_progress`, a peer (subagent) call is **streamed**
+    and its action progress is re-emitted on this agent's task, so a verbose
+    user sees the specialist's steps (e.g. `[Research Agent] [Tool]
+    web_search`) bubbling up — not just the umbrella call."""
     if local_tools is not None and local_tools.has(tool_call.name):
         return await local_tools.dispatch(ctx, tool_call)
     if file_tools_enabled and is_file_tool(tool_call.name):
         return await dispatch_file_tool(ctx.files, tool_call)
     if tool_call.name.startswith("call_"):
         try:
-            child = await ctx.peers.spawn_from_tool_call(tool_call)
+            if forward_subagent_progress:
+                async with (
+                    await ctx.peers.spawn_from_tool_call(tool_call, stream=True)
+                ) as stream:
+                    async for child_pf in stream:
+                        await relay_subagent_progress(ctx, child_pf)
+                    child = stream.result()
+            else:
+                child = await ctx.peers.spawn_from_tool_call(tool_call)
         except Exception as exc:  # noqa: BLE001
             return Message.tool_response(
                 tool_call_id=tool_call.id,
@@ -108,6 +122,7 @@ async def run_llm_loop(
     max_tokens: int | None = None,
     max_rounds: int = 8,
     emit_progress: bool = True,
+    forward_subagent_progress: bool = True,
     extra_tools: list[ToolSpec] | None = None,
     terminal_tools: set[str] | None = None,
     file_tools: str | None = None,
@@ -199,7 +214,8 @@ async def run_llm_loop(
                     detail=accompanying,
                 )
             result_msg = await _dispatch_tool_call(
-                ctx, tc, local_tools, file_tools_enabled=bool(file_tools)
+                ctx, tc, local_tools, file_tools_enabled=bool(file_tools),
+                forward_subagent_progress=forward_subagent_progress,
             )
             messages.append(result_msg)
             if emit_progress:

@@ -30,7 +30,12 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from bp_agents.agents.webapp.auth import session_user_id
 from bp_agents.agents.webapp.pages._common import TELEGRAM_CHANNEL
 from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
-from bp_agents.channel import ORCHESTRATOR_AGENT_ID, agent_tag, render_progress_line
+from bp_agents.channel import (
+    ORCHESTRATOR_AGENT_ID,
+    agent_tag,
+    progress_producer,
+    render_progress_line,
+)
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 
@@ -169,7 +174,7 @@ async def chat_stream(
         async def on_progress(pf: Any) -> None:
             lp = (getattr(pf, "metadata", None) or {}).get(LOOP_PROGRESS_KEY)
             if lp:
-                await queue.put(("progress", _row(getattr(pf, "agent_id", None), lp)))
+                await queue.put(("progress", _row(progress_producer(pf), lp)))
 
         async def _run() -> None:
             reply = ""

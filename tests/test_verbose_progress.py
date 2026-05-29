@@ -198,6 +198,27 @@ def test_render_progress_formats() -> None:
     ) == "Handing back to the assistant…"
 
 
+def test_progress_producer_prefers_metadata_then_agent_id() -> None:
+    """A relayed subagent frame is tagged by its original producer
+    (`metadata[PROGRESS_PRODUCER_KEY]`), not the relaying parent's agent_id."""
+    from types import SimpleNamespace
+
+    from bp_agents.channel import agent_tag, progress_producer
+    from bp_agents.common.progress import PROGRESS_PRODUCER_KEY
+
+    # Relayed: agent_id is the orchestrator (relay), producer marker is research.
+    relayed = SimpleNamespace(
+        agent_id="orchestrator", metadata={PROGRESS_PRODUCER_KEY: "research"}
+    )
+    assert progress_producer(relayed) == "research"
+    assert agent_tag(progress_producer(relayed)) == "[Research Agent] "
+
+    # Direct frame (no marker): falls back to agent_id; orchestrator stays untagged.
+    direct = SimpleNamespace(agent_id="orchestrator", metadata={})
+    assert progress_producer(direct) == "orchestrator"
+    assert agent_tag(progress_producer(direct)) == ""
+
+
 def test_typing_indicator_sent_during_turn(suite_db_url: str) -> None:
     """The gateway keeps Telegram's "typing…" action alive while a turn runs."""
     class _TgTyping(_FakeTelegram):
