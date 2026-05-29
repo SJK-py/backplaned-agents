@@ -20,6 +20,7 @@ from bp_agents.channel import (
     VERBOSE_PREFIX,
     ChannelCore,
     agent_tag,
+    progress_producer,
     render_progress_line,
 )
 from bp_agents.common.payloads import MessagePayload
@@ -452,7 +453,7 @@ class ChatbotGateway:
             # marker → (delegate tag, if any) → the rendered line. The tag is
             # per-frame: the orchestrator's own lines stay untagged; a
             # specialist's lines show it holds the session.
-            text = f"{VERBOSE_PREFIX}{agent_tag(pf.agent_id)}{render_progress_line(lp)}"
+            text = f"{VERBOSE_PREFIX}{agent_tag(progress_producer(pf))}{render_progress_line(lp)}"
             await self._telegram.send_message(chat_id=chat_id, text=text)
         return _cb
 

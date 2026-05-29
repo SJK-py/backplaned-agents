@@ -11,6 +11,7 @@ presentation (Telegram message vs HTML row) is the frontend's.
 from __future__ import annotations
 
 from bp_agents.channel.core import ORCHESTRATOR_AGENT_ID, pretty_agent
+from bp_agents.common.progress import PROGRESS_PRODUCER_KEY
 
 # Leads every verbose/progress line so it's visually distinct from the
 # final answer (which carries no marker).
@@ -38,6 +39,15 @@ def agent_tag(agent_id: str | None) -> str:
     if not agent_id or agent_id in UNTAGGED_AGENTS:
         return ""
     return f"[{pretty_agent(agent_id)} Agent] "
+
+
+def progress_producer(pf: object) -> str | None:
+    """The agent that actually produced a progress frame. A subagent's frame
+    relayed up by a parent carries the original producer in
+    `metadata[PROGRESS_PRODUCER_KEY]` (the frame's own `agent_id` is the
+    relay); fall back to `agent_id` for direct frames. Use this for the tag."""
+    meta = getattr(pf, "metadata", None) or {}
+    return meta.get(PROGRESS_PRODUCER_KEY) or getattr(pf, "agent_id", None)
 
 
 def render_progress_line(lp: dict) -> str:

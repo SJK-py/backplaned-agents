@@ -23,9 +23,13 @@ from bp_agents.common import (
     user_config_note,
 )
 from bp_agents.common.loop import _FINAL_ANSWER_NUDGE
-from bp_agents.common.progress import LOOP_PROGRESS_KEY, LoopProgress
+from bp_agents.common.progress import (
+    LOOP_PROGRESS_KEY,
+    PROGRESS_PRODUCER_KEY,
+    LoopProgress,
+)
 from bp_agents.db.models import UserConfigRow
-from bp_protocol.frames import ResultFrame
+from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from bp_sdk import LlmResponse, Message, ToolCall, ToolSpec
 
@@ -52,17 +56,46 @@ class _StubLlm:
         return self._responses.pop(0)
 
 
+class _StubStream:
+    """Minimal SpawnStream: async-iterates canned child frames, then exposes
+    the terminal result; an async context manager like the real one."""
+
+    def __init__(self, frames, result) -> None:
+        self._frames = list(frames)
+        self._result = result
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._frames:
+            return self._frames.pop(0)
+        raise StopAsyncIteration
+
+    def result(self):
+        return self._result
+
+
 class _StubPeers:
-    def __init__(self, *, catalog=None, spawn_result=None) -> None:
+    def __init__(self, *, catalog=None, spawn_result=None, child_frames=None) -> None:
         self._catalog = catalog or {}
         self._spawn_result = spawn_result
+        self._child_frames = child_frames or []
         self.spawned: list[ToolCall] = []
 
     def visible(self, *, for_user_level=None):
         return self._catalog
 
-    async def spawn_from_tool_call(self, tc):
+    async def spawn_from_tool_call(self, tc, *, stream=False, **kw):
         self.spawned.append(tc)
+        if stream:
+            return _StubStream(self._child_frames, self._spawn_result)
         return self._spawn_result
 
 
@@ -297,6 +330,77 @@ def test_run_llm_loop_forces_final_answer_at_round_limit() -> None:
     assert any(
         m.role == "user" and m.content == _FINAL_ANSWER_NUDGE for m in messages
     )
+
+
+def _child_progress(kind: str, tool: str | None, *, producer: str = "research") -> ProgressFrame:
+    lp = LoopProgress(kind=kind, tool=tool).model_dump()
+    return ProgressFrame(
+        agent_id=producer, trace_id="0" * 32, span_id="0" * 16,
+        task_id="tsk_child", event=kind, content="",
+        metadata={LOOP_PROGRESS_KEY: lp},
+    )
+
+
+def test_run_llm_loop_forwards_subagent_action_progress() -> None:
+    """A subagent (peer) call is streamed; its tool_call/tool_result frames
+    are re-emitted on the parent's progress tagged with the real producer,
+    while its `thinking` heartbeats are dropped."""
+    round1 = LlmResponse(
+        text="",
+        tool_calls=[ToolCall(id="c1", name="call_research", args={"prompt": "x"})],
+    )
+    round2 = LlmResponse(text="done", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    peers = _StubPeers(
+        spawn_result=_result_frame("research result"),
+        child_frames=[
+            _child_progress("thinking", None),
+            _child_progress("tool_call", "web_search"),
+            _child_progress("tool_result", "web_search"),
+        ],
+    )
+    progress = _StubProgress()
+    ctx = _StubCtx(llm, peers, progress)
+
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=[Message(role="user", content="go")],
+            preset="default", use_peer_tools=False,
+        )
+    )
+    assert resp.text == "done"
+    assert [tc.name for tc in peers.spawned] == ["call_research"]  # streamed
+    # Forwarded frames carry the producer marker; the parent's own loop frames
+    # don't. Only the subagent's actions are relayed — its thinking is dropped.
+    forwarded = [(e, md) for (e, _c, md) in progress.events if PROGRESS_PRODUCER_KEY in md]
+    assert [e for e, _ in forwarded] == ["tool_call", "tool_result"]
+    assert all(md[PROGRESS_PRODUCER_KEY] == "research" for _e, md in forwarded)
+
+
+def test_run_llm_loop_can_disable_subagent_progress() -> None:
+    """`forward_subagent_progress=False` keeps the old wait-only spawn (no
+    streaming, no relayed frames)."""
+    round1 = LlmResponse(
+        text="",
+        tool_calls=[ToolCall(id="c1", name="call_research", args={})],
+    )
+    llm = _StubLlm([round1, LlmResponse(text="done", tool_calls=[])])
+    peers = _StubPeers(
+        spawn_result=_result_frame("r"),
+        child_frames=[_child_progress("tool_call", "web_search")],
+    )
+    progress = _StubProgress()
+    ctx = _StubCtx(llm, peers, progress)
+    asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=[Message(role="user", content="go")],
+            preset="default", use_peer_tools=False,
+            forward_subagent_progress=False,
+        )
+    )
+    assert not any(PROGRESS_PRODUCER_KEY in md for (_e, _c, md) in progress.events)
 
 
 def test_run_llm_loop_emits_progress_for_terminal_tool() -> None:
