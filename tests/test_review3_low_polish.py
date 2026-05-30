@@ -210,12 +210,16 @@ def test_l3_dispatch_tier_lookup_is_task_derived_and_gated() -> None:
     from bp_router import dispatch
 
     src = inspect.getsource(dispatch._run_llm_call)
-    guard_idx = src.find("if preset_needs_tier:")
+    # Second-pass: the gate now branches on `first_preset_gated` (the
+    # requested preset is gated → hard-verify-or-refuse) and `chain_needs_tier`
+    # (a gated FALLBACK → best-effort resolve). Either way the level lookup
+    # (pool acquire + derive) is gated — never unconditional.
+    guard_idx = src.find("if first_preset_gated:")
     derive_idx = src.find("_derive_task_scope(")
     pool_idx = src.find("state.db_pool.acquire")
-    assert guard_idx > 0, "tier lookup must be gated on preset_needs_tier"
+    assert guard_idx > 0, "tier lookup must be gated on first_preset_gated"
     assert derive_idx > 0, "tier identity must come from _derive_task_scope"
-    # The pool acquire (and the derive) sit AFTER the preset_needs_tier guard.
+    # The pool acquire (and the derive) sit AFTER the first gate guard.
     assert guard_idx < pool_idx and guard_idx < derive_idx
     # The gate must NOT resolve the level from the agent-asserted user_id.
     assert "resolve_user_level(conn, frame.user_id)" not in src
