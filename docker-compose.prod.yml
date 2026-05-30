@@ -46,6 +46,45 @@ volumes:
   config_state: {}
   sandbox_state: {}
 
+# Common config shared by every suite agent. Each service sets
+# SUITE_AGENT + its own AGENT_INVITATION_TOKEN. NOTE: no `build:` here on
+# purpose — the image is built once by `suite-migrate`; every agent that
+# inherits this anchor (`<<: *suite-agent`) references the tag image-only.
+# Adding `build:` back would make `up --build` build backplaned-suite:latest
+# from many services at once → `image ... already exists`.
+#
+# This is a TOP-LEVEL `x-` extension field, NOT a service. Compose resolves
+# its `&suite-agent` / `&suite-env` anchors document-wide but does NOT
+# instantiate `x-` keys as containers. (When this lived UNDER `services:`,
+# Compose launched it as a real "x-suite-agent" container running the image
+# default SUITE_AGENT=orchestrator with no invitation token → crash-loop on
+# onboard. Keep it top-level.)
+x-suite-agent: &suite-agent
+  image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+  pull_policy: never               # use the locally-built tag; never pull
+  restart: unless-stopped
+  # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
+  # PR #75); give them room before SIGKILL. Inherited via `<<: *suite-agent`
+  # by webapp and every suite agent below.
+  stop_grace_period: 30s
+  depends_on:
+    router: {condition: service_started}
+    suite-migrate: {condition: service_completed_successfully}
+    bootstrap: {condition: service_completed_successfully}
+  environment: &suite-env
+    AGENT_ROUTER_URL: ws://router:8000/v1/agent
+    AGENT_STATE_DIR: /state
+    SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
+    SUITE_LANCE_ROOT: /lancedb
+    # Per-tier preset defaults seeded into a new user's config (chatbot
+    # approval). prod.sh wires these to the chosen provider's
+    # aliases; empty → the seeded `default` (Gemini).
+    SUITE_DEFAULT_PRESET_PRO: ${SUITE_DEFAULT_PRESET_PRO:-default}
+    SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
+    SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
+    SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
+  networks: [agents, suite]
+
 services:
   # --- Edge -------------------------------------------------------------
   caddy:
@@ -252,38 +291,6 @@ services:
     networks: [agents]
     restart: "no"
 
-  # Common config shared by every suite agent. Each service sets
-  # SUITE_AGENT + its own AGENT_INVITATION_TOKEN. NOTE: no `build:` here on
-  # purpose — the image is built once by `suite-migrate`; every agent that
-  # inherits this anchor (`<<: *suite-agent`) references the tag image-only.
-  # Adding `build:` back would make `up --build` build backplaned-suite:latest
-  # from many services at once → `image ... already exists`.
-  x-suite-agent: &suite-agent
-    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
-    pull_policy: never               # use the locally-built tag; never pull
-    restart: unless-stopped
-    # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
-    # PR #75); give them room before SIGKILL. Inherited via `<<: *suite-agent`
-    # by webapp and every suite agent below.
-    stop_grace_period: 30s
-    depends_on:
-      router: {condition: service_started}
-      suite-migrate: {condition: service_completed_successfully}
-      bootstrap: {condition: service_completed_successfully}
-    environment: &suite-env
-      AGENT_ROUTER_URL: ws://router:8000/v1/agent
-      AGENT_STATE_DIR: /state
-      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
-      SUITE_LANCE_ROOT: /lancedb
-      # Per-tier preset defaults seeded into a new user's config (chatbot
-      # approval). prod.sh wires these to the chosen provider's
-      # aliases; empty → the seeded `default` (Gemini).
-      SUITE_DEFAULT_PRESET_PRO: ${SUITE_DEFAULT_PRESET_PRO:-default}
-      SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
-      SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
-      SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
-    networks: [agents, suite]
-
   chatbot:                         # gateway + session manager + scheduler
     <<: *suite-agent
     environment:
@@ -373,6 +380,10 @@ services:
 
   sandbox:                         # UNTRUSTED code execution — hardened
     <<: *suite-agent
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: sandbox
+      AGENT_INVITATION_TOKEN: ${SANDBOX_INVITATION:?}
     # Runs as ROOT (overrides the image's `USER bp`) — the ONE service that
     # legitimately needs it: per-user isolation works by dropping each user's
     # bash to a distinct uid (setgroups/setgid/setuid in the child preexec),

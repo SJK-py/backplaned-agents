@@ -8,6 +8,52 @@ import pathlib
 import bp_agents.bootstrap as bs
 
 
+def test_compose_x_anchor_is_not_a_service() -> None:
+    """The `x-suite-agent` block is a top-level YAML extension field that only
+    EXISTS to hold the `&suite-agent` / `&suite-env` anchors. If it drifts
+    UNDER `services:` (a one-line indentation slip), Compose instantiates it as
+    a real container running the image default `SUITE_AGENT=orchestrator` with
+    NO invitation token → it crash-loops on onboard ("no auth_token and no
+    invitation_token"). Pin it out of the service set."""
+    import yaml  # noqa: PLC0415
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    d = yaml.safe_load((repo / "docker-compose.prod.yml").read_text())
+    assert "x-suite-agent" not in d["services"], (
+        "x-suite-agent is under services: — Compose will launch it as a "
+        "container. Move it back to a TOP-LEVEL x- key (anchors still resolve)."
+    )
+    # Sanity: it must still exist somewhere as the anchor source.
+    assert "x-suite-agent" in d, "x-suite-agent anchor block disappeared"
+
+
+def test_compose_every_suite_agent_sets_name_and_token() -> None:
+    """Every suite agent service must set BOTH `SUITE_AGENT: <its-name>` and an
+    `AGENT_INVITATION_TOKEN` in its `environment:`. The shared `*suite-env`
+    anchor carries NEITHER (it can't — they're per-agent), so a service that
+    forgets its own `environment:` override (as `sandbox` once did) inherits
+    only the anchor, falls back to the image default SUITE_AGENT=orchestrator
+    with an empty token, and crash-loops on onboard."""
+    import yaml  # noqa: PLC0415
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    d = yaml.safe_load((repo / "docker-compose.prod.yml").read_text())
+    svcs = d["services"]
+    roster_names = {name for name, _var, _prov in bs._ROSTER}
+    for name in roster_names:
+        env = svcs[name].get("environment", {})
+        assert isinstance(env, dict), f"{name}: no environment: block"
+        assert env.get("SUITE_AGENT") == name, (
+            f"{name}: SUITE_AGENT is {env.get('SUITE_AGENT')!r}, expected "
+            f"{name!r} — without it the container runs the image default "
+            "(orchestrator)."
+        )
+        assert "AGENT_INVITATION_TOKEN" in env, (
+            f"{name}: no AGENT_INVITATION_TOKEN — it will onboard with an "
+            "empty token and crash-loop."
+        )
+
+
 def test_bootstrap_compose_env_covers_full_roster() -> None:
     """The `bootstrap` service in docker-compose.prod.yml must pass EVERY
     agent's `*_INVITATION` env var. It's a hand-maintained copy of the roster,
