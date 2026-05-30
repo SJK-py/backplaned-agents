@@ -119,7 +119,11 @@ docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
 
 The agent-suite services are commented in the compose as the contract; bring them in from the suite repo (they share one image, agent selected by entrypoint env).
 
-## 7. Scaling notes
+## 7. Graceful shutdown (rollouts)
+
+On `SIGTERM` (every restart/rollout) the **router** lifespan drains in order — close live WS sockets with code 1001, cancel in-flight router-side LLM tasks (stop burning provider tokens), drain background loops, stop the PendingAcks reaper, close the pool/Redis — and the **suite agents** drain in-flight tasks via the SDK's graceful shutdown. The compose gives router + agents `stop_grace_period: 30s` so Docker doesn't `SIGKILL` mid-drain (its default is only 10s). The router caps its own wait at `ROUTER_SHUTDOWN_GRACE_S` (default 25s, the uvicorn `timeout_graceful_shutdown`) — keep it **below** `stop_grace_period`. Under `gunicorn -k uvicorn.workers.UvicornWorker`, set the worker's `--graceful-timeout` to match.
+
+## 8. Scaling notes
 
 - **router** — stateless; scale horizontally behind the proxy. Only the one-shot `migrate` runs `upgrade`.
 - **chatbot** — stateful (session queue, Telegram offset). v1: single instance. To scale: Redis-backed session queue + session→worker affinity ([`agent-suite/overview.md` §2.2](./agent-suite/overview.md)).

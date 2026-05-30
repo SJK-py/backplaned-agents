@@ -79,11 +79,13 @@ services:
 
   rustfs:
     # S3-compatible object store for the router's file_store=s3 backend.
-    # NOTE: pin a real tag and confirm the env/CLI against rustfs
-    # upstream — this is a representative config. MinIO is a known drop-in
-    # (image minio/minio, command 'server /data', MINIO_ROOT_USER /
-    # MINIO_ROOT_PASSWORD).
-    image: rustfs/rustfs:latest
+    # Pinned to an immutable version tag (NOT `latest`) so a restart can't
+    # silently pull a new build that changes S3 semantics and locks the
+    # router out of every user's files. Confirm the env/CLI against rustfs
+    # upstream when bumping — this is a representative config. MinIO is a
+    # known drop-in (image minio/minio:<tag>, command 'server /data',
+    # MINIO_ROOT_USER / MINIO_ROOT_PASSWORD).
+    image: rustfs/rustfs:1.0.0-beta.6
     restart: unless-stopped
     environment:
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
@@ -113,6 +115,12 @@ services:
     image: backplaned-router:latest
     build: .
     restart: unless-stopped
+    # Let the lifespan drain finish (close WS sockets 1001, cancel in-flight
+    # LLM tasks to stop burning provider tokens, drain loops, close the pool)
+    # before Docker SIGKILLs us. Must exceed the router's shutdown_grace_s
+    # (25s — the uvicorn timeout_graceful_shutdown). Without this, Docker's
+    # default 10s truncates the drain on every restart/rollout.
+    stop_grace_period: 30s
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -202,6 +210,10 @@ services:
     image: backplaned-suite:latest
     build: {context: ., dockerfile: Dockerfile.suite}
     restart: unless-stopped
+    # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
+    # PR #75); give them room before SIGKILL. Inherited via `<<: *suite-agent`
+    # by webapp and every suite agent below.
+    stop_grace_period: 30s
     depends_on:
       router: {condition: service_started}
       suite-migrate: {condition: service_completed_successfully}
@@ -300,7 +312,8 @@ services:
     networks: [agents]             # router WS only — no db/redis/web
 
   searxng:                         # optional web-search backend (profile)
-    image: searxng/searxng:latest
+    # Pinned to an immutable date tag (NOT `latest`) for reproducible deploys.
+    image: searxng/searxng:2026.5.29-780ee3256
     restart: unless-stopped
     profiles: ["search"]
     networks: [agents]             # research queries it; it alone has web egress

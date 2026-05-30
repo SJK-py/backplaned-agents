@@ -32,6 +32,12 @@ def main() -> None:
         # `gunicorn -k uvicorn.workers.UvicornWorker` must set the same
         # cap via that worker's `ws_max_size` config.
         ws_max_size=settings.max_payload_bytes,
+        # Bound the graceful-shutdown wait so the lifespan drain (close WS
+        # sockets 1001, cancel in-flight LLM tasks, drain loops) completes
+        # before the container's stop_grace_period elapses and Docker
+        # SIGKILLs us mid-drain. Operators under gunicorn set the equivalent
+        # `--graceful-timeout`.
+        timeout_graceful_shutdown=int(settings.shutdown_grace_s),
     )
 
 
