@@ -44,10 +44,10 @@ Every task runs as the end user, so all of the above is isolated per person.
 ## How it fits together
 
 ```
-Telegram ──▶ chatbot (gateway)        ┌─────────── Backplaned router ───────────┐
-              │  injects the turn as  │  task lifecycle · delegation · ACL ·     │
+Telegram ──▶ chatbot (gateway)        ┌──────────  Backplaned router  ───────────┐
+              │  injects the turn as  │   task lifecycle · delegation · ACL ·    │
               │  a task for the user ─┼─▶ file store · LLM service · identity    │
-              ▼                        └──────────────────────────────────────────┘
+              ▼                       └──────────────────────────────────────────┘
          orchestrator ──delegate──▶ deep_reasoning / research / computer_use
               │   │                                  │
               │   └─call──▶ memory · knowledge_base · md_converter
