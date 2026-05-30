@@ -25,8 +25,25 @@ volumes:
   rustfs_data: {}
   caddy_data: {}
   caddy_config: {}
-  chatbot_state: {}     # chatbot credentials.json + Telegram offset
   lancedb_data: {}      # per-user LanceDB (knowledge + memory)
+  # Per-agent /state (AGENT_STATE_DIR): each agent persists its
+  # credentials.json (auth token + rotated service refresh token) here so it
+  # RESUMES on container recreate instead of re-running POST /v1/onboard with
+  # an already-consumed single-use invitation — which the router rejects 409
+  # "already registered", crashing the agent on exit(1). One volume per agent
+  # (state is per-identity; they must not share).
+  chatbot_state: {}     # chatbot credentials.json + Telegram offset
+  webapp_state: {}
+  orchestrator_state: {}
+  deep_reasoning_state: {}
+  research_state: {}
+  computer_use_state: {}
+  knowledge_base_state: {}
+  memory_state: {}
+  history_summarizer_state: {}
+  md_converter_state: {}
+  config_state: {}
+  sandbox_state: {}
 
 services:
   # --- Edge -------------------------------------------------------------
@@ -122,6 +139,11 @@ services:
   migrate:
     image: backplaned-router:latest
     build: .
+    # Build locally — never try to PULL this tag. It's a local image with no
+    # registry, so without this an image-only dependent racing ahead of the
+    # build makes compose attempt a registry pull → "login required" against
+    # Docker Hub. `build` pins it to the local build.
+    pull_policy: build
     command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -132,6 +154,7 @@ services:
 
   router:
     image: backplaned-router:latest   # built by `migrate` (one builder per tag)
+    pull_policy: never                 # use the locally-built tag; never pull
     restart: unless-stopped
     # Let the lifespan drain finish (close WS sockets 1001, cancel in-flight
     # LLM tasks to stop burning provider tokens, drain loops, close the pool)
@@ -190,6 +213,7 @@ services:
     # tag avoids the `up --build` / bake `image ... already exists` race.
     image: backplaned-suite:latest
     build: {context: ., dockerfile: Dockerfile.suite}
+    pull_policy: build   # build locally; never pull (see migrate's note)
     command: ["alembic", "-c", "alembic_suite.ini", "upgrade", "head"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -204,6 +228,7 @@ services:
     # applies the suite ACL. Agents depend on this completing, so a single
     # `docker compose up -d` onboards the whole roster — no manual steps.
     image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+    pull_policy: never               # use the locally-built tag; never pull
     command: ["python", "-m", "bp_agents.bootstrap"]
     depends_on:
       router: {condition: service_healthy}
@@ -233,6 +258,7 @@ services:
   # from many services at once → `image ... already exists`.
   x-suite-agent: &suite-agent
     image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+    pull_policy: never               # use the locally-built tag; never pull
     restart: unless-stopped
     # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
     # PR #75); give them room before SIGKILL. Inherited via `<<: *suite-agent`
@@ -280,6 +306,7 @@ services:
       WEBAPP_USE_BUILT_CSS: "true"
     # Fronted by the edge proxy (HTTPS + SSE); not published directly.
     networks: [edge, agents, suite]
+    volumes: [webapp_state:/state]
 
   orchestrator:
     <<: *suite-agent
@@ -287,10 +314,12 @@ services:
       <<: *suite-env
       SUITE_AGENT: orchestrator
       AGENT_INVITATION_TOKEN: ${ORCHESTRATOR_INVITATION:?}
+    volumes: [orchestrator_state:/state]
 
   deep_reasoning:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: deep_reasoning, AGENT_INVITATION_TOKEN: "${DEEP_REASONING_INVITATION:?}"}
+    volumes: [deep_reasoning_state:/state]
 
   research:
     <<: *suite-agent
@@ -305,35 +334,40 @@ services:
       # Default empty — NOT http://searxng:8080 — so an unset value doesn't
       # silently point research at a SearXNG that isn't running.
       SUITE_SEARXNG_URL: ${SUITE_SEARXNG_URL:-}
+    volumes: [research_state:/state]
 
   computer_use:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: computer_use, AGENT_INVITATION_TOKEN: "${COMPUTER_USE_INVITATION:?}"}
+    volumes: [computer_use_state:/state]
 
-  # knowledge_base + memory share the per-user LanceDB volume.
+  # knowledge_base + memory share the per-user LanceDB volume (+ own /state).
   knowledge_base:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: knowledge_base, AGENT_INVITATION_TOKEN: "${KNOWLEDGE_BASE_INVITATION:?}"}
-    volumes: [lancedb_data:/lancedb]
+    volumes: [lancedb_data:/lancedb, knowledge_base_state:/state]
 
   memory:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: memory, AGENT_INVITATION_TOKEN: "${MEMORY_INVITATION:?}"}
-    volumes: [lancedb_data:/lancedb]
+    volumes: [lancedb_data:/lancedb, memory_state:/state]
     # memory's per-user lock is in-process; back it with Redis to scale
     # this service beyond one replica.
 
   history_summarizer:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: history_summarizer, AGENT_INVITATION_TOKEN: "${HISTORY_SUMMARIZER_INVITATION:?}"}
+    volumes: [history_summarizer_state:/state]
 
   md_converter:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: md_converter, AGENT_INVITATION_TOKEN: "${MD_CONVERTER_INVITATION:?}"}
+    volumes: [md_converter_state:/state]
 
   config:
     <<: *suite-agent
     environment: {<<: *suite-env, SUITE_AGENT: config, AGENT_INVITATION_TOKEN: "${CONFIG_INVITATION:?}"}
+    volumes: [config_state:/state]
 
   sandbox:                         # UNTRUSTED code execution — hardened
     <<: *suite-agent
@@ -342,6 +376,7 @@ services:
     # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
     # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
     networks: [agents]             # router WS only — no db/redis/web
+    volumes: [sandbox_state:/state]
 
   searxng:                         # optional web-search backend (profile)
     # Pinned to an immutable date tag (NOT `latest`) for reproducible deploys.
