@@ -226,11 +226,14 @@ checked by a single helper used by every read path.
 - Admin can revoke an agent (`POST /v1/admin/agents/{id}/suspend`)
   or a user session via the same mechanism.
 - Admin can **reset** an agent to `pending`
-  (`POST /v1/admin/agents/{id}/reset`) so it can re-onboard with a fresh
-  invitation — recovery for an agent whose persisted credentials were lost
-  (registered row, but a fresh onboard would `409`). Re-onboard still
-  requires an admin invitation, so the `agent_id` is never freed for silent
-  reuse.
+  (`POST /v1/admin/agents/{id}/reset`) — an operational "kick": force-close
+  its socket, fail its in-flight tasks, and require re-onboard before it
+  serves again (the reversible sibling of `suspend`; the agent comes back on
+  its own via re-onboard, no un-reset needed). Recovery itself no longer
+  needs this — `POST /v1/onboard` re-onboards an already-`active` row given a
+  valid invitation. Re-onboard still requires an admin invitation, so the
+  `agent_id` is never freed for silent reuse. (`reprovision` = reset + mint a
+  fresh invitation in one click, for an agent with no pending invitation.)
 - **Evict** (`POST /v1/admin/agents/{id}/evict`) retires an agent and
   **frees its `agent_id`**: the `removed` row's PK is renamed to a tombstone
   (`deleted_<id>_<epoch>`, with its co-located service principal renamed the

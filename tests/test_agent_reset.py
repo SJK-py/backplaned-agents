@@ -1,9 +1,12 @@
-"""Admin agent reset → pending (recovery for lost agent credentials).
+"""Admin agent reset → pending (operational "kick" — force re-onboard).
 
 `POST /v1/admin/agents/{id}/reset` moves a registered agent back to
-`pending` so it can re-onboard with a fresh invitation — without freeing the
-id for reuse (re-onboard still needs an admin invitation) and without
-resurrecting an evicted (`removed`, terminal) agent.
+`pending`, force-closing its socket + failing in-flight tasks so it must
+re-onboard before serving again — without freeing the id for reuse
+(re-onboard still needs an admin invitation) and without resurrecting an
+evicted (`removed`, terminal) agent. Since idempotent re-onboard, this is an
+ops lever (the reversible sibling of suspend), not the recovery path it once
+was — `POST /v1/onboard` reactivates an already-`active` row directly.
 
 Query transitions are exercised against the live schema; the endpoint
 contract (status guards, audit, in-flight handling) is source-pinned.

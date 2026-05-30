@@ -2030,20 +2030,27 @@ async def reset_agent(
     request: Request,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Reset a registered agent back to `pending` so it can **re-onboard**
-    with a fresh invitation.
+    """Force a registered agent off and require it to re-onboard before it
+    can serve again — an admin "kick" lever.
 
-    Recovery for an agent whose persisted credentials were lost (e.g. an
-    ephemeral state dir wiped on reboot): the row is registered but the agent
-    can't resume, and a fresh `POST /v1/onboard` would `409 already
-    registered`. Resetting to `pending` re-opens the onboard path (which
-    keeps the row, re-mints a service principal's refresh token if any, and
-    issues a fresh agent JWT) — without freeing the `agent_id` for arbitrary
-    reuse, since re-onboard still requires an admin-issued invitation.
+    ROLE (post idempotent re-onboard): this is now an OPERATIONS action, not a
+    recovery one. Recovery no longer needs `pending` — `POST /v1/onboard`
+    accepts a valid invitation against an already-`active` row and re-onboards
+    in place (see `api/onboard.py`). What `reset` still uniquely does:
+
+      * force-close the agent's live socket and FAIL its in-flight tasks, and
+      * block it (status `pending` → handshake refused) until it re-onboards.
+
+    It's the reversible sibling of `suspend`: where an unsuspend needs a
+    second admin action, a `reset` agent comes back on its own the moment it
+    re-onboards with a valid invitation. Use it to evict a misbehaving agent's
+    live session, or to force a credential rotation.
 
     Idempotent on `pending`. Refuses `removed` (eviction is terminal — a
-    retired `agent_id` is never reusable). Force-closes any live socket and
-    fails in-flight tasks, since the agent must re-onboard to operate again.
+    retired `agent_id` is never reusable). Re-onboard still requires an
+    admin-issued invitation, so `reset` never frees the `agent_id` for silent
+    reuse. To reset AND hand the operator a fresh invitation in one step, use
+    `reprovision` instead.
     """
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
@@ -2097,9 +2104,19 @@ async def reprovision_agent(
     request: Request,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> AgentReprovisioned:
-    """Reset an agent to `pending` AND mint a fresh invitation in one step,
-    so an operator can recover a stuck agent (e.g. one whose token expired
-    after >24h downtime, or whose state dir was wiped) with a single click.
+    """Reset an agent to `pending` AND mint a fresh invitation in one step —
+    the admin "one-click recover" for a stuck agent.
+
+    ROLE (post idempotent re-onboard): a fleet managed by `scripts/prod.sh`
+    self-recovers — prod.sh ships a fresh invitation each launch and re-onboard
+    reactivates the row, no admin step. `reprovision` is the path for an agent
+    OUTSIDE that flow: a stuck one-off (token expired after >24h down, state
+    dir wiped) that has no pending invitation waiting. It does what the
+    operator would otherwise do by hand — mint an invitation (via
+    `/invitations`) and hand it to the agent — but atomically and one-click.
+    The `reset`-to-pending here also force-closes the live socket + fails
+    in-flight tasks (see `reset`); the agent re-onboards with the returned
+    token.
 
     Mirrors the original provisioning so the agent reconnects unchanged:
     `provisions_service_user` is set iff the agent has a co-located service
