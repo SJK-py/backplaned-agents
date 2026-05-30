@@ -90,6 +90,28 @@ else
 fi
 ask TELEGRAM "Telegram bot token (from @BotFather)" ""
 
+# --- Web search backend (research agent) ------------------------------------
+# 1) bundled SearXNG via the compose `search` profile (URL → http://searxng:8080)
+# 2) external SearXNG (ask for its URL)
+# 3) none — research runs without web search (SUITE_SEARXNG_URL empty)
+echo
+echo "Web search backend for the research agent:"
+echo "  1) Deploy SearXNG with compose (bundled 'search' profile)"
+echo "  2) Use an external SearXNG (you provide the URL)"
+echo "  3) Don't configure now (research runs without web search)"
+ask SEARXNG_CHOICE "Choose 1-3" "1"
+SEARXNG_PROFILE=0   # 1 ⇒ the deploy must add `--profile search`
+case "${SEARXNG_CHOICE,,}" in
+    1|compose|bundled)
+        SEARXNG_URL="http://searxng:8080"; SEARXNG_PROFILE=1 ;;
+    2|external)
+        ask SEARXNG_URL "External SearXNG base URL (e.g. https://searx.example.com)" ""
+        [[ -z "$SEARXNG_URL" ]] && echo "  WARNING: empty URL — research will have no web search." ;;
+    3|none|"")
+        SEARXNG_URL="" ;;
+    *) echo "invalid search choice: $SEARXNG_CHOICE" >&2; exit 1 ;;
+esac
+
 GENERATED_PW=0
 if [[ -z "$ADMIN_PW" ]]; then ADMIN_PW="$(gen 20)"; GENERATED_PW=1; fi
 
@@ -136,6 +158,12 @@ if [[ -z "$ADMIN_PW" ]]; then ADMIN_PW="$(gen 20)"; GENERATED_PW=1; fi
     echo "# --- Channel ---"
     echo "SUITE_TELEGRAM_BOT_TOKEN=$TELEGRAM"
     echo
+    echo "# --- Web search (research agent) ---"
+    if [[ $SEARXNG_PROFILE -eq 1 ]]; then
+        echo "# bundled SearXNG — deploy with: ... --profile search up -d"
+    fi
+    echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
+    echo
     echo "# --- Agent invitation tokens (registered by the compose 'bootstrap' service) ---"
     scripts/register-invitations.sh --gen
 } > "$OUT"
@@ -158,5 +186,28 @@ if [[ "$PROVIDER" == "anthropic" ]]; then
     echo "        SUITE_DEFAULT_PRESET_EMBEDDING to an OpenAI embedding preset + key."
 fi
 [[ -z "$TELEGRAM" ]] && echo "  WARNING: SUITE_TELEGRAM_BOT_TOKEN is empty — the chatbot won't poll Telegram."
+[[ $SEARXNG_PROFILE -eq 1 ]] && echo "  search: bundled SearXNG (compose 'search' profile)"
+
+# Assemble the deploy command — add `--profile search` when the bundled
+# SearXNG was selected (otherwise the searxng service stays down and
+# research has no backend).
+COMPOSE="docker compose -f docker-compose.prod.yml --env-file $OUT"
+[[ $SEARXNG_PROFILE -eq 1 ]] && COMPOSE="$COMPOSE --profile search"
+
 echo
-echo "Next:  docker compose -f docker-compose.prod.yml --env-file $OUT up -d"
+echo "Deploy now?"
+echo "  1) docker compose up -d                 (use the prebuilt images)"
+echo "  2) docker compose up -d --build         (rebuild images from this source)"
+echo "  3) Don't run — just print the command   (e.g. to edit $OUT first)"
+ask RUN_CHOICE "Choose 1-3" "3"
+case "${RUN_CHOICE,,}" in
+    1|run)   echo; echo "+ $COMPOSE up -d"; exec $COMPOSE up -d ;;
+    2|build) echo; echo "+ $COMPOSE up -d --build"; exec $COMPOSE up -d --build ;;
+    3|no|"")
+        echo
+        echo "Next:  $COMPOSE up -d"
+        if [[ $SEARXNG_PROFILE -eq 1 ]]; then
+            echo "       (the --profile search flag above starts the bundled SearXNG)"
+        fi ;;
+    *) echo "invalid choice: $RUN_CHOICE" >&2; exit 1 ;;
+esac
