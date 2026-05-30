@@ -146,15 +146,18 @@ async def ensure_fresh_token(
     request.session["access_expires_at"] = body["expires_at"]
     request.session["refresh_token"] = body["refresh_token"]
     request.session["level"] = body["level"]
-    # Rotate the CSRF token on every refresh cycle. The token is
-    # bound to the signed session cookie (so leakage requires
-    # breaking the session secret, not just observing it) — but
-    # rotating cheaply bounds the replay window if the token leaks
-    # via a Referer header or proxy log. A long-lived session (24h
-    # max_age) without rotation kept the SAME CSRF token across
-    # many refresh cycles; the rotation makes each refresh boundary
-    # a fresh-token-required boundary too. R5 second-pass review.
-    request.session["csrf_token"] = _issue_csrf_token()
+    # NOTE: do NOT rotate the CSRF token here. This refresh runs in the auth
+    # middleware BEFORE call_next reaches the (inner) CSRF middleware, which
+    # validates the client's submitted token against session["csrf_token"]
+    # (stack order: Session → Auth → CSRF → handler). Rotating it mid-request
+    # invalidated the token the browser already held, so every state-changing
+    # admin action that happened to land in a refresh window (a recurring
+    # ~buffer_s window per token lifetime) failed with a spurious 403 until
+    # the operator reloaded. The token is minted at login and lives in the
+    # signed session cookie for the browser session — a double-submit token
+    # in a tamper-proof cookie gains negligible security from per-refresh
+    # rotation, and not rotating it removes the race entirely. (Mirrors the
+    # identical fix in the user webapp BFF; second-pass review.)
 
 
 # ---------------------------------------------------------------------------
