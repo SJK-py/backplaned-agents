@@ -61,6 +61,7 @@ build_env() {
     echo "  a public domain          → auto-TLS via Let's Encrypt (must resolve here, 80/443 open)"
     echo "  a LAN name (bp.lan)      → LAN access; Caddy internal-CA TLS (browser trust needed)"
     echo "  a bare IP (192.168.x.x)  → LAN access; webapp moves to a separate HTTPS port"
+    echo "  (TLS upstream? a later prompt switches Caddy to plain HTTP at the origin.)"
     ask PUBLIC_DOMAIN "Public domain — router + admin UI host" "localhost"
     # Webapp identity. A bare IP can't host `app.<ip>` (no DNS), so default it
     # to a PORT on the same IP; anything else gets the `app.` subdomain.
@@ -73,6 +74,17 @@ build_env() {
     # If the webapp identity carries a non-443 port, publish that port.
     WEBAPP_HTTPS_PORT="$(printf '%s' "$WEBAPP_DOMAIN" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
     WEBAPP_HTTPS_PORT="${WEBAPP_HTTPS_PORT:-443}"
+
+    # Edge scheme. Default: Caddy terminates TLS (https). Answer y when TLS is
+    # handled UPSTREAM — Cloudflare Tunnel, an external load balancer, ngrok —
+    # so Caddy serves plain HTTP at the origin (automatic HTTPS off). The
+    # public scheme stays https, so secrets/cookies are unaffected.
+    echo
+    echo "Is TLS terminated UPSTREAM (Cloudflare Tunnel / external LB)? If yes,"
+    echo "Caddy serves plain HTTP at the origin instead of provisioning certs."
+    ask UPSTREAM_TLS "TLS terminated upstream? [y/N]" "n"
+    if yesish "$UPSTREAM_TLS"; then EDGE_SCHEME=http; else EDGE_SCHEME=https; fi
+
     ask ADMIN_EMAIL "Bootstrap admin email" "admin@example.com"
     read -rsp "Bootstrap admin password (blank = generate one): " ADMIN_PW || true; echo
 
@@ -165,6 +177,10 @@ build_env() {
         if [[ "$WEBAPP_HTTPS_PORT" != "443" ]]; then
             echo "WEBAPP_HTTPS_PORT=$WEBAPP_HTTPS_PORT"
         fi
+        if [[ "$EDGE_SCHEME" != "https" ]]; then
+            echo "# TLS terminated upstream — Caddy serves plain HTTP at the origin."
+            echo "EDGE_SCHEME=$EDGE_SCHEME"
+        fi
         echo
         echo "# --- Postgres (router + suite DBs share this server; suite connects as postgres) ---"
         echo "PG_USER=postgres"
@@ -216,18 +232,24 @@ build_env() {
 
     echo
     echo "Wrote $OUT (chmod 600)."
-    echo "  edge: admin/router=https://$PUBLIC_DOMAIN  webapp=https://$WEBAPP_DOMAIN"
+    echo "  edge: admin/router=$EDGE_SCHEME://$PUBLIC_DOMAIN  webapp=$EDGE_SCHEME://$WEBAPP_DOMAIN"
     [[ "$WEBAPP_HTTPS_PORT" != "443" ]] && \
-        echo "        (webapp on a separate HTTPS port $WEBAPP_HTTPS_PORT — compose publishes it; open it on any firewall)"
+        echo "        (webapp on a separate port $WEBAPP_HTTPS_PORT — compose publishes it; open it on any firewall)"
+    if [[ "$EDGE_SCHEME" == "http" ]]; then
+        echo "        (Caddy serves plain HTTP — TLS is terminated upstream; clients still use https)"
+    fi
     echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
     [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"
-    case "$PUBLIC_DOMAIN" in
-        localhost|*.localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
-            echo "  NOTE: '$PUBLIC_DOMAIN' → Caddy serves internal-CA / self-signed TLS"
-            echo "        (browsers warn until you trust Caddy's root CA — see"
-            echo "        docs/deployment.md). A public domain resolving here gets"
-            echo "        automatic Let's Encrypt TLS instead." ;;
-    esac
+    # Internal-CA TLS warning only applies when CADDY is the TLS terminator.
+    if [[ "$EDGE_SCHEME" == "https" ]]; then
+        case "$PUBLIC_DOMAIN" in
+            localhost|*.localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
+                echo "  NOTE: '$PUBLIC_DOMAIN' → Caddy serves internal-CA / self-signed TLS"
+                echo "        (browsers warn until you trust Caddy's root CA — see"
+                echo "        docs/deployment.md). A public domain resolving here gets"
+                echo "        automatic Let's Encrypt TLS instead." ;;
+        esac
+    fi
     if [[ "$PROVIDER" == "custom" ]]; then
         echo "  NOTE: custom — the lite/default/pro presets are seeded to Gemini"
         echo "        placeholders. Set provider keys and repoint these presets in"

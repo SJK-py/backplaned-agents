@@ -43,6 +43,11 @@ services:
       - "443:443"
       - "${WEBAPP_HTTPS_PORT:-8443}:${WEBAPP_HTTPS_PORT:-8443}"
     environment:
+      # Scheme Caddy SERVES at the origin. `https` (default) → Caddy
+      # terminates TLS. `http` → TLS terminated UPSTREAM (Cloudflare Tunnel,
+      # external LB); Caddy serves plain HTTP and disables automatic HTTPS.
+      # The public scheme stays https, so ROUTER_PUBLIC_URL is unchanged.
+      EDGE_SCHEME: ${EDGE_SCHEME:-https}
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
       # Webapp (browser channel) host — defaults to the `app.` subdomain.
       # For a bare-IP LAN deploy set it to `<ip>:<WEBAPP_HTTPS_PORT>`.

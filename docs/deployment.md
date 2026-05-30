@@ -44,6 +44,7 @@ TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI 
 | `PUBLIC_DOMAIN` | router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
 | `WEBAPP_DOMAIN` | the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
 | `WEBAPP_HTTPS_PORT` | extra published port for the webapp under a **bare-IP** deploy (`WEBAPP_DOMAIN=<ip>:<port>`) | `8443` |
+| `EDGE_SCHEME` | scheme Caddy serves; set `http` when **TLS is terminated upstream** (Cloudflare Tunnel / LB) — see [§9](#9-edge--reverse-proxy-caddy) | `https` |
 
 The webapp gets its **own** identity (hostname, or a port for a bare IP) because it serves from `/`, which would collide with the router's `/admin` on the same host.
 
@@ -221,3 +222,38 @@ Notes:
 - **Editing routing** (extra paths, headers, a third host) is a
   `deploy/Caddyfile` change; it's bind-mounted read-only, so a `restart`
   reloads it.
+
+### Serving HTTP at the origin (TLS terminated upstream)
+
+When something **in front of** Caddy already terminates TLS — a **Cloudflare
+Tunnel**, an external load balancer / ingress, `ngrok`, a corporate proxy —
+you don't want Caddy provisioning its own certificate. Set **`EDGE_SCHEME=http`**
+(`prod.sh` asks *"TLS terminated upstream?"*; pick **y**). Caddy then serves
+**plain HTTP** at the origin and **disables automatic HTTPS** (no cert, no
+`:80→:443` redirect). The upstream connects to the container over HTTP
+(e.g. a Cloudflare Tunnel `service: http://caddy:80`, or the bare-IP/port
+forms above on `http://`).
+
+This is **not** an insecure deployment: clients still reach the stack over
+**HTTPS** (the tunnel/LB provides it), so the *public* scheme is unchanged —
+`ROUTER_PUBLIC_URL` stays `https://…` and the webapp's **Secure** session
+cookie keeps working. Only the single origin hop (upstream ⇄ Caddy, normally
+on a private network) is HTTP.
+
+| | `EDGE_SCHEME=https` (default) | `EDGE_SCHEME=http` |
+| --- | --- | --- |
+| Caddy provisions TLS | yes (Let's Encrypt / internal CA) | **no** — upstream does |
+| Origin listener | `:443` (+ `:80` redirect) | `:80` (the `:443` mapping is simply unused) |
+| Use when | Caddy is your edge | behind Cloudflare Tunnel / LB / ngrok |
+| Public scheme seen by clients | https | https (via the upstream) |
+
+> **`EDGE_SCHEME=http` assumes the public endpoint is still HTTPS** (provided
+> by the upstream). A *fully* plain-HTTP public deployment — no TLS anywhere —
+> is intentionally **not** a supported prod configuration: the webapp's prod
+> validator requires `WEBAPP_SESSION_COOKIE_SECURE=true` (a Secure cookie that
+> a browser won't send over plain HTTP), so the browser channel can't log in
+> over public HTTP. If you truly need that (a throwaway trial on a trusted
+> network) you'd have to drop the webapp out of `prod`
+> (`WEBAPP_DEPLOYMENT_ENV=staging`) to relax the guard and set
+> `ROUTER_PUBLIC_URL=http://…` — losing the prod hardening. Use the
+> upstream-TLS path instead; it keeps everything https-correct.

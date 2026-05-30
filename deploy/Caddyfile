@@ -5,8 +5,17 @@
 # The router does NOT terminate TLS itself; everything public goes
 # through here. Postgres / Redis / rustfs are never proxied (internal
 # networks only).
+#
+# EDGE_SCHEME (default https) is the scheme Caddy SERVES at the origin. Set it
+# to `http` when TLS is terminated UPSTREAM — e.g. behind a Cloudflare Tunnel
+# or an external load balancer — so Caddy serves plain HTTP locally while
+# clients still reach the stack over HTTPS. The PUBLIC scheme is unchanged, so
+# ROUTER_PUBLIC_URL and the Secure session cookie stay correct. With an
+# `http://` site address Caddy disables automatic HTTPS (no cert, no :80→:443
+# redirect) — exactly what an upstream terminator wants. See
+# docs/deployment.md "Edge / reverse proxy (Caddy)".
 
-{$PUBLIC_DOMAIN:localhost} {
+{$EDGE_SCHEME:https}://{$PUBLIC_DOMAIN:localhost} {
 	# Router: HTTP API (/v1/*), health, metrics, OpenAPI, and the admin
 	# UI (/admin/*). WebSocket upgrade on /v1/agent is handled
 	# transparently by reverse_proxy.
@@ -21,7 +30,7 @@
 # (login at /, /chat/*, /files/*, …), which would collide with the
 # router's /admin on the main domain. `flush_interval -1` disables
 # response buffering so the chat SSE progress stream flushes immediately.
-{$WEBAPP_DOMAIN:app.localhost} {
+{$EDGE_SCHEME:https}://{$WEBAPP_DOMAIN:app.localhost} {
 	reverse_proxy webapp:8002 {
 		flush_interval -1
 	}
