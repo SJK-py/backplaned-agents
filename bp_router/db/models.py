@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from bp_protocol.types import TaskPriority, TaskState
 
@@ -289,6 +289,16 @@ class LlmPresetRow(_Row):
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
+
+    @field_validator("default_provider_options", mode="before")
+    @classmethod
+    def _coerce_null_options(cls, v: Any) -> Any:
+        # The column is jsonb and nominally non-null, but a PATCH carrying an
+        # explicit JSON `null` could write SQL NULL. Coerce None → {} on read
+        # so a (legacy/edge) NULL row validates instead of 500-ing every
+        # subsequent list/get/load_presets. The write path also COALESCEs
+        # (see queries.update_llm_preset); this is belt-and-suspenders.
+        return {} if v is None else v
 
 
 class McpServerRow(_Row):
