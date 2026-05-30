@@ -105,6 +105,14 @@ services:
       # external LB); Caddy serves plain HTTP and disables automatic HTTPS.
       # The public scheme stays https, so ROUTER_PUBLIC_URL is unchanged.
       EDGE_SCHEME: ${EDGE_SCHEME:-https}
+      # Bare-IP https knobs (empty otherwise; set by prod.sh). EDGE_TLS pins the
+      # internal CA into the Caddyfile site blocks (Let's Encrypt won't issue an
+      # IP cert → :443 certless). EDGE_GLOBAL sets `default_sni <ip>` in the
+      # global-options block: an IP client sends no SNI and Caddy can't match a
+      # cert behind Docker NAT without it → tls 'internal error'
+      # (browser ERR_SSL_PROTOCOL_ERROR).
+      EDGE_TLS: ${EDGE_TLS:-}
+      EDGE_GLOBAL: ${EDGE_GLOBAL:-}
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
       # Webapp (browser channel) host — defaults to the `app.` subdomain.
       # For a bare-IP LAN deploy set it to `<ip>:<WEBAPP_HTTPS_PORT>`.
