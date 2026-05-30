@@ -2060,12 +2060,61 @@ async def _gc_registration_attempts(
     return deleted
 
 
+async def invitation_gc_loop(
+    state: AppState,
+    *,
+    interval_s: float = 3_600.0,
+    retention_days: int = 7,
+) -> None:
+    """Sweep terminal (used or expired) invitations older than
+    `retention_days`.
+
+    The suite mints a fresh single-use invitation per agent on EVERY launch
+    (`scripts/prod.sh` `refresh_invitations`, 10-min TTL), so dead rows pile up
+    ~one per agent per relaunch. A shorter retention than the other GC loops
+    (7d vs 30d) — these are high-churn and the auth audit log already records
+    onboard outcomes — but still generous enough to keep recent invitation
+    history for debugging. LIVE (unused, unexpired) invitations are never
+    touched (see `queries.gc_expired_invitations`)."""
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            await _gc_expired_invitations(state, retention_days=retention_days)
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "invitation_gc_failed",
+                extra={"event": "invitation_gc_failed"},
+            )
+
+
+async def _gc_expired_invitations(
+    state: AppState, *, retention_days: int
+) -> int:
+    pool = state.db_pool  # type: ignore[attr-defined]
+    cutoff = _now() - timedelta(days=retention_days)
+    async with pool.acquire() as conn:
+        deleted = await queries.gc_expired_invitations(conn, cutoff=cutoff)
+    if deleted:
+        logger.info(
+            "invitation_gc",
+            extra={
+                "event": "invitation_gc",
+                "deleted": deleted,
+                "retention_days": retention_days,
+            },
+        )
+    return deleted
+
+
 async def start_background_loops(state: AppState) -> list[asyncio.Task]:
     return [
         asyncio.create_task(timeout_sweep_loop(state)),
         asyncio.create_task(file_gc_loop(state)),
         asyncio.create_task(session_gc_loop(state)),
         asyncio.create_task(registration_attempts_gc_loop(state)),
+        asyncio.create_task(invitation_gc_loop(state)),
     ]
 
 

@@ -30,6 +30,14 @@ import httpx
 from bp_agents.acl import acl_replace_payload
 from bp_agents.load_acl import _env
 
+# Invitation TTL (seconds). The suite mints a FRESH single-use token per agent
+# on every launch (`scripts/prod.sh` `refresh_invitations`) and agents onboard
+# within seconds of this bootstrap completing, so a short TTL is ample and
+# limits the blast radius of a leaked-but-unused token. The router GC sweeps
+# expired rows (bp_router.tasks.invitation_gc_loop). Overridable for slow /
+# staggered rollouts via ROUTER_BOOTSTRAP_INVITATION_TTL_S.
+_INVITATION_TTL_S = int(os.environ.get("ROUTER_BOOTSTRAP_INVITATION_TTL_S", "600"))
+
 # name : env var : provisions_service_user. Only the chatbot provisions its
 # usr_service_* principal (registration submit + per-user minting).
 _ROSTER: list[tuple[str, str, bool]] = [
@@ -85,7 +93,12 @@ async def _main() -> int:
             resp = await client.post(
                 f"{router}/v1/admin/invitations",
                 headers=headers,
-                json={"level": "tier1", "token": tok, "provisions_service_user": prov},
+                json={
+                    "level": "tier1",
+                    "token": tok,
+                    "provisions_service_user": prov,
+                    "expires_in_s": _INVITATION_TTL_S,
+                },
             )
             # 201 = freshly registered; 409 = this exact token already
             # registered (idempotent re-run). Anything else (403/422/5xx) is a
