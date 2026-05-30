@@ -5,10 +5,12 @@ combined stdout/stderr; oversized output is saved to a file-store name
 instead of inlined. `storage_to_workspace` / `workspace_to_storage`
 bridge the named file store and the workspace filesystem.
 
-uid isolation: when the user's `sandbox_uid` is configured AND the
-process runs as root, the bash subprocess drops to that uid (per-user
-isolation inside the shared container). Otherwise it runs as the current
-user (dev / single-tenant).
+uid isolation: each user is assigned a distinct OS uid (allocated +
+persisted LOCALLY by `uid_store.UidStore` on the agent's state volume — the
+sandbox is network-isolated from the suite DB, so it owns this mapping
+itself). When the process runs as root (prod), the bash subprocess drops to
+that uid and the workspace is chowned to it; rootless dev runs as the current
+user. The map is sequential from `sandbox_uid_base`.
 """
 
 from __future__ import annotations
@@ -19,19 +21,14 @@ import os
 import re
 import resource  # POSIX-only; the sandbox runs on Linux
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from bp_agents.agents.sandbox.uid_store import UidStore
 from bp_agents.common import text_output
-from bp_agents.db import queries
-from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
-
-if TYPE_CHECKING:
-    import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -64,50 +61,32 @@ agent = Agent(
 )
 
 _settings: SuiteSettings = load_suite_settings()
-_pool: asyncpg.Pool | None = None
+# Per-user uid map, owned locally (NO suite DB — the sandbox is network-
+# isolated from Postgres). Wired at startup from the agent's state dir.
+_uid_store: UidStore | None = None
 
 
 @agent.on_startup
 async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — startup-wired handle
-    # The sandbox is deliberately isolated from the suite DB (prod compose puts
-    # it on the `agents` network only — untrusted code must never reach
-    # Postgres). The pool is used ONLY to look up the optional per-user
-    # `sandbox_uid`; without it, `_user_uid` returns None and bash runs as the
-    # current user (no per-uid drop). So a DB that's unreachable BY DESIGN must
-    # NOT crash startup — degrade to no-uid-drop instead of dying on gaierror.
-    try:
-        _pool = await open_pool(_settings)
-    except Exception as exc:  # noqa: BLE001 — DB-by-design-unreachable degrades
-        # A connection failure (gaierror/OSError when `postgres` doesn't
-        # resolve on the agents-only network, or any pool-open error) is
-        # expected for the isolated sandbox. Degrade, don't die.
-        logger.warning(
-            "sandbox_db_unavailable_no_uid_drop",
-            extra={
-                "event": "sandbox_db_unavailable",
-                "error": repr(exc),
-            },
-        )
-        _pool = None
-
-
-@agent.on_shutdown
-async def _shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
+    global _uid_store  # noqa: PLW0603 — startup-wired handle
+    _uid_store = UidStore(
+        state_dir=Path(agent.config.state_dir),
+        base=_settings.sandbox_uid_base,
+        maximum=_settings.sandbox_uid_max,
+    )
 
 
 def _workspace(settings: SuiteSettings, user_id: str) -> Path:
     return Path(settings.sandbox_root) / _SAFE.sub("_", user_id)
 
 
-async def _user_uid(ctx: TaskContext) -> int | None:
-    if _pool is None:
+def _user_uid(ctx: TaskContext) -> int | None:
+    """The OS uid this user's bash drops to (allocated + persisted locally on
+    first sight). None pre-startup or if the uid range is exhausted — the
+    caller then runs without a drop rather than reuse a colliding uid."""
+    if _uid_store is None:
         return None
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    return cfg.sandbox_uid if cfg else None
+    return _uid_store.uid_for(ctx.user_id)
 
 
 def _apply_rlimits(settings: SuiteSettings) -> None:
@@ -178,6 +157,18 @@ async def run_bash(
 ) -> AgentOutput:
     workspace = _workspace(settings, ctx.user_id)
     await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+    # When we'll drop to a per-user uid, the workspace (created as root) must
+    # be owned by that uid or the dropped command can't write to it. chown
+    # only when actually dropping (root + uid set); harmless to repeat.
+    if uid is not None and os.geteuid() == 0:
+        try:
+            await asyncio.to_thread(os.chown, str(workspace), uid, uid)
+        except OSError as exc:
+            logger.warning(
+                "sandbox_workspace_chown_failed",
+                extra={"event": "sandbox_workspace_chown_failed",
+                       "uid": uid, "error": repr(exc)},
+            )
     proc = await asyncio.create_subprocess_shell(
         payload.command,
         cwd=str(workspace),
@@ -209,7 +200,7 @@ async def run_bash(
     "return its output.",
 )
 async def bash(ctx: TaskContext, payload: Bash) -> AgentOutput:
-    return await run_bash(ctx, payload, settings=_settings, uid=await _user_uid(ctx))
+    return await run_bash(ctx, payload, settings=_settings, uid=_user_uid(ctx))
 
 
 @agent.handler(
