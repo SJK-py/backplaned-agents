@@ -27,6 +27,11 @@ COMPOSE_FILE="docker-compose.prod.yml"
 BUNDLED_SEARXNG_URL="http://searxng:8080"
 DEFAULT_WEBAPP_HTTPS_PORT="8443"   # webapp's port identity for bare-IP LAN
 
+# Set to 1 once invitation tokens have been minted in THIS invocation (by
+# build_env). start/restart then skip their own refresh so tokens are
+# generated exactly once per launch — never twice (see refresh_invitations).
+TOKENS_MINTED=0
+
 # URL-/DSN-/JSON-safe secret of $1 chars (alphanumeric only).
 gen() { openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c "${1:-44}"; }
 
@@ -224,11 +229,13 @@ build_env() {
             echo "# bundled SearXNG — prod.sh auto-adds '--profile search' on start/restart"
         fi
         echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
-        echo
-        echo "# --- Agent invitation tokens (registered by the compose 'bootstrap' service) ---"
-        scripts/register-invitations.sh --gen
     } > "$OUT"
     chmod 600 "$OUT"
+    # Invitation tokens are the ONE thing not written above: they're single-use
+    # and minted fresh on every start/restart by refresh_invitations(), which is
+    # the single source. Seed them once here too, so a build-then-stop/exit (no
+    # compose action) still leaves a complete, registerable env file.
+    refresh_invitations
 
     echo
     echo "Wrote $OUT (chmod 600)."
@@ -303,6 +310,7 @@ refresh_invitations() {
     } >> "$tmp"
     chmod 600 "$tmp"
     mv "$tmp" "$OUT"
+    TOKENS_MINTED=1
     echo "  refreshed agent invitation tokens (single-use — fresh per launch)"
 }
 
@@ -356,12 +364,12 @@ maybe_build_flag() {
 case "${ACTION,,}" in
     1|start)
         BUILD_FLAG="$(maybe_build_flag)"
-        refresh_invitations
+        [[ "$TOKENS_MINTED" == "1" ]] || refresh_invitations
         echo; echo "+ docker compose ${CARGS[*]} up -d ${BUILD_FLAG}"
         exec docker compose "${CARGS[@]}" up -d ${BUILD_FLAG:+$BUILD_FLAG} ;;
     2|restart)
         BUILD_FLAG="$(maybe_build_flag)"
-        refresh_invitations
+        [[ "$TOKENS_MINTED" == "1" ]] || refresh_invitations
         # `up -d --force-recreate` recreates ALL containers (a true restart);
         # --build first when rebuilding images from this source.
         echo; echo "+ docker compose ${CARGS[*]} up -d --force-recreate ${BUILD_FLAG}"
