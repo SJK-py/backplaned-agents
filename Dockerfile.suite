@@ -48,6 +48,15 @@ COPY --from=css-build /webapp/static/tailwind.css \
 # reach the LLM through the router's LlmService.
 RUN pip install ".[suite,webapp]"
 
+# Pre-create the mount points for the named volumes (AGENT_STATE_DIR=/state,
+# SUITE_LANCE_ROOT=/lancedb) OWNED BY the runtime uid. Docker seeds an empty
+# named volume from the image directory's ownership/permissions at first
+# mount; without these the volume is created root:root and the non-root `bp`
+# user (uid 10002) gets EACCES writing credentials.json → onboard succeeds
+# server-side but the credential can't be persisted → the agent re-onboards
+# next start → router 409 "already registered" → crash loop.
+RUN mkdir -p /state /lancedb && chown 10002:10002 /state /lancedb
+
 USER bp
 
 # `python -m bp_agents.agents.<name>` is the per-agent entrypoint; the
