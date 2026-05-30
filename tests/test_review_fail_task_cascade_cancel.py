@@ -486,8 +486,9 @@ def test_fail_task_cascade_runs_before_parent_none_return() -> None:
         "descendant cascade must run before the root-task "
         "early-return, else root timeouts leak their subtree"
     )
-    # Uses the shared reason + the proven cancel fan-out shape.
-    assert 'reason="parent_failed"' in src
+    # Uses the shared cascade reason (parent_failed | parent_timed_out,
+    # derived from terminal_state) + the proven cancel fan-out shape.
+    assert "reason=cascade_reason" in src
     assert "_abort_router_side_llm_tasks" in src
 
 

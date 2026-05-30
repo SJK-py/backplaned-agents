@@ -93,7 +93,7 @@ def upgrade() -> None:
             preset_pro               text NOT NULL DEFAULT 'default',
             preset_balanced          text NOT NULL DEFAULT 'default',
             preset_lite              text NOT NULL DEFAULT 'default',
-            preset_embedding         text NOT NULL DEFAULT 'default',
+            preset_embedding         text NOT NULL DEFAULT 'default_embedding',
             max_context_token_limit  integer NOT NULL DEFAULT 120000,
             verbose_default          boolean NOT NULL DEFAULT false,
             language                 text NOT NULL DEFAULT 'en',

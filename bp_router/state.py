@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 _ALLOWED: dict[TaskState, set[TaskState]] = {
     TaskState.QUEUED: {
         TaskState.RUNNING,
+        # A very fast executor can ack + complete before the router commits
+        # the QUEUED→RUNNING transition for its ack, so a Result(succeeded)
+        # may land while the row is still QUEUED. Allow it (the other
+        # terminals were already reachable from QUEUED) so the result isn't
+        # dropped as a "duplicate" and the task stranded until the deadline
+        # sweep TIMED_OUTs it.
+        TaskState.SUCCEEDED,
         TaskState.FAILED,
         TaskState.CANCELLED,
         TaskState.TIMED_OUT,

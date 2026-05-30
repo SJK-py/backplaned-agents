@@ -235,7 +235,6 @@ router_task_duration_seconds{terminal_state}                            histogra
 router_task_active_count{state}                                         gauge         # planned
 **router_db_pool_connections{state}**                                   gauge         # state ∈ in_use | idle | max; sampled per sweep tick
 **router_result_from_wrong_agent_total{reporter}**                      counter       # reporter ∈ owning | other; Result dropped, reporter != active executor
-**router_result_attachments_dropped_total{code}**                       counter       # result attachments unresolved at complete_task (best-effort drop; Result still delivered), by AdmitError code
 **router_acl_decisions_total{decision, effect, rule_name}**             counter
 **router_quota_exceeded_total{counter, level}**                         counter       # per-(user,level) admit-rate bucket denials
 router_db_query_duration_seconds{query}                                 histogram     # planned

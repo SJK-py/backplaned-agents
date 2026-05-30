@@ -1462,6 +1462,15 @@ async def fail_task(
     to fail an arbitrary number of an agent's tasks without
     monopolising the pool."""
     pool = state.db_pool  # type: ignore[attr-defined]
+    # Audit/fan-out reason for the cascaded descendant cancellations: name the
+    # parent's actual terminal cause (a deadline-expired parent timed out, it
+    # didn't "fail"). Cosmetic — the descendant terminal STATE is CANCELLED
+    # either way; this only makes audit/Result wording accurate.
+    cascade_reason = (
+        "parent_timed_out"
+        if terminal_state == TaskState.TIMED_OUT
+        else "parent_failed"
+    )
 
     async def _do_db_work(c: Any) -> dict | None:
         nonlocal user_id
@@ -1563,7 +1572,7 @@ async def fail_task(
                             c,
                             d.task_id,
                             TaskState.CANCELLED,
-                            reason="parent_failed",
+                            reason=cascade_reason,
                             actor_agent_id="router",
                         )
                     except IllegalTransition:
@@ -1631,7 +1640,7 @@ async def fail_task(
                     status_code=499,
                     error={
                         "code": "cancelled",
-                        "message": "parent_failed",
+                        "message": cascade_reason,
                     },
                 ),
                 await_ack=False,
@@ -1648,7 +1657,7 @@ async def fail_task(
                     trace_id="0" * 32,
                     span_id="0" * 16,
                     task_id=tid,
-                    reason="parent_failed",
+                    reason=cascade_reason,
                 ),
                 await_ack=False,
             )
