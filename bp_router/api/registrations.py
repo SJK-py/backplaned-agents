@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from bp_router.api.admin import _denial_audit_allowed
 from bp_router.db import queries
 from bp_router.security.jwt import SessionPrincipal, require_authenticated
 
@@ -91,17 +92,27 @@ async def submit_registration(
         the per-submitter aggregate cap from the per-external one."""
         retry_after_s = max(decision.retry_after_s, 1.0)
         retry_after = max(int(retry_after_s + 0.999), 1)
-        async with state.db_pool.acquire() as conn:
-            await queries.append_audit_event(
-                conn, actor_kind="user", actor_id=principal.user_id,
-                event="registration.rate_limited",
-                payload={
-                    "channel": req.channel,
-                    "external_id": req.external_id,
-                    "retry_after_s": retry_after,
-                    "scope": scope,
-                },
-            )
+        # Dampen the denial-audit write: a capped attacker hammering at full
+        # request rate would otherwise append one audit_log row PER rejected
+        # request, just relocating the unbounded-growth DoS from
+        # pending_user_registrations onto the hash-chained audit_log (whose
+        # global advisory lock serializes all appends). Same per-actor
+        # dampener the admin denial audits use; drops are metered
+        # (audit_denials_dropped_total). The 429 below ALWAYS fires.
+        if await _denial_audit_allowed(
+            state, principal.user_id, "registration.rate_limited"
+        ):
+            async with state.db_pool.acquire() as conn:
+                await queries.append_audit_event(
+                    conn, actor_kind="user", actor_id=principal.user_id,
+                    event="registration.rate_limited",
+                    payload={
+                        "channel": req.channel,
+                        "external_id": req.external_id,
+                        "retry_after_s": retry_after,
+                        "scope": scope,
+                    },
+                )
         raise HTTPException(
             status_code=429,
             detail="too many registration submissions; retry later",

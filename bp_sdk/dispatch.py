@@ -194,6 +194,17 @@ class Dispatcher:
             # don't burn the full grace window waiting for them — trip + reap
             # promptly. A live transport gets the full cooperative grace.
             await self._drain_in_flight(grace_s=30.0 if recv_alive else 0.0)
+            # The transport can also die DURING the drain (recv_alive was True
+            # at the top but the loop has since finished on its own). Capture
+            # that exception too — otherwise the `finally` cancel below masks
+            # it and run_until returns cleanly despite a permanently-failed
+            # transport. (No-op on a clean stop: recv_loop is still running.)
+            if (
+                recv_death is None
+                and recv_loop.done()
+                and not recv_loop.cancelled()
+            ):
+                recv_death = recv_loop.exception()
         finally:
             # Unconditional teardown — runs on clean stop AND on recv
             # death. Pre-fix only `self._loops` (recv loop) was
