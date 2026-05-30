@@ -82,3 +82,27 @@ def test_third_party_images_are_pinned(image_prefix: str) -> None:
     assert line is not None, f"{image_prefix} image line not found"
     tag = line.split(image_prefix, 1)[1].strip()
     assert tag and tag != "latest", f"{image_prefix} must pin a real tag, got {tag!r}"
+
+
+# --- sandbox per-user-uid posture: root + minimal caps + no-new-privs ------
+
+
+def test_sandbox_runs_root_with_minimal_caps_for_uid_drop() -> None:
+    """The sandbox must run as root with ONLY SETUID/SETGID added (so the
+    per-user uid drop works) AND keep no-new-privileges (so untrusted code
+    can't regain privilege). Dropping all caps without the two adds, or not
+    running as root, collapses every user onto one uid — no isolation."""
+    import yaml  # noqa: PLC0415
+
+    d = yaml.safe_load(_COMPOSE)
+    sb = d["services"]["sandbox"]
+    assert str(sb.get("user")) in ("0:0", "0", "root"), (
+        "sandbox must run as root or the uid drop silently no-ops"
+    )
+    assert "no-new-privileges:true" in sb.get("security_opt", []), (
+        "no-new-privileges must stay on — it blocks privilege REGAIN, not the drop"
+    )
+    assert sb.get("cap_drop") == ["ALL"]
+    assert set(sb.get("cap_add", [])) == {"SETUID", "SETGID"}, (
+        "exactly SETUID+SETGID — more is over-privileged, fewer breaks the drop"
+    )
