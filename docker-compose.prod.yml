@@ -384,6 +384,11 @@ services:
       <<: *suite-env
       SUITE_AGENT: sandbox
       AGENT_INVITATION_TOKEN: ${SANDBOX_INVITATION:?}
+      # This service runs as root with cap_drop: ALL (below), so it has no
+      # CAP_DAC_OVERRIDE and can only write a dir it OWNS. The image's default
+      # /state is owned by uid 10002 → EACCES on credentials.json. Use the
+      # root-owned 0700 /sandbox-state (Dockerfile.suite) instead.
+      AGENT_STATE_DIR: /sandbox-state
     # Runs as ROOT (overrides the image's `USER bp`) — the ONE service that
     # legitimately needs it: per-user isolation works by dropping each user's
     # bash to a distinct uid (setgroups/setgid/setuid in the child preexec),
@@ -408,7 +413,8 @@ services:
     # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
     # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
     networks: [agents]             # router WS only — no db/redis/web
-    volumes: [sandbox_state:/state]
+    # Mount at /sandbox-state (root-owned 0700) — see AGENT_STATE_DIR above.
+    volumes: [sandbox_state:/sandbox-state]
 
   searxng:                         # optional web-search backend (profile)
     # Pinned to an immutable date tag (NOT `latest`) for reproducible deploys.
