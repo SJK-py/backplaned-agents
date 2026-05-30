@@ -274,8 +274,13 @@ services:
       <<: *suite-env
       SUITE_AGENT: research
       AGENT_INVITATION_TOKEN: ${RESEARCH_INVITATION:?}
-      # Point at the bundled SearXNG (search profile) or an external one.
-      SUITE_SEARXNG_URL: ${SUITE_SEARXNG_URL:-http://searxng:8080}
+      # Web-search backend. The env file (scripts/init-prod-env.sh) is the
+      # single source of truth: set it to the bundled SearXNG
+      # (http://searxng:8080, also pass `--profile search`), an external
+      # instance, or leave it EMPTY to run research with no web search.
+      # Default empty — NOT http://searxng:8080 — so an unset value doesn't
+      # silently point research at a SearXNG that isn't running.
+      SUITE_SEARXNG_URL: ${SUITE_SEARXNG_URL:-}
 
   computer_use:
     <<: *suite-agent

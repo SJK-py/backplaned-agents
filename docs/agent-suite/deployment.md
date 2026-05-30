@@ -141,6 +141,15 @@ The **Custom** option asks for no key and wires the generic tier slots
 catalogue); set the provider key(s) and repoint those presets to any
 provider/model via the admin webUI (`/admin`) afterward.
 
+It then asks for the **web-search backend**: deploy the bundled SearXNG (sets
+`SUITE_SEARXNG_URL=http://searxng:8080` and adds `--profile search` to the
+deploy command for you), point at an **external** SearXNG (you give the URL),
+or **skip** it (empty `SUITE_SEARXNG_URL` — research runs without web search).
+Finally it offers to **deploy**: `docker compose up -d` (prebuilt images),
+`up -d --build` (rebuild from this source), or just print the command so you
+can edit `deploy/.env.prod` first — the printed command already includes
+`--profile search` when you chose the bundled SearXNG.
+
 `compose up` resolves the whole order via `depends_on`: `postgres` →
 `migrate` + `suite-migrate` (schemas) → `router` (healthy) → `bootstrap`
 (`python -m bp_agents.bootstrap` — registers the pre-supplied invitation
