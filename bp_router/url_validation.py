@@ -110,19 +110,25 @@ def _ip_is_blocked(
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = ipaddress.ip_address(mapped)
-    # Order: more-specific category first so error messages name the
-    # actual reason rather than a generic catch-all (e.g., ::1 is BOTH
-    # loopback and reserved; report loopback).
+    # Order: more-specific category first. Link-local / multicast /
+    # unspecified are blocked for everyone (link-local covers the
+    # 169.254.169.254 cloud-metadata endpoint). Loopback and private are
+    # then resolved against the caller's allowances — and a permitted
+    # loopback/private address SHORT-CIRCUITS to allowed here, because such
+    # an address may ALSO be `is_reserved` (notably ``::1`` is both loopback
+    # and reserved) and must not fall through to the reserved catch-all. A
+    # local provider's ``localhost`` resolves to ``::1`` on dual-stack hosts
+    # / CI, so without this a legitimate local base_url is wrongly blocked.
     if ip.is_link_local:
         return "link-local address (cloud-metadata range)"
     if ip.is_multicast:
         return "multicast address"
     if ip.is_unspecified:
         return "unspecified address"
-    if not allow_loopback and ip.is_loopback:
-        return "loopback address"
-    if not allow_private and ip.is_private:
-        return "private address (RFC1918 / ULA)"
+    if ip.is_loopback:
+        return None if allow_loopback else "loopback address"
+    if ip.is_private:
+        return None if allow_private else "private address (RFC1918 / ULA)"
     if ip.is_reserved:
         return "reserved address"
     return None
