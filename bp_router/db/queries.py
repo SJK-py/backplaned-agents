@@ -1253,6 +1253,28 @@ async def gc_registration_attempts(
     return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
 
 
+async def gc_expired_invitations(
+    conn: asyncpg.Connection, *, cutoff: datetime
+) -> int:
+    """Delete terminal (used OR expired) invitations whose terminal moment
+    is older than `cutoff`.
+
+    Invitations are single-use and now short-lived: the suite mints a fresh
+    one per agent on EVERY launch (`scripts/prod.sh` `refresh_invitations`,
+    10-min TTL), so dead rows otherwise accumulate ~one per agent per relaunch
+    forever. The terminal moment is `used_at` for a consumed invitation, else
+    `expires_at` — `COALESCE(used_at, expires_at)`. A LIVE invitation (unused
+    AND unexpired) has a future `expires_at`, which sorts after any cutoff, so
+    it is never touched; a just-expired or just-used one is retained until the
+    retention window passes (audit). Returns the number of rows deleted."""
+    result = await conn.execute(
+        "DELETE FROM invitations WHERE COALESCE(used_at, expires_at) < $1",
+        cutoff,
+    )
+    parts = result.split()
+    return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+
+
 async def get_pending_registration(
     conn: asyncpg.Connection, registration_id: str
 ) -> PendingRegistrationRow | None:

@@ -223,6 +223,17 @@ admin-test sessions (`metadata->>'kind' = 'admin_test'`) older than
 `ROUTER_SESSION_GC_TEST_RETENTION_DAYS` (default 30) when no tasks
 still reference them. User sessions accrue indefinitely.
 
+**Invitation GC.** Invitations are single-use and short-lived (the
+agent suite mints a fresh one per agent on every launch — see
+`scripts/prod.sh` `refresh_invitations` — with a 10-min TTL set by
+`bp_agents.bootstrap`). A sibling loop (`tasks.invitation_gc_loop`,
+hourly, 7-day retention) hard-deletes **terminal** invitations only —
+`DELETE FROM invitations WHERE COALESCE(used_at, expires_at) < cutoff`.
+A live invitation (unused **and** unexpired) has a future `expires_at`,
+so it is never touched; a just-used or just-expired row is kept for the
+retention window (audit) and then reaped. Without this the table grows
+~one dead row per agent per relaunch forever.
+
 ### 2.3 Quotas and budgets — partially shipped
 
 **Status: admit-rate quota is shipped; the broader counter table is

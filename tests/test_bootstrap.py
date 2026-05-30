@@ -92,6 +92,10 @@ def test_bootstrap_registers_all_and_applies_acl(monkeypatch) -> None:
     assert all(c[2]["json"]["level"] == "tier1" for c in invites)
     # Each carries its pre-supplied token.
     assert all(c[2]["json"]["token"] == "z" * 44 for c in invites)
+    # Short TTL (10 min default): tokens are minted fresh per launch and
+    # consumed within seconds, so a long-lived invitation is needless risk.
+    assert bs._INVITATION_TTL_S == 600
+    assert all(c[2]["json"]["expires_in_s"] == bs._INVITATION_TTL_S for c in invites)
     # ACL applied once.
     puts = [c for c in calls if c[0] == "PUT"]
     assert len(puts) == 1 and puts[0][1].endswith("/v1/admin/acl/rules")
