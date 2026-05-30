@@ -2725,7 +2725,17 @@ async def update_llm_preset(
     values: list[Any] = []
     for col, val in fields.items():
         values.append(val)
-        set_clauses.append(f"{col} = ${len(values)}")
+        if col == "default_provider_options":
+            # jsonb, nominally non-null. A PATCH carrying explicit JSON `null`
+            # would otherwise write SQL NULL, after which the RETURNING row
+            # (and every later list/get/load_presets) fails LlmPresetRow
+            # validation — poisoning the whole preset read. COALESCE keeps it
+            # an object.
+            set_clauses.append(
+                f"{col} = COALESCE(${len(values)}, '{{}}'::jsonb)"
+            )
+        else:
+            set_clauses.append(f"{col} = ${len(values)}")
     set_clauses.append("updated_at = now()")
     values.append(name)
     sql = f"""
