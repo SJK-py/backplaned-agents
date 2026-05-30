@@ -125,7 +125,19 @@ On `SIGTERM` (every restart/rollout) the **router** lifespan drains in order —
 
 ## 8. Scaling notes
 
-- **router** — stateless; scale horizontally behind the proxy. Only the one-shot `migrate` runs `upgrade`.
-- **chatbot** — stateful (session queue, Telegram offset). v1: single instance. To scale: Redis-backed session queue + session→worker affinity ([`agent-suite/overview.md` §2.2](./agent-suite/overview.md)).
-- **stores** — co-located KB+memory; >1 replica requires the memory per-user lock in Redis.
-- **sandbox** — scale by workspace/runtime capacity; keep the isolation invariants regardless of replica count.
+See **[`scaling.md`](./scaling.md)** for the full picture: the current
+scaling posture (the router runs as a **single worker** today; which
+subsystems already have a Redis path), the per-service scaling rules, and
+the ranked backlog of work to lift each ceiling. In short:
+
+- **router** — **single worker** today (process-local socket registry /
+  correlation maps); scale **vertically** until the multi-worker work
+  ([`scaling.md §1.1`](./scaling.md), [`router/storage.md §6.1`](./router/storage.md#61-multi-worker--planned))
+  lands. The one-shot `migrate` is the only process that runs `upgrade`.
+- **chatbot** — stateful (session queue, Telegram offset). v1: single
+  instance. To scale: `SUITE_REDIS_URL` (distributed session lock) +
+  session→worker affinity.
+- **stores** — co-located KB+memory; >1 replica requires the memory
+  per-user lock in Redis (`SUITE_REDIS_URL`).
+- **sandbox** — scale by workspace/runtime capacity; keep the isolation
+  invariants regardless of replica count.
