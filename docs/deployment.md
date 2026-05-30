@@ -37,7 +37,14 @@ Two boundaries to keep straight:
 ## 2. Boxes
 
 ### Edge — `caddy`
-TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp (v2). The router does **not** terminate TLS. PG/Redis/rustfs are never proxied.
+TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/rustfs are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
+
+| Env var | Serves | Default |
+| --- | --- | --- |
+| `PUBLIC_DOMAIN` | router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
+| `WEBAPP_DOMAIN` | the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
+
+The webapp gets its **own** hostname because it serves from `/`, which would collide with the router's `/admin` on the same host.
 
 ### docker 1 — router (this repo)
 FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (env `ROUTER_*`):
@@ -141,3 +148,53 @@ the ranked backlog of work to lift each ceiling. In short:
   per-user lock in Redis (`SUITE_REDIS_URL`).
 - **sandbox** — scale by workspace/runtime capacity; keep the isolation
   invariants regardless of replica count.
+
+## 9. Edge / reverse proxy (Caddy)
+
+The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443`. It
+terminates TLS, proxies the two public hostnames, and transparently upgrades
+the agent WebSocket on `/v1/agent`. The router never terminates TLS;
+Postgres / Redis / rustfs are never proxied. Two `${...}`-interpolated
+hostnames drive [`deploy/Caddyfile`](../deploy/Caddyfile), set by
+`scripts/prod.sh` (or by hand in `deploy/.env.prod`):
+
+- **`PUBLIC_DOMAIN`** — router + admin UI (`/v1/*`, `/admin/*`, `/healthz`,
+  `/readyz`, `/metrics`, `/docs`; bare `/` redirects to `/admin/login`).
+  Also flows into `ROUTER_PUBLIC_URL=https://$PUBLIC_DOMAIN`.
+- **`WEBAPP_DOMAIN`** — the browser channel (defaults to
+  `app.${PUBLIC_DOMAIN}`). Separate host because the webapp serves from `/`
+  and would collide with the router's `/admin`.
+
+### Choosing the hostnames — three access modes
+
+Caddy decides how to provision TLS **from the site address itself**:
+
+| You want | Set `PUBLIC_DOMAIN` / `WEBAPP_DOMAIN` to | TLS Caddy uses | Reachable from |
+| --- | --- | --- | --- |
+| **Local only** (single box, a trial) | `localhost` / `app.localhost` (the defaults) | local auto-self-signed (trusted by the host's browsers via Caddy's local CA) | this machine only — `https://localhost`, `https://app.localhost` |
+| **LAN** (reach it from other devices on the network) | a name or IP that resolves on the LAN, e.g. `bp.lan` / `app.bp.lan`, or `192.168.1.50` | Caddy's **internal CA** (no public ACME — these aren't public names) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
+| **Public** (internet) | a real domain whose DNS points at this host, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
+
+Notes:
+
+- **`localhost` is loopback only.** It is *not* reachable from other devices;
+  use the LAN mode for that. `*.localhost` resolves to `127.0.0.1` on most
+  systems, so `app.localhost` works out of the box on the same machine.
+- **Public mode prerequisites:** the domain's DNS A/AAAA record must point at
+  this host, and inbound **`:80` and `:443` must be reachable** (Caddy needs
+  `:80` for the ACME challenge and the HTTP→HTTPS redirect). Behind NAT,
+  forward both ports.
+- **LAN / localhost trust:** Caddy signs with a per-instance internal CA, so
+  LAN clients see a certificate warning. To remove it, export Caddy's root
+  certificate (it lives under the `caddy_data` volume — see Caddy's
+  [Local HTTPS / `caddy trust` docs](https://caddyserver.com/docs/automatic-https#local-https)
+  for the current path and the `caddy trust` helper) and import it into each
+  client's trust store. For an internal tool it's also fine to just accept
+  the warning.
+- **Custom split:** the two hostnames are independent — e.g. a public
+  `WEBAPP_DOMAIN` for users plus a LAN-only `PUBLIC_DOMAIN` to keep `/admin`
+  off the internet. Edit `deploy/.env.prod` and re-run `scripts/prod.sh`
+  (→ restart) to apply.
+- **Editing routing** (extra paths, headers, a third host) is a
+  `deploy/Caddyfile` change; it's bind-mounted read-only, so a `restart`
+  reloads it.
