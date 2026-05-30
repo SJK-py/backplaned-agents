@@ -1676,11 +1676,15 @@ async def rename_evicted_agent(
 
 
 async def reset_agent_to_pending(conn: asyncpg.Connection, agent_id: str) -> bool:
-    """Move an `active` or `suspended` agent back to `pending` so it can
-    re-onboard with a fresh invitation (recovery for lost credentials — the
-    row is registered but the agent can't resume, and a fresh onboard would
-    409). The status guard never resurrects a `removed` (terminal) row nor
-    touches an already-`pending` one. Returns True iff a row was transitioned."""
+    """Move an `active` or `suspended` agent back to `pending` — the storage
+    primitive behind the `reset` / `reprovision` admin actions (force the
+    agent off; it must re-onboard before serving again). The status guard
+    never resurrects a `removed` (terminal) row nor touches an already-
+    `pending` one. Returns True iff a row was transitioned.
+
+    Note: re-onboard itself no longer requires `pending` — `POST /v1/onboard`
+    reactivates an already-`active` row given a valid invitation. This is now
+    an operational kick, not the recovery path it once was."""
     row = await conn.fetchrow(
         "UPDATE agents SET status = 'pending' "
         "WHERE agent_id = $1 AND status IN ('active', 'suspended') "
