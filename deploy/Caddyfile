@@ -14,8 +14,30 @@
 # `http://` site address Caddy disables automatic HTTPS (no cert, no :80→:443
 # redirect) — exactly what an upstream terminator wants. See
 # docs/deployment.md "Edge / reverse proxy (Caddy)".
+#
+# EDGE_TLS is an optional tls-directive fragment injected verbatim into both
+# site blocks (empty by default → Caddy's automatic TLS: Let's Encrypt for a
+# public domain, internal CA for localhost/*.localhost/private IPs). prod.sh
+# sets it to `tls internal` for a bare-IP https deploy: a PUBLIC IP otherwise
+# "qualifies" for a public cert, so Caddy asks Let's Encrypt, which REFUSES to
+# issue for an IP, leaving :443 certless → browser ERR_SSL_PROTOCOL_ERROR. The
+# internal CA issues IP certs fine (one-time browser trust warning).
+#
+# EDGE_GLOBAL injects global options (empty by default). prod.sh sets it to
+# `default_sni <ip>` for a bare-IP deploy. This is REQUIRED for bare-IP https:
+# a client connecting to https://<ip> sends NO SNI (TLS SNI only carries
+# hostnames, never IP literals), so Caddy must fall back to a default cert.
+# Behind Docker's port publishing the local address Caddy sees is the
+# container IP — not the cert's IP SAN — so without default_sni it can't match
+# any cert and aborts the handshake with `tls: internal error`
+# (→ ERR_SSL_PROTOCOL_ERROR). default_sni names the cert to serve when no SNI
+# is offered.
+{
+	{$EDGE_GLOBAL:}
+}
 
 {$EDGE_SCHEME:https}://{$PUBLIC_DOMAIN:localhost} {
+	{$EDGE_TLS:}
 	# Router: HTTP API (/v1/*), health, metrics, OpenAPI, and the admin
 	# UI (/admin/*). WebSocket upgrade on /v1/agent is handled
 	# transparently by reverse_proxy.
@@ -31,6 +53,7 @@
 # router's /admin on the main domain. `flush_interval -1` disables
 # response buffering so the chat SSE progress stream flushes immediately.
 {$EDGE_SCHEME:https}://{$WEBAPP_DOMAIN:app.localhost} {
+	{$EDGE_TLS:}
 	reverse_proxy webapp:8002 {
 		flush_interval -1
 	}

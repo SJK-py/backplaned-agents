@@ -90,7 +90,9 @@ build_env() {
     ask PUBLIC_DOMAIN "Public domain — router + admin UI host" "localhost"
     # Webapp identity. A bare IP can't host `app.<ip>` (no DNS), so default it
     # to a PORT on the same IP; anything else gets the `app.` subdomain.
+    local IS_BARE_IP=0
     if [[ "$PUBLIC_DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        IS_BARE_IP=1
         WEBAPP_HTTPS_PORT="$DEFAULT_WEBAPP_HTTPS_PORT"
         ask WEBAPP_DOMAIN "Webapp (browser channel) host:port" "${PUBLIC_DOMAIN}:${WEBAPP_HTTPS_PORT}"
     else
@@ -109,6 +111,31 @@ build_env() {
     echo "Caddy serves plain HTTP at the origin instead of provisioning certs."
     ask UPSTREAM_TLS "TLS terminated upstream? [y/N]" "n"
     if yesish "$UPSTREAM_TLS"; then EDGE_SCHEME=http; else EDGE_SCHEME=https; fi
+
+    # Bare-IP https needs two Caddy nudges (both no-ops for a domain/localhost):
+    #
+    # EDGE_TLS="tls internal" — pin the internal CA. A PUBLIC IP otherwise
+    #   "qualifies" for a public cert, so Caddy asks Let's Encrypt, which REFUSES
+    #   to issue for a bare IP, leaving :443 certless. (A private IP already
+    #   auto-uses the internal CA, so this is belt-and-suspenders there.)
+    #
+    # EDGE_GLOBAL="default_sni <ip>" — name the cert to serve when the client
+    #   sends NO SNI. A browser hitting https://<ip> never sends SNI (it only
+    #   carries hostnames, not IP literals), and behind Docker's port publishing
+    #   the local address Caddy sees is the CONTAINER IP, not the cert's IP SAN —
+    #   so without default_sni Caddy can't match a cert and aborts the handshake
+    #   with `tls: internal error` (→ browser ERR_SSL_PROTOCOL_ERROR). This is
+    #   THE fix for the "https on a bare IP just SSL-errors" symptom.
+    #
+    # Both injected into deploy/Caddyfile (EDGE_TLS per-site, EDGE_GLOBAL into
+    # the global-options block). Empty otherwise: a real domain keeps auto
+    # Let's Encrypt + SNI routing; EDGE_SCHEME=http (TLS upstream) serves plain
+    # HTTP with no cert at all.
+    local EDGE_TLS="" EDGE_GLOBAL=""
+    if [[ "$EDGE_SCHEME" == "https" && $IS_BARE_IP -eq 1 ]]; then
+        EDGE_TLS="tls internal"
+        EDGE_GLOBAL="default_sni $PUBLIC_DOMAIN"
+    fi
 
     ask ADMIN_EMAIL "Bootstrap admin email" "admin@example.com"
     read -rsp "Bootstrap admin password (blank = generate one): " ADMIN_PW || true; echo
@@ -224,6 +251,16 @@ build_env() {
             echo "# TLS terminated upstream — Caddy serves plain HTTP at the origin."
             echo "EDGE_SCHEME=$EDGE_SCHEME"
         fi
+        if [[ -n "$EDGE_TLS" ]]; then
+            echo "# Bare-IP https (see deploy/Caddyfile). EDGE_TLS pins Caddy's"
+            echo "# internal CA — Let's Encrypt won't issue for an IP, so the"
+            echo "# default issuer leaves :443 certless. EDGE_GLOBAL sets default_sni:"
+            echo "# a client hitting https://<ip> sends no SNI, and behind Docker NAT"
+            echo "# Caddy can't match a cert without it → tls handshake 'internal"
+            echo "# error' (browser ERR_SSL_PROTOCOL_ERROR)."
+            echo "EDGE_TLS=$EDGE_TLS"
+            echo "EDGE_GLOBAL=$EDGE_GLOBAL"
+        fi
         echo
         echo "# --- Postgres (router + suite DBs share this server; suite connects as postgres) ---"
         echo "PG_USER=postgres"
@@ -300,6 +337,15 @@ build_env() {
                 echo "        docs/deployment.md). A public domain resolving here gets"
                 echo "        automatic Let's Encrypt TLS instead." ;;
         esac
+        if [[ -n "$EDGE_TLS" ]]; then
+            echo "  NOTE: bare IP '$PUBLIC_DOMAIN' over https → pinned Caddy's internal"
+            echo "        CA + default_sni (EDGE_TLS / EDGE_GLOBAL). default_sni is what"
+            echo "        lets the handshake succeed: an IP client sends no SNI, and"
+            echo "        Caddy can't match a cert behind Docker NAT without it (the"
+            echo "        'SSL protocol error' symptom). Browsers still warn on the"
+            echo "        self-signed cert until you trust Caddy's root CA — for"
+            echo "        warning-free TLS use a domain/LAN name that resolves here."
+        fi
     fi
     if [[ "$PROVIDER" == "custom" ]]; then
         echo "  NOTE: custom — the lite/default/pro presets are seeded to Gemini"
