@@ -372,8 +372,27 @@ services:
 
   sandbox:                         # UNTRUSTED code execution — hardened
     <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: sandbox, AGENT_INVITATION_TOKEN: "${SANDBOX_INVITATION:?}"}
+    # Runs as ROOT (overrides the image's `USER bp`) — the ONE service that
+    # legitimately needs it: per-user isolation works by dropping each user's
+    # bash to a distinct uid (setgroups/setgid/setuid in the child preexec),
+    # which requires CAP_SETUID, which only root has. The agent process itself
+    # does nothing privileged; it drops immediately per command.
+    #   * `no-new-privileges:true` is KEPT and is the crucial guard: it blocks
+    #     the UNTRUSTED code from REGAINING privilege via setuid binaries
+    #     (sudo/su/ping), while still allowing our root preexec to DROP
+    #     (verified: no_new_privs governs execve privilege-GAIN, not setuid()
+    #     down). So: root only to drop away, dropped code can't climb back.
+    #   * Without root here the drop silently no-ops (`_preexec` skips it when
+    #     euid != 0) and ALL users share uid 10002 — no per-user isolation.
+    user: "0:0"
     security_opt: ["no-new-privileges:true"]
+    # Root, but with the kernel capability set reduced to ONLY what the uid
+    # drop needs: SETUID + SETGID. Everything else (NET_RAW, SYS_ADMIN, …) is
+    # dropped, so even though the process is uid 0 it can't, e.g., raw-socket
+    # or mount. `cap_drop: ALL` WITHOUT the two adds would EPERM the setuid()
+    # and collapse all users onto one uid — keep both.
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID"]
     # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
     # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
     networks: [agents]             # router WS only — no db/redis/web
