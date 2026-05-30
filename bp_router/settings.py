@@ -133,6 +133,13 @@ class Settings(BaseSettings):
     public_url: str
     """External base URL, e.g. `https://router.example.com`."""
 
+    shutdown_grace_s: float = Field(default=25.0, ge=0.0)
+    """How long uvicorn waits for in-flight connections to close on SIGTERM
+    (``timeout_graceful_shutdown``) before forcing them. Keep this BELOW the
+    container's ``stop_grace_period`` (30s in docker-compose.prod.yml) so the
+    lifespan drain — closing WS sockets with 1001, cancelling in-flight LLM
+    tasks, draining loops — completes before Docker SIGKILLs the container."""
+
     # ------------------------------------------------------------------
     # Auth / tokens
     # ------------------------------------------------------------------
