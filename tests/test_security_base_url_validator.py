@@ -147,6 +147,48 @@ def test_local_provider_still_blocks_metadata_endpoint() -> None:
 
 
 # ---------------------------------------------------------------------------
+# IPv4-mapped IPv6 (``::ffff:a.b.c.d``) must be judged as its embedded IPv4.
+# Regression: on some hosts/CI, ``localhost`` resolves to ``::ffff:127.0.0.1``,
+# which reads as loopback=False/reserved=True and wrongly blocked a local
+# provider; and a mapped metadata IP read as generic "reserved" rather than
+# the real link-local hazard. The validator unwraps the mapped IPv4 first.
+# ---------------------------------------------------------------------------
+
+
+def test_local_provider_accepts_ipv4_mapped_loopback_literal() -> None:
+    # ::ffff:127.0.0.1 IS 127.0.0.1 — a local provider must accept it.
+    validate_base_url(
+        provider="openai-compatible",
+        base_url="http://[::ffff:127.0.0.1]:8000/v1",
+    )
+
+
+def test_local_provider_accepts_localhost_resolving_to_mapped_form(
+    monkeypatch,
+) -> None:
+    """Exact CI repro: ``localhost`` resolving to the IPv4-mapped form must
+    still be accepted by a local provider (it routes to IPv4 loopback)."""
+    monkeypatch.setattr(
+        url_validation.socket,
+        "getaddrinfo",
+        _stub_getaddrinfo("::ffff:127.0.0.1"),
+    )
+    validate_base_url(
+        provider="openai-compatible", base_url="http://localhost:8000/v1"
+    )
+
+
+def test_mapped_metadata_ip_blocked_as_link_local() -> None:
+    # ::ffff:169.254.169.254 must be flagged link-local (cloud-metadata),
+    # not generic "reserved" — and blocked even for a local provider.
+    with pytest.raises(BaseUrlValidationError, match="link-local"):
+        validate_base_url(
+            provider="openai-compatible",
+            base_url="http://[::ffff:169.254.169.254]/latest/meta-data/",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Hostnames (non-IP) ARE resolved and class-checked (H7 SSRF fix)
 # ---------------------------------------------------------------------------
 

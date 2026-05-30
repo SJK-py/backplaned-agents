@@ -100,6 +100,16 @@ def _ip_is_blocked(
     stays blocked for everyone — the cloud-metadata endpoint
     (169.254.169.254) is link-local.
     """
+    # Unwrap IPv4-mapped IPv6 (``::ffff:127.0.0.1``) to its embedded IPv4
+    # before classifying. Such an address routes to the IPv4 target, so it
+    # must be judged as that IPv4 — otherwise ``::ffff:127.0.0.1`` reads as
+    # loopback=False/reserved=True (wrongly blocking a local provider whose
+    # ``localhost`` resolved to the mapped form, as it does on some hosts/CI)
+    # AND ``::ffff:169.254.169.254`` reads as generic "reserved" instead of
+    # the real link-local cloud-metadata hazard. Mirrors common/urlsafe.py.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = ipaddress.ip_address(mapped)
     # Order: more-specific category first so error messages name the
     # actual reason rather than a generic catch-all (e.g., ::1 is BOTH
     # loopback and reserved; report loopback).
