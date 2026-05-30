@@ -104,16 +104,16 @@ SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
 ### Production — everything in Docker
 
 ```bash
-# 1. Generate deploy/.env.prod — prompts for the few things only you can
-#    provide (domain, admin email/password, GEMINI key, Telegram token) and
-#    random-generates the rest (DB password, JWT/session/metrics secrets,
-#    object-store keys, one invitation token per agent).
-scripts/init-prod-env.sh
-
-# 2. Up. Compose runs the schema migrations, then a one-shot `bootstrap`
-#    (registers the invitations + applies the suite ACL once the router is
-#    healthy), then every agent — in dependency order, one command.
-docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
+# Production launcher. First asks whether to build deploy/.env.prod (a
+# first deploy, or to change vars — prompts for the few things only you can
+# provide: domain, admin email/password, LLM key, Telegram token, search
+# backend; random-generates the rest). Then runs a compose action:
+# start / restart / stop (start & restart can rebuild images first). The
+# bundled-SearXNG `--profile search` flag is auto-added when configured.
+# Compose brings up schema migrations → a one-shot `bootstrap` (registers
+# invitations + applies the suite ACL once the router is healthy) → every
+# agent, in dependency order.
+scripts/prod.sh
 ```
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
