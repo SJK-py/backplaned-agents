@@ -163,6 +163,21 @@ class SuiteSettings(BaseSettings):
     """stdout above this many chars is saved to a file-store name instead
     of inlined."""
 
+    # Per-user uid isolation. The sandbox drops each user's bash to a distinct
+    # OS uid (filesystem/process isolation inside the shared container). The
+    # `user_id → uid` map is owned locally by the sandbox in a JSON file on its
+    # AGENT_STATE_DIR (`bp_agents.agents.sandbox.uid_store`) — NOT the suite DB,
+    # which the sandbox is deliberately isolated from. uids are allocated
+    # sequentially from the base. The drop only engages when the process runs
+    # as root (prod); in rootless dev it's a no-op.
+    sandbox_uid_base: int = Field(default=100_000, ge=1)
+    """First uid handed out (well above system/login uids). Subsequent users
+    get base+1, base+2, …"""
+    sandbox_uid_max: int = Field(default=165_535, ge=1)
+    """Upper bound of the uid range. Default keeps the whole range inside a
+    typical 65536-wide user-namespace sub-uid mapping (100000–165535). A user
+    arriving past this gets no uid drop (logged) rather than a colliding uid."""
+
     # Resource limits (rlimits) applied to every sandbox bash subprocess so a
     # single tenant's command can't starve the SHARED container (the wall-clock
     # timeout + uid drop don't bound resource use). Applied in the child

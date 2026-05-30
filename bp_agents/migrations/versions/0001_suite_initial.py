@@ -100,7 +100,11 @@ def upgrade() -> None:
             max_context_token_limit  integer NOT NULL DEFAULT 120000,
             verbose_default          boolean NOT NULL DEFAULT false,
             language                 text NOT NULL DEFAULT 'en',
-            sandbox_uid              integer,
+            sandbox_uid              integer,  -- DEAD: the sandbox now owns
+                                              -- per-user uids in a local JSON
+                                              -- store (it's network-isolated
+                                              -- from this DB). Never written;
+                                              -- kept to avoid a migration.
             default_session_id       text,
             custom_note              text NOT NULL DEFAULT '',
             created_at               timestamptz NOT NULL DEFAULT now(),
