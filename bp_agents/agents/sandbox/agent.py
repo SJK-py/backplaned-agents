@@ -70,7 +70,26 @@ _pool: asyncpg.Pool | None = None
 @agent.on_startup
 async def _startup() -> None:
     global _pool  # noqa: PLW0603 — startup-wired handle
-    _pool = await open_pool(_settings)
+    # The sandbox is deliberately isolated from the suite DB (prod compose puts
+    # it on the `agents` network only — untrusted code must never reach
+    # Postgres). The pool is used ONLY to look up the optional per-user
+    # `sandbox_uid`; without it, `_user_uid` returns None and bash runs as the
+    # current user (no per-uid drop). So a DB that's unreachable BY DESIGN must
+    # NOT crash startup — degrade to no-uid-drop instead of dying on gaierror.
+    try:
+        _pool = await open_pool(_settings)
+    except Exception as exc:  # noqa: BLE001 — DB-by-design-unreachable degrades
+        # A connection failure (gaierror/OSError when `postgres` doesn't
+        # resolve on the agents-only network, or any pool-open error) is
+        # expected for the isolated sandbox. Degrade, don't die.
+        logger.warning(
+            "sandbox_db_unavailable_no_uid_drop",
+            extra={
+                "event": "sandbox_db_unavailable",
+                "error": repr(exc),
+            },
+        )
+        _pool = None
 
 
 @agent.on_shutdown

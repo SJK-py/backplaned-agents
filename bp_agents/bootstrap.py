@@ -66,6 +66,16 @@ async def _main() -> int:
         headers = {"Authorization": f"Bearer {token}"}
 
         # 1. Register pre-supplied invitation tokens.
+        #
+        # NO per-name Idempotency-Key. The token itself is the natural dedup
+        # key — re-registering the SAME token collides on the token-hash PK
+        # and returns 409 ("already registered", fine). A per-name key
+        # (`register-<name>`) was actively WRONG with fresh-token-per-launch
+        # (prod.sh `refresh_invitations`): the router's idempotency contract
+        # returns the EXISTING row for a repeated key and IGNORES the new
+        # token, so a relaunch's fresh token was never registered → the agent
+        # then presents an unregistered token → 403. Without the key, each
+        # launch's fresh token is registered for real.
         registered = 0
         for name, var, prov in _ROSTER:
             tok = os.environ.get(var)
@@ -74,12 +84,19 @@ async def _main() -> int:
                 continue
             resp = await client.post(
                 f"{router}/v1/admin/invitations",
-                headers={**headers, "Idempotency-Key": f"register-{name}"},
+                headers=headers,
                 json={"level": "tier1", "token": tok, "provisions_service_user": prov},
             )
-            if resp.status_code in (201, 409):  # created / already registered
+            # 201 = freshly registered; 409 = this exact token already
+            # registered (idempotent re-run). Anything else (403/422/5xx) is a
+            # real failure we must surface — do NOT mask it.
+            if resp.status_code in (201, 409):
                 registered += 1
             else:
+                print(
+                    f"register {name} FAILED: {resp.status_code} {resp.text}",
+                    file=sys.stderr,
+                )
                 resp.raise_for_status()
         print(f"registered {registered} invitation(s)")
 
