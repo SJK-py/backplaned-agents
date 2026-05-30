@@ -43,8 +43,9 @@ TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI 
 | --- | --- | --- |
 | `PUBLIC_DOMAIN` | router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
 | `WEBAPP_DOMAIN` | the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
+| `WEBAPP_HTTPS_PORT` | extra published port for the webapp under a **bare-IP** deploy (`WEBAPP_DOMAIN=<ip>:<port>`) | `8443` |
 
-The webapp gets its **own** hostname because it serves from `/`, which would collide with the router's `/admin` on the same host.
+The webapp gets its **own** identity (hostname, or a port for a bare IP) because it serves from `/`, which would collide with the router's `/admin` on the same host.
 
 ### docker 1 — router (this repo)
 FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (env `ROUTER_*`):
@@ -151,35 +152,57 @@ the ranked backlog of work to lift each ceiling. In short:
 
 ## 9. Edge / reverse proxy (Caddy)
 
-The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443`. It
-terminates TLS, proxies the two public hostnames, and transparently upgrades
-the agent WebSocket on `/v1/agent`. The router never terminates TLS;
-Postgres / Redis / rustfs are never proxied. Two `${...}`-interpolated
-hostnames drive [`deploy/Caddyfile`](../deploy/Caddyfile), set by
-`scripts/prod.sh` (or by hand in `deploy/.env.prod`):
+The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443` (plus
+the optional webapp port below). It terminates TLS, proxies the two public
+hostnames, and transparently upgrades the agent WebSocket on `/v1/agent`. The
+router never terminates TLS; Postgres / Redis / rustfs are never proxied. Two
+`${...}`-interpolated hostnames drive [`deploy/Caddyfile`](../deploy/Caddyfile),
+set by `scripts/prod.sh` (or by hand in `deploy/.env.prod`):
 
 - **`PUBLIC_DOMAIN`** — router + admin UI (`/v1/*`, `/admin/*`, `/healthz`,
   `/readyz`, `/metrics`, `/docs`; bare `/` redirects to `/admin/login`).
   Also flows into `ROUTER_PUBLIC_URL=https://$PUBLIC_DOMAIN`.
 - **`WEBAPP_DOMAIN`** — the browser channel (defaults to
-  `app.${PUBLIC_DOMAIN}`). Separate host because the webapp serves from `/`
-  and would collide with the router's `/admin`.
+  `app.${PUBLIC_DOMAIN}`). The webapp needs its **own identity** because it
+  serves from `/`, which would collide with the router's `/admin` — Caddy
+  routes the two by `Host` header on the shared `:443`.
 
-### Choosing the hostnames — three access modes
+> **Two identities, one `:443`.** Caddy virtual-hosts both sites on `:443` and
+> picks the backend from the request's `Host` header — so each needs a
+> *distinct* name. With a **hostname** that's free (`bp.example.com` +
+> `app.bp.example.com`). With a **bare IP** there's no `app.<ip>` to resolve,
+> so the webapp instead takes a **port identity** on the same IP
+> (`WEBAPP_DOMAIN=<ip>:8443`) — `prod.sh` defaults to this automatically for
+> an IP, and the `caddy` service publishes `WEBAPP_HTTPS_PORT` (default
+> `8443`). The webapp can't be path-mounted under the router (it has no
+> mount-prefix support), so a second name or a second port is the only option.
+
+### Choosing the hostnames — access modes
 
 Caddy decides how to provision TLS **from the site address itself**:
 
-| You want | Set `PUBLIC_DOMAIN` / `WEBAPP_DOMAIN` to | TLS Caddy uses | Reachable from |
+| You want | `PUBLIC_DOMAIN` / `WEBAPP_DOMAIN` | TLS Caddy uses | Reachable from |
 | --- | --- | --- | --- |
 | **Local only** (single box, a trial) | `localhost` / `app.localhost` (the defaults) | local auto-self-signed (trusted by the host's browsers via Caddy's local CA) | this machine only — `https://localhost`, `https://app.localhost` |
-| **LAN** (reach it from other devices on the network) | a name or IP that resolves on the LAN, e.g. `bp.lan` / `app.bp.lan`, or `192.168.1.50` | Caddy's **internal CA** (no public ACME — these aren't public names) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
-| **Public** (internet) | a real domain whose DNS points at this host, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
+| **LAN — by hostname** (preferred) | a LAN-resolvable name **and** its `app.` sub, e.g. `bp.lan` / `app.bp.lan` | Caddy's **internal CA** (not public names → no ACME) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
+| **LAN — by bare IP** | `192.168.1.50` / `192.168.1.50:8443` (the IP default) | Caddy's **internal CA** | any LAN device — router at `https://<ip>`, **webapp at `https://<ip>:8443`** (open that port on any firewall) |
+| **Public** (internet) | a real domain whose DNS points here, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
 
 Notes:
 
 - **`localhost` is loopback only.** It is *not* reachable from other devices;
-  use the LAN mode for that. `*.localhost` resolves to `127.0.0.1` on most
+  use a LAN mode for that. `*.localhost` resolves to `127.0.0.1` on most
   systems, so `app.localhost` works out of the box on the same machine.
+- **LAN by hostname (preferred over bare IP):** you need *both* names to
+  resolve on every client — `bp.lan` **and** `app.bp.lan`. Use your LAN DNS /
+  router, an mDNS `*.local` name, or a per-client `hosts`-file entry (e.g.
+  `192.168.1.50  bp.lan app.bp.lan`). Then both sites share `:443` (no extra
+  port) and you only deal with the one internal-CA warning.
+- **LAN by bare IP:** when you can't add DNS, set `PUBLIC_DOMAIN=<ip>` and
+  `prod.sh` defaults `WEBAPP_DOMAIN=<ip>:8443` (overridable via
+  `WEBAPP_HTTPS_PORT`). The `caddy` service publishes that port; **open it on
+  the host firewall** so LAN clients can reach `https://<ip>:8443`. The router
+  stays on `https://<ip>`.
 - **Public mode prerequisites:** the domain's DNS A/AAAA record must point at
   this host, and inbound **`:80` and `:443` must be reachable** (Caddy needs
   `:80` for the ACME challenge and the HTTP→HTTPS redirect). Behind NAT,

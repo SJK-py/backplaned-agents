@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 OUT="${OUT:-deploy/.env.prod}"
 COMPOSE_FILE="docker-compose.prod.yml"
 BUNDLED_SEARXNG_URL="http://searxng:8080"
+DEFAULT_WEBAPP_HTTPS_PORT="8443"   # webapp's port identity for bare-IP LAN
 
 # URL-/DSN-/JSON-safe secret of $1 chars (alphanumeric only).
 gen() { openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c "${1:-44}"; }
@@ -44,21 +45,34 @@ yesish() { [[ "${1,,}" =~ ^(y|yes)$ ]]; }
 build_env() {
     echo "Generating $OUT — answer a few prompts; the rest is auto-generated."
     # Edge / reverse proxy (Caddy). PUBLIC_DOMAIN is the router + admin host;
-    # WEBAPP_DOMAIN is the browser-channel host (separate host because the
+    # WEBAPP_DOMAIN is the browser-channel host (separate IDENTITY because the
     # webapp serves from / and would collide with the router's /admin).
     #   - 'localhost'  → local box only, Caddy serves a local self-signed cert.
     #   - a real domain that resolves to this host → Caddy auto-provisions a
     #     public Let's Encrypt cert (ports 80/443 must be reachable).
-    #   - a LAN name/IP (e.g. bp.lan / 192.168.x.x) → reachable from the LAN,
-    #     but Caddy uses its internal CA (browsers warn until you trust it).
+    #   - a LAN name (e.g. bp.lan, with `app.bp.lan` resolvable too) → LAN
+    #     access; Caddy internal-CA TLS (browsers warn until you trust it).
+    #   - a bare IP (e.g. 192.168.1.50) → no DNS for `app.<ip>`, so the webapp
+    #     gets a PORT identity instead: WEBAPP_DOMAIN=<ip>:$WEBAPP_HTTPS_PORT.
     # See docs/deployment.md "Edge / reverse proxy (Caddy)".
     echo
     echo "Edge / reverse proxy (Caddy) hostnames:"
     echo "  localhost                → this machine only (local self-signed TLS)"
     echo "  a public domain          → auto-TLS via Let's Encrypt (must resolve here, 80/443 open)"
-    echo "  a LAN name/IP            → LAN access; Caddy internal-CA TLS (browser trust needed)"
+    echo "  a LAN name (bp.lan)      → LAN access; Caddy internal-CA TLS (browser trust needed)"
+    echo "  a bare IP (192.168.x.x)  → LAN access; webapp moves to a separate HTTPS port"
     ask PUBLIC_DOMAIN "Public domain — router + admin UI host" "localhost"
-    ask WEBAPP_DOMAIN "Webapp (browser channel) host" "app.${PUBLIC_DOMAIN}"
+    # Webapp identity. A bare IP can't host `app.<ip>` (no DNS), so default it
+    # to a PORT on the same IP; anything else gets the `app.` subdomain.
+    if [[ "$PUBLIC_DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        WEBAPP_HTTPS_PORT="$DEFAULT_WEBAPP_HTTPS_PORT"
+        ask WEBAPP_DOMAIN "Webapp (browser channel) host:port" "${PUBLIC_DOMAIN}:${WEBAPP_HTTPS_PORT}"
+    else
+        ask WEBAPP_DOMAIN "Webapp (browser channel) host" "app.${PUBLIC_DOMAIN}"
+    fi
+    # If the webapp identity carries a non-443 port, publish that port.
+    WEBAPP_HTTPS_PORT="$(printf '%s' "$WEBAPP_DOMAIN" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
+    WEBAPP_HTTPS_PORT="${WEBAPP_HTTPS_PORT:-443}"
     ask ADMIN_EMAIL "Bootstrap admin email" "admin@example.com"
     read -rsp "Bootstrap admin password (blank = generate one): " ADMIN_PW || true; echo
 
@@ -143,9 +157,14 @@ build_env() {
         echo "# PUBLIC_DOMAIN: router + admin UI host. WEBAPP_DOMAIN: browser"
         echo "# channel host (separate — webapp serves from /). 'localhost' or a"
         echo "# *.localhost / LAN name → Caddy internal-CA TLS; a public domain"
-        echo "# resolving here → auto Let's Encrypt. See docs/deployment.md."
+        echo "# resolving here → auto Let's Encrypt. A bare IP can't host"
+        echo "# app.<ip>, so WEBAPP_DOMAIN gets a port (<ip>:WEBAPP_HTTPS_PORT),"
+        echo "# which compose publishes. See docs/deployment.md."
         echo "PUBLIC_DOMAIN=$PUBLIC_DOMAIN"
         echo "WEBAPP_DOMAIN=$WEBAPP_DOMAIN"
+        if [[ "$WEBAPP_HTTPS_PORT" != "443" ]]; then
+            echo "WEBAPP_HTTPS_PORT=$WEBAPP_HTTPS_PORT"
+        fi
         echo
         echo "# --- Postgres (router + suite DBs share this server; suite connects as postgres) ---"
         echo "PG_USER=postgres"
@@ -198,6 +217,8 @@ build_env() {
     echo
     echo "Wrote $OUT (chmod 600)."
     echo "  edge: admin/router=https://$PUBLIC_DOMAIN  webapp=https://$WEBAPP_DOMAIN"
+    [[ "$WEBAPP_HTTPS_PORT" != "443" ]] && \
+        echo "        (webapp on a separate HTTPS port $WEBAPP_HTTPS_PORT — compose publishes it; open it on any firewall)"
     echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
     [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"
     case "$PUBLIC_DOMAIN" in
