@@ -310,8 +310,9 @@ def test_tier_gate_requires_task_context() -> None:
 
 
 def test_star_preset_skips_tier_lookup_entirely() -> None:
-    """A `*` preset never consults user_level → no task lookup, no
-    resolve_user_level (the hot default path pays zero DB cost)."""
+    """A `*` preset whose whole fallback chain is ungated never consults
+    user_level → no task lookup, no resolve_user_level (the hot default path
+    pays zero DB cost). `chain_needs_tier` is False for such a chain."""
     from bp_router.dispatch import _run_llm_call
 
     svc = _stub_llm_service(generate=AsyncMock(return_value=MagicMock(
@@ -320,6 +321,8 @@ def test_star_preset_skips_tier_lookup_entirely() -> None:
         raw={},
     )))
     svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="*"))
+    # No gated preset anywhere in the chain → no level lookup needed.
+    svc.chain_needs_tier = MagicMock(return_value=False)
     state = _make_state(llm_service=svc)
     entry = _make_entry()
 
@@ -328,6 +331,59 @@ def test_star_preset_skips_tier_lookup_entirely() -> None:
     )))
 
     svc.resolve_user_level.assert_not_awaited()
+    svc.chain_needs_tier.assert_called_once_with("default")
+
+
+def _ok_generate() -> AsyncMock:
+    return AsyncMock(return_value=MagicMock(
+        text="ok", tool_calls=[], finish_reason="stop",
+        usage=MagicMock(input_tokens=1, output_tokens=1, total_tokens=2),
+        raw={},
+    ))
+
+
+def test_star_preset_with_gated_fallback_resolves_level() -> None:
+    """Regression fix: a `*` REQUESTED preset whose fallback chain contains a
+    gated preset DOES resolve the trusted level (best-effort), so an entitled
+    caller's gated fallback is usable. The call is NOT refused (the requested
+    preset is ungated) and the resolved level flows to generate."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service(generate=_ok_generate())
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="*"))
+    svc.chain_needs_tier = MagicMock(return_value=True)  # gated fallback exists
+    state = _make_state(llm_service=svc)
+    entry = _make_entry()
+
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="primary", task_id="tsk_1",
+    )))
+
+    svc.resolve_user_level.assert_awaited_once()
+    svc.generate.assert_awaited_once()
+    _, kwargs = svc.generate.call_args
+    assert kwargs.get("user_level") == "admin"
+
+
+def test_star_preset_with_gated_fallback_no_task_context_not_refused() -> None:
+    """A `*` request with a gated fallback but NO task context must NOT be
+    refused — the ungated primary runs; the gated fallback is simply
+    unavailable (there's no identity to verify a level against)."""
+    from bp_router.dispatch import _run_llm_call
+
+    svc = _stub_llm_service(generate=_ok_generate())
+    svc.get_preset = MagicMock(return_value=MagicMock(min_user_level="*"))
+    svc.chain_needs_tier = MagicMock(return_value=True)
+    state = _make_state(llm_service=svc)
+    entry = _make_entry()
+
+    asyncio.run(_run_llm_call(state, entry, _llm_request(
+        preset="primary", task_id=None,
+    )))
+
+    # No task → cannot resolve a level, but the call proceeds (not refused).
+    svc.resolve_user_level.assert_not_awaited()
+    svc.generate.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

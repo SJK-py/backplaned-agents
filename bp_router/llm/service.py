@@ -388,6 +388,25 @@ class LlmService:
     def get_preset(self, name: str) -> Preset | None:
         return self._presets.get(name)
 
+    def chain_needs_tier(self, name: str) -> bool:
+        """True if the requested preset OR any preset reachable via its
+        ``fallback_preset`` chain is tier-gated (``min_user_level != "*"``).
+
+        The dispatch gate uses this to decide whether to resolve the
+        caller's trusted ``user_level``. A ``*`` (ungated) preset whose
+        fallback chain contains a gated preset STILL needs the level
+        resolved: otherwise ``_call_with_fallback`` re-checks the gate per
+        hop with ``user_level=None`` and silently skips that gated fallback
+        for *every* caller (the documented mixed permissive→restricted
+        chain would lose its restricted hop). Unknown preset → False (the
+        generate path raises ``PresetUnknownError`` on its own)."""
+        if name not in self._presets:
+            return False
+        return any(
+            p.min_user_level != "*"
+            for p in walk_fallback_chain(self._presets, name)
+        )
+
     def _register_preset_for_test(self, preset: Preset) -> None:
         """Register / overwrite a preset in the in-memory map.
 

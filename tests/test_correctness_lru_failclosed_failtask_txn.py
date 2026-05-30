@@ -136,9 +136,10 @@ def test_dispatch_user_level_lookup_error_fails_closed_for_tier_preset() -> None
     # The new branch must reference the fail-closed code path AND
     # consult the preset's tier requirement.
     assert "auth_lookup_failed" in src
-    assert "preset_needs_tier" in src
-    # And the failure log must distinguish needs-tier vs not.
-    assert '"preset_needs_tier"' in src or "preset_needs_tier" in src
+    # Second-pass rename: the requested-preset gate is `first_preset_gated`.
+    assert "first_preset_gated" in src
+    # And the failure log must distinguish the requested-preset-gated path.
+    assert '"first_preset_gated"' in src
 
 
 def test_dispatch_user_level_lookup_error_proceeds_for_open_preset() -> None:
@@ -150,10 +151,11 @@ def test_dispatch_user_level_lookup_error_proceeds_for_open_preset() -> None:
     from bp_router import dispatch
 
     src = _inspect.getsource(dispatch._run_llm_call)
-    # The fail-closed path must be guarded by `if preset_needs_tier:`.
-    # A naive unconditional "always fail-closed" would fail the open
-    # preset case, so verify the guard is present.
-    assert "if preset_needs_tier" in src
+    # The fail-closed (auth_lookup_failed) path must be guarded by
+    # `if first_preset_gated:` — it only fires when the REQUESTED preset is
+    # gated. An open (`*`) preset whose lookup fails (or which has no gated
+    # fallback) proceeds with user_level=None rather than failing closed.
+    assert "if first_preset_gated:" in src
 
 
 # ---------------------------------------------------------------------------

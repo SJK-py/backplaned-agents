@@ -671,12 +671,23 @@ async def _run_llm_call(
     except Exception:  # noqa: BLE001
         # `get_preset` shouldn't raise, but defensive — treat as unknown.
         preset_obj = None
-    preset_needs_tier = (
+    # The REQUESTED preset being gated is a HARD requirement: verify the
+    # caller's level or refuse. A gated FALLBACK target (when the requested
+    # preset is `*`) is BEST-EFFORT: resolve the level if we can so an
+    # entitled caller gets the fallback, else leave it None and that hop is
+    # simply skipped by `_call_with_fallback` (the ungated primary still
+    # runs) — never refuse. `chain_needs_tier` walks the whole fallback chain
+    # so a `*`-with-gated-fallback is not mistaken for "needs no level".
+    first_preset_gated = (
         preset_obj is not None and preset_obj.min_user_level != "*"
     )
+    try:
+        chain_needs_tier = state.llm_service.chain_needs_tier(preset_name)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        chain_needs_tier = first_preset_gated  # defensive: fail toward resolving
 
     user_level: str | None = None
-    if preset_needs_tier:
+    if first_preset_gated:
         if frame.task_id is None:
             # No task to bind a trusted identity to (e.g. a spawn-context
             # LLM call). The gate can't be evaluated → refuse.
@@ -702,7 +713,7 @@ async def _run_llm_call(
                     "event": "llm_user_level_lookup_failed",
                     "bp.task_id": frame.task_id,
                     "bp.agent_id": entry.agent_id,
-                    "preset_needs_tier": preset_needs_tier,
+                    "first_preset_gated": first_preset_gated,
                 },
                 exc_info=True,
             )
@@ -721,6 +732,34 @@ async def _run_llm_call(
                 code=ErrorCode.LLM_PRESET_NOT_ALLOWED,
             ))
             return
+    elif chain_needs_tier and frame.task_id is not None:
+        # Requested preset is `*` (runs for anyone) but a fallback target is
+        # gated. Best-effort resolve the trusted level so an entitled caller
+        # can use that fallback; on ANY failure leave `user_level=None` and
+        # the gated hop is skipped (the primary `*` still runs). No refusal —
+        # the requested preset is ungated, so degraded resilience must not
+        # become a denial.
+        try:
+            async with state.db_pool.acquire() as conn:
+                scope_t = await _derive_task_scope(
+                    conn, frame.task_id, entry.agent_id
+                )
+                if scope_t is not None:
+                    user_level = await state.llm_service.resolve_user_level(  # type: ignore[attr-defined]
+                        conn, scope_t[0]
+                    )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "llm_user_level_lookup_failed",
+                extra={
+                    "event": "llm_user_level_lookup_failed",
+                    "bp.task_id": frame.task_id,
+                    "bp.agent_id": entry.agent_id,
+                    "fallback_tier_probe": True,
+                },
+                exc_info=True,
+            )
+            user_level = None
 
     try:
         # Resolve any `file_ref` parts (router-proxy / http /
