@@ -57,6 +57,17 @@ RUN pip install ".[suite,webapp]"
 # next start → router 409 "already registered" → crash loop.
 RUN mkdir -p /state /lancedb && chown 10002:10002 /state /lancedb
 
+# The sandbox agent is the ONE service that runs as root (it needs CAP_SETUID
+# to drop each user's bash to a private uid) WITH cap_drop: ALL — so it has no
+# CAP_DAC_OVERRIDE and can only write a dir it OWNS. The 10002-owned /state
+# above would EACCES it (onboard succeeds server-side but the credential can't
+# persist → crash → re-onboard a consumed token → router 403). Give it a
+# ROOT-owned 0700 dir instead (its named volume seeds from this mount point).
+# 0700 also hides the agent's router token from the per-user uid the untrusted
+# bash drops to — they can't even traverse the dir. The sandbox service sets
+# AGENT_STATE_DIR=/sandbox-state and mounts its volume here.
+RUN mkdir -p /sandbox-state && chmod 700 /sandbox-state
+
 USER bp
 
 # `python -m bp_agents.agents.<name>` is the per-agent entrypoint; the

@@ -106,3 +106,35 @@ def test_sandbox_runs_root_with_minimal_caps_for_uid_drop() -> None:
     assert set(sb.get("cap_add", [])) == {"SETUID", "SETGID"}, (
         "exactly SETUID+SETGID — more is over-privileged, fewer breaks the drop"
     )
+
+
+def test_sandbox_state_dir_is_root_owned_not_the_10002_state() -> None:
+    """Regression: the sandbox runs as root with cap_drop: ALL → no
+    CAP_DAC_OVERRIDE, so it can ONLY write a dir it OWNS. The image's default
+    /state is chown'd to uid 10002 (for the other, non-root agents), so the
+    sandbox got `PermissionError: '/state/credentials.json.tmp'` → crash →
+    re-onboard a consumed token → router 403. It must instead use the
+    root-owned /sandbox-state (created in Dockerfile.suite) for BOTH its
+    AGENT_STATE_DIR and its volume mount. Pin all three (env, mount,
+    Dockerfile) so the EACCES can't silently return."""
+    import yaml  # noqa: PLC0415
+
+    d = yaml.safe_load(_COMPOSE)
+    sb = d["services"]["sandbox"]
+    assert sb["environment"]["AGENT_STATE_DIR"] == "/sandbox-state", (
+        "sandbox must NOT use the uid-10002-owned /state — root with "
+        "cap_drop: ALL can't write it (no CAP_DAC_OVERRIDE)"
+    )
+    # The persisted volume must mount where AGENT_STATE_DIR points, else the
+    # credential isn't on a volume and is lost on every recreate.
+    mounts = [v.split(":")[-1] for v in sb["volumes"]]
+    assert "/sandbox-state" in mounts, (
+        f"sandbox volume must mount at /sandbox-state, got {sb['volumes']}"
+    )
+    # Dockerfile must create that dir root-owned 0700 (root owns it by default;
+    # 0700 also hides the router token from the per-user uid the bash drops to).
+    dockerfile = (_REPO / "Dockerfile.suite").read_text()
+    assert "/sandbox-state" in dockerfile and "chmod 700 /sandbox-state" in dockerfile, (
+        "Dockerfile.suite must `mkdir -p /sandbox-state && chmod 700 "
+        "/sandbox-state` so the root sandbox owns a writable state dir"
+    )
