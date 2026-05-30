@@ -56,13 +56,34 @@ class SessionLockManager:
         self._poll_s = poll_s
         self._prefix = key_prefix
         self._local: dict[str, asyncio.Lock] = {}
+        # Refcount of guards that have ENTERED but not exited (held OR
+        # waiting) per session_id, so `_release_local` can evict an idle
+        # lock and `_local` can't grow without bound over a long-lived
+        # process's lifetime (one Lock per distinct session id otherwise
+        # leaks forever).
+        self._local_refs: dict[str, int] = {}
 
-    def _local_lock(self, session_id: str) -> asyncio.Lock:
+    def _acquire_local(self, session_id: str) -> asyncio.Lock:
+        """Get-or-create the per-session local lock and bump its refcount.
+        Runs synchronously (no await) at guard entry, so two overlapping
+        guards for the same session ALWAYS observe the same lock object —
+        eviction can never hand a later guard a fresh lock while an earlier
+        one still holds/awaits the old one (which would break exclusion)."""
         lock = self._local.get(session_id)
         if lock is None:
             lock = asyncio.Lock()
             self._local[session_id] = lock
+        self._local_refs[session_id] = self._local_refs.get(session_id, 0) + 1
         return lock
+
+    def _release_local(self, session_id: str) -> None:
+        """Drop one guard's reference; evict the lock once none remain."""
+        n = self._local_refs.get(session_id, 0) - 1
+        if n <= 0:
+            self._local_refs.pop(session_id, None)
+            self._local.pop(session_id, None)
+        else:
+            self._local_refs[session_id] = n
 
     def __call__(self, session_id: str) -> _Guard:
         return _Guard(self, session_id)
@@ -72,12 +93,16 @@ class _Guard:
     def __init__(self, mgr: SessionLockManager, session_id: str) -> None:
         self._mgr = mgr
         self._sid = session_id
-        self._local = mgr._local_lock(session_id)
+        # The local lock is acquired (and refcounted) in __aenter__ so the
+        # refcount tracks entry→exit symmetrically and the manager can evict
+        # idle entries.
+        self._local: asyncio.Lock | None = None
         self._key = f"{mgr._prefix}{session_id}"
         self._token: str | None = None
         self._renewer: asyncio.Task | None = None
 
     async def __aenter__(self) -> _Guard:
+        self._local = self._mgr._acquire_local(self._sid)
         await self._local.acquire()
         if self._mgr._redis is not None:
             try:
@@ -98,13 +123,10 @@ class _Guard:
                 self._renewer = None
             if self._token is not None and self._mgr._redis is not None:
                 try:
-                    # Compare-and-delete: only drop the key if it's still
-                    # ours. Not atomic with the GET, but the only race is
-                    # when our key already expired (renewal lapsed for a
-                    # full TTL — already degraded), so it's negligible; the
-                    # TTL reaps a missed delete anyway.
-                    if await self._mgr._redis.get(self._key) == self._token:
-                        await self._mgr._redis.delete(self._key)
+                    # Atomic compare-and-delete (WATCH/MULTI): only drop the
+                    # key while it still holds OUR token, so we never delete a
+                    # key another instance re-took after ours expired.
+                    await self._cas(extend=False)
                 except Exception:  # noqa: BLE001 — TTL reaps it anyway
                     logger.warning(
                         "session_lock_release_failed",
@@ -113,7 +135,10 @@ class _Guard:
                     )
                 self._token = None
         finally:
-            self._local.release()
+            if self._local is not None:
+                self._local.release()
+                self._mgr._release_local(self._sid)
+                self._local = None
 
     async def _acquire_redis(self) -> None:
         token = secrets.token_urlsafe(16)
@@ -130,17 +155,45 @@ class _Guard:
         self._token = token
         self._renewer = asyncio.create_task(self._renew_loop())
 
-    async def _renew_loop(self) -> None:
+    async def _cas(self, *, extend: bool) -> int:
+        """Atomic compare-and-act on our lock key via a WATCH/MULTI optimistic
+        transaction: extend its TTL (``extend=True``) or delete it
+        (``extend=False``), but ONLY while it still holds OUR token. Returns a
+        truthy value when the op ran, 0 when the key isn't ours.
+
+        The WATCH closes the GET→act race the old GET-then-PEXPIRE had: if the
+        key expired and another instance re-took it between our check and our
+        write, the WATCH makes EXEC abort (and the GET mismatch short-circuits
+        the common case), so we never extend or delete a foreign holder's
+        lock. Transient redis errors propagate to the caller (renew retries;
+        release logs)."""
+        try:
+            from redis.exceptions import WatchError  # noqa: PLC0415
+        except Exception:  # pragma: no cover — redis is present when a client is
+            WatchError = ()  # type: ignore[assignment, misc]
         ttl_ms = int(self._mgr._ttl_s * 1000)
+        async with self._mgr._redis.pipeline() as pipe:
+            try:
+                await pipe.watch(self._key)
+                if await pipe.get(self._key) != self._token:
+                    await pipe.unwatch()
+                    return 0
+                pipe.multi()
+                if extend:
+                    pipe.pexpire(self._key, ttl_ms)
+                else:
+                    pipe.delete(self._key)
+                res = await pipe.execute()
+                return res[0] if res else 0
+            except WatchError:
+                # Key changed under us between WATCH and EXEC → not ours.
+                return 0
+
+    async def _renew_loop(self) -> None:
         while True:
             await asyncio.sleep(self._mgr._renew_s)
             try:
-                # Extend only while the key is still ours (so a renewal
-                # can't revive/extend a lock another instance took over).
-                if await self._mgr._redis.get(self._key) != self._token:
-                    held = False
-                else:
-                    held = await self._mgr._redis.pexpire(self._key, ttl_ms)
+                held = await self._cas(extend=True)
             except Exception:  # noqa: BLE001
                 # Transient blip — keep trying; release/exit will clean up.
                 continue
