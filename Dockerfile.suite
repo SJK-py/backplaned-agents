@@ -9,6 +9,22 @@
 # the `suite-migrate` one-shot (alembic -c alembic_suite.ini), never on
 # container start, so scaling an agent never races the schema.
 
+# --- Stage 1: build the webapp's Tailwind stylesheet ----------------------
+# The webapp agent serves a self-hosted /static/tailwind.css in prod
+# (WEBAPP_USE_BUILT_CSS=true) instead of the Tailwind Play CDN — removing an
+# unpinned third-party runtime dependency and the permissive CSP its in-page
+# JIT compiler forces. Built here so the artifact ships in the final image
+# (no Node at runtime). Replicates the documented command in
+# webapp/tailwind.config.js (a v3-style config, so tailwindcss is pinned 3.x).
+FROM node:20-slim AS css-build
+WORKDIR /webapp
+COPY bp_agents/agents/webapp/tailwind.config.js ./tailwind.config.js
+COPY bp_agents/agents/webapp/static/tailwind.input.css ./static/tailwind.input.css
+COPY bp_agents/agents/webapp/templates ./templates
+RUN npx --yes tailwindcss@3.4.17 -c tailwind.config.js \
+      -i static/tailwind.input.css -o static/tailwind.css --minify
+
+# --- Stage 2: the suite runtime image -------------------------------------
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -21,6 +37,10 @@ RUN useradd --create-home --uid 10002 bp
 WORKDIR /app
 
 COPY . .
+# Drop in the prebuilt stylesheet (a git-ignored artifact built in css-build)
+# so a prod webapp runs WEBAPP_USE_BUILT_CSS=true with no Node at runtime.
+COPY --from=css-build /webapp/static/tailwind.css \
+     bp_agents/agents/webapp/static/tailwind.css
 # `suite` brings asyncpg/alembic/sqlalchemy/lancedb/markitdown/croniter;
 # `webapp` adds the browser channel's FastAPI/uvicorn/Jinja2 stack (one
 # image serves the whole roster, so the webapp agent ships here too). The

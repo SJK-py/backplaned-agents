@@ -251,6 +251,9 @@ services:
       # Signs the browser session cookie. Generate a strong random value.
       WEBAPP_SESSION_SECRET: ${WEBAPP_SESSION_SECRET:?set a strong random value}
       WEBAPP_DEPLOYMENT_ENV: prod
+      # Serve the self-hosted stylesheet (built into the image) — NOT the
+      # Tailwind Play CDN. Required in prod (the config validator enforces it).
+      WEBAPP_USE_BUILT_CSS: "true"
     # Fronted by the edge proxy (HTTPS + SSE); not published directly.
     networks: [edge, agents, suite]
 

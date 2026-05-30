@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,3 +52,46 @@ class WebappConfig(BaseSettings):
 
     bind_host: str = "0.0.0.0"  # noqa: S104 — container-internal; edge proxy fronts it
     bind_port: int = Field(default=8002, ge=1, le=65535)
+
+    @field_validator("session_secret")
+    @classmethod
+    def _session_secret_min_length(cls, v: SecretStr) -> SecretStr:
+        # The cookie is signed with this secret; a short/guessable value lets
+        # an attacker forge a session. Mirror the router's jwt_secret floor
+        # (OWASP: HMAC key ≥ the hash output, 32 bytes). Fail at startup so a
+        # weak secret can't ship silently. Generate via `openssl rand -base64
+        # 32` (44 chars).
+        raw = v.get_secret_value() if v is not None else ""
+        if len(raw.encode("utf-8")) < 32:
+            raise ValueError(
+                "WEBAPP_SESSION_SECRET must be at least 32 bytes "
+                "(generate via `openssl rand -base64 32`)"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _prod_hardening(self) -> WebappConfig:
+        # Fail-closed on prod misconfigurations that are silent in dev.
+        if self.deployment_env != "prod":
+            return self
+        secret = self.session_secret.get_secret_value().lower()
+        if "change-me" in secret or "insecure" in secret or "dev-" in secret:
+            raise ValueError(
+                "WEBAPP_SESSION_SECRET looks like a dev placeholder; set a "
+                "real random value in prod (`openssl rand -base64 32`)"
+            )
+        if not self.session_cookie_secure:
+            raise ValueError(
+                "WEBAPP_SESSION_COOKIE_SECURE must be true in prod — the "
+                "session cookie must only travel over HTTPS"
+            )
+        if not self.use_built_css:
+            # The Tailwind Play CDN is an unpinned third-party runtime
+            # dependency on an authenticated app and forces a permissive
+            # script-src/style-src (it JIT-compiles in-page). Prod must serve
+            # the self-hosted /static/tailwind.css (built into the image).
+            raise ValueError(
+                "WEBAPP_USE_BUILT_CSS must be true in prod — serve the "
+                "self-hosted stylesheet, not the Tailwind Play CDN"
+            )
+        return self
