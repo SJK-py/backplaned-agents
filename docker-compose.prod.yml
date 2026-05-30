@@ -34,10 +34,23 @@ services:
     image: caddy:2
     restart: unless-stopped
     depends_on: [router]
-    ports: ["80:80", "443:443"]
+    # 80/443 front the two hostnames (PUBLIC_DOMAIN + WEBAPP_DOMAIN). The
+    # extra WEBAPP_HTTPS_PORT (default 8443) is for the bare-IP LAN case:
+    # there's no DNS for `app.<ip>`, so the webapp gets a PORT identity
+    # (WEBAPP_DOMAIN=<ip>:8443) instead of a host one. Harmless when unused.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "${WEBAPP_HTTPS_PORT:-8443}:${WEBAPP_HTTPS_PORT:-8443}"
     environment:
+      # Scheme Caddy SERVES at the origin. `https` (default) → Caddy
+      # terminates TLS. `http` → TLS terminated UPSTREAM (Cloudflare Tunnel,
+      # external LB); Caddy serves plain HTTP and disables automatic HTTPS.
+      # The public scheme stays https, so ROUTER_PUBLIC_URL is unchanged.
+      EDGE_SCHEME: ${EDGE_SCHEME:-https}
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
       # Webapp (browser channel) host — defaults to the `app.` subdomain.
+      # For a bare-IP LAN deploy set it to `<ip>:<WEBAPP_HTTPS_PORT>`.
       WEBAPP_DOMAIN: ${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
