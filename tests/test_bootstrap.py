@@ -3,8 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 
 import bp_agents.bootstrap as bs
+
+
+def test_bootstrap_compose_env_covers_full_roster() -> None:
+    """The `bootstrap` service in docker-compose.prod.yml must pass EVERY
+    agent's `*_INVITATION` env var. It's a hand-maintained copy of the roster,
+    and `WEBAPP_INVITATION` once drifted out → bootstrap logged
+    `skip webapp: WEBAPP_INVITATION unset`, registered only 11, and the webapp
+    onboarded with an unregistered token → 403. Cross-check the compose env
+    against `bp_agents.bootstrap._ROSTER` so a future add/rename can't silently
+    drop one again."""
+    import yaml  # noqa: PLC0415
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    d = yaml.safe_load((repo / "docker-compose.prod.yml").read_text())
+    boot_env = set(d["services"]["bootstrap"]["environment"])
+    roster_vars = {var for _name, var, _prov in bs._ROSTER}
+    missing = roster_vars - boot_env
+    assert not missing, (
+        f"bootstrap service env is missing roster invitation var(s): {missing}. "
+        "Add them to the bootstrap `environment:` block or bootstrap will skip "
+        "those agents and they'll 403 on onboard."
+    )
 
 
 class _Resp:
