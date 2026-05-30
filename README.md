@@ -1,5 +1,7 @@
 # backplaned-agents
 
+[![CI](https://github.com/SJK-py/backplaned-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/SJK-py/backplaned-agents/actions/workflows/ci.yml)
+
 **A multi-user personal-assistant suite — a single orchestrator that reasons, researches, runs code, and remembers — built on the [Backplaned](./docs/overview.md) agent platform.**
 
 Message it on Telegram and it answers: it pulls from your private knowledge base, recalls what it learned about you in past conversations, searches the web, runs code in a sandbox, and schedules reminders — delegating to specialist agents as needed, all under *your* identity. Every user gets their own isolated files, memory, sessions, and knowledge.
