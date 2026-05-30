@@ -560,6 +560,14 @@ def upgrade() -> None:
         "CREATE INDEX registration_attempts_window_idx "
         "ON registration_attempts (channel, external_id, attempted_at DESC)"
     )
+    # Dedicated single-column index for the hourly GC delete
+    # (`DELETE ... WHERE attempted_at < cutoff`). `window_idx` can't serve it
+    # — `attempted_at` is that index's 3rd column, not a leftmost prefix — so
+    # without this the GC is a full table scan every hour.
+    op.execute(
+        "CREATE INDEX registration_attempts_gc_idx "
+        "ON registration_attempts (attempted_at)"
+    )
 
     # ------------------------------------------------------------------
     # mcp_servers (folded from 0006)

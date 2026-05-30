@@ -65,9 +65,15 @@ async def list_session_info_for_user(
     """Every session_info row this user owns, newest first. Powers the
     webapp session list's channel badge + delegation status ([webapp.md]
     §4); the router's `/v1/sessions` remains the authoritative open/closed
-    list."""
+    list.
+
+    Capped at the 500 most-recent rows: this is webapp display metadata, not
+    the authoritative list, and an unbounded read+sort on every render is a
+    per-heavy-user cost. The `(user_id, created_at DESC)` index serves the cap
+    as a cheap top-N (no sort). Users below the cap see no change."""
     rows = await conn.fetch(
-        "SELECT * FROM session_info WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT * FROM session_info WHERE user_id = $1 "
+        "ORDER BY created_at DESC LIMIT 500",
         user_id,
     )
     return [SessionInfoRow.model_validate(dict(r)) for r in rows]
