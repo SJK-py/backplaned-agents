@@ -122,42 +122,50 @@ backend behind the same agent interface is future work
 ## Bring-up order
 
 ```
-scripts/init-prod-env.sh                                     # generates deploy/.env.prod
-docker compose -f docker-compose.prod.yml --env-file deploy/.env.prod up -d
+scripts/prod.sh                                              # the prod launcher
 ```
 
-`init-prod-env.sh` first asks which **LLM provider** to use (Anthropic /
-Gemini / OpenAI / Custom), captures that provider's API key into the matching
-env var (`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY`), and wires
-the suite's per-tier defaults to that provider's seeded aliases — e.g.
-Anthropic → `lite=claude-haiku`, `balanced=claude`, `pro=claude-opus` (Gemini
-and OpenAI have analogous `gemini-lite/gemini/gemini-pro` and
-`gpt-nano/gpt/gpt-pro` mappings). Anthropic has no embedding model, so
-embeddings stay on `default_embedding` (Gemini) — set `GEMINI_API_KEY` too, or
-repoint `SUITE_DEFAULT_PRESET_EMBEDDING` to an OpenAI embedding preset.
+`scripts/prod.sh` is the single entry point for the prod lifecycle. It runs in
+two stages:
 
-The **Custom** option asks for no key and wires the generic tier slots
-(`lite` / `default` / `pro` — preset names seeded to Gemini placeholders in the
-catalogue); set the provider key(s) and repoint those presets to any
-provider/model via the admin webUI (`/admin`) afterward.
+**1. Build the env file? (`deploy/.env.prod`)** — answer **y** for a first
+deploy or to change vars (it confirms before overwriting an existing file);
+**n** reuses the existing file and skips straight to the action. The build
+prompts for:
 
-It then asks for the **web-search backend**: deploy the bundled SearXNG (sets
-`SUITE_SEARXNG_URL=http://searxng:8080` and adds `--profile search` to the
-deploy command for you), point at an **external** SearXNG (you give the URL),
-or **skip** it (empty `SUITE_SEARXNG_URL` — research runs without web search).
-Finally it offers to **deploy**: `docker compose up -d` (prebuilt images),
-`up -d --build` (rebuild from this source), or just print the command so you
-can edit `deploy/.env.prod` first — the printed command already includes
-`--profile search` when you chose the bundled SearXNG.
+- **LLM provider** (Anthropic / Gemini / OpenAI / Custom) — captures that
+  provider's API key into the matching env var (`ANTHROPIC_API_KEY` /
+  `GEMINI_API_KEY` / `OPENAI_API_KEY`) and wires the suite's per-tier defaults
+  to that provider's seeded aliases — e.g. Anthropic → `lite=claude-haiku`,
+  `balanced=claude`, `pro=claude-opus` (Gemini/OpenAI have analogous
+  `gemini-lite/gemini/gemini-pro` and `gpt-nano/gpt/gpt-pro` mappings).
+  Anthropic has no embedding model, so embeddings stay on `default_embedding`
+  (Gemini) — set `GEMINI_API_KEY` too, or repoint
+  `SUITE_DEFAULT_PRESET_EMBEDDING` to an OpenAI embedding preset. **Custom**
+  asks for no key and wires generic `lite`/`default`/`pro` slots (Gemini
+  placeholders) to repoint later via the admin webUI (`/admin`).
+- **Web-search backend** — bundled SearXNG (sets
+  `SUITE_SEARXNG_URL=http://searxng:8080`), an **external** SearXNG URL, or
+  **skip** (empty — research runs without web search).
 
-`compose up` resolves the whole order via `depends_on`: `postgres` →
-`migrate` + `suite-migrate` (schemas) → `router` (healthy) → `bootstrap`
-(`python -m bp_agents.bootstrap` — registers the pre-supplied invitation
-tokens + applies the ACL) → the agents. The migrations stay one-shot init
-services (never on agent start), so scaling an agent never races the schema.
-Add `--profile search` to bring up the bundled SearXNG. To run the steps
-manually instead (e.g. `register-invitations.sh` + `load_acl`), see the
-sections above.
+Everything else (Postgres password, JWT / session / metrics secrets,
+object-store keys, one invitation token per agent) is random-generated.
+
+**2. Action** — **start** (`up -d`), **restart** (`up -d --force-recreate`),
+**stop** (`down`), or **exit**. start/restart can **rebuild images from this
+source** first (asks). The launcher **auto-adds `--profile search`** (the
+bundled SearXNG service) to start/restart/stop whenever the env file's
+`SUITE_SEARXNG_URL` is the bundled `http://searxng:8080` — read from the file,
+so it's correct even when you skip the build step and reuse an earlier env.
+
+Under the hood `compose up` resolves the whole order via `depends_on`:
+`postgres` → `migrate` + `suite-migrate` (schemas) → `router` (healthy) →
+`bootstrap` (`python -m bp_agents.bootstrap` — registers the pre-supplied
+invitation tokens + applies the ACL) → the agents. The migrations stay
+one-shot init services (never on agent start), so scaling an agent never
+races the schema. To run the steps manually instead (e.g. drive
+`register-invitations.sh` + `load_acl` yourself, or add `--profile search` by
+hand), see the sections above.
 
 Then message the Telegram bot and send `/register` (an admin approves the
 registration; the chatbot's approval poller maps the chat to the new user).

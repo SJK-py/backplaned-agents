@@ -147,7 +147,7 @@ services:
       # LLM provider-key secrets. Presets themselves live in the
       # llm_presets table (admin-managed via /admin); a preset's
       # api_key_ref (e.g. env://GEMINI_API_KEY) resolves to one of these.
-      # init-prod-env.sh fills in whichever provider you choose; the others
+      # prod.sh fills in whichever provider you choose; the others
       # stay empty (set one per provider you configure).
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -224,7 +224,7 @@ services:
       SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
       SUITE_LANCE_ROOT: /lancedb
       # Per-tier preset defaults seeded into a new user's config (chatbot
-      # approval). init-prod-env.sh wires these to the chosen provider's
+      # approval). prod.sh wires these to the chosen provider's
       # aliases; empty → the seeded `default` (Gemini).
       SUITE_DEFAULT_PRESET_PRO: ${SUITE_DEFAULT_PRESET_PRO:-default}
       SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
@@ -274,7 +274,7 @@ services:
       <<: *suite-env
       SUITE_AGENT: research
       AGENT_INVITATION_TOKEN: ${RESEARCH_INVITATION:?}
-      # Web-search backend. The env file (scripts/init-prod-env.sh) is the
+      # Web-search backend. The env file (scripts/prod.sh) is the
       # single source of truth: set it to the bundled SearXNG
       # (http://searxng:8080, also pass `--profile search`), an external
       # instance, or leave it EMPTY to run research with no web search.
