@@ -189,6 +189,49 @@ def test_mapped_metadata_ip_blocked_as_link_local() -> None:
 
 
 # ---------------------------------------------------------------------------
+# IPv6 loopback ``::1`` is ALSO ``is_reserved`` in Python's ipaddress. A local
+# provider permits loopback, so ``::1`` must be accepted — it must not fall
+# through to the reserved catch-all. Regression: on dual-stack hosts/CI,
+# ``localhost`` resolves to ``::1`` and a legitimate local base_url was blocked
+# "resolves to a reserved address".
+# ---------------------------------------------------------------------------
+
+
+def test_local_provider_accepts_ipv6_loopback_literal() -> None:
+    validate_base_url(
+        provider="openai-compatible", base_url="http://[::1]:8000/v1"
+    )
+
+
+def test_local_provider_accepts_localhost_resolving_to_ipv6_loopback(
+    monkeypatch,
+) -> None:
+    """Exact CI repro: ``localhost`` resolving to ``::1`` (loopback+reserved)
+    must be accepted by a local provider."""
+    monkeypatch.setattr(
+        url_validation.socket, "getaddrinfo", _stub_getaddrinfo("::1")
+    )
+    validate_base_url(
+        provider="openai-compatible", base_url="http://localhost:8000/v1"
+    )
+
+
+def test_local_provider_accepts_localhost_resolving_to_dual_stack(
+    monkeypatch,
+) -> None:
+    """``localhost`` resolving to BOTH 127.0.0.1 and ::1 (every candidate is
+    class-checked) must be accepted by a local provider."""
+
+    def _gai(host, *a, **k):  # type: ignore[no-untyped-def]
+        return [(2, 1, 6, "", ("127.0.0.1", 0)), (10, 1, 6, "", ("::1", 0))]
+
+    monkeypatch.setattr(url_validation.socket, "getaddrinfo", _gai)
+    validate_base_url(
+        provider="openai-compatible", base_url="http://localhost:8000/v1"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Hostnames (non-IP) ARE resolved and class-checked (H7 SSRF fix)
 # ---------------------------------------------------------------------------
 
