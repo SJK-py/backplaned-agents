@@ -395,8 +395,10 @@ hot-reload + `CatalogUpdate` fan-out.
 
 **Status: not yet implemented.** Today the router runs as a single
 worker; the in-memory socket registry, pending-ack futures, and
-correlation maps are process-local. Deployments needing horizontal
-scale should run a single instance.
+correlation maps are process-local. Deployments needing more capacity
+should scale vertically (a single, larger instance). See
+[`scaling.md`](../scaling.md) for the operator-facing scaling posture and
+the ranked backlog; this section is the design detail.
 
 The intended path: an external load balancer terminates TLS and
 sticky-routes WebSocket connections by `agent_id` (consistent
