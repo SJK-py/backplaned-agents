@@ -17,6 +17,7 @@ import asyncio
 import logging
 import os
 import re
+import resource  # POSIX-only; the sandbox runs on Linux
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -90,19 +91,51 @@ async def _user_uid(ctx: TaskContext) -> int | None:
     return cfg.sandbox_uid if cfg else None
 
 
-def _preexec(uid: int | None):  # noqa: ANN202
-    """Best-effort uid drop for the subprocess (only when root + uid set)."""
-    if uid is None or os.geteuid() != 0:
-        return None
+def _apply_rlimits(settings: SuiteSettings) -> None:
+    """Lower the calling (child) process's resource limits. A process may
+    always reduce its own soft/hard limits without privilege, so this runs
+    whether or not we drop uid. Best-effort: a limit we can't set is skipped
+    rather than blocking the command. `resource` is imported at module top
+    (NOT here) — a preexec_fn runs in the forked child and must not import
+    (the import lock may be held at fork time → deadlock/failure)."""
+    caps = (
+        (resource.RLIMIT_NPROC, settings.sandbox_rlimit_nproc),
+        (resource.RLIMIT_AS, settings.sandbox_rlimit_as_bytes),
+        (resource.RLIMIT_FSIZE, settings.sandbox_rlimit_fsize_bytes),
+        (resource.RLIMIT_CPU, settings.sandbox_rlimit_cpu_s),
+    )
+    for res, limit in caps:
+        if not limit or limit <= 0:
+            continue  # 0 disables this cap
+        try:
+            _soft, hard = resource.getrlimit(res)
+            # Can't raise the hard limit unprivileged — clamp to it.
+            new = limit if hard == resource.RLIM_INFINITY else min(limit, hard)
+            resource.setrlimit(res, (new, new))
+        except (ValueError, OSError):
+            continue
+
+
+def _preexec(uid: int | None, settings: SuiteSettings):  # noqa: ANN202
+    """Child pre-exec: bound resources (always) and drop privileges (when
+    root + uid set). The rlimits stop one tenant's command — fork bomb,
+    memory balloon, disk fill, CPU spin — from starving the SHARED container,
+    which the wall-clock timeout and uid drop alone do not."""
+    drop_uid = uid is not None and os.geteuid() == 0
 
     def _set() -> None:
-        # Drop root's supplementary groups BEFORE setgid/setuid — otherwise
-        # the subprocess keeps every group root belonged to, defeating the
-        # per-user isolation this uid drop exists to provide. setgroups must
-        # run while still privileged.
-        os.setgroups([])
-        os.setgid(uid)
-        os.setuid(uid)
+        # Resource caps FIRST: they apply with or without the uid drop, and
+        # capping NPROC before dropping to the sandbox uid bounds a fork bomb
+        # against that uid's process count.
+        _apply_rlimits(settings)
+        if drop_uid:
+            # Drop root's supplementary groups BEFORE setgid/setuid — otherwise
+            # the subprocess keeps every group root belonged to, defeating the
+            # per-user isolation this uid drop exists to provide. setgroups
+            # must run while still privileged.
+            os.setgroups([])
+            os.setgid(uid)  # type: ignore[arg-type]
+            os.setuid(uid)  # type: ignore[arg-type]
 
     return _set
 
@@ -131,7 +164,7 @@ async def run_bash(
         cwd=str(workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        preexec_fn=_preexec(uid),
+        preexec_fn=_preexec(uid, settings),
     )
     try:
         out, _ = await asyncio.wait_for(
