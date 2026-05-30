@@ -56,7 +56,10 @@ def upgrade() -> None:
             session_name      text
         )
     """)
-    op.execute("CREATE INDEX session_info_user_idx ON session_info(user_id)")
+    op.execute(
+        "CREATE INDEX session_info_user_idx "
+        "ON session_info(user_id, created_at DESC)"
+    )
 
     # ------------------------------------------------------------------
     # session_history — the conversation log. `agent_id` is the thread
