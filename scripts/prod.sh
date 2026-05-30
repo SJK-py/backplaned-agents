@@ -277,6 +277,35 @@ env_searxng_url() {  # echo SUITE_SEARXNG_URL from $OUT (empty if unset/missing)
     sed -n 's/^SUITE_SEARXNG_URL=//p' "$OUT" | tail -n1
 }
 
+_INVITE_HEADER="# --- Agent invitation tokens (registered by the compose 'bootstrap' service) ---"
+
+# Invitation tokens are SINGLE-USE: each launch consumes them at onboard, so
+# the next launch needs FRESH ones (the router now allows idempotent
+# re-onboard with a *new* invitation — see bp_router/api/onboard.py). Rewrite
+# just the `*_INVITATION` lines in the existing env file (strip the old block,
+# re-append a freshly-generated one) so start/restart always ships unused
+# tokens — without rebuilding the whole env. The agents read these via compose
+# interpolation and `bootstrap` registers them, so both see the same value.
+refresh_invitations() {
+    local tmp
+    tmp="$(mktemp)"
+    # Drop the invitation header (fixed-string whole-line match — it contains
+    # `()`/`'` regex metachars) AND every *_INVITATION= line, then re-append a
+    # fresh block. Everything else is kept byte-for-byte.
+    grep -vxF "$_INVITE_HEADER" "$OUT" \
+        | grep -vE "^[A-Z_]*_INVITATION=" > "$tmp" || true
+    # Trim trailing blank lines so they don't accumulate across launches.
+    sed -i -e :a -e '/^\n*$/{$d;N;ba}' "$tmp" 2>/dev/null || true
+    {
+        echo
+        echo "$_INVITE_HEADER"
+        scripts/register-invitations.sh --gen
+    } >> "$tmp"
+    chmod 600 "$tmp"
+    mv "$tmp" "$OUT"
+    echo "  refreshed agent invitation tokens (single-use — fresh per launch)"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -327,10 +356,12 @@ maybe_build_flag() {
 case "${ACTION,,}" in
     1|start)
         BUILD_FLAG="$(maybe_build_flag)"
+        refresh_invitations
         echo; echo "+ docker compose ${CARGS[*]} up -d ${BUILD_FLAG}"
         exec docker compose "${CARGS[@]}" up -d ${BUILD_FLAG:+$BUILD_FLAG} ;;
     2|restart)
         BUILD_FLAG="$(maybe_build_flag)"
+        refresh_invitations
         # `up -d --force-recreate` recreates ALL containers (a true restart);
         # --build first when rebuilding images from this source.
         echo; echo "+ docker compose ${CARGS[*]} up -d --force-recreate ${BUILD_FLAG}"
@@ -341,10 +372,11 @@ case "${ACTION,,}" in
     4|reset)
         # `down -v` ALSO removes named volumes — the Postgres DB (agent rows,
         # users, tasks), Redis, rustfs blobs, LanceDB, and every agent's
-        # persisted credentials. Use this for a genuine clean slate: a plain
-        # `down` keeps the DB, so a later `up` re-onboards agents that already
-        # exist in the surviving DB → router 409 "already registered" → the
-        # agents crash on exit(1). Destructive — confirm.
+        # persisted credentials — for a genuine clean slate. (Normal
+        # start/restart no longer needs this: invitations are refreshed each
+        # launch and the router allows idempotent re-onboard, so agents
+        # recover across redeploys. Use reset when you want to wipe DATA.)
+        # Destructive — confirm.
         echo
         echo "  This DELETES ALL DATA: Postgres (users/tasks/agents), Redis,"
         echo "  object store, LanceDB, and agent credentials. Irreversible."

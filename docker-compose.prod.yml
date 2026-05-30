@@ -27,11 +27,12 @@ volumes:
   caddy_config: {}
   lancedb_data: {}      # per-user LanceDB (knowledge + memory)
   # Per-agent /state (AGENT_STATE_DIR): each agent persists its
-  # credentials.json (auth token + rotated service refresh token) here so it
-  # RESUMES on container recreate instead of re-running POST /v1/onboard with
-  # an already-consumed single-use invitation — which the router rejects 409
-  # "already registered", crashing the agent on exit(1). One volume per agent
-  # (state is per-identity; they must not share).
+  # credentials.json (auth token + rotated service refresh token) here so a
+  # normal restart RESUMES from the stored token (fast, no router round-trip)
+  # instead of re-onboarding. If /state is lost (fresh host) or the token has
+  # expired (>24h down), the agent re-onboards — which now succeeds because
+  # prod.sh ships a fresh invitation each launch and the router allows
+  # idempotent re-onboard. One volume per agent (state is per-identity).
   chatbot_state: {}     # chatbot credentials.json + Telegram offset
   webapp_state: {}
   orchestrator_state: {}

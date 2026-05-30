@@ -1575,6 +1575,43 @@ async def unsuspend_agent(conn: asyncpg.Connection, agent_id: str) -> None:
     )
 
 
+async def reactivate_agent_on_onboard(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: str,
+    capabilities: list[str],
+    groups: list[str],
+    agent_info: dict[str, Any],
+    public_key: str | None,
+) -> AgentRow:
+    """Re-onboard an EXISTING agent row (idempotent onboard): set it back to
+    `active` and refresh the identity fields from the new AgentInfo, returning
+    the updated row. Guarded to `active`/`pending`/`suspended` — never
+    resurrects a `removed` (terminal) row (the onboard handler already refuses
+    `removed`, but the WHERE guard is defence-in-depth). Mirrors
+    `insert_agent`'s column set so a re-onboarded agent looks identical to a
+    freshly-inserted one. `public_key` is COALESCEd so a re-onboard that omits
+    it keeps the stored key."""
+    row = await conn.fetchrow(
+        """
+        UPDATE agents
+        SET status = 'active',
+            capabilities = $2,
+            groups = $3,
+            agent_info = $4,
+            public_key = COALESCE($5, public_key)
+        WHERE agent_id = $1 AND status IN ('active', 'pending', 'suspended')
+        RETURNING *
+        """,
+        agent_id,
+        capabilities,
+        groups,
+        agent_info,
+        public_key,
+    )
+    return AgentRow.model_validate(dict(row))
+
+
 async def evict_agent(conn: asyncpg.Connection, agent_id: str) -> None:
     """Mark agent as `removed` (terminal). Row is preserved so that
     foreign keys from tasks and audit_log stay valid."""

@@ -153,6 +153,9 @@ def test_issue_invitation_request_carries_provisions_flag() -> None:
 # ---------------------------------------------------------------------------
 
 
+_UNSET_INVITATION = object()  # sentinel: "use the default valid invitation"
+
+
 def _drive_onboard(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -160,6 +163,7 @@ def _drive_onboard(
     existing_agent: Any = None,
     existing_svc: Any = None,
     agent_id: str = "chatbot",
+    invitation: Any = _UNSET_INVITATION,
 ) -> tuple[Any, dict[str, Any]]:
     """Drive `onboard()` against a fully stubbed pool + queries layer.
     Returns (response, mocks)."""
@@ -182,15 +186,26 @@ def _drive_onboard(
         "get_agent_for_update",
         AsyncMock(return_value=existing_agent),
     )
+    # `invitation` defaults to a valid (unconsumed) invitation; pass
+    # `invitation=None` to simulate a used/expired/wrong token.
+    consume_ret = (
+        {"level": "service", "provisions_service_user": provisions}
+        if invitation is _UNSET_INVITATION
+        else invitation
+    )
     monkeypatch.setattr(
         onboard_mod.queries,
         "consume_invitation",
-        AsyncMock(
-            return_value={"level": "service", "provisions_service_user": provisions}
-        ),
+        AsyncMock(return_value=consume_ret),
     )
     monkeypatch.setattr(
         onboard_mod.queries, "insert_agent", AsyncMock(return_value=agent_row)
+    )
+    # Idempotent re-onboard of an existing row returns the reactivated row.
+    monkeypatch.setattr(
+        onboard_mod.queries,
+        "reactivate_agent_on_onboard",
+        AsyncMock(return_value=agent_row),
     )
     monkeypatch.setattr(
         onboard_mod.queries, "get_user_by_id", AsyncMock(return_value=existing_svc)
@@ -425,3 +440,91 @@ def test_onboard_or_resume_restores_service_fields(tmp_path: Any) -> None:
     assert cfg2.auth_token == "A1"
     assert cfg2.service_user_id == "usr_service_chatbot"
     assert cfg2.service_refresh_token == "RT1"
+
+
+# ---------------------------------------------------------------------------
+# Idempotent re-onboard: an existing active/pending agent re-registers with a
+# fresh invitation instead of being 409'd, so a redeploy / wiped state-dir /
+# >24h-expired agent recovers without admin reprovision. `removed` (evicted)
+# stays terminal. A used/expired invitation still 403s.
+# ---------------------------------------------------------------------------
+
+
+def _existing_agent(status: str):  # type: ignore[no-untyped-def]
+    a = MagicMock()
+    a.agent_id = "chatbot"
+    a.status = status
+    return a
+
+
+def test_reonboard_active_agent_reactivates_with_valid_invitation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already-`active` agent presenting a valid (unconsumed) invitation
+    re-onboards: the invitation is consumed, the row is reactivated, a fresh
+    token is returned — no 409."""
+    from bp_router.api import onboard as onboard_mod
+
+    resp, mocks = _drive_onboard(
+        monkeypatch, provisions=False, existing_agent=_existing_agent("active")
+    )
+    assert resp.auth_token == "agent-jwt"
+    # The existing row was reactivated, NOT freshly inserted.
+    onboard_mod.queries.reactivate_agent_on_onboard.assert_awaited_once()
+    onboard_mod.queries.insert_agent.assert_not_awaited()
+    # The invitation was consumed (single-use preserved).
+    onboard_mod.queries.consume_invitation.assert_awaited_once()
+
+
+def test_reonboard_pending_agent_reactivates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `pending` agent (post-reprovision) re-onboards to active."""
+    from bp_router.api import onboard as onboard_mod
+
+    resp, _ = _drive_onboard(
+        monkeypatch, provisions=False, existing_agent=_existing_agent("pending")
+    )
+    assert resp.auth_token == "agent-jwt"
+    onboard_mod.queries.reactivate_agent_on_onboard.assert_awaited_once()
+
+
+def test_reonboard_removed_agent_is_refused_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An evicted (`removed`) agent is terminal — 409 even with a valid
+    invitation; the invitation is NOT consumed."""
+    pytest.importorskip("fastapi")
+    from fastapi import HTTPException
+
+    from bp_router.api import onboard as onboard_mod
+
+    with pytest.raises(HTTPException) as ei:
+        _drive_onboard(
+            monkeypatch, provisions=False, existing_agent=_existing_agent("removed")
+        )
+    assert ei.value.status_code == 409
+    assert "evicted" in ei.value.detail
+    # Terminal refusal must not burn the invitation.
+    onboard_mod.queries.consume_invitation.assert_not_awaited()
+
+
+def test_reonboard_without_valid_invitation_is_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An existing agent with a USED/expired invitation gets 403 (the old
+    'already registered' 409 is now this 403 — the invitation is the gate)."""
+    pytest.importorskip("fastapi")
+    from fastapi import HTTPException
+
+    from bp_router.api import onboard as onboard_mod
+
+    with pytest.raises(HTTPException) as ei:
+        _drive_onboard(
+            monkeypatch,
+            provisions=False,
+            existing_agent=_existing_agent("active"),
+            invitation=None,  # consume_invitation → None
+        )
+    assert ei.value.status_code == 403
+    onboard_mod.queries.reactivate_agent_on_onboard.assert_not_awaited()
