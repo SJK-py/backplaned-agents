@@ -112,9 +112,16 @@ async def onboard(req: OnboardRequest, request: Request) -> OnboardResponse:
             existing = await queries.get_agent_for_update(
                 conn, req.agent_info.agent_id
             )
-            if existing is not None and existing.status != "pending":
-                # Audit, but DO NOT consume the invitation token —
-                # the admin's invitation should remain usable.
+            # Eviction is terminal: a `removed` agent must NOT be able to
+            # re-onboard, even with a valid invitation. (The admin
+            # reprovision flow is the only way back, and it refuses
+            # `removed` too.) Every other status — active, pending — may
+            # re-onboard IF it presents a valid, unconsumed invitation
+            # (checked next). This is the idempotent re-onboard: a redeploy
+            # / wiped state-dir / >24h-expired agent re-registers cleanly
+            # instead of being 409'd. A normal restart resumes from its
+            # persisted token and never reaches this endpoint at all.
+            if existing is not None and existing.status == "removed":
                 await queries.append_audit_event(
                     conn,
                     actor_kind="agent",
@@ -123,17 +130,22 @@ async def onboard(req: OnboardRequest, request: Request) -> OnboardResponse:
                     target_kind="agent",
                     target_id=req.agent_info.agent_id,
                     payload={
-                        "reason": "already_registered",
+                        "reason": "evicted",
                         "status": existing.status,
                     },
                 )
                 raise HTTPException(
                     status_code=409,
-                    detail=f"agent {req.agent_info.agent_id!r} already registered",
+                    detail=(
+                        f"agent {req.agent_info.agent_id!r} is evicted "
+                        "(terminal); admin reprovision is required"
+                    ),
                 )
 
-            # Now safe to consume the invitation — only burns it on a
-            # request that would otherwise have created the agent.
+            # The invitation is the trust anchor: only an admin-minted,
+            # unconsumed, unexpired token gets past here. Consuming it burns
+            # it (single-use preserved), so re-onboard requires a FRESH
+            # invitation each time (prod.sh mints one per launch).
             invitation = await queries.consume_invitation(
                 conn,
                 token_hash=invitation_hash,
@@ -141,13 +153,20 @@ async def onboard(req: OnboardRequest, request: Request) -> OnboardResponse:
             )
             if invitation is None:
                 # Wrong / used / expired token. Audit so admins can
-                # investigate stolen-token scenarios.
+                # investigate stolen-token scenarios. (Also the rejection
+                # path for an already-active agent with no fresh invitation
+                # — the old 409 "already registered" is now this 403.)
                 await queries.append_audit_event(
                     conn,
                     actor_kind="agent",
                     actor_id=req.agent_info.agent_id,
                     event="auth.invitation_rejected",
-                    payload={"agent_id": req.agent_info.agent_id},
+                    payload={
+                        "agent_id": req.agent_info.agent_id,
+                        "existing_status": (
+                            existing.status if existing else None
+                        ),
+                    },
                 )
                 raise HTTPException(
                     status_code=403, detail="invalid or used invitation token"
@@ -167,8 +186,20 @@ async def onboard(req: OnboardRequest, request: Request) -> OnboardResponse:
                     public_key=req.public_key,
                 )
             else:
-                # status == 'pending' fall-through: keep the row.
-                agent_row = existing
+                # Re-onboard of an existing active/pending/suspended agent
+                # (idempotent path). Set the row back to `active` and refresh
+                # its identity fields — without this an agent that had been
+                # reset to `pending` (admin reprovision) would re-onboard but
+                # stay `pending`, and the WS handshake (which requires
+                # `active`) would reject it.
+                agent_row = await queries.reactivate_agent_on_onboard(
+                    conn,
+                    agent_id=req.agent_info.agent_id,
+                    capabilities=req.agent_info.capabilities,
+                    groups=list(req.agent_info.groups),
+                    agent_info=req.agent_info.model_dump(),
+                    public_key=req.public_key,
+                )
 
             await queries.append_audit_event(
                 conn,
