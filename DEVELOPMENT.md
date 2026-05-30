@@ -69,9 +69,11 @@ missing, that's a misconfiguration:
 
 ## Smoke tests
 
-There are three categories of admin-side smoke test. (Automated CI is
-not yet configured — run these locally; if you change anything in
-`bp_admin/`, run at least these three:)
+CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full
+`pytest` suite against a Postgres service (both the router and suite
+schemas migrated) on every PR to `main`. The admin-side smoke tests
+below are a fast local subset — if you change anything in `bp_admin/`,
+run at least these three before pushing:
 
 ```bash
 pytest tests/test_admin_smoke.py            # standalone bp-admin
