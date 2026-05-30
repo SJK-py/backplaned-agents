@@ -310,11 +310,12 @@ fi
 
 echo
 echo "Action:"
-echo "  1) start     (docker compose up -d)"
-echo "  2) restart   (recreate containers)"
-echo "  3) stop      (docker compose down)"
-echo "  4) exit      (do nothing)"
-ask ACTION "Choose 1-4" "1"
+echo "  1) start        (docker compose up -d)"
+echo "  2) restart      (recreate containers)"
+echo "  3) stop         (docker compose down — keeps data volumes)"
+echo "  4) reset        (down -v — DELETES the DB + all data volumes; full fresh start)"
+echo "  5) exit         (do nothing)"
+ask ACTION "Choose 1-5" "1"
 
 # start / restart can optionally rebuild images from this source first.
 maybe_build_flag() {
@@ -337,7 +338,24 @@ case "${ACTION,,}" in
     3|stop)
         echo; echo "+ docker compose ${CARGS[*]} down"
         exec docker compose "${CARGS[@]}" down ;;
-    4|exit|"")
+    4|reset)
+        # `down -v` ALSO removes named volumes — the Postgres DB (agent rows,
+        # users, tasks), Redis, rustfs blobs, LanceDB, and every agent's
+        # persisted credentials. Use this for a genuine clean slate: a plain
+        # `down` keeps the DB, so a later `up` re-onboards agents that already
+        # exist in the surviving DB → router 409 "already registered" → the
+        # agents crash on exit(1). Destructive — confirm.
+        echo
+        echo "  This DELETES ALL DATA: Postgres (users/tasks/agents), Redis,"
+        echo "  object store, LanceDB, and agent credentials. Irreversible."
+        ask CONFIRM "  Type 'reset' to confirm" ""
+        if [[ "$CONFIRM" == "reset" ]]; then
+            echo; echo "+ docker compose ${CARGS[*]} down -v"
+            exec docker compose "${CARGS[@]}" down -v
+        else
+            echo "  aborted — nothing deleted."
+        fi ;;
+    5|exit|"")
         echo "nothing to do." ;;
     *) echo "invalid choice: $ACTION" >&2; exit 1 ;;
 esac
