@@ -113,6 +113,12 @@ services:
   # --- Router (this repo) ----------------------------------------------
   # One-shot: apply router-DB migrations before the router serves, so
   # scaling the router never races the schema (only this runs `upgrade`).
+  # This is also the CANONICAL BUILDER of backplaned-router:latest — it is the
+  # ONLY router-image service with a `build:` section. The other router-image
+  # service (`router`) references the tag image-only. Compose builds images
+  # before starting any container, so the tag exists when both start. Do NOT
+  # add `build:` to a second service for the same tag: `up --build` / bake then
+  # build the same tag concurrently and fail with `image ... already exists`.
   migrate:
     image: backplaned-router:latest
     build: .
@@ -125,8 +131,7 @@ services:
     restart: "no"
 
   router:
-    image: backplaned-router:latest
-    build: .
+    image: backplaned-router:latest   # built by `migrate` (one builder per tag)
     restart: unless-stopped
     # Let the lifespan drain finish (close WS sockets 1001, cancel in-flight
     # LLM tasks to stop burning provider tokens, drain loops, close the pool)
@@ -179,6 +184,10 @@ services:
   # ======================================================================
 
   suite-migrate:                   # one-shot: apply the suite DB schema
+    # CANONICAL BUILDER of backplaned-suite:latest — the ONLY suite-image
+    # service with a `build:`. `bootstrap`, the `x-suite-agent` anchor, and
+    # every agent inheriting it reference the tag image-only. One builder per
+    # tag avoids the `up --build` / bake `image ... already exists` race.
     image: backplaned-suite:latest
     build: {context: ., dockerfile: Dockerfile.suite}
     command: ["alembic", "-c", "alembic_suite.ini", "upgrade", "head"]
@@ -194,8 +203,7 @@ services:
     # invitation token (POST /v1/admin/invitations accepts the token) and
     # applies the suite ACL. Agents depend on this completing, so a single
     # `docker compose up -d` onboards the whole roster — no manual steps.
-    image: backplaned-suite:latest
-    build: {context: ., dockerfile: Dockerfile.suite}
+    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
     command: ["python", "-m", "bp_agents.bootstrap"]
     depends_on:
       router: {condition: service_healthy}
@@ -218,10 +226,13 @@ services:
     restart: "no"
 
   # Common config shared by every suite agent. Each service sets
-  # SUITE_AGENT + its own AGENT_INVITATION_TOKEN.
+  # SUITE_AGENT + its own AGENT_INVITATION_TOKEN. NOTE: no `build:` here on
+  # purpose — the image is built once by `suite-migrate`; every agent that
+  # inherits this anchor (`<<: *suite-agent`) references the tag image-only.
+  # Adding `build:` back would make `up --build` build backplaned-suite:latest
+  # from many services at once → `image ... already exists`.
   x-suite-agent: &suite-agent
-    image: backplaned-suite:latest
-    build: {context: ., dockerfile: Dockerfile.suite}
+    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
     restart: unless-stopped
     # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
     # PR #75); give them room before SIGKILL. Inherited via `<<: *suite-agent`
