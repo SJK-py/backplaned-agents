@@ -163,6 +163,23 @@ class SuiteSettings(BaseSettings):
     """stdout above this many chars is saved to a file-store name instead
     of inlined."""
 
+    # Resource limits (rlimits) applied to every sandbox bash subprocess so a
+    # single tenant's command can't starve the SHARED container (the wall-clock
+    # timeout + uid drop don't bound resource use). Applied in the child
+    # pre-exec regardless of the uid drop — a non-root process can still lower
+    # its own limits. 0 disables a given cap.
+    sandbox_rlimit_nproc: int = Field(default=256, ge=0)
+    """RLIMIT_NPROC — max processes for the sandbox uid (fork-bomb guard)."""
+    sandbox_rlimit_as_bytes: int = Field(default=2 * 1024**3, ge=0)
+    """RLIMIT_AS — max virtual address space per process (memory-balloon
+    guard). Default 2 GiB."""
+    sandbox_rlimit_fsize_bytes: int = Field(default=1024**3, ge=0)
+    """RLIMIT_FSIZE — max single-file size the command can write (disk-fill
+    guard). Default 1 GiB."""
+    sandbox_rlimit_cpu_s: int = Field(default=120, ge=0)
+    """RLIMIT_CPU — max CPU-seconds (CPU-spin guard); pair with the wall-clock
+    timeout, which a busy-loop wouldn't otherwise trip cleanly."""
+
     # ------------------------------------------------------------------
     # research web tools
     # ------------------------------------------------------------------
