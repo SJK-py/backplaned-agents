@@ -37,7 +37,7 @@ gen() { openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c "${1:-44}"; }
 
 # Read a single VAR's value from an existing env file (empty if absent/missing).
 # Used to CARRY FORWARD secrets that get baked into persistent volumes on first
-# use (PG_PASSWORD → pg_data, S3 keys → rustfs_data): Postgres/rustfs only honor
+# use (PG_PASSWORD → pg_data, S3 keys → seaweedfs_data): Postgres/SeaweedFS only honor
 # them when the volume is EMPTY (first init), so regenerating them on an env
 # rebuild while the volume survives a non-reset relaunch would break auth
 # (migrate: password authentication failed → exit 1). Caller falls back to
@@ -226,7 +226,7 @@ build_env() {
     # Volume-baked secrets: capture BEFORE the `{ } > "$OUT"` block truncates
     # the file. Reuse the existing value when a previous $OUT is present — so a
     # rebuild over SURVIVING data volumes keeps the secret the volume was
-    # initialised with (else Postgres/rustfs keep the OLD secret and the NEW one
+    # initialised with (else Postgres/SeaweedFS keep the OLD secret and the NEW one
     # in .env fails auth → migrate exit 1). Mint fresh only when $OUT is absent
     # (true first build). After `reset` (down -v) the volumes are gone but $OUT
     # remains, so the reused secret simply re-initialises the now-empty volume —
@@ -289,7 +289,7 @@ build_env() {
         echo "BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL"
         echo "BOOTSTRAP_ADMIN_PASSWORD=$ADMIN_PW"
         echo
-        echo "# --- Object store (rustfs / S3) ---"
+        echo "# --- Object store (SeaweedFS / S3) ---"
         echo "S3_BUCKET=bp-files"
         echo "S3_ACCESS_KEY=$S3_AK"
         echo "S3_SECRET_KEY=$S3_SK"
@@ -490,7 +490,7 @@ case "${ACTION,,}" in
         exec docker compose "${CARGS[@]}" down ;;
     4|reset)
         # `down -v` ALSO removes named volumes — the Postgres DB (agent rows,
-        # users, tasks), Redis, rustfs blobs, LanceDB, and every agent's
+        # users, tasks), Redis, SeaweedFS blobs, LanceDB, and every agent's
         # persisted credentials — for a genuine clean slate. (Normal
         # start/restart no longer needs this: invitations are refreshed each
         # launch and the router allows idempotent re-onboard, so agents

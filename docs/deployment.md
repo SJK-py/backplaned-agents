@@ -20,7 +20,7 @@
                          │   router    │──────┬─────────┬──────────┐
                          │ (this repo) │      │         │          │
                          └──────┬──────┘  ┌───▼───┐ ┌───▼───┐ ┌────▼────┐
-                       agents   │         │  PG   │ │ Redis │ │ rustfs  │
+                       agents   │         │  PG   │ │ Redis │ │seaweedfs│
                        net      │         │ (×2db)│ │       │ │  (S3)   │
             ┌────────────┬──────┴────┬────────────┐└───────┘ └─────────┘
         ┌───▼───┐   ┌────▼────┐  ┌───▼────┐   ┌────▼────┐         ▲ suite net
@@ -37,7 +37,7 @@ Two boundaries to keep straight:
 ## 2. Boxes
 
 ### Edge — `caddy`
-TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/rustfs are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
+TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/SeaweedFS are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
 
 | Env var | Serves | Default |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (
 | `ROUTER_DB_URL` | → `bp_router` DB |
 | `ROUTER_REDIS_URL` | jti revocation, rate limits (required in prod) |
 | `ROUTER_JWT_SECRET` | ≥32 bytes (`openssl rand -base64 32`) |
-| `ROUTER_FILE_STORE=s3` + `ROUTER_FILE_STORE_OPTIONS` | JSON: `bucket`, `endpoint_url`, `region_name`, `access_key_id`, `secret_access_key` → rustfs |
+| `ROUTER_FILE_STORE=s3` + `ROUTER_FILE_STORE_OPTIONS` | JSON: `bucket`, `endpoint_url`, `region_name`, `access_key_id`, `secret_access_key` → SeaweedFS |
 | `ROUTER_PUBLIC_URL` | external URL (behind the proxy) |
 | `ROUTER_ADMIN_SESSION_SECRET` | admin-UI cookie signing |
 | `ROUTER_METRICS_TOKEN` | bearer-gates `/metrics` (required in prod) |
@@ -71,8 +71,8 @@ Hosts both `bp_router` and `bp_suite`. The router DB is migrated by this repo's 
 ### docker 3 — Redis 7
 Shared: router (revocation/rate-limits) + suite (the per-session FIFO queue when the channel is multi-worker; cron coordination). One instance.
 
-### docker 4 — rustfs (S3)
-The router's blob backend (`file_store=s3`, `endpoint_url=http://rustfs:9000`). Persistent volume, **internal-only**. Downloads default to **router-proxy** mode, which keeps rustfs off the public net; only switch to **302-presigned** (rustfs reachable by clients) if you need to offload bytes from the router. Only the router holds the rustfs keys. *(Pin the rustfs tag + confirm its env against upstream; MinIO is a drop-in.)*
+### docker 4 — SeaweedFS (S3)
+The router's blob backend (`file_store=s3`, `endpoint_url=http://seaweedfs:8333`). Persistent volume, **internal-only**. Downloads default to **router-proxy** mode, which keeps SeaweedFS off the public net; only switch to **302-presigned** (SeaweedFS reachable by clients) if you need to offload bytes from the router. Only the router holds the S3 keys. *(Replaced rustfs beta, whose multipart path was broken — `create_multipart_upload` succeeded but the immediate `upload_part` returned NoSuchUpload, failing any upload bigger than one PUT. SeaweedFS has reliable S3 multipart. Pin the tag + confirm flags against upstream; MinIO is a drop-in.)*
 
 ### docker 5 — chatbot (channel; webapp in v2)
 The gateway ([`agent-suite/channel.md`](./agent-suite/channel.md)). Bootstraps **two identities at onboarding** from a single invitation flagged `provisions_service_user`: its agent JWT *and* the `usr_service_{agent_id}` service refresh token ([`security.md` §3.2](./security.md)). Holds the Telegram bot token + suite-DB creds. Stateful (`state_dir` volume: credentials.json + Telegram offset); runs the cron scheduler (v1). Needs router WS + router HTTP (token mint, `/v1/files/names`) + suite DB + Redis + Telegram egress.
@@ -110,7 +110,7 @@ Web-search backend for `research`. Internal-only; the one agent-side box with we
 ## 4. Networks
 
 - `edge` — proxy ↔ router (+ webapp in v2).
-- `backend` — router ↔ PG / Redis / rustfs. **Private**; agents never join it.
+- `backend` — router ↔ PG / Redis / SeaweedFS. **Private**; agents never join it.
 - `agents` — router ↔ every agent (the agent WS).
 - `suite` — chatbot + suite agents ↔ `bp_suite` Postgres / Redis.
 
@@ -118,7 +118,7 @@ The sandbox joins `agents` **only** (router WS), nothing else.
 
 ## 5. First-boot order
 
-1. `docker compose -f docker-compose.prod.yml up -d postgres redis rustfs` — data services.
+1. `docker compose -f docker-compose.prod.yml up -d postgres redis seaweedfs` — data services.
 2. `migrate` one-shot runs `alembic upgrade head` against `bp_router`.
 3. `router` starts; the bootstrap-admin env seeds the first admin.
 4. Admin logs into `/admin`, configures LLM presets, and **issues agent invitations** — the chatbot's flagged `provisions_service_user`.
@@ -162,7 +162,7 @@ the ranked backlog of work to lift each ceiling. In short:
 The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443` (plus
 the optional webapp port below). It terminates TLS, proxies the two public
 hostnames, and transparently upgrades the agent WebSocket on `/v1/agent`. The
-router never terminates TLS; Postgres / Redis / rustfs are never proxied. Two
+router never terminates TLS; Postgres / Redis / SeaweedFS are never proxied. Two
 `${...}`-interpolated hostnames drive [`deploy/Caddyfile`](../deploy/Caddyfile),
 set by `scripts/prod.sh` (or by hand in `deploy/.env.prod`):
 

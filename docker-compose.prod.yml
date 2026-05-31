@@ -1,7 +1,7 @@
 # Backplaned production topology (skeleton).
 #
 # Brings up the full stack from THIS monorepo: edge proxy, router (+ a
-# one-shot `migrate`), Postgres (router + suite DBs), Redis, rustfs (S3),
+# one-shot `migrate`), Postgres (router + suite DBs), Redis, SeaweedFS (S3),
 # and the AGENT SUITE (chatbot, webapp, sandbox, orchestrator/l1, stores,
 # helpers, searxng) — all defined below and built from this repo's
 # Dockerfile / Dockerfile.suite. See docs/agent-suite/deployment.md.
@@ -15,14 +15,14 @@ name: backplaned
 
 networks:
   edge: {}        # proxy  <-> router  (+ webapp in v2)
-  backend: {}     # router <-> postgres / redis / rustfs   (private)
+  backend: {}     # router <-> postgres / redis / seaweedfs (private)
   agents: {}      # router <-> every agent (the agent WS /v1/agent)
   suite: {}       # chatbot + suite agents <-> suite Postgres / Redis
 
 volumes:
   pg_data: {}
   redis_data: {}
-  rustfs_data: {}
+  seaweedfs_data: {}
   caddy_data: {}
   caddy_config: {}
   lancedb_data: {}      # per-user LanceDB (knowledge + memory)
@@ -161,24 +161,41 @@ services:
       retries: 20
     networks: [backend, suite]
 
-  rustfs:
+  seaweedfs:
     # S3-compatible object store for the router's file_store=s3 backend.
-    # Pinned to an immutable version tag (NOT `latest`) so a restart can't
-    # silently pull a new build that changes S3 semantics and locks the
-    # router out of every user's files. Confirm the env/CLI against rustfs
-    # upstream when bumping — this is a representative config. MinIO is a
-    # known drop-in (image minio/minio:<tag>, command 'server /data',
-    # MINIO_ROOT_USER / MINIO_ROOT_PASSWORD).
-    image: rustfs/rustfs:1.0.0-beta.6
+    # Replaced rustfs (1.0.0-beta.6) here: that beta's multipart path was
+    # broken — create_multipart_upload returned an UploadId but the immediate
+    # upload_part 403'd NoSuchUpload — so any file > a single PUT failed.
+    # SeaweedFS has mature, reliable S3 multipart. `weed server -s3` runs
+    # master+volume+filer+S3 in one process; the S3 API listens on :8333.
+    # MinIO is the other known drop-in (minio/minio, `server /data`,
+    # MINIO_ROOT_USER/PASSWORD). Pinned to an immutable tag for reproducible
+    # deploys — confirm the CLI/flags against upstream when bumping.
+    image: chrislusf/seaweedfs:4.29
     restart: unless-stopped
     environment:
-      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
-      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      # Same secrets prod.sh already generates. SeaweedFS takes S3 creds via a
+      # JSON identities file, not env, so the entrypoint renders one from these
+      # at boot. `$$` escapes compose interpolation → the shell expands the env
+      # var at runtime, keeping the secrets out of the rendered command.
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/seaweedfs
+        cat > /etc/seaweedfs/s3.json <<JSON
+        {"identities":[{"name":"router","credentials":[{"accessKey":"$$S3_ACCESS_KEY","secretKey":"$$S3_SECRET_KEY"}],"actions":["Admin"]}]}
+        JSON
+        exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json
     volumes:
-      - rustfs_data:/data
+      # Fresh volume — the old rustfs_data is not S3-API-migratable in place and
+      # held nothing portable. A from-scratch deploy starts empty here.
+      - seaweedfs_data:/data
     networks: [backend]
     # Not published: the router reaches it on the backend net (S3 API on
-    # :9000). Keeps downloads in router-proxy mode; only expose it behind
+    # :8333). Keeps downloads in router-proxy mode; only expose it behind
     # the edge proxy if you switch to 302-presigned downloads.
 
   # --- Router (this repo) ----------------------------------------------
@@ -232,7 +249,7 @@ services:
       # file_store_options is parsed as JSON (pydantic-settings).
       ROUTER_FILE_STORE_OPTIONS: >-
         {"bucket":"${S3_BUCKET:-bp-files}",
-         "endpoint_url":"http://rustfs:9000",
+         "endpoint_url":"http://seaweedfs:8333",
          "region_name":"us-east-1",
          "access_key_id":"${S3_ACCESS_KEY}",
          "secret_access_key":"${S3_SECRET_KEY}"}
