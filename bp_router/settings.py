@@ -72,6 +72,21 @@ class Settings(BaseSettings):
     file_store_options: dict[str, Any] = Field(default_factory=dict)
     """Backend-specific options (bucket, region, endpoint, etc.)."""
 
+    file_download_presigned: bool = False
+    """Whether a download may 302-redirect to a backend-direct presigned URL
+    (S3/GCS/R2) instead of streaming the bytes through the router.
+
+    OFF by default: every current consumer of GET /v1/files/{id} is a
+    SERVER-SIDE, in-cluster caller — the SDK agents, the chatbot's
+    `fetch_file`, and the webapp backend's `fetch_file` (which proxies bytes to
+    the browser). None of them are on the object store's private network, so a
+    presigned URL pointing at e.g. `seaweedfs:8333` is unresolvable to them
+    (`ConnectError: Name or service not known`). Streaming through the router
+    always works. Enable ONLY if you front the object store with a hostname
+    that download clients can actually reach (and want to offload bytes from
+    the router). The download hardening — forced `attachment` + MIME downgrade
+    — is applied identically either way."""
+
     file_default_ttl_s: int = Field(default=604_800, ge=1)  # 7 days
 
     file_upload_token_ttl_s: int = Field(default=300, ge=1, le=3600)

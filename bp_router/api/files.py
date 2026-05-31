@@ -504,6 +504,7 @@ async def download(
             )
 
     file_store = state.file_store
+    settings = state.settings
 
     # Single source of truth for the download-hardening policy,
     # applied identically whether we stream the bytes or redirect to
@@ -518,19 +519,19 @@ async def download(
     )
     safe_mime = _safe_response_mime(row.mime_type)
 
-    # Prefer a presigned URL when the backend supports it — pinning
-    # the SAME disposition/MIME so the redirect can't bypass the
-    # hardening the streamed branch applies (pre-fix: an S3-served
-    # `text/html` rendered inline → stored XSS).
+    # Optionally 302 to a backend-direct presigned URL (S3/GCS/R2) — pinning
+    # the SAME disposition/MIME so the redirect can't bypass the hardening the
+    # streamed branch applies (pre-fix: an S3-served `text/html` rendered inline
+    # → stored XSS).
     #
-    # ONLY for session principals (browser/UI/admin), which can reach the
-    # object store directly — the 302 offloads bytes from the router. An AGENT
-    # fetch (keyed: via_key_file_id set) comes over the internal `agents`
-    # network and resolves only the router; the store host (e.g. seaweedfs on
-    # the `backend` net) is deliberately unreachable to it, so a presigned
-    # redirect would fail with "Name or service not known". Stream those.
-    is_agent_fetch = access.via_key_file_id is not None
-    if not is_agent_fetch:
+    # Gated on `file_download_presigned` (default OFF). Every current consumer
+    # of this route is an in-cluster, server-side caller — SDK agents, the
+    # chatbot's fetch_file, and the webapp backend's fetch_file (which proxies
+    # bytes to the browser) — and none sit on the object store's private
+    # network, so a presigned URL pointing at e.g. `seaweedfs:8333` is
+    # unresolvable to them (ConnectError). Stream through the router by default;
+    # operators that front the store on a client-reachable host can opt in.
+    if settings.file_download_presigned:
         presigned = await file_store.presigned_url(
             row.sha256,
             ttl_s=300,
