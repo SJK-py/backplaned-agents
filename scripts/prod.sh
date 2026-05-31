@@ -301,7 +301,13 @@ build_env() {
         echo
         echo "# --- Web search (research agent) ---"
         if [[ "$SEARXNG_URL" == "$BUNDLED_SEARXNG_URL" ]]; then
-            echo "# bundled SearXNG — prod.sh auto-adds '--profile search' on start/restart"
+            echo "# bundled SearXNG — prod.sh auto-adds '--profile search' on start/restart."
+            echo "# deploy/searxng/settings.yml enables the json format + GET method the"
+            echo "# research agent needs (the stock image defaults to html/POST → 403)."
+            echo "# SEARXNG_SECRET overrides the instance secret_key (compose passes it"
+            echo "# through). Only emitted for the bundled instance; an external SearXNG"
+            echo "# is the operator's to configure."
+            echo "SEARXNG_SECRET=$(gen 32)"
         fi
         echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
     } > "$OUT"

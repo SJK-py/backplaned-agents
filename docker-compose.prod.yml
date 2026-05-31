@@ -430,3 +430,14 @@ services:
     restart: unless-stopped
     profiles: ["search"]
     networks: [agents]             # research queries it; it alone has web egress
+    environment:
+      # secret_key override (settings.yml references SEARXNG_SECRET indirectly
+      # via this env). prod.sh generates SEARXNG_SECRET; the :- default keeps a
+      # bare `up --profile search` working in dev. NOT `:?` — that errors even
+      # when the search profile is inactive (a `none`/external-search deploy).
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-change-me-prod.sh-sets-SEARXNG_SECRET}
+    volumes:
+      # Mount our settings.yml (json format + GET method) read-only. Without it
+      # the image regenerates an html-only/POST-only default every boot and
+      # the research agent's `GET /search?format=json` gets 403. See the file.
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro

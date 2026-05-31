@@ -1,0 +1,37 @@
+# SearXNG settings for the bundled `search` profile (docker-compose.prod.yml).
+#
+# Why this file exists at all: the searxng/searxng image ships defaults of
+#   search.formats: [html]      # JSON disabled
+#   server.method:  POST        # GET /search rejected
+# and its entrypoint regenerates that html-only/POST default on every start
+# when no settings file is mounted. The research agent calls
+#   GET {SUITE_SEARXNG_URL}/search?q=...&format=json   (bp_agents/agents/research/web.py)
+# so against the stock image BOTH the JSON format AND the GET method are
+# refused — SearXNG answers 403 Forbidden. This file flips just those two knobs
+# (and is mounted read-only at /etc/searxng/settings.yml).
+#
+# `use_default_settings: true` layers these overrides on top of the image's
+# built-in settings.yml, so engine lists / UI / everything else stay at the
+# upstream defaults and survive image bumps — we only own the keys below.
+use_default_settings: true
+
+server:
+  # secret_key is injected from the SEARXNG_SECRET env var (set by prod.sh,
+  # passed through in compose). The literal below is only a placeholder so a
+  # bare `docker compose up` without the env still boots; prod always overrides
+  # it. NEVER ship the placeholder to a public instance.
+  secret_key: "change-me-prod.sh-sets-SEARXNG_SECRET"
+  # Allow the GET the client uses (default is POST → 403 on our GET /search).
+  method: "GET"
+  # Internal-only service on the private `agents` network; no public limiter /
+  # bot detection (which would 403 our server-to-server calls). Do NOT expose
+  # this port publicly with the limiter off.
+  limiter: false
+  public_instance: false
+
+search:
+  # THE fix: enable JSON output so `format=json` stops returning 403. `html`
+  # is kept so the instance is still browsable for debugging.
+  formats:
+    - html
+    - json
