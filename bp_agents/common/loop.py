@@ -62,7 +62,7 @@ async def _dispatch_tool_call(
                 ) as stream:
                     async for child_pf in stream:
                         await relay_subagent_progress(ctx, child_pf)
-                    child = stream.result()
+                    child = await stream.result()
             else:
                 child = await ctx.peers.spawn_from_tool_call(tool_call)
         except Exception as exc:  # noqa: BLE001
