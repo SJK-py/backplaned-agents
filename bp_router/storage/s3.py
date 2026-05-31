@@ -86,7 +86,27 @@ class S3FileStore(FileStore):
 
     def _client(self):  # type: ignore[no-untyped-def]
         session = self._session_factory()
-        return session.client("s3", endpoint_url=self.endpoint_url)
+        return session.client(
+            "s3", endpoint_url=self.endpoint_url, config=self._botocore_config()
+        )
+
+    @staticmethod
+    def _botocore_config():  # type: ignore[no-untyped-def]
+        # botocore 1.36 (pulled in by aioboto3>=14) flipped S3 request
+        # checksums on by default (request_checksum_calculation="when_supported"):
+        # it now adds x-amz-checksum-* trailers via `aws-chunked`
+        # content-encoding on PUT/UploadPart. Many S3-COMPATIBLE servers
+        # (rustfs beta, older MinIO, some R2 paths) don't implement that
+        # trailer protocol, so the body is misframed and the part is rejected —
+        # create_multipart_upload succeeds but the very next upload_part (and
+        # even abort) fail with NoSuchUpload. Pin both knobs back to AWS's
+        # pre-1.36 behaviour (only checksum when the operation requires it).
+        # Against real AWS this is a no-op for correctness. See boto3#4392.
+        from botocore.config import Config  # noqa: PLC0415
+        return Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
 
     # ------------------------------------------------------------------
     # put
