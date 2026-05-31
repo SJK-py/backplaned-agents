@@ -280,6 +280,14 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Generic passthrough slots for custom/self-hosted providers: reference
+      # them from a preset's api_key_ref (env://CUSTOM_LLM_API_KEY_1, ...). They
+      # reach the container with no compose edit — just set the value in
+      # deploy/.env.prod. (A keyless local endpoint needs no slot; pass an
+      # inline api_key dummy on the preset instead.)
+      CUSTOM_LLM_API_KEY_1: ${CUSTOM_LLM_API_KEY_1:-}
+      CUSTOM_LLM_API_KEY_2: ${CUSTOM_LLM_API_KEY_2:-}
+      CUSTOM_LLM_API_KEY_3: ${CUSTOM_LLM_API_KEY_3:-}
     volumes:
       # Operator preset overlay (see ROUTER_LLM_PRESET_OVERLAY_PATH above),
       # read-only. The committed deploy/presets.custom.jsonc (copied from the
