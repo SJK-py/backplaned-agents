@@ -397,6 +397,9 @@ async def edit_preset_form(request: Request, name: str) -> HTMLResponse:
             "preset_name": name,
             "fallback_choices": fallback_choices,
             "has_api_key": bool(preset.get("has_api_key")),
+            # Catalogue-managed presets are re-synced on every boot, so edits
+            # here don't persist — the edit template warns about this.
+            "managed": bool(preset.get("managed")),
             "form": _form_from_preset(preset),
             "errors": [],
         },

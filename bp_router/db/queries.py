@@ -2700,7 +2700,7 @@ _PRESET_PATCHABLE_COLUMNS = frozenset({
 _PRESET_COLUMNS = (
     "name, description, provider, concrete_model, api_key_ref, api_key, "
     "base_url, min_user_level, default_temperature, default_max_tokens, "
-    "default_provider_options, fallback_preset, max_retries, "
+    "default_provider_options, fallback_preset, max_retries, managed, "
     "created_at, updated_at, created_by"
 )
 
@@ -2767,6 +2767,89 @@ async def insert_llm_preset(
         created_by,
     )
     return LlmPresetRow.model_validate(dict(row))
+
+
+async def upsert_managed_preset(
+    conn: asyncpg.Connection,
+    *,
+    name: str,
+    description: str | None,
+    provider: str,
+    concrete_model: str,
+    api_key_ref: str,
+    min_user_level: str,
+    default_temperature: float | None,
+    default_max_tokens: int | None,
+    default_provider_options: dict[str, Any] | None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    fallback_preset: str | None = None,
+    max_retries: int = 0,
+) -> None:
+    """Insert-or-update a CATALOGUE-owned preset (managed = TRUE). Used by
+    the boot-time catalogue sync (`LlmService.load_presets_from_db`).
+
+    On a name conflict the row is overwritten ONLY when it is already
+    managed: an admin-created preset (managed = FALSE) sharing the name is
+    left untouched (the `WHERE llm_presets.managed` guard makes the upsert a
+    no-op for it). `created_by` stays NULL for managed rows."""
+    await conn.execute(
+        """
+        INSERT INTO llm_presets
+            (name, description, provider, concrete_model, api_key_ref, api_key,
+             base_url, min_user_level, default_temperature, default_max_tokens,
+             default_provider_options, fallback_preset, max_retries, managed,
+             created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                TRUE, NULL)
+        ON CONFLICT (name) DO UPDATE SET
+            description = EXCLUDED.description,
+            provider = EXCLUDED.provider,
+            concrete_model = EXCLUDED.concrete_model,
+            api_key_ref = EXCLUDED.api_key_ref,
+            api_key = EXCLUDED.api_key,
+            base_url = EXCLUDED.base_url,
+            min_user_level = EXCLUDED.min_user_level,
+            default_temperature = EXCLUDED.default_temperature,
+            default_max_tokens = EXCLUDED.default_max_tokens,
+            default_provider_options = EXCLUDED.default_provider_options,
+            fallback_preset = EXCLUDED.fallback_preset,
+            max_retries = EXCLUDED.max_retries,
+            managed = TRUE,
+            updated_at = now()
+        WHERE llm_presets.managed
+        """,
+        name,
+        description,
+        provider,
+        concrete_model,
+        api_key_ref,
+        api_key,
+        base_url,
+        min_user_level,
+        default_temperature,
+        default_max_tokens,
+        default_provider_options or {},
+        fallback_preset,
+        max_retries,
+    )
+
+
+async def delete_stale_managed_presets(
+    conn: asyncpg.Connection, *, keep: list[str]
+) -> int:
+    """Delete catalogue-managed presets (managed = TRUE) whose name is NOT in
+    `keep` (the current catalogue). Admin-created presets (managed = FALSE)
+    are never touched. Returns the number of rows deleted.
+
+    A surviving row that referenced a pruned preset via `fallback_preset` has
+    that column NULLed by the FK's ON DELETE SET NULL."""
+    result = await conn.execute(
+        "DELETE FROM llm_presets WHERE managed AND name <> ALL($1::text[])",
+        keep,
+    )
+    # asyncpg returns "DELETE n".
+    return int(result.split()[-1])
 
 
 async def update_llm_preset(

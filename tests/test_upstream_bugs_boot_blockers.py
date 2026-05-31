@@ -124,29 +124,29 @@ def test_bug2_concrete_models_keep_dotted_form() -> None:
 
 
 def test_bug2_load_presets_from_db_seeds_in_a_single_transaction() -> None:
-    """Source pin: the seed branch wraps the per-preset INSERT
-    loop in `async with conn.transaction()`. Without the
-    transaction, a CHECK-constraint failure on any one preset
-    leaves the table in a partially-seeded state that the
-    `if not rows` guard never recovers from on subsequent
-    boots — the operator has to manually `TRUNCATE llm_presets`."""
+    """Source pin: the catalogue sync wraps the per-preset upsert
+    loop (and the stale-prune) in `async with conn.transaction()`.
+    Without the transaction, a CHECK-constraint failure on any one
+    preset leaves the table in a partially-synced state. (The sync
+    now runs on every boot, not just first boot, but the all-or-
+    nothing requirement is unchanged.)"""
     from bp_router.llm import service as svc_module
 
     src = inspect.getsource(svc_module.LlmService.load_presets_from_db)
     # The transaction context must wrap the for-loop.
     txn_idx = src.find("async with conn.transaction()")
     assert txn_idx > 0, (
-        "upstream-bug #2 regression: seed loop is no longer wrapped "
-        "in a transaction; partial-seed states will be sticky"
+        "upstream-bug #2 regression: sync loop is no longer wrapped "
+        "in a transaction; partial-sync states will result"
     )
     # The for-loop must follow the transaction opener (i.e. be
     # INSIDE it).
-    seed_for_idx = src.find("for p in seeded:")
+    seed_for_idx = src.find("for p in catalog:")
     assert seed_for_idx > txn_idx, (
         "upstream-bug #2: the for-loop must run INSIDE the transaction"
     )
-    # The insert call must be inside the loop.
-    insert_idx = src.find("queries.insert_llm_preset(", seed_for_idx)
+    # The upsert call must be inside the loop.
+    insert_idx = src.find("queries.upsert_managed_preset(", seed_for_idx)
     assert insert_idx > seed_for_idx
 
 

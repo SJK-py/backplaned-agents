@@ -491,6 +491,12 @@ def upgrade() -> None:
                 REFERENCES llm_presets(name) ON DELETE SET NULL,
             max_retries                integer NOT NULL DEFAULT 0
                 CHECK (max_retries >= 0 AND max_retries <= 10),
+            -- TRUE for presets owned by the JSONC catalogue: re-synced
+            -- (upserted) from the catalogue on every boot and pruned when
+            -- dropped from it, so edits to them via the admin UI are
+            -- transient. FALSE for admin-created presets, which the boot
+            -- sync never touches. created_by is NULL exactly when managed.
+            managed                    boolean NOT NULL DEFAULT false,
             created_at                 timestamptz NOT NULL DEFAULT now(),
             updated_at                 timestamptz NOT NULL DEFAULT now(),
             -- created_by may be NULL for default-seeded rows.
