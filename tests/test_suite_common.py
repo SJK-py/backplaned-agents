@@ -166,6 +166,29 @@ def test_text_output_stamps_context_tokens() -> None:
     assert text_output("x").metadata == {}
 
 
+def test_text_output_synthesizes_message_when_files_but_no_text() -> None:
+    # Harness safeguard: a model that send_file's then stops with no text must
+    # not deliver a bare/empty reply — supply a minimal accompanying line.
+    out = text_output(None, files=["report.pdf"])
+    assert "report.pdf" in out.content
+    assert out.files == ["report.pdf"]
+    # Empty/whitespace content is treated the same as None.
+    assert text_output("   ", files=["a.txt", "b.csv"]).content
+    assert "a.txt" in text_output("", files=["a.txt", "b.csv"]).content
+
+
+def test_text_output_keeps_real_text_with_files() -> None:
+    # When the model DID write a reply, it's preserved verbatim (no synthesis).
+    out = text_output("Here's your export.", files=["x.csv"])
+    assert out.content == "Here's your export."
+
+
+def test_text_output_no_files_no_synthesis() -> None:
+    # No files → empty content stays empty (a deliberate no-op turn is allowed).
+    assert text_output(None).content is None
+    assert text_output("").content == ""
+
+
 def test_estimate_context_tokens_counts_text_only() -> None:
     msgs = [
         Message(role="system", content="a" * 40),
@@ -594,7 +617,10 @@ def test_send_file_records_existing_name() -> None:
                                                     args={"name": "report.pdf"}))
     )
     assert outbound == ["report.pdf"]
-    assert "delivered to the user" in msg.content
+    # The tool result reinforces: queued, delivered only with a final reply,
+    # don't stop / end the delegation without writing one.
+    assert "queued" in msg.content
+    assert "final text reply" in msg.content
 
 
 def test_send_file_dedups_and_validates_persist_prefix() -> None:

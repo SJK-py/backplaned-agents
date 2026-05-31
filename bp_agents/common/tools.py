@@ -174,17 +174,27 @@ def make_send_file_tool(outbound: list[str]) -> LocalTool:
             )
         if name not in outbound:
             outbound.append(name)
-        return f"OK — '{name}' will be delivered to the user with this reply."
+        return (
+            f"OK — '{name}' is queued and will be delivered ONLY with your "
+            "final text reply. You have NOT answered the user yet: write your "
+            "normal final message now (do not stop here, and do not end the "
+            "delegation, until you have). A file is never sent on its own."
+        )
 
     return LocalTool(
         spec=ToolSpec(
             name="send_file",
             description=(
-                "Deliver a file to the user as an attachment, alongside your "
-                "text reply. Pass a stash file name — one you created with "
-                "write_file, or a name a specialist returned to you. Use this "
-                "whenever the user should receive an actual file (a document, "
-                "export, image, etc.), not just text about it."
+                "Queue a file to deliver to the user as an attachment "
+                "ALONGSIDE your final text reply. Pass a stash file name — one "
+                "you created with write_file, or a name a specialist returned "
+                "to you. Use this whenever the user should receive an actual "
+                "file (a document, export, image, etc.), not just text about "
+                "it. IMPORTANT: this only QUEUES the file — it is delivered "
+                "only with your final answer, so after calling it you must "
+                "still write your normal text reply. Calling send_file and then "
+                "stopping (or ending the delegation) with no final message "
+                "sends nothing."
             ),
             parameters={
                 "type": "object",
