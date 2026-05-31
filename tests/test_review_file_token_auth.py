@@ -230,8 +230,9 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
     state = MagicMock()
     state.db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     state.db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
-    # A keyed (agent) fetch must STREAM, never 302 to a presigned URL — the
-    # agent reaches only the router on the internal net, not the object store.
+    # Default download mode: stream (file_download_presigned OFF) — every
+    # in-cluster consumer reaches only the router, not the object store.
+    state.settings.file_download_presigned = False
     async def _stream():
         yield b"data"
     state.file_store.open = AsyncMock(return_value=_stream())
@@ -245,7 +246,7 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
         files.download(file_id="file_X", request=req, access=access)
     )
     assert isinstance(resp, StreamingResponse)
-    # Streamed, not redirected — presigned_url not consulted for an agent fetch.
+    # Streamed, not redirected — presigned_url not consulted when streaming.
     state.file_store.presigned_url.assert_not_awaited()
     state.file_store.open.assert_awaited_once()
     # Resolved via the UNSCOPED lookup; the user-scoped path was
@@ -255,28 +256,23 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
 
 
 def test_download_presigned_pins_attachment_and_safe_mime(monkeypatch) -> None:
-    """L3: the presigned-redirect path must carry the SAME
-    download-hardening as the streamed path. A stored `text/html`
-    must redirect with a downgraded content-type and an `attachment`
-    disposition so the S3-direct fetch can't render inline (stored
-    XSS) — the bug was the presigned URL omitting both."""
+    """L3: WHEN presigned downloads are enabled (file_download_presigned=True),
+    the redirect path must carry the SAME download-hardening as the streamed
+    path. A stored `text/html` must redirect with a downgraded content-type and
+    an `attachment` disposition so the S3-direct fetch can't render inline
+    (stored XSS) — the bug was the presigned URL omitting both."""
     from fastapi.responses import RedirectResponse
 
     from bp_router.api import files
 
-    # SESSION principal (no via_key_file_id): a browser/UI client that CAN
-    # reach the object store, so the presigned-redirect path applies. (Agent
-    # keyed fetches stream instead — see the cross-user test above.)
-    access = J.FileReadAccess(user_id="u", via_key_file_id=None)
+    access = J.FileReadAccess(user_id="u", via_key_file_id="file_h")
     row = MagicMock(
         sha256="ab" * 32, byte_size=9,
         mime_type="text/html; charset=utf-8",
         original_filename="evil.html",
     )
-    scoped_get = AsyncMock(return_value=row)
     monkeypatch.setattr(
-        files.queries.Scope, "user",
-        staticmethod(lambda conn, uid: MagicMock(get_file=scoped_get)),
+        files.queries, "get_file_by_id", AsyncMock(return_value=row)
     )
     monkeypatch.setattr(
         files.queries, "append_audit_event", AsyncMock(return_value=None)
@@ -286,6 +282,8 @@ def test_download_presigned_pins_attachment_and_safe_mime(monkeypatch) -> None:
     state = MagicMock()
     state.db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     state.db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+    # Opt in to presigned redirects for this test.
+    state.settings.file_download_presigned = True
     presigned = AsyncMock(return_value="https://s3.example/obj?sig=1")
     state.file_store.presigned_url = presigned
     req = MagicMock()
