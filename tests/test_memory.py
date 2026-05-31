@@ -311,6 +311,22 @@ def test_memory_list_no_query_returns_all_with_kind_filter(tmp_path) -> None:
     assert all("score" not in i for i in allres["items"])  # no query → no score
 
 
+def test_memory_list_kind_filter_is_case_insensitive(tmp_path) -> None:
+    """The `kind` filter matches regardless of case — seeded `preference`
+    facts are found via `Preference`."""
+    async def _drive() -> dict:
+        store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_facts(store)
+        out = await run_memory_list(
+            _Ctx(_ScriptLlm([])), MemList(kind="Preference"),
+            settings=_settings(), store=store, embed_preset="e",
+        )
+        return json.loads(out.content)
+
+    res = asyncio.run(_drive())
+    assert {i["fact"] for i in res["items"]} == {"likes cats", "has a dog"}
+
+
 def test_memory_list_query_ranks_by_relevance(tmp_path) -> None:
     async def _drive() -> dict:
         store = MemoryStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)

@@ -153,6 +153,13 @@ def test_kb_store_retrieve_list_remove(tmp_path) -> None:
         )
         assert "cats" in hit.content.lower()
 
+        # Metadata filter is case-insensitive: tag "ANIMALS" matches "animals".
+        tagged = await run_kb_retrieve(
+            ctx, KbRetrieve(query="tell me about cats", tags=["ANIMALS"], count=1),
+            settings=settings, store=store, preset="emb",
+        )
+        assert "cats" in tagged.content.lower()
+
         # List shows both.
         listed = await run_kb_list(ctx, KbList(), settings=settings, store=store)
         assert "cats" in listed.content and "dogs" in listed.content
@@ -268,6 +275,26 @@ def test_kb_browse_filters_and_fields(tmp_path) -> None:
     assert [i["title"] for i in titled["items"]] == ["Paris guide"]
     first = allres["items"][0]
     assert {"doc_id", "title", "collection", "tags", "updated_at"} <= set(first)
+
+
+def test_kb_browse_metadata_filters_are_case_insensitive(tmp_path) -> None:
+    """collection / tag filters match regardless of case — seeded `pets` /
+    `cat` are found via `PETS` / `Cat`."""
+    async def _drive() -> tuple[dict, dict]:
+        store = KnowledgeStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)
+        await _seed_docs(store)
+        ctx = _StubCtx("usr_a", None, _StubLlm())
+        coll = await run_kb_browse(
+            ctx, KbBrowse(collection="PETS"), settings=_settings(), store=store
+        )
+        tag = await run_kb_browse(
+            ctx, KbBrowse(tag="Cat"), settings=_settings(), store=store
+        )
+        return json.loads(coll.content), json.loads(tag.content)
+
+    coll, tag = asyncio.run(_drive())
+    assert {i["title"] for i in coll["items"]} == {"Cats 101", "Dogs 101"}
+    assert {i["title"] for i in tag["items"]} == {"Cats 101"}
 
 
 def test_kb_browse_paging_caps_at_50(tmp_path) -> None:

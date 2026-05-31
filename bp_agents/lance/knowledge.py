@@ -48,6 +48,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _ci_eq(a: str | None, b: str | None) -> bool:
+    """Case-insensitive equality for metadata values (None-safe)."""
+    return (a or "").casefold() == (b or "").casefold()
+
+
+def _ci_set(values: list[str] | None) -> set[str]:
+    """Case-folded set of tag values (None-safe)."""
+    return {v.casefold() for v in (values or [])}
+
+
 class KnowledgeStore:
     """Per-user knowledge base over one LanceDB connection."""
 
@@ -103,11 +113,11 @@ class KnowledgeStore:
         """Apply the metadata filters in Python and cap at `count`."""
         out: list[dict[str, Any]] = []
         for r in rows:
-            if collection is not None and r["collection"] != collection:
+            if collection is not None and not _ci_eq(r["collection"], collection):
                 continue
-            if title is not None and r["title"] != title:
+            if title is not None and not _ci_eq(r["title"], title):
                 continue
-            if tags and not set(tags).issubset(set(r.get("tags") or [])):
+            if tags and not _ci_set(tags).issubset(_ci_set(r.get("tags"))):
                 continue
             out.append(r)
             if len(out) >= count:
@@ -235,9 +245,9 @@ class KnowledgeStore:
         q = query.lower() if query else None
         out = []
         for d in docs:
-            if collection is not None and d["collection"] != collection:
+            if collection is not None and not _ci_eq(d["collection"], collection):
                 continue
-            if tag is not None and tag not in (d.get("tags") or []):
+            if tag is not None and tag.casefold() not in _ci_set(d.get("tags")):
                 continue
             if q is not None and q not in (
                 f"{d['title']} {d['description']}".lower()
