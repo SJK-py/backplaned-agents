@@ -254,6 +254,13 @@ services:
       ROUTER_JWT_SECRET: ${ROUTER_JWT_SECRET:?openssl rand -base64 32}
       ROUTER_ADMIN_SESSION_SECRET: ${ROUTER_ADMIN_SESSION_SECRET:?openssl rand -base64 32}
       ROUTER_METRICS_TOKEN: ${ROUTER_METRICS_TOKEN:?required in prod}
+      # Optional operator preset overlay, merged OVER the bundled catalogue at
+      # first-boot seed (custom wins on a name collision; new names added). Copy
+      # deploy/presets.custom.jsonc.example → deploy/presets.custom.jsonc and
+      # edit it; it's gitignored and mounted read-only below. Only consulted
+      # when seeding an empty llm_presets table — after that presets are
+      # admin-managed in the DB. An empty array (the example default) is a no-op.
+      ROUTER_LLM_PRESET_OVERLAY_PATH: /app/deploy/presets.custom.jsonc
       ROUTER_FILE_STORE: s3
       # file_store_options is parsed as JSON (pydantic-settings).
       ROUTER_FILE_STORE_OPTIONS: >-
@@ -273,6 +280,12 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      # Operator preset overlay (see ROUTER_LLM_PRESET_OVERLAY_PATH above),
+      # read-only. The committed deploy/presets.custom.jsonc (copied from the
+      # .example) ensures the bind source exists even when unused (its default
+      # is an empty array → no-op).
+      - ./deploy/presets.custom.jsonc:/app/deploy/presets.custom.jsonc:ro
     networks: [edge, backend, agents]
     # Not published directly — the edge proxy fronts it.
 

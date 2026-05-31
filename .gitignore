@@ -35,5 +35,8 @@ Thumbs.db
 deploy/.env.prod
 .env.prod
 
+# Operator preset overlay (filled-in copy of deploy/presets.custom.jsonc.example)
+deploy/presets.custom.jsonc
+
 # Webapp prod CSS — a build artifact (see bp_agents/agents/webapp/tailwind.config.js)
 bp_agents/agents/webapp/static/tailwind.css

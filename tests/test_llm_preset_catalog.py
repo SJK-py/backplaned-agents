@@ -14,6 +14,7 @@ import pytest
 from bp_router.llm.presets import (
     BUNDLED_CATALOG_PATH,
     default_presets,
+    default_presets_with_overlay,
     load_catalog,
     strip_jsonc_comments,
 )
@@ -115,3 +116,84 @@ def test_non_array_top_level_fails_loud(tmp_path) -> None:
     cat.write_text('{"name": "x"}', encoding="utf-8")
     with pytest.raises(ValueError, match="array"):
         load_catalog(cat)
+
+
+# ---------------------------------------------------------------------------
+# Operator overlay merge (default_presets_with_overlay)
+# ---------------------------------------------------------------------------
+
+
+def test_overlay_none_is_just_the_base() -> None:
+    """No overlay path → identical to the bundled base catalogue."""
+    base = {p.name for p in default_presets()}
+    merged = {p.name for p in default_presets_with_overlay(overlay_path=None)}
+    assert merged == base
+
+
+def test_overlay_missing_file_is_noop(tmp_path) -> None:
+    """A pointed-at-but-absent overlay file is ignored (the compose mount is
+    optional), not an error."""
+    base = [p.name for p in default_presets()]
+    merged = [p.name for p in default_presets_with_overlay(
+        overlay_path=tmp_path / "nope.jsonc")]
+    assert merged == base
+
+
+def test_overlay_custom_wins_on_name_collision(tmp_path) -> None:
+    """An overlay entry whose name collides with a built-in REPLACES it."""
+    overlay = tmp_path / "custom.jsonc"
+    overlay.write_text(
+        """
+        [
+          {
+            "name": "default",
+            "provider": "openai-compatible",
+            "concrete_model": "qwen3:32b",
+            "api_key_ref": "env://OPENAI_API_KEY",
+            "base_url": "http://ollama:11434/v1"
+          }
+        ]
+        """,
+        encoding="utf-8",
+    )
+    merged = {p.name: p for p in default_presets_with_overlay(overlay_path=overlay)}
+    # `default` exists once, and it's the OVERLAY's version.
+    assert merged["default"].provider == "openai-compatible"
+    assert merged["default"].concrete_model == "qwen3:32b"
+    # No duplicate `default`.
+    names = [p.name for p in default_presets_with_overlay(overlay_path=overlay)]
+    assert names.count("default") == 1
+    # Built-ins not in the overlay survive.
+    assert "claude" in merged
+
+
+def test_overlay_adds_new_names(tmp_path) -> None:
+    """An overlay name not in the base is appended."""
+    overlay = tmp_path / "custom.jsonc"
+    overlay.write_text(
+        """
+        [
+          {
+            "name": "house-local",
+            "provider": "openai-compatible",
+            "concrete_model": "llama-3",
+            "api_key_ref": "env://LOCAL_KEY",
+            "base_url": "http://localhost:8000/v1"
+          }
+        ]
+        """,
+        encoding="utf-8",
+    )
+    names = [p.name for p in default_presets_with_overlay(overlay_path=overlay)]
+    assert "house-local" in names
+    # Base names all still present.
+    assert {p.name for p in default_presets()}.issubset(set(names))
+
+
+def test_overlay_malformed_fails_loud(tmp_path) -> None:
+    """A present-but-broken overlay is loud (so a typo'd override doesn't
+    silently no-op)."""
+    overlay = tmp_path / "bad.jsonc"
+    overlay.write_text('[{"name": "x", "bogus_key": 1}]', encoding="utf-8")
+    with pytest.raises(ValueError):
+        default_presets_with_overlay(overlay_path=overlay)

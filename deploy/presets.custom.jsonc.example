@@ -1,0 +1,36 @@
+// deploy/presets.custom.jsonc — OPTIONAL operator preset overlay.
+//
+// Copy this file to `deploy/presets.custom.jsonc` (gitignored) and edit it to
+// override or add LLM presets WITHOUT editing the package. It is MERGED over
+// the bundled catalogue (bp_router/llm/presets_catalog.jsonc) at first-boot
+// seed:
+//   - a custom entry whose `name` collides with a built-in WINS (replaces it),
+//   - a new `name` is added.
+//
+// Consulted ONLY when seeding an empty `llm_presets` table (first boot, or
+// after TRUNCATE llm_presets). After that, presets live in the DB and are
+// admin-managed via /admin — editing this file does NOT retroactively change
+// an already-seeded deployment.
+//
+// JSONC: `//` and `/* */` comments allowed; NO trailing commas. Each entry
+// mirrors the `Preset` dataclass:
+//   Required: name, provider, concrete_model, api_key_ref
+//   Optional: description, min_user_level, default_temperature,
+//             default_max_tokens, default_provider_options, api_key, base_url,
+//             fallback_preset, max_retries
+//   provider ∈ gemini | anthropic | openai | openai-embeddings |
+//              openai-compatible | openai-compatible-embeddings
+//   name must match ^[a-z][a-z0-9_-]{0,63}$ (lowercase, no dots).
+//
+// Default below is an EMPTY array → a no-op overlay (safe to leave as-is).
+// Example (uncomment + adapt):
+//   {
+//     "name": "default",
+//     "provider": "openai-compatible",
+//     "concrete_model": "qwen3:32b",
+//     "api_key_ref": "env://OPENAI_API_KEY",
+//     "base_url": "http://ollama:11434/v1",
+//     "description": "Local Qwen via Ollama — overrides the bundled default."
+//   }
+[
+]
