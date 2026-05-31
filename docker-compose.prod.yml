@@ -435,12 +435,19 @@ services:
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
     # Root, but with the kernel capability set reduced to ONLY what the uid
-    # drop needs: SETUID + SETGID. Everything else (NET_RAW, SYS_ADMIN, …) is
-    # dropped, so even though the process is uid 0 it can't, e.g., raw-socket
-    # or mount. `cap_drop: ALL` WITHOUT the two adds would EPERM the setuid()
-    # and collapse all users onto one uid — keep both.
+    # drop needs: SETUID + SETGID (to drop each user's bash to its own uid) and
+    # CHOWN (to hand that uid ownership of its workspace dir). Everything else
+    # (NET_RAW, SYS_ADMIN, …) is dropped, so even though the process is uid 0 it
+    # can't, e.g., raw-socket or mount. Notes:
+    #   * cap_drop: ALL WITHOUT SETUID/SETGID would EPERM the setuid() and
+    #     collapse all users onto one uid — keep them.
+    #   * WITHOUT CHOWN, os.chown(workspace, uid, uid) fails with EPERM
+    #     (sandbox_workspace_chown_failed): the workspace stays root-owned and,
+    #     since cap_drop: ALL removed CAP_DAC_OVERRIDE, the dropped uid then
+    #     can't write its own workspace — every bash command fails. CHOWN is the
+    #     minimal cap that fixes it (vs re-adding the blanket DAC_OVERRIDE).
     cap_drop: ["ALL"]
-    cap_add: ["SETUID", "SETGID"]
+    cap_add: ["SETUID", "SETGID", "CHOWN"]
     # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
     # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
     networks: [agents]             # router WS only — no db/redis/web
