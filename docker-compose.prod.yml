@@ -83,6 +83,15 @@ x-suite-agent: &suite-agent
     SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
     SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
     SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
+    # Per-tier USER-SELECTABLE preset allow-lists. JSON arrays of preset names a
+    # user may switch their own tier to via /config or the webapp Settings page.
+    # Empty (default) → that tier is system-managed: the current model is still
+    # SHOWN, but not user-changeable. e.g. SUITE_SELECTABLE_PRESETS_PRO=
+    # ["gpt-pro","claude-opus","gemini-pro"]. (config agent + webapp read these
+    # off SuiteSettings; the embedding tier is never user-selectable.)
+    SUITE_SELECTABLE_PRESETS_PRO: ${SUITE_SELECTABLE_PRESETS_PRO:-[]}
+    SUITE_SELECTABLE_PRESETS_BALANCED: ${SUITE_SELECTABLE_PRESETS_BALANCED:-[]}
+    SUITE_SELECTABLE_PRESETS_LITE: ${SUITE_SELECTABLE_PRESETS_LITE:-[]}
     # Vector length the knowledge_base/memory agents bake into their LanceDB
     # table schema on first write (and frozen for the volume's life). MUST match
     # the embedding preset's output dimension — 1536 for the default Gemini

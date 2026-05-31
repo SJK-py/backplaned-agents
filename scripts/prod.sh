@@ -310,6 +310,13 @@ build_env() {
         echo "# lancedb_data volume. MUST match $PRESET_EMBEDDING; change it (and reset"
         echo "# the volume) only if you repoint the embedding preset to a different dim."
         echo "SUITE_EMBEDDING_DIM=$EMBEDDING_DIM"
+        echo "# Per-tier user-selectable model presets (JSON arrays of preset names)."
+        echo "# Empty → the tier's model is shown to the user but not changeable by"
+        echo "# them. Fill a list to let users switch their own tier via /config or the"
+        echo "# webapp, e.g. SUITE_SELECTABLE_PRESETS_PRO=[\"gpt-pro\",\"claude-opus\"]."
+        echo "SUITE_SELECTABLE_PRESETS_PRO=[]"
+        echo "SUITE_SELECTABLE_PRESETS_BALANCED=[]"
+        echo "SUITE_SELECTABLE_PRESETS_LITE=[]"
         echo
         echo "# --- Channel ---"
         echo "SUITE_TELEGRAM_BOT_TOKEN=$TELEGRAM"

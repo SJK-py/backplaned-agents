@@ -67,13 +67,22 @@ def preset_choices_from_settings(settings: SuiteSettings | None) -> PresetChoice
 
 
 def editable_fields(preset_choices: PresetChoices | None = None) -> dict[str, type]:
-    """The fields a user may read/set: the always-editable base, plus any
-    preset/tier field whose allow-list (`preset_choices`) is non-empty."""
+    """The fields a user may SET: the always-editable base, plus any preset/tier
+    field whose allow-list (`preset_choices`) is non-empty."""
     fields = dict(EDITABLE_FIELDS)
     for field in PRESET_FIELDS:
         if preset_choices and preset_choices.get(field):
             fields[field] = str
     return fields
+
+
+def displayable_fields() -> list[str]:
+    """The fields a user may SEE on a read — the always-editable base PLUS all
+    three per-tier model presets, regardless of the allow-lists. Which model
+    each tier uses is the user's own config and should always be visible; only
+    CHANGING it is gated (see `editable_fields`). Ordered: base fields, then the
+    model tiers."""
+    return [*EDITABLE_FIELDS, *PRESET_FIELDS]
 
 
 def coerce_config_value(
