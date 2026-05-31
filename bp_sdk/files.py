@@ -197,7 +197,13 @@ class FileStash:
         assert res.fetch_url and res.fetch_token
         dest = self._inbox_dir / f"{uuid.uuid4().hex}_{name.replace('/', '_')}"
         url = f"{self._router_url}{res.fetch_url}"
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # follow_redirects: the download endpoint 302s to a backend-direct
+        # presigned URL when the store supports it (e.g. SeaweedFS); without
+        # this the SDK gets the raw 302 and raise_for_status() throws. httpx
+        # drops the Authorization header on a cross-host redirect, so the
+        # router bearer token isn't leaked to the object store — and the
+        # presigned URL carries its own signature, so it doesn't need it.
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
             async with client.stream(
                 "GET", url,
                 headers={"Authorization": f"Bearer {res.fetch_token}"},
