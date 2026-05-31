@@ -522,14 +522,23 @@ async def download(
     # the SAME disposition/MIME so the redirect can't bypass the
     # hardening the streamed branch applies (pre-fix: an S3-served
     # `text/html` rendered inline → stored XSS).
-    presigned = await file_store.presigned_url(
-        row.sha256,
-        ttl_s=300,
-        content_disposition=disposition,
-        content_type=safe_mime,
-    )
-    if presigned:
-        return RedirectResponse(presigned, status_code=302)
+    #
+    # ONLY for session principals (browser/UI/admin), which can reach the
+    # object store directly — the 302 offloads bytes from the router. An AGENT
+    # fetch (keyed: via_key_file_id set) comes over the internal `agents`
+    # network and resolves only the router; the store host (e.g. seaweedfs on
+    # the `backend` net) is deliberately unreachable to it, so a presigned
+    # redirect would fail with "Name or service not known". Stream those.
+    is_agent_fetch = access.via_key_file_id is not None
+    if not is_agent_fetch:
+        presigned = await file_store.presigned_url(
+            row.sha256,
+            ttl_s=300,
+            content_disposition=disposition,
+            content_type=safe_mime,
+        )
+        if presigned:
+            return RedirectResponse(presigned, status_code=302)
 
     # Streamed fallback. `nosniff` can only be set here (it can't
     # ride the presigned query params); the presigned path relies on
