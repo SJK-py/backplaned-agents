@@ -100,6 +100,23 @@ with `docker compose --profile search up`, or leave it off and set
 `SUITE_SEARXNG_URL` to an external instance. With neither, `web_search`
 returns a "not configured" notice; the rest of research still works.
 
+The bundled instance mounts `deploy/searxng/settings.yml`, which enables the
+**JSON output format** and the **GET method** that `web_search` relies on
+(`GET /search?format=json`). The stock SearXNG image defaults to
+`formats: [html]` and `method: POST`, so without this both the format and the
+method are refused and SearXNG answers **403 Forbidden**. `prod.sh` also writes
+a `SEARXNG_SECRET` (the instance `secret_key`).
+
+**Using an external SearXNG?** Apply the same two settings on it, or
+`web_search` will 403:
+
+```yaml
+search:
+  formats: [html, json]
+server:
+  method: GET
+```
+
 ## Sandbox isolation (v1 caveat)
 
 v1 uses the **shared-container / per-uid** model: the sandbox runs bash
