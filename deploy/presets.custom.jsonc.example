@@ -22,8 +22,33 @@
 //              openai-compatible | openai-compatible-embeddings
 //   name must match ^[a-z][a-z0-9_-]{0,63}$ (lowercase, no dots).
 //
+// ── API KEYS: `api_key_ref` (preferred) vs `api_key` (inline) ──────────────
+// A preset gets its provider credential one of two ways:
+//
+//   api_key_ref  — an INDIRECT reference resolved at call time. The only
+//                  scheme wired out of the box is env://VAR, which reads the
+//                  router container's environment. Three vars are already
+//                  passed into the container (and filled by scripts/prod.sh):
+//                    env://GEMINI_API_KEY, env://OPENAI_API_KEY,
+//                    env://ANTHROPIC_API_KEY
+//                  Referencing ANY OTHER var (e.g. env://MY_LLM_KEY) needs the
+//                  var added in TWO places: deploy/.env.prod AND the router
+//                  service's `environment:` block in docker-compose.prod.yml
+//                  (compose's --env-file only feeds ${...} interpolation, not
+//                  the container). Without that the ref resolves to empty and
+//                  calls 401. PREFERRED: only a reference lives in the DB/file.
+//
+//   api_key      — an INLINE literal secret. Takes precedence over api_key_ref
+//                  when both are set. No env/compose edits — handy for a
+//                  provider whose key isn't one of the three above, or a
+//                  keyless local endpoint (use any dummy string). CAVEAT: it's
+//                  stored PLAINTEXT in the llm_presets table (masked only on
+//                  the admin API read-back, not at rest) and sits in plaintext
+//                  in THIS file. Keep this file 0600 and off backups you don't
+//                  trust. Avoid for shared/production secrets.
+//
 // Default below is an EMPTY array → a no-op overlay (safe to leave as-is).
-// Example (uncomment + adapt):
+// Example A — repoint `default` via an env ref (preferred):
 //   {
 //     "name": "default",
 //     "provider": "openai-compatible",
@@ -31,6 +56,14 @@
 //     "api_key_ref": "env://OPENAI_API_KEY",
 //     "base_url": "http://ollama:11434/v1",
 //     "description": "Local Qwen via Ollama — overrides the bundled default."
+//   }
+// Example B — inline key for a non-standard provider (no env/compose edits):
+//   {
+//     "name": "default",
+//     "provider": "openai-compatible",
+//     "concrete_model": "deepseek-chat",
+//     "api_key": "sk-...",
+//     "base_url": "https://api.deepseek.com/v1"
 //   }
 [
 ]
