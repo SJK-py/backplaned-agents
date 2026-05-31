@@ -522,7 +522,8 @@ async def run_memory_list(
         # No query → newest first by last_used_at.
         facts = await store.all_facts()
         if payload.kind:
-            facts = [f for f in facts if f.get("kind") == payload.kind]
+            kind = payload.kind.casefold()
+            facts = [f for f in facts if (f.get("kind") or "").casefold() == kind]
         facts.sort(key=lambda f: f.get("last_used_at", ""), reverse=True)
         items = [_fact_item(f) for f in facts[start:end]]
         return text_output(json.dumps({"items": items, "total": len(facts)}))
@@ -546,7 +547,8 @@ async def run_memory_list(
     by_uid = {f["uid"]: f for f in (*vec_pool, *bm_pool)}
     pool = list(by_uid.values())
     if payload.kind:
-        pool = [f for f in pool if f.get("kind") == payload.kind]
+        kind = payload.kind.casefold()
+        pool = [f for f in pool if (f.get("kind") or "").casefold() == kind]
 
     def _score(f: dict[str, Any]) -> float:
         return relevance[f["uid"]] * _decay(f["last_used_at"], settings)
