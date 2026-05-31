@@ -363,6 +363,45 @@ def default_presets(path: str | Path | None = None) -> list[Preset]:
     return list(_load_catalog_cached(str(path) if path is not None else None))
 
 
+@lru_cache(maxsize=8)
+def _load_overlay_cached(path: str) -> tuple[Preset, ...]:
+    # A missing overlay file is not an error — the operator simply didn't
+    # provide one (the compose mount is optional). An unreadable/malformed one
+    # IS loud, so a typo'd override fails at boot rather than silently doing
+    # nothing.
+    if not Path(path).exists():
+        return ()
+    return tuple(load_catalog(path))
+
+
+def default_presets_with_overlay(
+    *, catalog_path: str | Path | None = None, overlay_path: str | Path | None = None
+) -> list[Preset]:
+    """Seed presets = the base catalogue (bundled, or `catalog_path` if the
+    operator replaced it wholesale) MERGED with an optional operator overlay
+    (`overlay_path`, e.g. deploy/presets.custom.jsonc). On a name collision the
+    OVERLAY wins, so an operator can repoint or add a preset without copying
+    the whole built-in list. Overlay-only names are appended. Order: base
+    order preserved, overlay-new names appended in overlay order.
+
+    Like the base seed, this is consulted only on first boot (empty table) and
+    as the pre-DB fallback — once seeded, presets are admin-managed."""
+    base = default_presets(catalog_path)
+    if overlay_path is None:
+        return base
+    overlay = list(_load_overlay_cached(str(overlay_path)))
+    if not overlay:
+        return base
+    by_name = {p.name: p for p in base}
+    for p in overlay:
+        by_name[p.name] = p  # custom wins on collision
+    # Preserve base order, then append overlay-only names.
+    base_names = [p.name for p in base]
+    merged = [by_name[n] for n in base_names]
+    merged += [p for p in overlay if p.name not in base_names]
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------

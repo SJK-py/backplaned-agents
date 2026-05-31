@@ -132,6 +132,15 @@ class Settings(BaseSettings):
     first boot (empty table) and as the pre-DB fallback; once seeded, presets
     live in the DB and are admin-managed."""
 
+    llm_preset_overlay_path: str | None = None
+    """Path to an OPTIONAL operator preset overlay (JSONC), merged OVER the base
+    catalogue at seed time — a custom entry wins on a name collision, new names
+    are added. Unlike `llm_preset_catalog_path` (which replaces the catalogue
+    wholesale), the overlay keeps the built-ins and only lists overrides/
+    additions. Missing file → ignored; malformed → loud at boot. Like all
+    seeding, consulted only on first boot (empty table); after that presets are
+    admin-managed. Wired in prod to deploy/presets.custom.jsonc."""
+
     max_request_body_bytes: int = Field(default=64 * 1024, ge=1024)  # 64 KiB
     """Per-request HTTP body cap enforced by `BodySizeLimitMiddleware`
     for every endpoint EXCEPT `/v1/files` (which has its own larger

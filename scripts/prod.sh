@@ -188,9 +188,28 @@ build_env() {
             PRESET_EMBEDDING=text-embedding-3-small; EMBEDDING_DIM=1536 ;;
         custom)
             KEY_VAR=""
-            PRESET_LITE=lite; PRESET_BALANCED=default; PRESET_PRO=pro
+            # Asked below. Default each tier to `default` — the one preset
+            # guaranteed to exist in the bundled catalogue (and to survive a
+            # custom overlay), so a fresh custom deploy still resolves.
+            PRESET_LITE=default; PRESET_BALANCED=default; PRESET_PRO=default
             PRESET_EMBEDDING=default_embedding; EMBEDDING_DIM=1536 ;;
     esac
+
+    # Custom provider: the operator brings their own presets (built-ins,
+    # admin-webUI edits, or a deploy/presets.custom.jsonc overlay), so ask which
+    # preset NAME backs each tier rather than hard-wiring a provider's models.
+    # Default `default` (always available). No validation here — a name that
+    # doesn't resolve surfaces at first use (PresetUnknownError); repoint it in
+    # the admin webUI or the overlay.
+    if [[ "$PROVIDER" == "custom" ]]; then
+        echo
+        echo "Custom provider: name the preset backing each model tier"
+        echo "(must exist in the catalog / your overlay; 'default' always works)."
+        ask PRESET_LITE "  lite tier preset name" "default"
+        ask PRESET_BALANCED "  balanced tier preset name" "default"
+        ask PRESET_PRO "  pro tier preset name" "default"
+        ask PRESET_EMBEDDING "  embedding preset name" "default_embedding"
+    fi
 
     if [[ -n "$KEY_VAR" ]]; then
         ask PROVIDER_KEY "$PROVIDER API key (resolves env://$KEY_VAR for the presets)" ""
@@ -454,6 +473,16 @@ esac
 if [[ ! -f "$OUT" ]]; then
     echo "no env file at $OUT — re-run and choose to build it (first deploy)." >&2
     exit 1
+fi
+
+# The router bind-mounts deploy/presets.custom.jsonc (operator preset overlay).
+# It's gitignored, so seed an empty no-op copy from the .example if absent —
+# otherwise Docker would create a directory at the bind source and the router
+# couldn't read it. Operators edit the real file to override/add presets.
+OVERLAY="deploy/presets.custom.jsonc"
+if [[ ! -f "$OVERLAY" && -f "$OVERLAY.example" ]]; then
+    cp "$OVERLAY.example" "$OVERLAY"
+    echo "  seeded $OVERLAY (empty overlay; edit it to override/add presets)."
 fi
 
 # Resolve compose args once (base + auto search profile from the env file).

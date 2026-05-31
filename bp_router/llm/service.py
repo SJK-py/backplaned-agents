@@ -17,7 +17,7 @@ from bp_router.llm.presets import (
     PresetNotAllowedError,
     PresetUnknownError,
     ResolvedCallParams,
-    default_presets,
+    default_presets_with_overlay,
     detect_fallback_cycles,
     resolve_call_params,
     user_level_satisfies,
@@ -276,7 +276,7 @@ class LlmService:
         # Empty until then; falls back to default_presets() if the DB
         # call hasn't been made yet (test harnesses, in-process tests).
         self._presets: dict[str, Preset] = {
-            p.name: p for p in default_presets(self._catalog_path())
+            p.name: p for p in self._seed_presets()
         }
         self._adapters: dict[str, ProviderAdapter] = {}
         # OrderedDict drives the LRU: move-to-end on hit/insert, then
@@ -292,6 +292,18 @@ class LlmService:
         (`None` → the bundled catalogue). Tolerant of settings stubs that
         predate the field."""
         return getattr(self.settings, "llm_preset_catalog_path", None) or None
+
+    def _overlay_path(self) -> str | None:
+        """The operator preset OVERLAY path, if any — merged over the base
+        catalogue (custom wins). Tolerant of settings stubs predating it."""
+        return getattr(self.settings, "llm_preset_overlay_path", None) or None
+
+    def _seed_presets(self) -> list[Preset]:
+        """The presets to seed / fall back to: base catalogue merged with the
+        optional operator overlay (custom wins on collision)."""
+        return default_presets_with_overlay(
+            catalog_path=self._catalog_path(), overlay_path=self._overlay_path()
+        )
 
     async def load_presets_from_db(self, conn: asyncpg.Connection) -> int:
         """Read the `llm_presets` table into the in-memory map.
@@ -319,7 +331,7 @@ class LlmService:
             # the next startup, so the seed branch never runs again,
             # and the operator has to manually `TRUNCATE llm_presets`
             # to recover.
-            seeded = default_presets(self._catalog_path())
+            seeded = self._seed_presets()
             async with conn.transaction():
                 for p in seeded:
                     await queries.insert_llm_preset(
