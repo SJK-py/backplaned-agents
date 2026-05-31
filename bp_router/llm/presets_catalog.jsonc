@@ -39,24 +39,6 @@
     "description": "Default embedding model (Gemini). Open to all tiers.",
     "default_provider_options": { "output_dimensionality": 1536 }
   },
-  // Generic tier slots — stable names the suite's "custom" default config
-  // points at (lite / default / pro), meant to be REPOINTED to any
-  // provider/model via the admin webUI. Seeded to Gemini so a fresh boot
-  // resolves; `default` (above) is the balanced slot.
-  {
-    "name": "lite",
-    "provider": "gemini",
-    "concrete_model": "gemini-3.1-flash-lite",
-    "api_key_ref": "env://GEMINI_API_KEY",
-    "description": "Lite tier slot — repoint via the admin webUI."
-  },
-  {
-    "name": "pro",
-    "provider": "gemini",
-    "concrete_model": "gemini-3.1-pro-preview",
-    "api_key_ref": "env://GEMINI_API_KEY",
-    "description": "Pro tier slot — repoint via the admin webUI."
-  },
   {
     "name": "gemini",
     "provider": "gemini",

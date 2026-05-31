@@ -331,8 +331,6 @@ def test_default_presets_cover_known_aliases() -> None:
         "default", "default_embedding", "gemini", "gemini-2-5-pro",
         "gemini-3-5-flash", "gemini-3-1-flash-lite", "gemini-3-1-pro",
         "gemini-lite", "gemini-pro", "gemini-embedding-2",
-        # Generic tier slots
-        "lite", "pro",
         # Anthropic
         "claude", "claude-opus", "claude-opus-4-8",
         "claude-sonnet", "claude-sonnet-4-6",
