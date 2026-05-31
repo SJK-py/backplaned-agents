@@ -144,6 +144,110 @@ def _preexec(uid: int | None, settings: SuiteSettings):  # noqa: ANN202
     return _set
 
 
+def _ensure_workspace(workspace: Path, uid: int | None) -> None:
+    """Create the workspace dir and (when dropping to a per-user uid) make it
+    owned by that uid. The whole sandbox treats the workspace as belonging to
+    the user uid: bash runs AS that uid, and the stash<->workspace copies run
+    as it too (see `_copy_as_uid`). Owning the dir up-front is what lets the
+    dropped processes read+write it — root itself has cap_drop: ALL minus
+    SETUID/SETGID/CHOWN, so NO CAP_DAC_OVERRIDE, and cannot touch a uid-owned
+    dir directly. Raises a clear RuntimeError if the chown is refused."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    if uid is None or os.geteuid() != 0:
+        return  # rootless dev: no drop, no chown needed.
+    try:
+        os.chown(str(workspace), uid, uid)
+    except OSError as exc:
+        logger.error(
+            "sandbox_workspace_chown_failed",
+            extra={"event": "sandbox_workspace_chown_failed",
+                   "uid": uid, "errno": exc.errno, "error": repr(exc)},
+        )
+        if exc.errno == errno.EINVAL:
+            hint = (
+                f"uid {uid} is not valid inside the container's user namespace "
+                "— under Docker userns-remap/rootless the container maps only a "
+                "sub-range to uids 0..65535. Set SUITE_SANDBOX_UID_BASE/_MAX to "
+                "a range your container maps (default 2000..60000 fits a "
+                "standard 65536-wide map)"
+            )
+        else:
+            hint = (
+                "the sandbox container needs the CHOWN capability "
+                "(cap_add: CHOWN) so the dropped user can own its workspace"
+            )
+        raise RuntimeError(
+            f"sandbox could not chown its workspace to uid {uid} ({exc}); {hint}"
+        ) from exc
+
+
+def _write_bytes_as_uid(dest: Path, data: bytes, uid: int | None) -> None:
+    """Write `data` to `dest` AS the user uid (when dropping). Root has no
+    CAP_DAC_OVERRIDE, so it can't create a file inside the uid-owned workspace
+    bash leaves behind — fork a child, drop to the uid, and write there. Fork
+    (not a thread) because setuid is per-process and must not touch the agent's
+    own root identity; the child does only the write and exits.
+
+    The child does NO Python imports or async work (pathlib/io are already
+    imported, the event loop is never touched), so the multi-threaded-fork
+    deadlock the DeprecationWarning warns about can't bite — same property the
+    existing bash `preexec_fn` fork relies on. `data` is already in hand."""
+    if uid is None or os.geteuid() != 0:
+        dest.write_bytes(data)
+        return
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            os.setgroups([])
+            os.setgid(uid)
+            os.setuid(uid)
+            dest.write_bytes(data)
+            os._exit(0)
+        except BaseException:  # noqa: BLE001 — child must never escape the fork
+            os._exit(17)
+    _, status = os.waitpid(pid, 0)
+    if os.WEXITSTATUS(status) != 0:
+        raise PermissionError(
+            f"sandbox could not write {dest.name} as uid {uid} "
+            f"(child exit {os.WEXITSTATUS(status)})"
+        )
+
+
+def _read_bytes_as_uid(path: Path, uid: int | None) -> bytes:
+    """Read `path` AS the user uid (when dropping) — the workspace file is
+    uid-owned and root (no CAP_DAC_OVERRIDE) may not be able to read it. The
+    dropped child streams the bytes back through a pipe."""
+    if uid is None or os.geteuid() != 0:
+        return path.read_bytes()
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            os.close(r)
+            os.setgroups([])
+            os.setgid(uid)
+            os.setuid(uid)
+            with open(path, "rb") as fh:
+                while chunk := fh.read(65536):
+                    os.write(w, chunk)
+            os.close(w)
+            os._exit(0)
+        except BaseException:  # noqa: BLE001
+            os._exit(17)
+    os.close(w)
+    chunks: list[bytes] = []
+    while data := os.read(r, 65536):
+        chunks.append(data)
+    os.close(r)
+    _, status = os.waitpid(pid, 0)
+    if os.WEXITSTATUS(status) != 0:
+        raise PermissionError(
+            f"sandbox could not read {path.name} as uid {uid} "
+            f"(child exit {os.WEXITSTATUS(status)})"
+        )
+    return b"".join(chunks)
+
+
 def _resolve_in_workspace(workspace: Path, path: str) -> Path:
     """Resolve a (possibly relative) path and confine it to the workspace
     — refuse traversal outside it."""
@@ -162,45 +266,9 @@ async def run_bash(
     uid: int | None = None,
 ) -> AgentOutput:
     workspace = _workspace(settings, ctx.user_id)
-    await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-    # When we'll drop to a per-user uid, the workspace (created as root) must
-    # be owned by that uid or the dropped command can't write to it. chown
-    # only when actually dropping (root + uid set); harmless to repeat.
-    if uid is not None and os.geteuid() == 0:
-        try:
-            await asyncio.to_thread(os.chown, str(workspace), uid, uid)
-        except OSError as exc:
-            # Don't swallow this: if the chown fails the workspace stays
-            # root-owned and the about-to-be-dropped uid can't write it, so the
-            # bash command fails anyway — with the opaque "Exception occurred in
-            # preexec_fn" instead of a clear cause. The two causes need
-            # different fixes, so name the right one:
-            #   EPERM  → the container lacks CAP_CHOWN (cap_add: CHOWN).
-            #   EINVAL → the uid isn't valid inside the container namespace
-            #            (Docker userns-remap / rootless maps only a sub-range);
-            #            point SUITE_SANDBOX_UID_BASE/_MAX at a mapped range.
-            logger.error(
-                "sandbox_workspace_chown_failed",
-                extra={"event": "sandbox_workspace_chown_failed",
-                       "uid": uid, "errno": exc.errno, "error": repr(exc)},
-            )
-            if exc.errno == errno.EINVAL:
-                hint = (
-                    f"uid {uid} is not valid inside the container's user "
-                    "namespace — under Docker userns-remap/rootless the "
-                    "container maps only a sub-range to uids 0..65535. Set "
-                    "SUITE_SANDBOX_UID_BASE/_MAX to a range your container maps "
-                    "(the default 2000..60000 fits a standard 65536-wide map)"
-                )
-            else:
-                hint = (
-                    "the sandbox container needs the CHOWN capability "
-                    "(cap_add: CHOWN) so the dropped user can own its workspace"
-                )
-            raise RuntimeError(
-                f"sandbox could not chown its workspace to uid {uid} ({exc}); "
-                f"{hint}"
-            ) from exc
+    # Create + (when dropping) hand the workspace to the user uid, so the
+    # dropped bash can read+write it. Shared with the stash<->workspace copies.
+    await asyncio.to_thread(_ensure_workspace, workspace, uid)
     proc = await asyncio.create_subprocess_shell(
         payload.command,
         cwd=str(workspace),
@@ -260,11 +328,15 @@ async def storage_to_workspace(
     ctx: TaskContext, payload: StorageToWorkspace
 ) -> AgentOutput:
     workspace = _workspace(_settings, ctx.user_id)
-    await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+    uid = _user_uid(ctx)
+    # Same ownership model as bash: the workspace belongs to the user uid.
+    await asyncio.to_thread(_ensure_workspace, workspace, uid)
     src = await ctx.files.read(payload.name)
     dest = workspace / Path(payload.name).name
     data = await asyncio.to_thread(src.read_bytes)
-    await asyncio.to_thread(dest.write_bytes, data)
+    # Write AS the uid — root (no DAC_OVERRIDE) can't create a file inside the
+    # uid-owned workspace bash leaves behind.
+    await asyncio.to_thread(_write_bytes_as_uid, dest, data, uid)
     # Tell the model exactly how to reach it: bash's cwd IS this workspace, so
     # the file is just `./<name>` (or the bare name) — no absolute path needed.
     return text_output(
@@ -285,7 +357,9 @@ async def workspace_to_storage(
 ) -> AgentOutput:
     workspace = _workspace(_settings, ctx.user_id)
     path = _resolve_in_workspace(workspace, payload.path)
-    data = await asyncio.to_thread(path.read_bytes)
+    # Read AS the uid — the workspace file bash produced is uid-owned, and root
+    # (no DAC_OVERRIDE) may not be able to read it.
+    data = await asyncio.to_thread(_read_bytes_as_uid, path, _user_uid(ctx))
     name = await ctx.files.store(data, filename=path.name)
     return AgentOutput(content=f"Saved {path.name} to the stash as {name}", files=[name])
 

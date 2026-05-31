@@ -52,12 +52,14 @@ def test_agent_uses_no_db(monkeypatch) -> None:
 
 
 def test_run_bash_chowns_workspace_when_dropping() -> None:
-    """Source pin: run_bash chowns the workspace to the uid before running, so
-    the dropped command can write to its (root-created) workspace dir."""
+    """Source pin: run_bash hands the workspace to the uid (via
+    _ensure_workspace) BEFORE starting the subprocess, so the dropped command
+    can write to it; and _ensure_workspace is what does the chown."""
     import inspect
 
     src = inspect.getsource(sb.run_bash)
-    assert "os.chown" in src
-    chown = src.find("os.chown")
+    ensure = src.find("_ensure_workspace")
     subproc = src.find("create_subprocess_shell")
-    assert 0 < chown < subproc, "chown must happen before the subprocess starts"
+    assert 0 < ensure < subproc, "_ensure_workspace must run before the subprocess"
+    # The chown now lives in the shared _ensure_workspace helper.
+    assert "os.chown" in inspect.getsource(sb._ensure_workspace)
