@@ -27,7 +27,7 @@ WORKDIR /app
 # no compiler. If a wheel is unavailable for your arch, add a builder
 # stage with build-essential and copy the resulting site-packages.
 COPY . .
-RUN pip install ".[router,storage-s3,admin,llm-gemini]"
+RUN pip install ".[router,storage-s3,admin,llm-gemini,llm-anthropic,llm-openai]"
 
 USER bp
 EXPOSE 8000

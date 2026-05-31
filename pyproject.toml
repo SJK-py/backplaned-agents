@@ -40,9 +40,24 @@ router = [
     "jsonschema>=4.21",
 ]
 
-# LLM provider adapters (only what's wired today; add more as adapters land).
+# LLM provider adapters (one extra per provider SDK; add more as adapters
+# land). Each maps to a bp_router/llm/providers/<p>.py adapter that imports its
+# SDK lazily, so a router image only needs the extras for the providers its
+# presets actually use. The prod router image installs all three (see
+# Dockerfile) since presets can target any of them.
 llm-gemini = [
     "google-genai>=1.14",
+]
+llm-anthropic = [
+    # Messages API adapter: bp_router/llm/providers/anthropic.py.
+    "anthropic>=0.39",
+]
+llm-openai = [
+    # Responses API adapter (bp_router/llm/providers/openai.py uses
+    # client.responses.create → needs the Responses API, openai>=1.66) plus the
+    # openai-compatible / -embeddings adapters that reuse the same SDK against a
+    # custom base_url (Azure/Groq/Together/vLLM/Ollama/LM Studio).
+    "openai>=1.68",
 ]
 
 # Optional S3-compatible file storage backend (AWS S3, R2, MinIO).
@@ -62,6 +77,11 @@ admin = [
     "jinja2>=3.1",
     "python-multipart>=0.0.22",
     "itsdangerous>=2.2",
+    # bp_admin imports Starlette directly (SessionMiddleware, Request,
+    # responses). It rides in via FastAPI today, but declare it explicitly —
+    # same reasoning as itsdangerous above. Weak floor so it never fights
+    # FastAPI's own starlette pin (pip intersects the two).
+    "starlette>=0.40",
 ]
 
 # Webapp channel (bp_agents.agents.webapp) — the browser channel: a
@@ -75,6 +95,9 @@ webapp = [
     "jinja2>=3.1",
     "python-multipart>=0.0.22",
     "itsdangerous>=2.2",
+    # Webapp imports Starlette directly (SessionMiddleware, Request, responses);
+    # declared explicitly though FastAPI also pulls it. Weak floor (see admin).
+    "starlette>=0.40",
 ]
 
 # Agent suite (bp_agents) — its own Postgres (asyncpg + Alembic) on top
@@ -87,6 +110,10 @@ suite = [
     "sqlalchemy[asyncio]>=2.0",
     # Per-user vector store for the knowledge base + memory fact graph.
     "lancedb>=0.30",
+    # bp_agents/lance builds pyarrow tables/schemas directly. It comes in via
+    # lancedb, but declare it explicitly since we import it. Weak floor so it
+    # never fights lancedb's own pyarrow pin.
+    "pyarrow>=14",
     # File / webpage → Markdown for md_converter (+ KB ingest).
     "markitdown>=0.0.1",
     # DST-aware cron evaluation for the scheduler.
