@@ -306,58 +306,60 @@ class LlmService:
         )
 
     async def load_presets_from_db(self, conn: asyncpg.Connection) -> int:
-        """Read the `llm_presets` table into the in-memory map.
+        """Re-sync the JSONC preset catalogue into `llm_presets`, then read
+        the table into the in-memory map. Returns the number of presets in
+        the resulting map.
 
-        On first startup the table is empty: we seed it with
-        `default_presets()` so deployments using the old `model="..."`
-        kwarg keep working unchanged. Returns the number of presets
-        in the resulting in-memory map.
+        Unlike the original first-boot-only seed, the catalogue is re-applied
+        on EVERY boot: each catalogue preset is upserted (and marked
+        `managed = TRUE`) and any managed preset that has been dropped from
+        the catalogue is pruned. Admin-created presets (`managed = FALSE`) are
+        never touched, so operator-defined presets survive across boots. The
+        whole sync runs in a SINGLE transaction, so a CHECK-constraint
+        failure on any one preset can't leave the table half-synced.
 
-        Fallback cycles raise `PresetCycleError` — surfaced from the
-        admin API as 400 on save, and logged + ignored at startup
-        (so an existing-but-broken DB doesn't brick the router; the
-        old in-memory map continues to serve requests).
+        Customisation of catalogue presets is expected via the operator
+        overlay JSONC (see `default_presets_with_overlay`); edits to managed
+        presets through the admin UI are transient — overwritten on the next
+        boot.
+
+        Fallback cycles raise `PresetCycleError` — surfaced from the admin
+        API as 400 on save, and logged + ignored here (so an
+        existing-but-broken DB doesn't brick the router; the old in-memory
+        map continues to serve requests).
         """
         from bp_router.db import queries  # noqa: PLC0415
 
-        rows = await queries.list_llm_presets(conn)
-        if not rows:
-            # Empty table → seed defaults. Wrap in a SINGLE transaction
-            # so the seed is all-or-nothing. Without
-            # the transaction, a CHECK-constraint failure on any one
-            # preset would commit the rows that succeeded before it
-            # and leave the table in a non-empty "partially seeded"
-            # state — `list_llm_presets` would return non-empty on
-            # the next startup, so the seed branch never runs again,
-            # and the operator has to manually `TRUNCATE llm_presets`
-            # to recover.
-            seeded = self._seed_presets()
-            async with conn.transaction():
-                for p in seeded:
-                    await queries.insert_llm_preset(
-                        conn,
-                        name=p.name,
-                        description=p.description,
-                        provider=p.provider,
-                        concrete_model=p.concrete_model,
-                        api_key_ref=p.api_key_ref,
-                        api_key=p.api_key,
-                        base_url=p.base_url,
-                        min_user_level=p.min_user_level,
-                        default_temperature=p.default_temperature,
-                        default_max_tokens=p.default_max_tokens,
-                        default_provider_options=p.default_provider_options or None,
-                        fallback_preset=p.fallback_preset,
-                        max_retries=p.max_retries,
-                        created_by=None,
-                    )
-            self._presets = {p.name: p for p in seeded}
-            logger.info(
-                "llm_presets_seeded",
-                extra={"event": "llm_presets_seeded", "count": len(seeded)},
+        catalog = self._seed_presets()
+        # Sync catalogue → DB atomically. Prune stale managed rows FIRST so a
+        # rename (old name dropped, new name added) can't collide on the name
+        # PK, then upsert every catalogue preset. The catalogue carries no
+        # fallback references today, so the single-pass insert order is safe;
+        # an overlay that introduces a forward fallback reference would need
+        # the referenced preset to appear earlier in the catalogue.
+        async with conn.transaction():
+            await queries.delete_stale_managed_presets(
+                conn, keep=[p.name for p in catalog]
             )
-            return len(seeded)
+            for p in catalog:
+                await queries.upsert_managed_preset(
+                    conn,
+                    name=p.name,
+                    description=p.description,
+                    provider=p.provider,
+                    concrete_model=p.concrete_model,
+                    api_key_ref=p.api_key_ref,
+                    api_key=p.api_key,
+                    base_url=p.base_url,
+                    min_user_level=p.min_user_level,
+                    default_temperature=p.default_temperature,
+                    default_max_tokens=p.default_max_tokens,
+                    default_provider_options=p.default_provider_options or None,
+                    fallback_preset=p.fallback_preset,
+                    max_retries=p.max_retries,
+                )
 
+        rows = await queries.list_llm_presets(conn)
         new_map: dict[str, Preset] = {}
         for row in rows:
             new_map[row.name] = Preset(
@@ -388,6 +390,16 @@ class LlmService:
             # Keep serving with the old in-memory map; admins can fix
             # via the API and reload.
             return len(self._presets)
+        logger.info(
+            "llm_presets_synced",
+            extra={
+                "event": "llm_presets_synced",
+                "count": len(new_map),
+                "managed": len(catalog),
+            },
+        )
+        # Atomic publish: the map is fully built above; swap it in as the
+        # final mutation so a concurrent reader never sees a partial map.
         self._presets = new_map
         # Adapter cache may now be stale (e.g., concrete_model changed)
         # so flush; lazy reconstruction is cheap.

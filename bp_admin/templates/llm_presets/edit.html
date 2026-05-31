@@ -17,6 +17,16 @@
   <p class="text-xs text-brand-500/80 mt-1 font-mono">{{ preset_name }}</p>
 </header>
 
+{% if managed %}
+  <div class="mb-4 rounded border border-amber-500/30 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+    <strong>Catalogue-managed preset.</strong> This preset is defined in the
+    JSONC preset catalogue and re-synced on every router startup, so changes
+    saved here are <strong>transient</strong> — they'll be overwritten on the
+    next restart. To change it permanently, edit the catalogue (or an operator
+    overlay).
+  </div>
+{% endif %}
+
 {% set form_action = "/admin/llm/presets/" ~ preset_name ~ "/edit" %}
 {% set submit_label = "Save changes" %}
 {% set is_create = False %}

@@ -1,9 +1,12 @@
 // bp_router — built-in LLM preset catalogue.
 //
-// Seeded into an empty `llm_presets` table on first startup, and used as the
-// in-memory fallback before the DB load. After the first seed, presets live
-// in the DB and are admin-managed via the webUI — editing this file does NOT
-// retroactively change an already-seeded deployment.
+// Source of truth for catalogue-managed presets. These are RE-SYNCED into the
+// `llm_presets` table on EVERY router startup: each is upserted and marked
+// `managed`, and any managed preset dropped from this file is pruned. It is
+// also the in-memory fallback before the DB load. Admin-created presets (added
+// via the webUI / admin API) are never touched by the sync — editing a managed
+// preset through the UI is transient (overwritten on the next boot), so to
+// change one permanently, edit this file (or an operator overlay).
 //
 // This file is JSONC: `//` line comments and `/* ... */` block comments are
 // allowed (and stripped before parsing); trailing commas are NOT. Point a

@@ -2841,6 +2841,9 @@ class LlmPresetView(BaseModel):
     default_provider_options: dict[str, Any] = {}
     fallback_preset: str | None = None
     max_retries: int = 0
+    # True → catalogue-managed: re-synced from the JSONC catalogue on every
+    # boot, so admin edits to it are transient. False → admin-created.
+    managed: bool = False
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
@@ -2861,6 +2864,7 @@ def _preset_to_view(row) -> LlmPresetView:  # type: ignore[no-untyped-def]
         default_provider_options=dict(row.default_provider_options or {}),
         fallback_preset=row.fallback_preset,
         max_retries=row.max_retries,
+        managed=row.managed,
         created_at=row.created_at,
         updated_at=row.updated_at,
         created_by=row.created_by,

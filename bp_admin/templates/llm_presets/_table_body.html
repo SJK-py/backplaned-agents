@@ -17,7 +17,17 @@
         {% for p in presets %}
           <tr class="hover:bg-brand-50/50">
             <td class="px-3 py-2">
-              <div class="font-mono text-xs text-brand-900">{{ p.name }}</div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-mono text-xs text-brand-900">{{ p.name }}</span>
+                {% if p.managed %}
+                  <span class="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5
+                               text-[10px] uppercase tracking-wide text-brand-500
+                               ring-1 ring-inset ring-brand-500/20"
+                        title="Catalogue-managed: re-synced from the preset catalogue on every boot. Edits here are transient — overwritten on the next restart.">
+                    managed
+                  </span>
+                {% endif %}
+              </div>
               {% if p.description %}
                 <div class="text-xs text-brand-500/80">{{ p.description }}</div>
               {% endif %}
@@ -100,9 +110,9 @@
     </table>
   {% else %}
     <div class="px-4 py-12 text-center text-brand-500">
-      No presets defined. Defaults seed automatically on first router
-      startup, so this is unusual — agents calling the LLM service
-      will hit
+      No presets defined. The catalogue re-syncs its presets on every
+      router startup, so an empty list is unusual — agents calling the
+      LLM service will hit
       <code class="text-brand-700">preset_unknown</code> errors.
       <a href="/admin/llm/presets/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
         Add one

@@ -286,6 +286,8 @@ class LlmPresetRow(_Row):
     default_provider_options: dict[str, Any] = {}
     fallback_preset: str | None = None
     max_retries: int = 0
+    # TRUE → catalogue-owned (re-synced every boot); FALSE → admin-created.
+    managed: bool = False
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
