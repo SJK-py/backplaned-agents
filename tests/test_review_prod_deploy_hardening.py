@@ -7,8 +7,8 @@ B1 — graceful shutdown: the router gets a bounded uvicorn
       restart.
 B2 — the `bp_suite` Postgres role is created NOLOGIN (no committed
       'change-me-suite' login password — a dormant known-credential account).
-M2 — the third-party `rustfs` (file store) and `searxng` images are pinned to
-      immutable tags, not `:latest`.
+M2 — the third-party `seaweedfs` (file store) and `searxng` images are pinned
+      to immutable tags, not `:latest`.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_suite_role_is_nologin_without_committed_password() -> None:
 # --- M2: third-party images pinned, not :latest ---------------------------
 
 
-@pytest.mark.parametrize("image_prefix", ["rustfs/rustfs:", "searxng/searxng:"])
+@pytest.mark.parametrize("image_prefix", ["chrislusf/seaweedfs:", "searxng/searxng:"])
 def test_third_party_images_are_pinned(image_prefix: str) -> None:
     line = next(
         (ln.strip() for ln in _COMPOSE.splitlines()
