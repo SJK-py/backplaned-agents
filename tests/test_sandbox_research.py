@@ -79,6 +79,55 @@ def test_sandbox_bash_large_output_saved(tmp_path) -> None:
     asyncio.run(_drive())
 
 
+def test_sandbox_bash_empty_output_explains_success(tmp_path) -> None:
+    # A command that prints nothing must not return a blank reply — the model
+    # would misread it as failure. Explain it succeeded + how to inspect.
+    async def _drive() -> None:
+        settings = SuiteSettings(sandbox_root=str(tmp_path))
+        out = await run_bash(ctx=_Ctx(files=_StubFiles()),
+                             payload=Bash(command="true"), settings=settings)
+        assert out.content.strip()
+        assert "no output" in out.content and "ls" in out.content
+
+    asyncio.run(_drive())
+
+
+def test_storage_to_workspace_tells_model_the_relative_path(tmp_path) -> None:
+    # The return must point the model at the cwd-relative name, since bash runs
+    # in the workspace where the file lands.
+    import importlib
+    from pathlib import Path
+
+    # The submodule (the package __init__ rebinds the name `agent` to the Agent
+    # instance, so a plain `import ...agent as sb` would grab that, not module).
+    sb = importlib.import_module("bp_agents.agents.sandbox.agent")
+
+    async def _drive() -> None:
+        src = tmp_path / "example.py"
+        src.write_text("print('hi')")
+
+        class _Files:
+            async def read(self, name):  # noqa: ANN001
+                return Path(src)
+        ctx = _Ctx(files=_Files())
+        settings = SuiteSettings(sandbox_root=str(tmp_path / "ws"))
+        # storage_to_workspace reads module-level _settings; patch it.
+        orig = sb._settings
+        sb._settings = settings
+        try:
+            out = await sb.storage_to_workspace(
+                ctx, sb.StorageToWorkspace(name="example.py")
+            )
+        finally:
+            sb._settings = orig
+        assert "example.py" in out.content
+        # Names the relative form and explains bash's cwd.
+        assert "./example.py" in out.content or "'example.py'" in out.content
+        assert "bash" in out.content.lower()
+
+    asyncio.run(_drive())
+
+
 # --------------------------------------------------------------------------- #
 # research web tools
 # --------------------------------------------------------------------------- #
