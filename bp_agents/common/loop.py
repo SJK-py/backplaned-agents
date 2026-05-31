@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.progress import emit_loop_progress, relay_subagent_progress
 from bp_agents.common.tools import LocalToolset, peer_tool_specs
+from bp_protocol.types import TaskStatus
 from bp_sdk import (
     LlmCallError,
     Message,
@@ -28,7 +29,21 @@ from bp_sdk import (
 from bp_sdk import file_tools as sdk_file_tools
 
 if TYPE_CHECKING:
+    from bp_protocol.frames import ResultFrame
     from bp_sdk import LlmResponse, TaskContext, ToolCall, ToolSpec
+
+
+def _failed_tool_text(tool_name: str, child: ResultFrame) -> str:
+    """Render a non-succeeded subagent result into a tool-response string the
+    MODEL can act on. The error carries a `{code, message}`; both are
+    agent/router-authored and safe to relay (raw exception strings are already
+    scrubbed to `internal_error` upstream, so nothing host-internal leaks).
+    Without this the model gets an empty result and fails silently."""
+    err = child.error or {}
+    code = str(err.get("code") or child.status.value)
+    message = str(err.get("message") or "").strip()
+    detail = f"{code}: {message}" if message and message != code else code
+    return f"The {tool_name} call did not succeed ({detail})."
 
 
 async def _dispatch_tool_call(
@@ -70,6 +85,17 @@ async def _dispatch_tool_call(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
                 response=f"tool error: {exc}",
+            )
+        # A FAILED/CANCELLED child has output=None and its reason in
+        # `child.error` — which tool_response_from_result drops, so the model
+        # would otherwise get an EMPTY tool result for a failed delegation and
+        # couldn't tell the user or retry. Surface the error code/message so the
+        # model can react (e.g. a file-name typo → not_found → ask/recheck).
+        if child.status is not TaskStatus.SUCCEEDED:
+            return Message.tool_response(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                response=_failed_tool_text(tool_call.name, child),
             )
         return Message.tool_response_from_result(
             tool_call_id=tool_call.id, name=tool_call.name, result=child
