@@ -161,8 +161,9 @@ build_env() {
     esac
 
     # provider -> (key env var, lite, balanced, pro, embedding) preset aliases.
-    # `custom` wires the generic tier slots (lite / default / pro) the operator
-    # repoints via the admin webUI, and asks for no key (configure it there).
+    # `custom` asks for the preset NAME backing each tier (default `default`)
+    # and asks for no key — the operator brings their own presets via the admin
+    # webUI or a deploy/presets.custom.jsonc overlay, and configures keys there.
     #
     # EMBEDDING_DIM must equal the VECTOR LENGTH the embedding preset emits — it
     # becomes SUITE_EMBEDDING_DIM, which the knowledge_base/memory agents bake
@@ -317,8 +318,9 @@ build_env() {
         if [[ -n "$KEY_VAR" ]]; then
             echo "$KEY_VAR=$PROVIDER_KEY"
         else
-            echo "# custom: set provider key(s) + repoint the lite/default/pro"
-            echo "# presets via the admin webUI (/admin)."
+            echo "# custom: set provider key(s) + define/repoint the tier presets"
+            echo "# named above via the admin webUI (/admin) or a"
+            echo "# deploy/presets.custom.jsonc overlay."
         fi
         echo "SUITE_DEFAULT_PRESET_LITE=$PRESET_LITE"
         echo "SUITE_DEFAULT_PRESET_BALANCED=$PRESET_BALANCED"
@@ -395,9 +397,11 @@ build_env() {
         fi
     fi
     if [[ "$PROVIDER" == "custom" ]]; then
-        echo "  NOTE: custom — the lite/default/pro presets are seeded to Gemini"
-        echo "        placeholders. Set provider keys and repoint these presets in"
-        echo "        the admin webUI (/admin) before they'll work."
+        echo "  NOTE: custom — tiers point at presets: lite=$PRESET_LITE"
+        echo "        balanced=$PRESET_BALANCED pro=$PRESET_PRO. Define them via a"
+        echo "        deploy/presets.custom.jsonc overlay or the admin webUI (/admin),"
+        echo "        and set the provider key(s) they reference. The bundled"
+        echo "        'default' resolves to Gemini until repointed."
     elif [[ -z "$PROVIDER_KEY" ]]; then
         echo "  WARNING: $KEY_VAR is empty — set it before deploying."
     fi
