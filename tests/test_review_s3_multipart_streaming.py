@@ -276,3 +276,32 @@ def test_source_pin_put_uses_multipart_api() -> None:
     assert "abort_multipart_upload" in src
     # And the catch is `BaseException` (covers CancelledError).
     assert "except BaseException" in src
+
+
+def test_client_disables_default_request_checksums() -> None:
+    """botocore 1.36 (via aioboto3>=14) turns S3 request checksums on by
+    default (request_checksum_calculation="when_supported"), sending
+    x-amz-checksum-* trailers over `aws-chunked`. S3-COMPATIBLE servers like
+    rustfs beta don't implement that trailer framing, so upload_part is
+    rejected with NoSuchUpload right after create_multipart_upload succeeds.
+    `_client` must pin both checksum knobs back to "when_required" so the
+    bundled rustfs (and MinIO/R2) work. This pins the Config the client is
+    built with."""
+    pytest.importorskip("aioboto3")
+    pytest.importorskip("botocore")
+
+    captured: dict = {}
+
+    class _FakeSession:
+        def client(self, name, **kwargs):  # type: ignore[no-untyped-def]
+            captured["name"] = name
+            captured["kwargs"] = kwargs
+            return object()
+
+    store = _make_store()
+    store._session = _FakeSession()  # type: ignore[attr-defined]
+    store._client()
+
+    cfg = captured["kwargs"]["config"]
+    assert cfg.request_checksum_calculation == "when_required"
+    assert cfg.response_checksum_validation == "when_required"
