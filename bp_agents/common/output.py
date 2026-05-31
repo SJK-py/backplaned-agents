@@ -32,11 +32,22 @@ def text_output(
     **metadata: Any,
 ) -> AgentOutput:
     """Build the standard `AgentOutput`. `context_tokens` (when given)
-    is stamped into `metadata` for the channel's summarization check."""
+    is stamped into `metadata` for the channel's summarization check.
+
+    Harness safeguard: if `files` are attached but `content` is empty, supply
+    a minimal accompanying line. The prompts + the send_file tool tell the
+    model to always write a reply alongside an attachment, but a model that
+    calls send_file and then stops (or ends a delegation) with no text would
+    otherwise deliver a bare file — or, on some channels, nothing. A file is
+    never sent on its own, so a one-liner is always better than an empty turn."""
+    files = files or []
+    if files and not (content and content.strip()):
+        names = ", ".join(files)
+        content = f"Here {'is' if len(files) == 1 else 'are'} the file{'' if len(files) == 1 else 's'} you requested: {names}"
     meta: dict[str, Any] = dict(metadata)
     if context_tokens is not None:
         meta["context_tokens"] = context_tokens
-    return AgentOutput(content=content, files=files or [], metadata=meta)
+    return AgentOutput(content=content, files=files, metadata=meta)
 
 
 def estimate_tokens(text: str) -> int:

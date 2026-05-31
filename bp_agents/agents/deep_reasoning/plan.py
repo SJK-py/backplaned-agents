@@ -176,7 +176,9 @@ def _final_system(objective: str, results: list[dict]) -> str:
         "Every planned step is complete. Using the results below, write the "
         "final answer to the user's objective. If something essential is still "
         "missing, call add_step to extend the plan; otherwise just write the "
-        "answer (no tool call). Use send_file to attach any produced files.\n\n"
+        "answer (no tool call). Use send_file to attach any produced files — "
+        "it only queues the file, so you must still write the answer text in "
+        "the same turn; a file is never delivered without it.\n\n"
         f"## Objective\n{objective}\n\n## Results\n{_results_digest(results, limit=800)}"
     )
 
