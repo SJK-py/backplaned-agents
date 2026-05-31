@@ -124,6 +124,63 @@ def test_preset_fields_are_tier_gated() -> None:
         coerce_config_value("preset_pro", "default", preset_choices=choices)
 
 
+def test_preset_tiers_are_always_displayable_even_when_not_editable() -> None:
+    """A bare read must SHOW the current per-tier model regardless of the
+    allow-lists — only CHANGING it is gated. Without this, `/config` (read)
+    hid the model info whenever the operator hadn't opened the tiers."""
+    from bp_agents.config_edit import (  # noqa: PLC0415
+        PRESET_FIELDS,
+        displayable_fields,
+        editable_fields,
+        preset_choices_from_settings,
+    )
+
+    empty = preset_choices_from_settings(SuiteSettings())
+    # Not editable with empty allow-lists...
+    assert not any(f in editable_fields(empty) for f in PRESET_FIELDS)
+    # ...but always displayable.
+    disp = displayable_fields()
+    assert all(f in disp for f in PRESET_FIELDS)
+    # The config agent's read formatter shows every tier (value + read-only tag).
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from bp_agents.agents.config.agent import _format_config  # noqa: PLC0415
+
+    cfg = SimpleNamespace(
+        full_name="Ada", timezone="UTC", language="en", verbose_default=False,
+        custom_note="", max_context_token_limit=8000,
+        preset_pro="claude-opus", preset_balanced="default", preset_lite="lite",
+        preset_embedding="default_embedding",
+    )
+    out = _format_config(cfg, empty)
+    assert "preset_pro: claude-opus" in out
+    assert "(read-only)" in out  # not editable → annotated, still shown
+
+
+def test_webapp_renders_readonly_preset_tier_with_current_value() -> None:
+    """The webapp form lists EVERY tier; a non-opted-in tier renders read-only
+    with its current value (not omitted)."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from bp_agents.agents.webapp.pages.config import (  # noqa: PLC0415
+        _preset_fields_for_template,
+    )
+    from bp_agents.config_edit import preset_choices_from_settings  # noqa: PLC0415
+
+    cfg = SimpleNamespace(
+        preset_pro="claude-opus", preset_balanced="default", preset_lite="lite",
+    )
+    # pro opted-in (editable), the rest read-only.
+    choices = preset_choices_from_settings(
+        SuiteSettings(selectable_presets_pro=["claude-opus", "default"])
+    )
+    fields = {f["name"]: f for f in _preset_fields_for_template(cfg, choices)}
+    assert fields["preset_pro"]["editable"] is True
+    assert fields["preset_balanced"]["editable"] is False
+    # Read-only tier still carries its current value for display.
+    assert fields["preset_balanced"]["current"] == "default"
+
+
 def test_config_agent_uses_shared_editable_fields() -> None:
     """The config agent must source its editable set + coercion from
     config_edit, so the NL path and the form can't drift."""

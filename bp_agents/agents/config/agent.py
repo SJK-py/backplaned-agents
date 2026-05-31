@@ -10,6 +10,7 @@ from bp_agents.common.payloads import MessagePayload
 from bp_agents.config_edit import (
     ConfigError,
     coerce_config_value,
+    displayable_fields,
     editable_fields,
     preset_choices_from_settings,
 )
@@ -63,8 +64,16 @@ def _system_prompt(preset_choices: dict[str, list[str]]) -> str:
 def _format_config(cfg: Any, preset_choices: dict[str, list[str]]) -> str:
     if cfg is None:
         return "No settings found."
-    fields = editable_fields(preset_choices)
-    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in fields)
+    # READ shows everything, incl. the per-tier model presets — a user can
+    # always SEE which model each tier uses. A preset that the operator hasn't
+    # opened for editing (empty allow-list) is annotated "(read-only)" so the
+    # value is still visible but the model won't offer to change it.
+    editable = editable_fields(preset_choices)
+    lines = []
+    for f in displayable_fields():
+        suffix = "" if f in editable else "  (read-only)"
+        lines.append(f"{f}: {getattr(cfg, f)}{suffix}")
+    return "\n".join(lines)
 
 
 async def _build_tools(

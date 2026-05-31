@@ -76,6 +76,15 @@ def editable_fields(preset_choices: PresetChoices | None = None) -> dict[str, ty
     return fields
 
 
+def displayable_fields() -> dict[str, type]:
+    """The fields a user may SEE on a read — the always-editable base PLUS the
+    per-tier preset fields, regardless of the allow-lists. Seeing which model
+    each tier currently uses is their own config; only CHANGING it is gated
+    (see `editable_fields`). Without this a bare `/config` hid the model info
+    entirely whenever the operator hadn't opened up the tiers for editing."""
+    return {**EDITABLE_FIELDS, **{f: str for f in PRESET_FIELDS}}
+
+
 def coerce_config_value(
     field: str,
     raw: Any,

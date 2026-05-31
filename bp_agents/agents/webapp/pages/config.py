@@ -42,18 +42,20 @@ def _preset_choices(request: Request) -> dict[str, list[str]]:
 def _preset_fields_for_template(
     cfg: object, preset_choices: dict[str, list[str]]
 ) -> list[dict[str, object]]:
-    """The opted-in preset tiers to render as <select>s — name, label,
-    current value, and the allowed options. Empty tiers are omitted."""
+    """Every preset tier to render — name, label, current value, allowed
+    options, and `editable`. A tier with a non-empty allow-list renders as an
+    editable <select>; a tier with none still shows its CURRENT model as
+    read-only text (so the user can always see which model each tier uses —
+    only changing it is gated)."""
     out: list[dict[str, object]] = []
     for field in PRESET_FIELDS:
         choices = preset_choices.get(field) or []
-        if not choices:
-            continue
         out.append({
             "name": field,
             "label": _PRESET_LABELS.get(field, field),
             "current": getattr(cfg, field, None) if cfg else None,
             "choices": choices,
+            "editable": bool(choices),
         })
     return out
 

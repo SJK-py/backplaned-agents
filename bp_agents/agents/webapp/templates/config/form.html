@@ -72,6 +72,7 @@
       <label for="{{ pf.name }}" class="block text-xs font-medium text-brand-700 mb-1">
         {{ pf.label }}
       </label>
+      {% if pf.editable %}
       <select id="{{ pf.name }}" name="{{ pf.name }}"
               class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
                      focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
@@ -79,6 +80,15 @@
           <option value="{{ opt }}" {% if opt == pf.current %}selected{% endif %}>{{ opt }}</option>
         {% endfor %}
       </select>
+      {% else %}
+      {# Read-only: the operator hasn't opened this tier for selection, but the
+         current model is still shown so the user can see what they're on. #}
+      <div class="w-full rounded border border-brand-500/20 bg-brand-500/5 px-3 py-2
+                  text-sm text-brand-700/80">
+        {{ pf.current or "—" }}
+        <span class="text-xs text-brand-700/50">(set by your administrator)</span>
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
 
