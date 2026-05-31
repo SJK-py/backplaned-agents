@@ -205,7 +205,7 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
     served — the capability is the sole authorization, not 404'd by
     a user-scoped lookup. The user-scoped path is stubbed to None so
     this fails if the handler ever regresses off get_file_by_id."""
-    from fastapi.responses import RedirectResponse
+    from fastapi.responses import StreamingResponse
 
     from bp_router.api import files
 
@@ -230,6 +230,11 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
     state = MagicMock()
     state.db_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
     state.db_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+    # A keyed (agent) fetch must STREAM, never 302 to a presigned URL — the
+    # agent reaches only the router on the internal net, not the object store.
+    async def _stream():
+        yield b"data"
+    state.file_store.open = AsyncMock(return_value=_stream())
     state.file_store.presigned_url = AsyncMock(
         return_value="https://signed.example/obj"
     )
@@ -239,8 +244,10 @@ def test_download_keyed_fetch_serves_cross_user_file(monkeypatch) -> None:
     resp = asyncio.run(
         files.download(file_id="file_X", request=req, access=access)
     )
-    assert isinstance(resp, RedirectResponse)
-    assert resp.status_code == 302
+    assert isinstance(resp, StreamingResponse)
+    # Streamed, not redirected — presigned_url not consulted for an agent fetch.
+    state.file_store.presigned_url.assert_not_awaited()
+    state.file_store.open.assert_awaited_once()
     # Resolved via the UNSCOPED lookup; the user-scoped path was
     # never taken (so the cross-user file is not 404'd).
     unscoped.assert_awaited_once_with(conn, "file_X")
@@ -257,14 +264,19 @@ def test_download_presigned_pins_attachment_and_safe_mime(monkeypatch) -> None:
 
     from bp_router.api import files
 
-    access = J.FileReadAccess(user_id="u", via_key_file_id="file_h")
+    # SESSION principal (no via_key_file_id): a browser/UI client that CAN
+    # reach the object store, so the presigned-redirect path applies. (Agent
+    # keyed fetches stream instead — see the cross-user test above.)
+    access = J.FileReadAccess(user_id="u", via_key_file_id=None)
     row = MagicMock(
         sha256="ab" * 32, byte_size=9,
         mime_type="text/html; charset=utf-8",
         original_filename="evil.html",
     )
+    scoped_get = AsyncMock(return_value=row)
     monkeypatch.setattr(
-        files.queries, "get_file_by_id", AsyncMock(return_value=row)
+        files.queries.Scope, "user",
+        staticmethod(lambda conn, uid: MagicMock(get_file=scoped_get)),
     )
     monkeypatch.setattr(
         files.queries, "append_audit_event", AsyncMock(return_value=None)
