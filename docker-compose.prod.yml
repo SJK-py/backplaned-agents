@@ -83,6 +83,12 @@ x-suite-agent: &suite-agent
     SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
     SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
     SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
+    # Vector length the knowledge_base/memory agents bake into their LanceDB
+    # table schema on first write (and frozen for the volume's life). MUST match
+    # the embedding preset's output dimension — 1536 for the default Gemini
+    # `default_embedding` and OpenAI text-embedding-3-small. prod.sh sets it
+    # from the chosen preset; the :- default keeps a bare `up` consistent.
+    SUITE_EMBEDDING_DIM: ${SUITE_EMBEDDING_DIM:-1536}
   networks: [agents, suite]
 
 services:

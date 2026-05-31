@@ -163,23 +163,33 @@ build_env() {
     # provider -> (key env var, lite, balanced, pro, embedding) preset aliases.
     # `custom` wires the generic tier slots (lite / default / pro) the operator
     # repoints via the admin webUI, and asks for no key (configure it there).
+    #
+    # EMBEDDING_DIM must equal the VECTOR LENGTH the embedding preset emits — it
+    # becomes SUITE_EMBEDDING_DIM, which the knowledge_base/memory agents bake
+    # into their LanceDB table schema (pa.list_(float32, dim)) on FIRST write.
+    # A wrong value makes every KB/memory write fail, and the dimension is
+    # frozen once the lancedb_data volume exists (a later change needs a reset).
+    # All presets below resolve to 1536: Gemini `default_embedding` pins
+    # output_dimensionality=1536 (presets_catalog.jsonc); OpenAI
+    # text-embedding-3-small is natively 1536. Keep this in sync with the preset
+    # if you repoint it (e.g. text-embedding-3-large → 3072).
     case "$PROVIDER" in
         anthropic)
             KEY_VAR=ANTHROPIC_API_KEY
             PRESET_LITE=claude-haiku; PRESET_BALANCED=claude; PRESET_PRO=claude-opus
-            PRESET_EMBEDDING=default_embedding ;;   # Anthropic has no embeddings
+            PRESET_EMBEDDING=default_embedding; EMBEDDING_DIM=1536 ;;   # Anthropic has no embeddings → Gemini
         gemini)
             KEY_VAR=GEMINI_API_KEY
             PRESET_LITE=gemini-lite; PRESET_BALANCED=gemini; PRESET_PRO=gemini-pro
-            PRESET_EMBEDDING=default_embedding ;;
+            PRESET_EMBEDDING=default_embedding; EMBEDDING_DIM=1536 ;;
         openai)
             KEY_VAR=OPENAI_API_KEY
             PRESET_LITE=gpt-nano; PRESET_BALANCED=gpt; PRESET_PRO=gpt-pro
-            PRESET_EMBEDDING=text-embedding-3-small ;;
+            PRESET_EMBEDDING=text-embedding-3-small; EMBEDDING_DIM=1536 ;;
         custom)
             KEY_VAR=""
             PRESET_LITE=lite; PRESET_BALANCED=default; PRESET_PRO=pro
-            PRESET_EMBEDDING=default_embedding ;;
+            PRESET_EMBEDDING=default_embedding; EMBEDDING_DIM=1536 ;;
     esac
 
     if [[ -n "$KEY_VAR" ]]; then
@@ -295,6 +305,11 @@ build_env() {
         echo "SUITE_DEFAULT_PRESET_BALANCED=$PRESET_BALANCED"
         echo "SUITE_DEFAULT_PRESET_PRO=$PRESET_PRO"
         echo "SUITE_DEFAULT_PRESET_EMBEDDING=$PRESET_EMBEDDING"
+        echo "# Vector length the embedding preset emits — baked into the KB/memory"
+        echo "# LanceDB schema on first write and frozen for the life of the"
+        echo "# lancedb_data volume. MUST match $PRESET_EMBEDDING; change it (and reset"
+        echo "# the volume) only if you repoint the embedding preset to a different dim."
+        echo "SUITE_EMBEDDING_DIM=$EMBEDDING_DIM"
         echo
         echo "# --- Channel ---"
         echo "SUITE_TELEGRAM_BOT_TOKEN=$TELEGRAM"
