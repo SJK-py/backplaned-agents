@@ -53,8 +53,13 @@ agent = Agent(
     info=AgentInfo(
         agent_id=SANDBOX_AGENT_ID,
         description=(
-            "The user's isolated sandbox workspace — run bash and move "
-            "files between the stash and the workspace."
+            "The user's isolated, PERSISTENT sandbox workspace — a single "
+            "directory that bash runs in and that keeps its files across "
+            "calls. Run shell commands (bash), pull a stash file in "
+            "(storage_to_workspace) where bash can use it by bare filename, "
+            "and push a produced file back out (workspace_to_storage). Fetched "
+            "and created files all live together in bash's working directory; "
+            "run `ls` to see them."
         ),
         groups=["infra"],
         capabilities=["computer.bash", "computer.network", "file.full"],
@@ -218,13 +223,26 @@ async def run_bash(
             content=f"{head}\n\n…(output truncated; full output saved as {name})",
             files=[name],
         )
+    # An empty result is normal (e.g. a successful `cp`/`python script.py` that
+    # prints nothing) — say so explicitly, otherwise the model misreads the
+    # blank reply as a failure or a missing file and retries needlessly.
+    if not text.strip():
+        return text_output(
+            "(command finished with no output — this usually means success; "
+            "run `ls` to see the workspace if you expected a file)"
+        )
     return text_output(text)
 
 
 @agent.handler(
     mode="bash",
-    description="Run a bash command in the user's sandbox workspace and "
-    "return its output.",
+    description="Run a bash command in the user's persistent sandbox "
+    "workspace. Every call starts in the SAME working directory — the "
+    "workspace root — and files persist across calls, so a file you fetched "
+    "with storage_to_workspace, or wrote in an earlier command, is right there "
+    "in `.` (run `ls` to see them). Relative paths resolve against the "
+    "workspace; you don't know or need its absolute path. Returns combined "
+    "stdout+stderr (a successful command may print nothing).",
 )
 async def bash(ctx: TaskContext, payload: Bash) -> AgentOutput:
     return await run_bash(ctx, payload, settings=_settings, uid=_user_uid(ctx))
@@ -233,7 +251,10 @@ async def bash(ctx: TaskContext, payload: Bash) -> AgentOutput:
 @agent.handler(
     mode="storage_to_workspace",
     description="Copy a stash file (by name) into the sandbox workspace so "
-    "bash can operate on it.",
+    "bash can operate on it. The file lands at the TOP of the workspace, which "
+    "is exactly bash's working directory — so afterwards `bash` can reference "
+    "it by its bare filename (e.g. `python example.py` or `cat ./example.py`), "
+    "no path needed.",
 )
 async def storage_to_workspace(
     ctx: TaskContext, payload: StorageToWorkspace
@@ -244,13 +265,20 @@ async def storage_to_workspace(
     dest = workspace / Path(payload.name).name
     data = await asyncio.to_thread(src.read_bytes)
     await asyncio.to_thread(dest.write_bytes, data)
-    return text_output(f"Fetched into workspace: {dest.name}")
+    # Tell the model exactly how to reach it: bash's cwd IS this workspace, so
+    # the file is just `./<name>` (or the bare name) — no absolute path needed.
+    return text_output(
+        f"Copied '{payload.name}' into the workspace as ./{dest.name} "
+        f"(bash starts in this directory, so refer to it as '{dest.name}')."
+    )
 
 
 @agent.handler(
     mode="workspace_to_storage",
-    description="Save a file from the sandbox workspace (by path) back to "
-    "the stash, returning its stash name.",
+    description="Save a file from the sandbox workspace back to the stash so "
+    "it can be delivered or reused, returning its stash name. Pass the path as "
+    "bash would see it — a workspace-relative path like 'out.csv' or "
+    "'results/report.pdf' (the same cwd bash runs in).",
 )
 async def workspace_to_storage(
     ctx: TaskContext, payload: WorkspaceToStorage
