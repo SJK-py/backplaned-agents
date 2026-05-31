@@ -266,8 +266,9 @@ def test_config_save_persists_via_shared_validation(suite_db_url: str) -> None:
 
 
 def test_config_preset_select_renders_and_persists(suite_db_url: str) -> None:
-    """With an opted-in tier allow-list, the form renders a <select> and a
-    POST persists a value in the list; a disallowed value is rejected."""
+    """An opted-in tier renders an editable <select>; a NON-opted-in tier is
+    still shown read-only (current model visible, not changeable). A POST
+    persists a value in the opted-in list; a disallowed value is rejected."""
     pytest.importorskip("fastapi")
 
     settings = SuiteSettings(selectable_presets_balanced=["default", "claude"])
@@ -282,8 +283,13 @@ def test_config_preset_select_renders_and_persists(suite_db_url: str) -> None:
             ) as client:
                 await _login(client)
                 page = await client.get("/config")
-                assert 'name="preset_balanced"' in page.text
-                assert "preset_pro" not in page.text  # tier not opted in
+                # Opted-in tier → editable <select name="preset_balanced">.
+                assert '<select id="preset_balanced" name="preset_balanced"' in page.text
+                # Non-opted-in tiers are SHOWN (label present) but read-only —
+                # no editable <select> for them, and the admin-managed note.
+                assert "Model — deep reasoning (pro)" in page.text
+                assert 'name="preset_pro"' not in page.text  # not an input/select
+                assert "set by your administrator" in page.text
 
                 token = await _csrf(client, "/config")
                 ok = await client.post(
