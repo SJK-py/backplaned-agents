@@ -170,13 +170,22 @@ class SuiteSettings(BaseSettings):
     # which the sandbox is deliberately isolated from. uids are allocated
     # sequentially from the base. The drop only engages when the process runs
     # as root (prod); in rootless dev it's a no-op.
-    sandbox_uid_base: int = Field(default=100_000, ge=1)
-    """First uid handed out (well above system/login uids). Subsequent users
-    get base+1, base+2, …"""
-    sandbox_uid_max: int = Field(default=165_535, ge=1)
-    """Upper bound of the uid range. Default keeps the whole range inside a
-    typical 65536-wide user-namespace sub-uid mapping (100000–165535). A user
-    arriving past this gets no uid drop (logged) rather than a colliding uid."""
+    sandbox_uid_base: int = Field(default=2_000, ge=1)
+    """First uid handed out. Subsequent users get base+1, base+2, …
+
+    MUST be a uid that is valid INSIDE the container. Under Docker
+    userns-remap (or rootless Docker) the container maps a sub-uid range to
+    container uids 0..65535 — a uid OUTSIDE that (e.g. the old 100000 default,
+    which confused the HOST sub-uid range with the in-container space) makes
+    chown fail with EINVAL ("Invalid argument") and every bash command error.
+    Default 2000: above system/login uids (collision-safe) and inside the
+    65536-wide namespace, so it works both with and without userns-remap. On a
+    host with a different mapping, set SUITE_SANDBOX_UID_BASE/_MAX to a range
+    your container actually maps."""
+    sandbox_uid_max: int = Field(default=60_000, ge=1)
+    """Upper bound of the uid range — kept below 65536 so the whole range stays
+    inside a remapped container's uid space. A user arriving past this gets no
+    uid drop (logged) rather than a colliding uid."""
 
     # Resource limits (rlimits) applied to every sandbox bash subprocess so a
     # single tenant's command can't starve the SHARED container (the wall-clock

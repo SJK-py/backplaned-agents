@@ -16,6 +16,7 @@ user. The map is sequential from `sandbox_uid_base`.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import re
@@ -167,18 +168,33 @@ async def run_bash(
             # Don't swallow this: if the chown fails the workspace stays
             # root-owned and the about-to-be-dropped uid can't write it, so the
             # bash command fails anyway — with the opaque "Exception occurred in
-            # preexec_fn" instead of a clear cause. The fix is the CHOWN
-            # capability (docker-compose.prod.yml sandbox cap_add); surface that
-            # explicitly rather than limping into a broken run.
+            # preexec_fn" instead of a clear cause. The two causes need
+            # different fixes, so name the right one:
+            #   EPERM  → the container lacks CAP_CHOWN (cap_add: CHOWN).
+            #   EINVAL → the uid isn't valid inside the container namespace
+            #            (Docker userns-remap / rootless maps only a sub-range);
+            #            point SUITE_SANDBOX_UID_BASE/_MAX at a mapped range.
             logger.error(
                 "sandbox_workspace_chown_failed",
                 extra={"event": "sandbox_workspace_chown_failed",
-                       "uid": uid, "error": repr(exc)},
+                       "uid": uid, "errno": exc.errno, "error": repr(exc)},
             )
+            if exc.errno == errno.EINVAL:
+                hint = (
+                    f"uid {uid} is not valid inside the container's user "
+                    "namespace — under Docker userns-remap/rootless the "
+                    "container maps only a sub-range to uids 0..65535. Set "
+                    "SUITE_SANDBOX_UID_BASE/_MAX to a range your container maps "
+                    "(the default 2000..60000 fits a standard 65536-wide map)"
+                )
+            else:
+                hint = (
+                    "the sandbox container needs the CHOWN capability "
+                    "(cap_add: CHOWN) so the dropped user can own its workspace"
+                )
             raise RuntimeError(
                 f"sandbox could not chown its workspace to uid {uid} ({exc}); "
-                "the sandbox container needs the CHOWN capability "
-                "(cap_add: CHOWN) so the dropped user can write its workspace"
+                f"{hint}"
             ) from exc
     proc = await asyncio.create_subprocess_shell(
         payload.command,
