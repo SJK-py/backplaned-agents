@@ -27,16 +27,20 @@
 //
 //   api_key_ref  — an INDIRECT reference resolved at call time. The only
 //                  scheme wired out of the box is env://VAR, which reads the
-//                  router container's environment. Three vars are already
-//                  passed into the container (and filled by scripts/prod.sh):
+//                  router container's environment. These vars already reach the
+//                  container — just set their value in deploy/.env.prod:
 //                    env://GEMINI_API_KEY, env://OPENAI_API_KEY,
-//                    env://ANTHROPIC_API_KEY
-//                  Referencing ANY OTHER var (e.g. env://MY_LLM_KEY) needs the
-//                  var added in TWO places: deploy/.env.prod AND the router
-//                  service's `environment:` block in docker-compose.prod.yml
-//                  (compose's --env-file only feeds ${...} interpolation, not
-//                  the container). Without that the ref resolves to empty and
-//                  calls 401. PREFERRED: only a reference lives in the DB/file.
+//                    env://ANTHROPIC_API_KEY  (filled by scripts/prod.sh), and
+//                    env://CUSTOM_LLM_API_KEY_1 .._2 .._3  (generic slots for
+//                    custom/self-hosted providers — reference one here, set its
+//                    value in deploy/.env.prod, done).
+//                  Referencing some OTHER var name needs it added in TWO places:
+//                  deploy/.env.prod AND the router service's `environment:`
+//                  block in docker-compose.prod.yml (compose's --env-file only
+//                  feeds ${...} interpolation, not the container) — so prefer a
+//                  CUSTOM_LLM_API_KEY_* slot to skip the compose edit. A missing
+//                  ref resolves to empty and calls 401. PREFERRED: only a
+//                  reference lives in the DB/file.
 //
 //   api_key      — an INLINE literal secret. Takes precedence over api_key_ref
 //                  when both are set. No env/compose edits — handy for a
@@ -57,7 +61,17 @@
 //     "base_url": "http://ollama:11434/v1",
 //     "description": "Local Qwen via Ollama — overrides the bundled default."
 //   }
-// Example B — inline key for a non-standard provider (no env/compose edits):
+// Example B — non-standard provider via a generic key slot (preferred; set
+//             CUSTOM_LLM_API_KEY_1 in deploy/.env.prod, no compose edit):
+//   {
+//     "name": "default",
+//     "provider": "openai-compatible",
+//     "concrete_model": "deepseek-chat",
+//     "api_key_ref": "env://CUSTOM_LLM_API_KEY_1",
+//     "base_url": "https://api.deepseek.com/v1"
+//   }
+// Example C — same, but with an INLINE key (no env edit; plaintext in this file
+//             + the DB — see the caveat above):
 //   {
 //     "name": "default",
 //     "provider": "openai-compatible",
