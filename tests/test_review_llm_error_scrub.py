@@ -96,6 +96,21 @@ def test_err_result_uses_scrubber() -> None:
     assert "_scrub_upstream_message(message)" in src
 
 
+def test_handler_filestore_error_surfaces_safe_code() -> None:
+    """Source pin: the SDK handler dispatch surfaces a FileStoreError's bounded
+    `code` (not_found / denied / quota_exceeded / ...) to the caller instead of
+    scrubbing it to `internal_error` like an unclassified exception. The code is
+    safe (no host/path/SQL) and is what the calling model needs to react. The
+    branch must come BEFORE the catch-all so the scrub doesn't swallow it."""
+    import bp_sdk.dispatch as dispatch
+
+    src = inspect.getsource(dispatch.Dispatcher._run_handler)
+    assert "except FileStoreError as exc:" in src
+    assert '"code": exc.code' in src
+    # Ordering: the FileStoreError branch precedes the catch-all scrub.
+    assert src.index("except FileStoreError") < src.index("internal_error")
+
+
 def test_scrubber_does_not_strip_unrelated_text_resembling_keys() -> None:
     """Defensive: a message mentioning "sk-" outside a key-shaped
     context (e.g. a help URL) shouldn't be over-redacted. The

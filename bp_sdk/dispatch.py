@@ -45,6 +45,7 @@ from bp_sdk.errors import (
     TransportError,
     TransportPermanentlyFailed,
 )
+from bp_sdk.files import FileStoreError
 
 if TYPE_CHECKING:
     from bp_sdk.agent import Agent
@@ -873,6 +874,18 @@ class Dispatcher:
             status = TaskStatus.FAILED
             status_code = exc.status_code
             error = {"code": type(exc).__name__, "message": str(exc)}
+        except FileStoreError as exc:
+            # A file-store op the handler ran (ctx.files.read/store/...) failed
+            # with a router-reported code: not_found / denied / quota_exceeded /
+            # filename_exists / invalid_filename / too_large / rate_limited.
+            # That code is a BOUNDED, safe enum (no host/path/SQL leakage), and
+            # it's exactly what the calling model needs to react — e.g.
+            # not_found → the file name was wrong, ask/recheck rather than
+            # retry the same name. So surface it instead of scrubbing it to
+            # `internal_error` like an unclassified exception.
+            status = TaskStatus.FAILED
+            status_code = 404 if exc.code == "not_found" else 400
+            error = {"code": exc.code, "message": f"file operation failed: {exc.code}"}
         except Exception:  # noqa: BLE001
             # Catch-all for unclassified handler failures. Emit a
             # FIXED message — never `str(exc)` — because the result

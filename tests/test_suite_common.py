@@ -141,6 +141,20 @@ def _result_frame(content: str, files=None) -> ResultFrame:
     )
 
 
+def _failed_result_frame(code: str, message: str = "") -> ResultFrame:
+    # A FAILED child: output is None, the reason lives in `error`.
+    return ResultFrame(
+        agent_id="echo",
+        trace_id="0" * 32,
+        span_id="0" * 16,
+        task_id="tsk_child",
+        status=TaskStatus.FAILED,
+        status_code=404,
+        output=None,
+        error={"code": code, "message": message},
+    )
+
+
 def _user_config(**overrides) -> UserConfigRow:
     base = dict(
         user_id="usr_a", full_name="Ada", timezone="Europe/London",
@@ -322,6 +336,34 @@ def test_run_llm_loop_dispatches_local_and_peer_tools() -> None:
         if LOOP_PROGRESS_KEY in md
     ]
     assert "thinking" in kinds and "tool_call" in kinds and "tool_result" in kinds
+
+
+def test_failed_peer_call_surfaces_error_to_model() -> None:
+    """A FAILED subagent result (output=None, reason in `error`) must reach the
+    model as a non-empty tool response naming the code/message — otherwise the
+    model gets a blank result and can't recover or tell the user."""
+    round1 = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="call_kb", args={})],
+    )
+    round2 = LlmResponse(text="sorry, that file wasn't found", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    peers = _StubPeers(
+        spawn_result=_failed_result_frame("not_found", "file operation failed: not_found"),
+    )
+    ctx = _StubCtx(llm, peers, _StubProgress())
+
+    messages: list[Message] = [Message(role="user", content="store notes.md in my KB")]
+    asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", use_peer_tools=False,
+        )
+    )
+    tool_msg = next(m for m in messages if m.role == "tool" and m.name == "call_kb")
+    # The model sees the failure + the actionable code, not an empty string.
+    assert tool_msg.content
+    assert "not succeed" in tool_msg.content
+    assert "not_found" in tool_msg.content
 
 
 def test_run_llm_loop_forces_final_answer_at_round_limit() -> None:
