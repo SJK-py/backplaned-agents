@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+
+import pytest
 
 from bp_agents.agents.research.web import html_fetch, make_web_tools, web_search
 from bp_agents.agents.sandbox import Bash, run_bash
@@ -126,6 +129,51 @@ def test_storage_to_workspace_tells_model_the_relative_path(tmp_path) -> None:
         assert "bash" in out.content.lower()
 
     asyncio.run(_drive())
+
+
+@pytest.mark.skipif(
+    os.geteuid() != 0, reason="needs root to exercise the uid-drop workspace I/O"
+)
+def test_workspace_io_works_when_dir_is_uid_owned() -> None:
+    """Regression: bash chowns the workspace to the per-user uid; the
+    stash<->workspace copies then run as ROOT with no CAP_DAC_OVERRIDE, so a
+    direct write/read into the uid-owned dir EACCES'd. The fork+drop helpers
+    must do the I/O as the uid instead. Verify the full round-trip with a real
+    uid-owned workspace."""
+    import shutil
+    import uuid
+    from pathlib import Path
+
+    from bp_agents.agents.sandbox.agent import (
+        _ensure_workspace,
+        _read_bytes_as_uid,
+        _write_bytes_as_uid,
+    )
+
+    uid = 2000
+    # NOT pytest's tmp_path / mkdtemp: those sit under a 0o700 root-owned
+    # intermediate dir, so the dropped uid can't traverse INTO the workspace.
+    # Build directly under /tmp (0o777, world-traversable), mirroring the real
+    # /home/<user> layout where the parent chain is reachable by the uid.
+    root = Path("/tmp") / f"sbx_io_{uuid.uuid4().hex}"
+    root.mkdir()
+    os.chmod(root, 0o755)
+    ws = root / "usr_test"
+    try:
+        # ensure_workspace hands the dir to the uid (as bash does).
+        _ensure_workspace(ws, uid)
+        assert os.stat(ws).st_uid == uid
+
+        # storage_to_workspace's write path: root can't write here directly,
+        # but the helper drops to the uid and succeeds.
+        _write_bytes_as_uid(ws / "sample.py", b"print(1)\n", uid)
+        assert (ws / "sample.py").exists()
+        assert os.stat(ws / "sample.py").st_uid == uid
+
+        # workspace_to_storage's read path round-trips the bytes back.
+        assert _read_bytes_as_uid(ws / "sample.py", uid) == b"print(1)\n"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
