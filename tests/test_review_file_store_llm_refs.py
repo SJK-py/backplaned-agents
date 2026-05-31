@@ -26,8 +26,15 @@ from bp_router.attachments import AttachmentResolutionError
 
 
 def _store_returning(data: bytes):  # type: ignore[no-untyped-def]
-    async def _open(_sha: str):  # type: ignore[no-untyped-def]
+    # Mirror the real FileStore.open contract: an `async def` that RETURNS an
+    # async iterator (so the caller must `await` before `async for`). A plain
+    # async-generator stub here would let `async for x in open(...)` work
+    # without the await and mask the real bug (TypeError: got coroutine).
+    async def _gen(data: bytes):  # type: ignore[no-untyped-def]
         yield data
+
+    async def _open(_sha: str):  # type: ignore[no-untyped-def]
+        return _gen(data)
 
     return _open
 
