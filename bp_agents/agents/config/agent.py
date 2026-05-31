@@ -10,6 +10,7 @@ from bp_agents.common.payloads import MessagePayload
 from bp_agents.config_edit import (
     ConfigError,
     coerce_config_value,
+    displayable_fields,
     editable_fields,
     preset_choices_from_settings,
 )
@@ -36,7 +37,11 @@ _SYSTEM_BASE = (
     "You manage the user's settings. Use `get_config` to read current values "
     "and `set_config` to change one. Editable fields: full_name, timezone "
     "(IANA), language, verbose_default (true/false), custom_note, "
-    "max_context_token_limit."
+    "max_context_token_limit. The user also has three LLM model tiers — "
+    "preset_pro (deep reasoning), preset_balanced (general), preset_lite "
+    "(quick helpers); always report their current values on a read. They are "
+    "only CHANGEABLE when listed as selectable below; if a tier isn't listed, "
+    "tell the user it's set by their administrator and can't be changed here."
 )
 _SYSTEM_TAIL = (
     " ALWAYS end your reply by stating the relevant settings in plain "
@@ -63,8 +68,16 @@ def _system_prompt(preset_choices: dict[str, list[str]]) -> str:
 def _format_config(cfg: Any, preset_choices: dict[str, list[str]]) -> str:
     if cfg is None:
         return "No settings found."
-    fields = editable_fields(preset_choices)
-    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in fields)
+    # Show every displayable field, including the model tiers. A tier the
+    # operator hasn't opened for editing (empty allow-list) is tagged
+    # "(set by your administrator)" so its value is visible but clearly not
+    # user-changeable. Without this a bare read hid the model entirely.
+    editable = editable_fields(preset_choices)
+    lines = []
+    for f in displayable_fields():
+        suffix = "" if f in editable else "  (set by your administrator)"
+        lines.append(f"{f}: {getattr(cfg, f)}{suffix}")
+    return "\n".join(lines)
 
 
 async def _build_tools(
