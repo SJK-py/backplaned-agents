@@ -14,6 +14,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _json_dumps_no_nul(obj: object) -> str:
+    """`json.dumps` that drops NUL bytes — the asyncpg jsonb/json encoder.
+
+    Postgres jsonb (and text) cannot store a NUL byte: json.dumps emits it as
+    the six-character escape ``\\u0000``, which jsonb rejects with
+    ``UntranslatableCharacterError: unsupported Unicode escape sequence``. NULs
+    legitimately reach us in task output — e.g. an agent reading a binary file
+    (a .pdf decoded to a str) into ``AgentOutput.content``. They carry no
+    meaning in a text/JSON value, so strip that escape here, at the encoder
+    boundary — this protects EVERY jsonb write (task output/error, event
+    payloads), not just one call site.
+    """
+    import json  # noqa: PLC0415
+
+    s = json.dumps(obj)
+    return s.replace("\\u0000", "") if "\\u0000" in s else s
+
+
 # ---------------------------------------------------------------------------
 # Postgres
 # ---------------------------------------------------------------------------
@@ -32,18 +50,19 @@ async def open_pool(settings: Settings) -> asyncpg.Pool:
         await conn.execute(
             f"SET statement_timeout = {settings.db_statement_timeout_ms}"
         )
-        # Register JSON codec so dict ↔ jsonb is automatic.
+        # Register JSON codec so dict ↔ jsonb is automatic. The encoder strips
+        # NUL escapes that jsonb can't store — see _json_dumps_no_nul.
         import json  # noqa: PLC0415
 
         await conn.set_type_codec(
             "jsonb",
-            encoder=json.dumps,
+            encoder=_json_dumps_no_nul,
             decoder=json.loads,
             schema="pg_catalog",
         )
         await conn.set_type_codec(
             "json",
-            encoder=json.dumps,
+            encoder=_json_dumps_no_nul,
             decoder=json.loads,
             schema="pg_catalog",
         )
