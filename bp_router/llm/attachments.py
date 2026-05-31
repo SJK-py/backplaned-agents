@@ -172,7 +172,11 @@ async def _inline_blob(
         )
     file_store = state.file_store  # type: ignore[attr-defined]
     buf = bytearray()
-    async for chunk in file_store.open(sha256):
+    # `open()` is `async def` returning an async iterator — await to get the
+    # iterator, THEN `async for`. (`async for x in open(...)` iterates the
+    # coroutine itself → "got coroutine".) Matches api/files.py.
+    stream = await file_store.open(sha256)
+    async for chunk in stream:
         buf += chunk
         if len(buf) > inline_cap:
             raise AttachmentResolutionError(
