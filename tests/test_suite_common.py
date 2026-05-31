@@ -78,7 +78,12 @@ class _StubStream:
             return self._frames.pop(0)
         raise StopAsyncIteration
 
-    def result(self):
+    async def result(self):
+        # async to match the real SpawnStream.result (bp_sdk/peers.py) — the
+        # caller must `await` it. A sync stub here masked a missing await in
+        # loop.py's streaming branch (coroutine passed to
+        # tool_response_from_result → 'coroutine' object has no attribute
+        # 'output').
         return self._result
 
 
