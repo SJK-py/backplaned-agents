@@ -164,11 +164,22 @@ async def run_bash(
         try:
             await asyncio.to_thread(os.chown, str(workspace), uid, uid)
         except OSError as exc:
-            logger.warning(
+            # Don't swallow this: if the chown fails the workspace stays
+            # root-owned and the about-to-be-dropped uid can't write it, so the
+            # bash command fails anyway — with the opaque "Exception occurred in
+            # preexec_fn" instead of a clear cause. The fix is the CHOWN
+            # capability (docker-compose.prod.yml sandbox cap_add); surface that
+            # explicitly rather than limping into a broken run.
+            logger.error(
                 "sandbox_workspace_chown_failed",
                 extra={"event": "sandbox_workspace_chown_failed",
                        "uid": uid, "error": repr(exc)},
             )
+            raise RuntimeError(
+                f"sandbox could not chown its workspace to uid {uid} ({exc}); "
+                "the sandbox container needs the CHOWN capability "
+                "(cap_add: CHOWN) so the dropped user can write its workspace"
+            ) from exc
     proc = await asyncio.create_subprocess_shell(
         payload.command,
         cwd=str(workspace),

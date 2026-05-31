@@ -88,10 +88,14 @@ def test_third_party_images_are_pinned(image_prefix: str) -> None:
 
 
 def test_sandbox_runs_root_with_minimal_caps_for_uid_drop() -> None:
-    """The sandbox must run as root with ONLY SETUID/SETGID added (so the
-    per-user uid drop works) AND keep no-new-privileges (so untrusted code
-    can't regain privilege). Dropping all caps without the two adds, or not
-    running as root, collapses every user onto one uid — no isolation."""
+    """The sandbox must run as root with EXACTLY SETUID/SETGID/CHOWN added AND
+    keep no-new-privileges (so untrusted code can't regain privilege).
+    SETUID+SETGID drop each user's bash to its own uid; CHOWN hands that uid
+    ownership of its workspace (without it the chown EPERMs, the workspace
+    stays root-owned, and — cap_drop ALL having removed DAC_OVERRIDE — the
+    dropped uid can't write it, so every bash command fails). Dropping all caps
+    without these, or not running as root, collapses every user onto one uid —
+    no isolation. More caps than these three is over-privileged."""
     import yaml  # noqa: PLC0415
 
     d = yaml.safe_load(_COMPOSE)
@@ -103,8 +107,9 @@ def test_sandbox_runs_root_with_minimal_caps_for_uid_drop() -> None:
         "no-new-privileges must stay on — it blocks privilege REGAIN, not the drop"
     )
     assert sb.get("cap_drop") == ["ALL"]
-    assert set(sb.get("cap_add", [])) == {"SETUID", "SETGID"}, (
-        "exactly SETUID+SETGID — more is over-privileged, fewer breaks the drop"
+    assert set(sb.get("cap_add", [])) == {"SETUID", "SETGID", "CHOWN"}, (
+        "exactly SETUID+SETGID (uid drop) + CHOWN (workspace ownership) — "
+        "more is over-privileged, fewer breaks the drop or the workspace write"
     )
 
 
