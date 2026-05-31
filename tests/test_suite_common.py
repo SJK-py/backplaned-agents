@@ -201,6 +201,10 @@ def test_estimate_context_tokens_counts_text_only() -> None:
 def test_compose_system_prompt_and_config_note() -> None:
     note = user_config_note(_user_config())
     assert "Ada" in note and "Europe/London" in note and "be terse" in note
+    # The block must frame the details as the USER's identity, not the
+    # assistant's — otherwise the model reads "name: Ada" as its own name.
+    assert "NOT you" in note
+    assert "USER's name, not yours" in note
     prompt = compose_system_prompt(
         "You are helpful.", config_note=note, summary="prior chat",
     )

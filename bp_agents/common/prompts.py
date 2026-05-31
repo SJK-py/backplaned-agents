@@ -18,19 +18,27 @@ if TYPE_CHECKING:
 def user_config_note(cfg: UserConfigRow) -> str:
     """Render the per-user context block injected into system prompts:
     name, timezone, language preference, and the user's custom note.
-    Empty fields are omitted; returns "" when nothing is set."""
+    Empty fields are omitted; returns "" when nothing is set.
+
+    The block is explicitly framed as the PERSON YOU ARE TALKING TO — not the
+    assistant's own identity. Without that framing the model sometimes reads
+    "name: Alice" as its own name and starts speaking as the user."""
     lines: list[str] = []
     if cfg.full_name:
-        lines.append(f"User's name: {cfg.full_name}")
+        lines.append(f"- Their name is {cfg.full_name} (this is the USER's name, not yours — you are the assistant). Address them by it; never claim it as your own.")
     if cfg.timezone:
-        lines.append(f"User's timezone: {cfg.timezone}")
+        lines.append(f"- Their timezone is {cfg.timezone}.")
     if cfg.language:
-        lines.append(f"Preferred language: {cfg.language}")
+        lines.append(f"- Their preferred language is {cfg.language}.")
     if cfg.custom_note:
-        lines.append(f"User note: {cfg.custom_note}")
+        lines.append(f"- A note they set about themselves / how they want to be helped: {cfg.custom_note}")
     if not lines:
         return ""
-    return "## About the user\n" + "\n".join(lines)
+    return (
+        "## About the user (the person you are assisting — NOT you)\n"
+        "The following describes the user you are talking to. You are their "
+        "assistant; these details are theirs, not yours.\n" + "\n".join(lines)
+    )
 
 
 def compose_system_prompt(
