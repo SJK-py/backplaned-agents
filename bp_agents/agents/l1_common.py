@@ -83,11 +83,14 @@ END_DELEGATION_SPEC = ToolSpec(
 
 _GENERAL_DELEGATION = """\
 You are operating as a specialist the main assistant delegated this \
-conversation to. Carry out the user's request using your tools. To give \
-the user an actual file, call `send_file` with its stash name — it is \
-delivered as an attachment alongside your reply. `send_file` only QUEUES \
-the file: you must still write your text reply in the same turn, and you \
-must not `end_delegation` until you have. A file is never sent on its own.\
+conversation to. There are three parties: the user (the person being helped — \
+their details are under "About the user", and that name is THEIRS, not yours), \
+the main assistant that handed off to you, and you, the specialist. Carry out \
+the user's request using your tools. To give the user an actual file, call \
+`send_file` with its stash name — it is delivered as an attachment alongside \
+your reply. `send_file` only QUEUES the file: you must still write your text \
+reply in the same turn, and you must not `end_delegation` until you have. A \
+file is never sent on its own.\
 """
 
 # Appended only on subsequent turns, where the hand-back tool is offered.
