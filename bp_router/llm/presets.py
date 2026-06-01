@@ -70,7 +70,13 @@ class Preset:
     name: str
     provider: str
     concrete_model: str
-    api_key_ref: str
+    # Indirect credential reference (e.g. env://OPENAI_API_KEY), resolved at
+    # call time. Defaults to "" — a preset may instead carry an inline
+    # `api_key`, or rely on a keyless local endpoint. This mirrors the admin
+    # API (`CreateLlmPresetRequest.api_key_ref` also defaults to "") and the
+    # DB column (NOT NULL, but "" satisfies it); the call-time resolver falls
+    # back to `api_key` when the ref is empty.
+    api_key_ref: str = ""
     min_user_level: str = "*"
     description: str | None = None
     default_temperature: float | None = None

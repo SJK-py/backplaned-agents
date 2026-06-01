@@ -14,9 +14,12 @@
 //
 // JSONC: `//` and `/* */` comments allowed; NO trailing commas. Each entry
 // mirrors the `Preset` dataclass:
-//   Required: name, provider, concrete_model, api_key_ref
+//   Required: name, provider, concrete_model
+//   Credential: api_key_ref OR api_key (see below) — at least one in practice,
+//             though both default empty (a keyless local endpoint needs
+//             neither; a missing/empty ref resolves to empty and calls 401).
 //   Optional: description, min_user_level, default_temperature,
-//             default_max_tokens, default_provider_options, api_key, base_url,
+//             default_max_tokens, default_provider_options, base_url,
 //             fallback_preset, max_retries
 //   provider ∈ gemini | anthropic | openai | openai-embeddings |
 //              openai-compatible | openai-compatible-embeddings
