@@ -52,9 +52,15 @@ _MAX_FACTS_PER_TURN = 10
 _VALID_KINDS = {"preference", "personal_info", "event", "project"}
 
 _EXTRACT_INSTRUCTIONS = """\
-Extract durable facts about the user worth remembering long-term from this \
-turn — preferences, personal info, ongoing events, projects. Ignore \
-small talk and transient/piecemeal detail.
+Extract ONLY durable facts about the user that are genuinely worth \
+recalling in future conversations — stable preferences, personal \
+information, ongoing projects, and significant events. Be selective: an \
+empty list is a perfectly good, common result, not a failure. Do NOT \
+extract small talk or pleasantries, transient or piecemeal detail, the \
+immediate topic or what the user is doing right now, anything the \
+assistant said or did, or anything that wouldn't still be useful to know \
+weeks later outside this conversation. If a fact isn't clearly worth \
+remembering, leave it out.
 
 Resolve every relative or partial time expression to an ABSOLUTE timestamp \
 using the current time given above, and bake it into the fact so it stands \
@@ -68,7 +74,8 @@ user's local one. Leave facts that carry no time untouched.
 
 Return ONLY JSON:
 {"facts": [{"fact": "<self-contained statement>", "kind": "preference|personal_info|event|project"}]}
-Return {"facts": []} if nothing is worth keeping.\
+When nothing clears the bar, return {"facts": []} — this is common and \
+entirely correct.\
 """
 
 
