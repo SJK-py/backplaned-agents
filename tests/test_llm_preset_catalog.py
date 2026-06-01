@@ -111,6 +111,38 @@ def test_missing_required_field_fails_loud(tmp_path) -> None:
         load_catalog(cat)
 
 
+def test_inline_api_key_without_api_key_ref_loads(tmp_path) -> None:
+    """A preset may carry an INLINE `api_key` and omit `api_key_ref` entirely
+    — `api_key_ref` defaults to "". This is the documented Example C shape
+    (inline key, keyless/self-hosted endpoints) and must not crash at load."""
+    cat = tmp_path / "inline.jsonc"
+    cat.write_text(
+        '[{"name": "default", "provider": "openai-compatible", '
+        '"concrete_model": "deepseek-chat", "api_key": "sk-test", '
+        '"base_url": "https://api.deepseek.com/v1"}]',
+        encoding="utf-8",
+    )
+    presets = load_catalog(cat)
+    assert len(presets) == 1
+    assert presets[0].api_key_ref == ""
+    assert presets[0].api_key == "sk-test"
+
+
+def test_no_credential_at_all_loads(tmp_path) -> None:
+    """Neither `api_key_ref` nor `api_key` — valid at load time (a keyless
+    local endpoint). An empty ref resolves to empty and only fails at call
+    time, mirroring the admin API where both default empty."""
+    cat = tmp_path / "keyless.jsonc"
+    cat.write_text(
+        '[{"name": "local", "provider": "openai-compatible", '
+        '"concrete_model": "llama3", "base_url": "http://localhost:8000/v1"}]',
+        encoding="utf-8",
+    )
+    presets = load_catalog(cat)
+    assert presets[0].api_key_ref == ""
+    assert presets[0].api_key is None
+
+
 def test_non_array_top_level_fails_loud(tmp_path) -> None:
     cat = tmp_path / "bad3.jsonc"
     cat.write_text('{"name": "x"}', encoding="utf-8")
