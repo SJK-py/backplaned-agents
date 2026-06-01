@@ -88,7 +88,7 @@ the user an actual file, call `send_file` with its stash name — it is \
 delivered as an attachment alongside your reply. `send_file` only QUEUES \
 the file: you must still write your text reply in the same turn, not \
 `end_delegation`. A file is never sent on its own. Files live in a shared \
-stash: when you're given a file name, you call `read_file` to see its \
+stash; when you're given a file name, you can call `read_file` to see its \
 contents, or pass a name along to hand a file to another agent — because \
 the stash is shared, the name is enough.\
 """
