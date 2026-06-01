@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 
-from bp_agents.agents.chatbot.gateway import ChatbotGateway
+import pytest
+
+from bp_agents.agents.chatbot.gateway import ChatbotGateway, _detect_mime
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
@@ -39,11 +41,13 @@ class _FakeCreds:
     def __init__(self, *, resolves: dict[str, str] | None = None,
                  blobs: dict[str, bytes] | None = None) -> None:
         self.stored: list[tuple[str, str, bytes]] = []
+        self.mime_types: list[str | None] = []
         self._resolves = resolves or {}
         self._blobs = blobs or {}
 
     async def store_named_file(self, *, user_id, session_id, filename, data, mime_type=None) -> str:
         self.stored.append((session_id, filename, data))
+        self.mime_types.append(mime_type)
         return filename
 
     async def resolve_named_file(self, *, user_id, session_id, name) -> str | None:
@@ -88,6 +92,26 @@ async def _seed(pool) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("data", "filename", "expected"),
+    [
+        # Magic bytes win, regardless of (or despite) the filename.
+        (b"\xff\xd8\xff\xe0junk", "AgAC123.jpg", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\nrest", "AgAC123.jpg", "image/png"),
+        (b"GIF89a....", "x", "image/gif"),
+        (b"%PDF-1.7\n%...", "x", "application/pdf"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "x", "image/webp"),
+        # No magic → fall back to the filename extension.
+        (b"not a known signature", "photo.png", "image/png"),
+        (b"not a known signature", "doc.pdf", "application/pdf"),
+        # Neither magic nor a known extension → octet-stream.
+        (b"\x00\x01\x02\x03", "mystery", "application/octet-stream"),
+    ],
+)
+def test_detect_mime(data: bytes, filename: str, expected: str) -> None:
+    assert _detect_mime(data, filename) == expected
+
+
 def test_inbound_file_saved_and_recorded(suite_db_url: str) -> None:
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
@@ -102,6 +126,9 @@ def test_inbound_file_saved_and_recorded(suite_db_url: str) -> None:
 
             # Stored to the session stash.
             assert creds.stored == [("ses_1", "report.pdf", b"PDF BYTES")]
+            # MIME resolved from the .pdf extension (bytes don't carry the
+            # %PDF magic here) and forwarded to the store.
+            assert creds.mime_types == ["application/pdf"]
             # History has the (T,T) file row + the user text turn.
             async with pool.acquire() as conn:
                 rows = await queries.reload_incumbent(

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import mimetypes
 from typing import TYPE_CHECKING, Any, Protocol
 
 from bp_agents.agents.chatbot.credentials import ChannelCredentials
@@ -35,6 +36,32 @@ logger = logging.getLogger(__name__)
 
 PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
+
+# Leading magic-byte signatures → MIME type. Telegram hands us only a
+# file_id, so the stash upload would otherwise default to
+# application/octet-stream — which the router refuses to inline as an
+# image. Sniff the real type from the bytes (with an extension fallback)
+# so inbound photos/PDFs are stored as a multimodal-supported MIME.
+_MAGIC_MIME: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"%PDF", "application/pdf"),
+)
+
+
+def _detect_mime(data: bytes, filename: str) -> str:
+    """Best-effort MIME for an inbound attachment: sniff magic bytes
+    first, fall back to the filename extension, then octet-stream."""
+    for sig, mime in _MAGIC_MIME:
+        if data.startswith(sig):
+            return mime
+    # RIFF....WEBP — the "WEBP" tag sits at offset 8, after the size field.
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
 
 
 async def send_named_file(
@@ -581,6 +608,7 @@ class ChatbotGateway:
             data = await self._telegram.download_file(tg_file_id)
             saved = await self._credentials.store_named_file(
                 user_id=user_id, session_id=session_id, filename=filename, data=data,
+                mime_type=_detect_mime(data, filename),
             )
         except Exception:  # noqa: BLE001
             logger.exception(
