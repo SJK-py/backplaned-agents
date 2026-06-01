@@ -98,6 +98,12 @@ webapp = [
     # Webapp imports Starlette directly (SessionMiddleware, Request, responses);
     # declared explicitly though FastAPI also pulls it. Weak floor (see admin).
     "starlette>=0.40",
+    # Chat page renders assistant Markdown server-side (bp_agents.agents.
+    # webapp.markdown): markdown-it-py converts (raw HTML disabled) and nh3
+    # (Rust/ammonia) sanitizes the output against an allowlist. nh3 is the
+    # maintained successor to the now-EOL bleach.
+    "markdown-it-py>=3.0",
+    "nh3>=0.2",
 ]
 
 # Agent suite (bp_agents) — its own Postgres (asyncpg + Alembic) on top

@@ -5,7 +5,13 @@
   <div class="max-w-[80%] rounded-lg px-3 py-2 text-sm
               {% if role == 'user' %}bg-brand-900 text-brand-50{% else %}bg-white border border-brand-500/10 text-brand-900{% endif %}">
     {% if tag %}<div class="mb-1 text-xs font-medium text-amber-700">{{ tag }}</div>{% endif %}
-    <div class="whitespace-pre-wrap break-words">{{ content }}</div>
+    {% if role == 'user' %}
+      <div class="whitespace-pre-wrap break-words">{{ content }}</div>
+    {% else %}
+      {# Assistant replies are Markdown — rendered + sanitized server-side
+         (env filter `markdown`). User input above stays plain text. #}
+      <div class="markdown break-words">{{ content | markdown }}</div>
+    {% endif %}
     {% if files %}
       <div class="mt-2 flex flex-wrap gap-1">
         {% for f in files %}

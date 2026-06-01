@@ -26,6 +26,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from bp_agents.agents.webapp.auth import make_auth_middleware
 from bp_agents.agents.webapp.config import WebappConfig
 from bp_agents.agents.webapp.csrf import make_csrf_middleware
+from bp_agents.agents.webapp.markdown import render_markdown
 from bp_agents.agents.webapp.pages import (
     auth_pages,
     chat,
@@ -100,6 +101,9 @@ def create_app(
 
     app.state.templates = Jinja2Templates(directory=str(_here() / "templates"))
     app.state.templates.env.filters["dt"] = _dt_filter
+    # Assistant replies are Markdown; render+sanitize them server-side
+    # (see webapp.markdown). User messages stay plain auto-escaped text.
+    app.state.templates.env.filters["markdown"] = render_markdown
     # Tailwind source: built CSS (prod, opt-in) vs the Play CDN (dev default).
     app.state.templates.env.globals["use_built_css"] = config.use_built_css
     app.mount(

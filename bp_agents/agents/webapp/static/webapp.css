@@ -11,3 +11,54 @@ aside {
 [x-cloak] {
   display: none !important;
 }
+
+/* Rendered assistant Markdown. Tailwind's Preflight resets headings,
+   lists, etc. to unstyled, and the prod prebuilt CSS has no typography
+   plugin, so restore readable defaults scoped to the chat bubble. */
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0.5em 0; }
+.markdown h1, .markdown h2, .markdown h3,
+.markdown h4, .markdown h5, .markdown h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0.8em 0 0.4em;
+}
+.markdown h1 { font-size: 1.3em; }
+.markdown h2 { font-size: 1.2em; }
+.markdown h3 { font-size: 1.1em; }
+.markdown h4, .markdown h5, .markdown h6 { font-size: 1em; }
+.markdown ul, .markdown ol { margin: 0.5em 0; padding-left: 1.5em; }
+.markdown ul { list-style: disc; }
+.markdown ol { list-style: decimal; }
+.markdown li { margin: 0.2em 0; }
+.markdown a { color: #2563eb; text-decoration: underline; }
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0.1em 0.3em;
+  border-radius: 0.25rem;
+}
+.markdown pre {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0.6em 0.8em;
+  border-radius: 0.4rem;
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+.markdown pre code { background: none; padding: 0; font-size: 0.85em; }
+.markdown blockquote {
+  border-left: 3px solid rgba(0, 0, 0, 0.15);
+  margin: 0.6em 0;
+  padding-left: 0.8em;
+  color: rgba(0, 0, 0, 0.7);
+}
+.markdown hr { border: 0; border-top: 1px solid rgba(0, 0, 0, 0.12); margin: 0.8em 0; }
+.markdown table { border-collapse: collapse; margin: 0.6em 0; }
+.markdown th, .markdown td {
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  padding: 0.3em 0.6em;
+  text-align: left;
+}
+.markdown th { background: rgba(0, 0, 0, 0.04); font-weight: 600; }
