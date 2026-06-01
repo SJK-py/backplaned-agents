@@ -144,12 +144,26 @@ async def _local_tools(
     )
 
 
-def _llmdata_user(payload: LLMData) -> str:
-    parts: list[str] = []
+_SUBAGENT_ROLE = """\
+You are running as a subagent: another agent has called you as a tool to \
+carry out the task below. Your reply is returned to that calling agent — it \
+is NOT sent to the user, who will not see it. Produce a complete, \
+self-contained result the caller can use directly; don't address the user \
+or assume they see your output.\
+"""
+
+
+def compose_subagent_system(base: str, payload: LLMData) -> str:
+    """System prompt for a stateless subagent call: the agent's own role
+    (`base`), the shared subagent framing (output goes to the CALLER, not
+    the user), then the caller-supplied context and instruction under
+    explicit headers. Context/instruction are skipped when absent."""
+    system = f"{base}\n\n{_SUBAGENT_ROLE}"
     if payload.context:
-        parts.append(f"## Context\n{payload.context}")
-    parts.append(payload.prompt)
-    return "\n\n".join(parts)
+        system += f"\n\n## Context from the calling agent\n{payload.context}"
+    if payload.agent_instruction:
+        system += f"\n\n## Instruction from the calling agent\n{payload.agent_instruction}"
+    return system
 
 
 async def run_subagent(
@@ -163,12 +177,9 @@ async def run_subagent(
     """Stateless tool-face execution — no history read/write."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    system = config.subagent_system
-    if payload.agent_instruction:
-        system = f"{system}\n\n{payload.agent_instruction}"
     messages = [
-        Message(role="system", content=system),
-        Message(role="user", content=_llmdata_user(payload)),
+        Message(role="system", content=compose_subagent_system(config.subagent_system, payload)),
+        Message(role="user", content=payload.prompt),
     ]
     timezone = cfg.timezone if cfg else settings.default_timezone
     local = await _local_tools(ctx, settings, config, timezone)

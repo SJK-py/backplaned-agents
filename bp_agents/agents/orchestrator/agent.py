@@ -18,6 +18,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents.agents.l1_common import compose_subagent_system
 from bp_agents.agents.orchestrator.prompts import CRON_INSTRUCTION, GENERAL_INSTRUCTION
 from bp_agents.common import (
     LocalToolset,
@@ -313,13 +314,12 @@ async def run_orchestrator_subagent(
         cfg = await queries.get_user_config(conn, ctx.user_id)
     preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
     timezone = cfg.timezone if cfg else settings.default_timezone
-    system = GENERAL_INSTRUCTION
-    if payload.agent_instruction:
-        system = f"{system}\n\n{payload.agent_instruction}"
-    user = (f"## Context\n{payload.context}\n\n" if payload.context else "") + payload.prompt
     messages = [
-        Message(role="system", content=system),
-        Message(role="user", content=user),
+        Message(
+            role="system",
+            content=compose_subagent_system(GENERAL_INSTRUCTION, payload),
+        ),
+        Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset,
