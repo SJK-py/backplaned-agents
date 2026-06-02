@@ -1,0 +1,20 @@
+# Cloudflare Worker — KakaoTalk skill relay.
+#
+# The stateless front door for the KakaoTalk channel: it authenticates
+# Kakao's webhook, returns the 5s "working…" ack with `useCallback`, and
+# enqueues the turn on a Cloudflare Queue the egress-only agent pulls
+# from. It holds no business logic and only one low-value secret
+# (KAKAO_SKILL_SECRET). See ../../docs/design/kakao-channel.md §4 / §12.
+
+name = "kakao-relay"
+main = "src/worker.ts"
+compatibility_date = "2025-01-01"
+
+# Producer binding only — the Worker can send(); it cannot pull/ack.
+# The pull/ack credential lives solely on the agent (SUITE_KAKAO_CF_*).
+[[queues.producers]]
+queue = "kakao-jobs"
+binding = "KAKAO_JOBS"
+
+# KAKAO_SKILL_SECRET is set out-of-band and never committed:
+#   wrangler secret put KAKAO_SKILL_SECRET

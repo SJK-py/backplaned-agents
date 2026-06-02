@@ -65,6 +65,15 @@ storage-s3 = [
     "aioboto3>=14.0",
 ]
 
+# KakaoTalk chatbot channel (bp_agents.agents.chatbot.kakao_*). The
+# egress-only pull consumer needs nothing beyond the base httpx (CF Queues
+# pull API); aioboto3 is only for OUTBOUND images — presigned R2 urls in
+# kakao_files, the same package as `storage-s3`. The Worker relay
+# (deploy/kakao-relay) is a separate JS artifact, not a Python dependency.
+kakaotalk = [
+    "aioboto3>=14.0",
+]
+
 # Admin web UI (bp_admin) — Jinja2 templating + Starlette
 # SessionMiddleware. `itsdangerous` is required by SessionMiddleware
 # for cookie signing; Starlette ≥1.0 dropped it from base requirements

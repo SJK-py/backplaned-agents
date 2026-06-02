@@ -1,10 +1,15 @@
-"""chatbot agent — the Telegram gateway process (Phase 1).
+"""chatbot agent — the Telegram + KakaoTalk gateway process (Phase 1).
 
 A gateway, not a handler-agent: `on_startup` opens the suite DB pool and
 launches the Telegram long-poll loop. Each inbound message is handed to
 `ChatbotGateway.handle_update`, which injects it as a root task on behalf
 of the user and relays the result. No inbound router modes on the normal
 path (proactive-push / cron modes land later).
+
+A second, optional channel — KakaoTalk — runs alongside when its
+Cloudflare Queue credentials are set: an egress-only pull consumer behind
+a Worker relay ([../../../docs/design/kakao-channel.md]). It is launched
+independently of `telegram_bot_token`, so either channel can run alone.
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ from bp_agents.agents.chatbot.approval import approval_poll_loop
 from bp_agents.agents.chatbot.credentials import HttpChannelCredentials
 from bp_agents.agents.chatbot.cron import CronScheduler
 from bp_agents.agents.chatbot.gateway import BOT_COMMANDS, ChatbotGateway
+from bp_agents.agents.chatbot.kakao_client import HttpKakaoClient
+from bp_agents.agents.chatbot.kakao_consumer import kakao_consume_loop
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
@@ -38,10 +45,11 @@ CHATBOT_AGENT_ID = "chatbot"
 agent = Agent(
     info=AgentInfo(
         agent_id=CHATBOT_AGENT_ID,
-        description="Telegram channel + session manager.",
+        description="Telegram + KakaoTalk channel + session manager.",
         groups=["channel", "inbound"],
         capabilities=[
             "channel.telegram",
+            "channel.kakao",
             "user.auth",
             "user.registration",
             "user.cron",
@@ -61,6 +69,8 @@ _credentials: HttpChannelCredentials | None = None
 _poll_task: asyncio.Task | None = None
 _approval_task: asyncio.Task | None = None
 _cron_task: asyncio.Task | None = None
+_kakao: HttpKakaoClient | None = None
+_kakao_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
 
 
@@ -77,6 +87,19 @@ def _on_update_done(task: asyncio.Task) -> None:
             exc_info=exc,
         )
 _stop = asyncio.Event()
+
+
+def _kakao_configured(settings: SuiteSettings) -> bool:
+    """True when all three KakaoTalk queue credentials are present — the
+    activation gate for the pull consumer (the Kakao analogue of
+    `telegram_bot_token` being set)."""
+    return all(
+        (
+            settings.kakao_cf_account_id,
+            settings.kakao_cf_queue_id,
+            settings.kakao_cf_api_token,
+        )
+    )
 
 
 def _http_url() -> str:
@@ -109,6 +132,23 @@ async def _startup() -> None:
             approval_poll_loop(
                 credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
             )
+        )
+
+    # KakaoTalk channel (optional, independent of Telegram). Egress-only
+    # pull consumer behind the relay + queue (see kakao_consumer). Launched
+    # before the Telegram early-return so it can run with Telegram unset.
+    # Redis is required: the deadline/next-touch registry (next PR) is
+    # Redis-backed, so the gate is declared now — enabling Kakao without
+    # Redis fails loudly rather than half-working.
+    global _kakao, _kakao_task  # noqa: PLW0603
+    if _kakao_configured(_settings) and _redis is not None:
+        _kakao = HttpKakaoClient(_settings)
+        _kakao_task = asyncio.create_task(
+            kakao_consume_loop(_kakao, _settings, _stop)
+        )
+    elif _kakao_configured(_settings):
+        logger.warning(
+            "kakao_redis_required", extra={"event": "kakao_redis_required"}
         )
 
     if not _settings.telegram_bot_token:
@@ -153,13 +193,15 @@ async def _startup() -> None:
 @agent.on_shutdown
 async def _shutdown() -> None:
     _stop.set()
-    for t in (_poll_task, _approval_task, _cron_task):
+    for t in (_poll_task, _approval_task, _cron_task, _kakao_task):
         if t is not None:
             t.cancel()
     for t in list(_inflight):
         t.cancel()
     if _telegram is not None:
         await _telegram.aclose()
+    if _kakao is not None:
+        await _kakao.aclose()
     if _credentials is not None:
         await _credentials.aclose()
     if _redis is not None:
