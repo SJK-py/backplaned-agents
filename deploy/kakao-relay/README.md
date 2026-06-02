@@ -26,6 +26,11 @@ gates *enqueue*, not data.
 
 ## Deploy
 
+> For a full click-through of R2 + Queue + Worker in the Cloudflare
+> dashboard (and how each value maps to a `SUITE_KAKAO_*` env var), see
+> [`SETUP.md`](./SETUP.md). The CLI quickstart below covers the Worker +
+> queue; Queues runs on the Workers **Free** plan (no paid plan required).
+
 ```sh
 npm install
 

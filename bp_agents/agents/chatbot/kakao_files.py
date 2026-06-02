@@ -93,6 +93,10 @@ class R2FileEgress:
             self._session = aioboto3.Session(
                 aws_access_key_id=self._access_key,
                 aws_secret_access_key=self._secret_key,
+                # SigV4 needs a region or botocore raises NoRegionError. R2
+                # ignores it; "auto" is its convention (override via the
+                # AWS_REGION env for a region-sensitive S3 backend).
+                region_name="auto",
             )
         return self._session
 
