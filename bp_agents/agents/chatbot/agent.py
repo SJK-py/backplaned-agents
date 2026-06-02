@@ -25,6 +25,8 @@ from bp_agents.agents.chatbot.cron import CronScheduler
 from bp_agents.agents.chatbot.gateway import BOT_COMMANDS, ChatbotGateway
 from bp_agents.agents.chatbot.kakao_client import HttpKakaoClient
 from bp_agents.agents.chatbot.kakao_consumer import kakao_consume_loop
+from bp_agents.agents.chatbot.kakao_gateway import KakaoGateway
+from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
@@ -70,6 +72,7 @@ _poll_task: asyncio.Task | None = None
 _approval_task: asyncio.Task | None = None
 _cron_task: asyncio.Task | None = None
 _kakao: HttpKakaoClient | None = None
+_kakao_gateway: KakaoGateway | None = None
 _kakao_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
 
@@ -140,11 +143,20 @@ async def _startup() -> None:
     # Redis is required: the deadline/next-touch registry (next PR) is
     # Redis-backed, so the gate is declared now — enabling Kakao without
     # Redis fails loudly rather than half-working.
-    global _kakao, _kakao_task  # noqa: PLW0603
+    global _kakao, _kakao_gateway, _kakao_task  # noqa: PLW0603
     if _kakao_configured(_settings) and _redis is not None:
         _kakao = HttpKakaoClient(_settings)
+        _kakao_gateway = KakaoGateway(
+            dispatcher=agent,
+            pool=_pool,
+            client=_kakao,
+            registry=KakaoTaskRegistry(_redis, ttl_s=_settings.kakao_carry_ttl_s),
+            settings=_settings,
+            credentials=_credentials,
+            redis=_redis,
+        )
         _kakao_task = asyncio.create_task(
-            kakao_consume_loop(_kakao, _settings, _stop)
+            kakao_consume_loop(_kakao_gateway, _kakao, _settings, _stop)
         )
     elif _kakao_configured(_settings):
         logger.warning(
@@ -198,6 +210,8 @@ async def _shutdown() -> None:
             t.cancel()
     for t in list(_inflight):
         t.cancel()
+    if _kakao_gateway is not None:
+        await _kakao_gateway.aclose()
     if _telegram is not None:
         await _telegram.aclose()
     if _kakao is not None:

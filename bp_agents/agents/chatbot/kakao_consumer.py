@@ -1,16 +1,15 @@
-"""chatbot.kakao_consumer — the KakaoTalk pull loop (PR1 skeleton).
+"""chatbot.kakao_consumer — the KakaoTalk pull loop.
 
 Mirrors the Telegram `_poll_loop`: a `while not stop.is_set()` loop that
-PULLS jobs from the Cloudflare Queue and ACKs them, backing off on a pull
-error (2s) rather than tight-looping.
+PULLS jobs from the Cloudflare Queue, hands each to `KakaoGateway`, and
+ACKs the ones that processed cleanly. A pull/network error backs off (2s)
+rather than tight-looping.
 
-PR1 is plumbing only — turn processing (the `KakaoGateway`, the deadline
-state machine, the registry) lands in the next PR. For now the loop
-drains and acks, logging each job so the relay → queue → agent path is
-verifiable end-to-end without any user-facing behavior. Because the
-gateway is not wired yet, pulled turns are acked-and-dropped (not
-replayed forever); the consumer only runs at all when explicitly
-configured, so this affects nothing until then.
+Ack policy ([kakao-channel.md] §5/§13): ack a job only when `handle_job`
+returns without raising. `handle_job` swallows turn-level failures (it
+delivers an apology) and is idempotent via a dedupe mark, so it raises
+only on a pre-dedupe infra error (e.g. Redis) — exactly the case where
+leaving the message unacked for redelivery is the right move.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import asyncio
 import logging
 
 from bp_agents.agents.chatbot.kakao_client import KakaoClient
+from bp_agents.agents.chatbot.kakao_gateway import KakaoGateway
 from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
@@ -33,13 +33,13 @@ async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
 
 
 async def kakao_consume_loop(
-    client: KakaoClient, settings: SuiteSettings, stop: asyncio.Event
+    gateway: KakaoGateway,
+    client: KakaoClient,
+    settings: SuiteSettings,
+    stop: asyncio.Event,
 ) -> None:
-    """Pull KakaoTalk jobs from the Cloudflare Queue and ack them.
-
-    A pull/network error backs off (2s) like `_poll_loop`; on success
-    every pulled message is acked so the queue drains.
-    """
+    """Pull KakaoTalk jobs, dispatch each through the gateway, ack the
+    successes. A pull error backs off (2s) like `_poll_loop`."""
     logger.info(
         "kakao_consumer_started", extra={"event": "kakao_consumer_started"}
     )
@@ -59,14 +59,21 @@ async def kakao_consume_loop(
         if not jobs:
             continue
 
+        acks: list[str] = []
         for job in jobs:
-            logger.info(
-                "kakao_job_received",
-                extra={"event": "kakao_job_received", "kakao.msg_id": job.msg_id},
-            )
-        try:
-            await client.ack([job.lease_id for job in jobs])
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "kakao_ack_error", extra={"event": "kakao_ack_error"}
-            )
+            try:
+                await gateway.handle_job(job)
+                acks.append(job.lease_id)
+            except Exception:  # noqa: BLE001
+                # Pre-dedupe infra error → leave unacked for redelivery.
+                logger.exception(
+                    "kakao_job_error",
+                    extra={"event": "kakao_job_error", "kakao.msg_id": job.msg_id},
+                )
+        if acks:
+            try:
+                await client.ack(acks)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "kakao_ack_error", extra={"event": "kakao_ack_error"}
+                )
