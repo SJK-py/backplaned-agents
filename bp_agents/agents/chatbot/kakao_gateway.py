@@ -145,9 +145,14 @@ class KakaoGateway:
         self._turns: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
-        """Cancel any in-flight parked turns (best-effort, on shutdown)."""
-        for t in list(self._turns):
+        """Cancel in-flight compute/parked turns and await their teardown, so
+        the caller can safely close Redis/the pool afterwards (a park task
+        mid-write would otherwise hit a closed client). Best-effort."""
+        tasks = list(self._turns)
+        for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # -- entry point ----------------------------------------------------
 
@@ -262,13 +267,16 @@ class KakaoGateway:
 
     # -- normal message → turn lifecycle --------------------------------
 
-    async def _guard_busy(self, chat_id: str, callback_url: str) -> bool:
-        """One turn per chat. Returns True (caller should stop) if a parked
-        answer was delivered on this callback, or a turn is still pending."""
+    async def _claim_or_handle(self, chat_id: str, callback_url: str) -> bool:
+        """Atomically gate "one turn per chat". Returns True when the request
+        was already handled (a parked answer was delivered, or a turn is in
+        flight → "still working") and the caller must stop. Returns False
+        when this call CLAIMED the chat (an atomic `try_begin`); the caller
+        must then run a turn and eventually clear/park it — releasing the
+        claim with `clear` if it bails before dispatch."""
         if await self._deliver_ready(chat_id, callback_url):
             return True
-        turn = await self._registry.get_turn(chat_id)
-        if turn and turn.get("state") == "pending":
+        if not await self._registry.try_begin(chat_id):
             await self._client.post_callback(
                 callback_url, _STILL_WORKING_TEXT, quick_replies=self._poll_buttons()
             )
@@ -278,10 +286,11 @@ class KakaoGateway:
     async def _handle_message(
         self, chat_id: str, callback_url: str, text: str, body: dict
     ) -> None:
-        if await self._guard_busy(chat_id, callback_url):
+        if await self._claim_or_handle(chat_id, callback_url):
             return
         resolved = await self._resolve_session(chat_id, callback_url)
         if resolved is None:
+            await self._registry.clear(chat_id)  # release the claim
             return  # register / no-session prompt already sent
         user_id, session_id = resolved
         await self._run_compute(
@@ -306,16 +315,29 @@ class KakaoGateway:
             done = set()  # callback already dead → park-only, no race
 
         if compute in done:
-            await self._registry.clear(chat_id)
             try:
                 reply = compute.result()
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "kakao_turn_error", extra={"event": "kakao_turn_error"}
                 )
+                await self._registry.clear(chat_id)
                 await self._client.post_callback(callback_url, _DISPATCH_FAILED_TEXT)
                 return
-            await self._deliver(callback_url, reply)
+            # Deliver on the (single-use) callback; if that POST fails, the
+            # callback is spent and can't be retried — PARK the answer so the
+            # user's next touch still gets it, rather than losing it.
+            try:
+                await self._deliver(callback_url, reply)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "kakao_deliver_failed", extra={"event": "kakao_deliver_failed"}
+                )
+                await self._registry.store_ready_unless_stopped(
+                    chat_id, reply.text, json.dumps(reply.images)
+                )
+                return
+            await self._registry.clear(chat_id)
             return
 
         # Overran (or stale callback) — park the rest, status if we still can.
@@ -343,8 +365,6 @@ class KakaoGateway:
         t.add_done_callback(self._turns.discard)
 
     async def _park(self, chat_id: str, task: asyncio.Task) -> None:
-        turn = await self._registry.get_turn(chat_id)
-        stopped = bool(turn and turn.get("stopped"))
         try:
             reply = task.result()
         except asyncio.CancelledError:
@@ -352,12 +372,14 @@ class KakaoGateway:
         except Exception:  # noqa: BLE001
             logger.exception("kakao_turn_error", extra={"event": "kakao_turn_error"})
             reply = TurnReply(_DISPATCH_FAILED_TEXT, [])
-        if stopped:
-            await self._registry.clear(chat_id)  # user already saw the stop ack
-            return
-        await self._registry.store_ready(
+        # Park atomically: a concurrent /stop (mark_stopped) or /new (clear)
+        # landing now must win — store_ready_unless_stopped returns False and
+        # we drop the stale answer instead of resurrecting an abandoned turn.
+        parked = await self._registry.store_ready_unless_stopped(
             chat_id, reply.text, json.dumps(reply.images)
         )
+        if not parked:
+            await self._registry.clear(chat_id)  # stopped/cleared → leave clean
 
     async def _compute_turn(
         self, chat_id: str, user_id: str, session_id: str, text: str, body: dict
@@ -380,7 +402,7 @@ class KakaoGateway:
                 else "(the user sent a message with no text.)"
             )
             task_id = await self._core.spawn(user_id, session_id, dest, mode, prompt)
-            await self._registry.set_inflight(chat_id, user_id, task_id)
+            await self._registry.set_task(chat_id, user_id, task_id)
             result = await self._core.await_result(task_id)
 
             reply = (result.output.content if result.output else "") or ""
@@ -412,7 +434,7 @@ class KakaoGateway:
         no memory) — mirrors ChatbotGateway._cmd_agent but returns a
         TurnReply for the shared deadline/park path."""
         task_id = await self._core.spawn(user_id, session_id, dest, mode, prompt)
-        await self._registry.set_inflight(chat_id, user_id, task_id)
+        await self._registry.set_task(chat_id, user_id, task_id)
         result = await self._core.await_result(task_id)
         if result.status != TaskStatus.SUCCEEDED:
             logger.warning(
@@ -557,10 +579,11 @@ class KakaoGateway:
     ) -> None:
         """Route /config·/cron to an agent and relay its reply (deadline/park
         aware). Bypasses the orchestrator + conversation thread."""
-        if await self._guard_busy(chat_id, callback_url):
+        if await self._claim_or_handle(chat_id, callback_url):
             return
         resolved = await self._resolve_session(chat_id, callback_url)
         if resolved is None:
+            await self._registry.clear(chat_id)  # release the claim
             return
         user_id, session_id = resolved
         await self._run_compute(
@@ -571,13 +594,15 @@ class KakaoGateway:
     async def _cmd_delegate(
         self, chat_id: str, callback_url: str, body: dict, arg: str
     ) -> None:
-        if await self._guard_busy(chat_id, callback_url):
+        if await self._claim_or_handle(chat_id, callback_url):
             return
         resolved = await self._resolve_session(chat_id, callback_url)
         if resolved is None:
+            await self._registry.clear(chat_id)  # release the claim
             return
         user_id, session_id = resolved
-        target = arg.split(maxsplit=1)[0] if arg.split(maxsplit=1) else ""
+        parts = arg.split(maxsplit=1)
+        target = parts[0] if parts else ""
         await self._run_compute(
             chat_id, callback_url, body,
             self._reply_only(self._core.delegate(user_id, session_id, target)),
@@ -586,10 +611,11 @@ class KakaoGateway:
     async def _cmd_undelegate(
         self, chat_id: str, callback_url: str, body: dict
     ) -> None:
-        if await self._guard_busy(chat_id, callback_url):
+        if await self._claim_or_handle(chat_id, callback_url):
             return
         resolved = await self._resolve_session(chat_id, callback_url)
         if resolved is None:
+            await self._registry.clear(chat_id)  # release the claim
             return
         user_id, session_id = resolved
         await self._run_compute(

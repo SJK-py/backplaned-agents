@@ -59,6 +59,18 @@ def _job(msg_id="m1", **body) -> KakaoJob:
     return KakaoJob(msg_id=msg_id, lease_id="L1", body=b)
 
 
+async def _set_pending(reg, chat="kc1", user="usr", task="tsk1") -> None:
+    """Set up a claimed, in-flight (pending) turn for a chat (test helper)."""
+    await reg.try_begin(chat)
+    await reg.set_task(chat, user, task)
+
+
+async def _set_ready(reg, chat, text, images="") -> None:
+    """Set up a parked (ready) answer for a chat (test helper)."""
+    await reg.try_begin(chat)
+    await reg.store_ready_unless_stopped(chat, text, images)
+
+
 class _RecordingClient:
     """Captures post_callback so the gateway's delivery can be asserted.
     posts are (callback_url, text, quick_replies, images)."""
@@ -208,15 +220,32 @@ def test_registry_dedupe_and_park_lifecycle() -> None:
         assert await reg.seen("m1") is True   # duplicate
 
         assert await reg.get_turn("c") is None
-        await reg.set_inflight("c", "usr", "tsk1")
+        assert await reg.try_begin("c") is True   # atomic claim
+        assert await reg.try_begin("c") is False  # already claimed (busy)
+        await reg.set_task("c", "usr", "tsk1")
         turn = await reg.get_turn("c")
         assert turn == {"state": "pending", "user_id": "usr", "task_id": "tsk1"}
 
-        await reg.store_ready("c", "the answer")
+        assert await reg.store_ready_unless_stopped("c", "the answer") is True
         assert (await reg.get_turn("c"))["state"] == "ready"
         assert await reg.take_ready("c") == ("the answer", "")
         assert await reg.take_ready("c") is None  # cleared on take
         assert await reg.get_turn("c") is None
+
+
+def test_registry_store_ready_unless_stopped_respects_stop_and_clear() -> None:
+    async def _drive() -> None:
+        reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+        # stopped → don't park
+        await reg.try_begin("a")
+        await reg.mark_stopped("a")
+        assert await reg.store_ready_unless_stopped("a", "x") is False
+        # cleared (/new) → don't park (turn no longer exists)
+        await reg.try_begin("b")
+        await reg.clear("b")
+        assert await reg.store_ready_unless_stopped("b", "x") is False
+
+    asyncio.run(_drive())
 
     asyncio.run(_drive())
 
@@ -235,7 +264,7 @@ def _poll_gateway(client, reg, *, credentials=None) -> KakaoGateway:
 def test_check_delivers_ready_result() -> None:
     async def _drive() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-        await reg.store_ready("kc1", "parked answer")
+        await _set_ready(reg, "kc1", "parked answer")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance=CHECK_LABEL))
@@ -248,7 +277,7 @@ def test_check_delivers_ready_result() -> None:
 def test_check_while_pending_reports_still_working() -> None:
     async def _drive() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-        await reg.set_inflight("kc1", "usr", "tsk1")
+        await _set_pending(reg, "kc1", "usr", "tsk1")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance=CHECK_LABEL))
@@ -269,7 +298,7 @@ def test_stop_cancels_pending_turn() -> None:
 
     async def _drive() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-        await reg.set_inflight("kc1", "usr", "tsk1")
+        await _set_pending(reg, "kc1", "usr", "tsk1")
         client, creds = _RecordingClient(), _Creds()
         gw = _poll_gateway(client, reg, credentials=creds)
         await gw.handle_job(_job(utterance=STOP_LABEL))
@@ -294,7 +323,7 @@ def test_stop_with_nothing_running() -> None:
 def test_duplicate_job_is_dropped() -> None:
     async def _drive() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-        await reg.store_ready("kc1", "parked")
+        await _set_ready(reg, "kc1", "parked")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(msg_id="dup", utterance=CHECK_LABEL))
@@ -575,9 +604,9 @@ def test_fetch_inbound_image_caps_and_guards_scheme() -> None:
     async def _drive() -> bytes:
         c = HttpKakaoClient(_settings())
         c._callback_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
-        data = await c.fetch_inbound_image("https://img.kakao/x.png")
+        data = await c.fetch_inbound_image("https://8.8.8.8/x.png")  # public IP literal
         with pytest.raises(ValueError):
-            await c.fetch_inbound_image("ftp://nope")  # scheme guard
+            await c.fetch_inbound_image("ftp://nope")  # scheme rejected by guard
         await c.aclose()
         return data
 
@@ -784,6 +813,110 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                 info = await queries.get_session_info(conn, "ses_k2")
             assert uid == "usr_k2"
             assert info.channel == "chatbot_kakao"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+# --- hardening: SSRF guard, fan-out, delivery-failure park -------------
+
+
+def test_fetch_inbound_image_blocks_internal_targets() -> None:
+    """The SSRF guard rejects loopback / RFC1918 / link-local / metadata and
+    non-http schemes; a public IP literal is allowed."""
+    async def _drive() -> None:
+        c = HttpKakaoClient(_settings())
+        c._callback_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: httpx.Response(200, content=_PNG))
+        )
+        for bad in (
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/x",
+            "http://192.168.1.1/x",
+            "ftp://8.8.8.8/x",
+        ):
+            with pytest.raises(ValueError):
+                await c.fetch_inbound_image(bad)
+        # public IP literal → guard passes, mock returns the bytes
+        assert await c.fetch_inbound_image("http://8.8.8.8/x.png") == _PNG
+        await c.aclose()
+
+    asyncio.run(_drive())
+
+
+def test_consumer_fans_out_slow_does_not_block_fast() -> None:
+    """A slow turn (first in the batch) must not delay a fast turn's ack —
+    the fan-out makes the consumer head-of-line free."""
+    order: list[str] = []
+    stop = asyncio.Event()
+
+    class _Gw:
+        async def handle_job(self, job):
+            if job.msg_id == "slow":
+                await asyncio.sleep(0.3)
+            order.append(job.msg_id)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.acked: list[str] = []
+            self._sent = False
+
+        async def pull(self, *, batch_size, visibility_timeout_s):
+            await asyncio.sleep(0)
+            if self._sent:
+                return []
+            self._sent = True
+            return [KakaoJob("slow", "Lslow", {}), KakaoJob("fast", "Lfast", {})]
+
+        async def ack(self, lease_ids):
+            self.acked.extend(lease_ids)
+            if "Lslow" in lease_ids:
+                stop.set()
+
+        async def aclose(self) -> None:
+            return None
+
+    client = _Client()
+    asyncio.run(
+        asyncio.wait_for(
+            kakao_consume_loop(_Gw(), client, _settings(), stop), timeout=5
+        )
+    )
+    # the fast job finished and was acked before the slow one
+    assert order[0] == "fast"
+    assert client.acked.index("Lfast") < client.acked.index("Lslow")
+
+
+def test_in_time_delivery_failure_parks_for_next_touch(suite_db_url: str) -> None:
+    class _FailFirst(_RecordingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def post_callback(self, url, text, *, quick_replies=None, images=None):
+            self.calls += 1
+            if self.calls == 1:  # the in-time delivery POST fails (Kakao 5xx)
+                raise RuntimeError("kakao 5xx")
+            await super().post_callback(
+                url, text, quick_replies=quick_replies, images=images
+            )
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            client = _FailFirst()
+            gw = _gateway(pool, client, _FakeDispatcher(reply="answer"), reg, _settings())
+
+            await gw.handle_job(_job(utterance="hi"))
+            # the spent callback couldn't deliver → answer is PARKED, not lost
+            assert (await reg.get_turn("kc1") or {}).get("state") == "ready"
+            # next touch ([확인]) delivers it on a fresh callback
+            await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
+            assert client.posts[-1][1] == "answer"
         finally:
             await pool.close()
 

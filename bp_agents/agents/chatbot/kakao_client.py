@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from bp_agents.common.urlsafe import ensure_fetchable_url
 from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
@@ -220,11 +221,12 @@ class HttpKakaoClient:
         """Download an inbound image from a (Kakao-provided) url, capped.
 
         The agent fetches it itself — the router deliberately does no
-        outbound fetch ([router-managed-file-store.md] §4.1). The url
-        originates from an authenticated Kakao skill payload; we still
-        restrict the scheme as a minimal SSRF guard."""
-        if not url.lower().startswith(("http://", "https://")):
-            raise ValueError("unsupported inbound image url scheme")
+        outbound fetch ([router-managed-file-store.md] §4.1). SSRF guard:
+        the `image_url` is attacker-controllable if the relay secret ever
+        leaks, so resolve + reject loopback / RFC1918 / link-local / cloud-
+        metadata targets before fetching (the same guard the research web
+        tools use). Redirects are NOT followed (httpx default)."""
+        await ensure_fetchable_url(url)
         buf = bytearray()
         async with self._callback_client.stream("GET", url) as resp:
             resp.raise_for_status()
