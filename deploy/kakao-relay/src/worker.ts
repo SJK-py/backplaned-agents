@@ -71,7 +71,8 @@ export default {
     const callbackUrl = p?.userRequest?.callbackUrl; // ⚠ verify field (design §16)
     if (!chatId || !callbackUrl) {
       // No user id / callback → the agent couldn't route or reply; don't
-      // enqueue a guaranteed-dead job. Answer the webhook synchronously.
+      // enqueue a guaranteed-dead job. This is an IMMEDIATE skill response
+      // (no callback), so it uses the normal `template.outputs` shape.
       return Response.json({
         version: "2.0",
         template: { outputs: [{ simpleText: { text: "처리할 수 없는 요청이에요." } }] },
@@ -87,9 +88,14 @@ export default {
     };
     await env.KAKAO_JOBS.send(job);
 
-    // `useCallback: true` on every turn so the relay never needs to know a
-    // command from a question — the agent always delivers the real answer
-    // over the callback. Requires callback enabled on the skill (design §4).
+    // The useCallback ACK — defers the real answer to a later POST on
+    // callbackUrl. Per Kakao's callback guide this shape uses
+    // `useCallback: true` + `data.text` (the interim "working" bubble) and
+    // MUST NOT include `template` — that's only for an immediate response
+    // (the no-callback fallback above) and for the callback POST itself
+    // (the agent's post_callback). `useCallback` on every turn so the relay
+    // never needs to tell a command from a question; requires callback
+    // enabled on the skill (design §4).
     return Response.json({
       version: "2.0",
       useCallback: true,
