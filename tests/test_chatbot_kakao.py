@@ -952,3 +952,38 @@ def test_mark_stopped_sets_ttl() -> None:
         assert await r.ttl("kakao:turn:c") > 0  # recreated key can't leak
 
     asyncio.run(_drive())
+
+
+def test_pull_coerces_string_and_b64_body() -> None:
+    """CF Queues HTTP pull returns a json body as a STRING (sometimes base64);
+    pull() must normalize each to a dict so handle_job never sees a str."""
+    import base64 as _b64
+
+    payload = {"chat_id": "kc1", "utterance": "hi", "callback_url": "https://cb/x"}
+    as_str = json.dumps(payload)
+    as_b64 = _b64.b64encode(as_str.encode()).decode()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "success": True,
+            "result": {"messages": [
+                {"id": "m1", "lease_id": "L1", "body": as_str},   # JSON string
+                {"id": "m2", "lease_id": "L2", "body": as_b64},   # base64 of JSON
+                {"id": "m3", "lease_id": "L3", "body": "garbage"},  # unparsable → {}
+                {"id": "m4", "lease_id": "L4", "body": payload},  # already a dict
+            ]},
+        })
+
+    async def _drive() -> list[KakaoJob]:
+        c = HttpKakaoClient(_settings())
+        c._queue_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        jobs = await c.pull(batch_size=4, visibility_timeout_s=10)
+        await c.aclose()
+        return jobs
+
+    jobs = asyncio.run(_drive())
+    assert all(isinstance(j.body, dict) for j in jobs)
+    assert jobs[0].body == payload
+    assert jobs[1].body == payload
+    assert jobs[2].body == {}        # garbage → empty (handled as missing-fields)
+    assert jobs[3].body == payload

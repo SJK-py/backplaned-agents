@@ -24,6 +24,8 @@ The field names are encoded in one place so a correction is a local edit.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -36,6 +38,31 @@ from bp_agents.settings import SuiteSettings
 logger = logging.getLogger(__name__)
 
 _CF_API_BASE = "https://api.cloudflare.com/client/v4"
+
+
+def _coerce_body(raw: Any) -> dict[str, Any]:
+    """Normalize a pulled message body to the dict the gateway expects.
+
+    The CF Queues HTTP **pull** API returns a json-content body as a JSON
+    *string* (not a parsed object — and occasionally base64-wrapped), unlike
+    a Worker consumer which gets the object back. Parse it here so
+    `KakaoJob.body` is always a dict; an unparseable body becomes `{}`,
+    handled downstream as a missing-fields job (logged, not crashed)."""
+    if isinstance(raw, dict):
+        return raw
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    if isinstance(text, str):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            try:
+                parsed = json.loads(base64.b64decode(text))
+            except Exception:  # noqa: BLE001
+                parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    logger.warning("kakao_body_unparsable", extra={"event": "kakao_body_unparsable"})
+    return {}
 
 # A Kakao callback template renders at most a few outputs; cap how many an
 # over-long reply is split into (the tail is truncated) and the total
@@ -158,7 +185,9 @@ class HttpKakaoClient:
             return []
         messages = (body.get("result") or {}).get("messages") or []
         return [
-            KakaoJob(msg_id=m["id"], lease_id=m["lease_id"], body=m["body"])
+            KakaoJob(
+                msg_id=m["id"], lease_id=m["lease_id"], body=_coerce_body(m["body"])
+            )
             for m in messages
         ]
 
