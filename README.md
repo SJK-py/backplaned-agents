@@ -36,7 +36,7 @@ A roster of cooperating agents and the conversation machinery around them:
 - **Knowledge base** — per-user documents with hybrid retrieval, semantic chunking, any-file ingest (via `md_converter`), and LLM-generated metadata.
 - **Conversational sessions** — full history per `(session, agent)` thread with **rolling summarization** so context stays bounded without losing the thread.
 - **Scheduled tasks** — DST-aware **cron** reminders and jobs that run on your behalf and ping you when they matter.
-- **Channels** — **Telegram** (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose) and a **web app** (browser channel: login, session management, live-progress chat, settings/cron, file stash).
+- **Channels** — **Telegram** (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose), **KakaoTalk** (the same commands, via an egress-only pull consumer behind a tiny Cloudflare Worker relay — see [`docs/design/kakao-channel.md`](./docs/design/kakao-channel.md)), and a **web app** (browser channel: login, session management, live-progress chat, settings/cron, file stash).
 - **Helpers** — `config` (change settings in natural language), `history_summarizer`, `md_converter`.
 
 Every task runs as the end user, so all of the above is isolated per person.
@@ -44,10 +44,11 @@ Every task runs as the end user, so all of the above is isolated per person.
 ## How it fits together
 
 ```
-Telegram ──▶ chatbot (gateway)        ┌──────────  Backplaned router  ───────────┐
-              │  injects the turn as  │   task lifecycle · delegation · ACL ·    │
-              │  a task for the user ─┼─▶ file store · LLM service · identity    │
-              ▼                       └──────────────────────────────────────────┘
+Telegram ─┐                           ┌──────────  Backplaned router  ───────────┐
+KakaoTalk ─┼▶ chatbot (gateway)       │   task lifecycle · delegation · ACL ·    │
+ (relay+Q) │   │  injects the turn as │   file store · LLM service · identity    │
+           │   │  a task for the user ┼─▶                                        │
+           ▼   ▼                      └──────────────────────────────────────────┘
          orchestrator ──delegate──▶ deep_reasoning / research / computer_use
               │   │                                  │
               │   └─call──▶ memory · knowledge_base · md_converter

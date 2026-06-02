@@ -1,7 +1,7 @@
 # Agent Suite — Deployment
 
-> How to run the v1 suite (Telegram chatbot + webapp browser channel +
-> orchestrator + specialists)
+> How to run the v1 suite (Telegram + KakaoTalk chatbot + webapp browser
+> channel + orchestrator + specialists)
 > on top of a Backplaned router. The router's own deployment (Postgres,
 > Redis, file store, edge proxy, secrets) is in
 > [`../deployment.md`](../deployment.md); this covers the **suite**
@@ -19,7 +19,10 @@
 - Networks: every agent is on `agents` (router WS); suite agents that
   touch the suite DB are also on `suite`; the chatbot (Telegram egress) and
   the webapp (fronted by Caddy) are additionally on `edge`; the **sandbox**
-  is on `agents` only.
+  is on `agents` only. The optional KakaoTalk channel adds no inbound
+  surface — the chatbot pulls its turns outbound from a Cloudflare Queue,
+  and reaches the in-cluster Redis over `suite` (so enabling Kakao needs no
+  new network).
 
 ## Databases
 
@@ -69,7 +72,20 @@ automatically for a local router.
 - chatbot: `SUITE_TELEGRAM_BOT_TOKEN`; `SUITE_REDIS_URL` makes the
   per-session turn lock distributed — **required when both the chatbot and
   the webapp run**, so the two channels serialize turns for a shared
-  session; a chatbot-only deploy needs no Redis.
+  session; a chatbot-only Telegram deploy needs no Redis.
+- chatbot (KakaoTalk, optional): an egress-only second channel. The agent
+  **pulls** turns from a Cloudflare Queue fed by the
+  [`deploy/kakao-relay`](../../deploy/kakao-relay/) Worker — it opens no
+  inbound port. Gate it with `SUITE_KAKAO_CF_ACCOUNT_ID` /
+  `SUITE_KAKAO_CF_QUEUE_ID` / `SUITE_KAKAO_CF_API_TOKEN` (a token scoped to
+  Queues pull+ack); **`SUITE_REDIS_URL` is required** (the deadline /
+  next-touch registry), so set it even on a chatbot-only deploy if you
+  enable Kakao. Outbound images additionally need the `SUITE_KAKAO_R2_*`
+  vars (a presigned-URL bucket); inbound images reuse the router file
+  store. Design + the relay/queue setup: [`../design/kakao-channel.md`](../design/kakao-channel.md)
+  and [`deploy/kakao-relay/README.md`](../../deploy/kakao-relay/README.md).
+  Approved Kakao registrations reconcile to `platform=kakao` via a second
+  approval poller, mirroring Telegram.
 - webapp: `WEBAPP_SESSION_SECRET` (signs the browser session cookie;
   required). Serves FastAPI on `:8002`, fronted by Caddy on its own host
   (`WEBAPP_DOMAIN`, default `app.<PUBLIC_DOMAIN>`) — it serves from root, so

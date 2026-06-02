@@ -15,6 +15,8 @@ The channel is an SDK `Agent` (`groups=[channel, inbound]`, `capabilities=[chann
 
 Each inbound message spawns a per-message handler task (tracked for graceful shutdown and `/stop`). The **normal reply is the awaited result** of the task the channel injected — *not* a call into a channel mode. (`message_to_user` / `file_to_user` remain only as optional *proactive*-push modes; the common path never uses them.)
 
+**KakaoTalk** is an optional second transport on the same gateway. Because a Kakao skill can't be polled and its reply rides a single-use, ~1-minute `callbackUrl`, it can't use the synchronous "await the result, then send" shape above: the agent stays **egress-only**, pulling turns from a Cloudflare Queue (fed by a stateless Worker relay) and delivering on the callback or, when a turn outlives it, parking the answer for the user's next touch. The identity / session / command model below is shared verbatim (`platform=kakao`); the transport-specific design is in [`../design/kakao-channel.md`](../design/kakao-channel.md).
+
 ## 2. Identity resolution
 
 ```

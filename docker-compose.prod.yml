@@ -359,6 +359,22 @@ services:
       SUITE_AGENT: chatbot
       AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION:?provisions_service_user invite}
       SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
+      # KakaoTalk channel (optional). Egress-only pull consumer behind the
+      # deploy/kakao-relay Cloudflare Worker + a Cloudflare Queue. Inert
+      # unless the three CF queue vars are set; it REQUIRES Redis (the
+      # deadline/next-touch registry), so SUITE_REDIS_URL must be set too —
+      # the in-cluster redis is reachable on the `suite` network (use db 1 so
+      # suite keys don't collide with the router's db 0).
+      SUITE_REDIS_URL: ${SUITE_REDIS_URL:-}
+      SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
+      SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}
+      SUITE_KAKAO_CF_API_TOKEN: ${SUITE_KAKAO_CF_API_TOKEN:-}
+      # Outbound KakaoTalk images (optional, presigned R2). Inbound images
+      # reuse the router file store regardless of these.
+      SUITE_KAKAO_R2_ENDPOINT_URL: ${SUITE_KAKAO_R2_ENDPOINT_URL:-}
+      SUITE_KAKAO_R2_BUCKET: ${SUITE_KAKAO_R2_BUCKET:-}
+      SUITE_KAKAO_R2_ACCESS_KEY_ID: ${SUITE_KAKAO_R2_ACCESS_KEY_ID:-}
+      SUITE_KAKAO_R2_SECRET_ACCESS_KEY: ${SUITE_KAKAO_R2_SECRET_ACCESS_KEY:-}
     volumes: [chatbot_state:/state]
     networks: [edge, agents, suite]
 
