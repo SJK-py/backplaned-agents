@@ -90,7 +90,9 @@ _LINK_USAGE_TEXT = (
     "/link <토큰> 형식으로 보내 이 채팅을 기존 계정에 연결하세요. "
     "이미 연결된 채팅(또는 웹)에서 /password 로 토큰을 받을 수 있어요."
 )
-_LINK_OK_TEXT = "연결됐어요 — 이제 이 채팅이 기존 계정을 사용해요."
+_LINK_OK_TEXT = (
+    "연결됐어요 — 이제 이 채팅이 기존 계정을 사용해요. (다른 채팅과는 별개의 대화를 가져요.)"
+)
 _LINK_INVALID_TEXT = (
     "토큰이 올바르지 않거나 만료됐어요. /password 로 새 토큰을 받아 다시 시도해 주세요."
 )
@@ -106,6 +108,9 @@ _NEW_STARTED_TEXT = "새 대화를 시작했어요."
 _DONE_TEXT = "완료했어요."
 _UNKNOWN_CMD_TEXT = "지원하지 않는 명령이에요. /help 를 입력해 보세요."
 _PASSWORD_INTRO = "비밀번호 설정용 일회용 토큰이에요 (곧 만료됩니다):"
+_SETDEFAULT_OK_TEXT = (
+    "이 채팅의 대화를 기본으로 설정했어요. 예약 알림과 외부 메시지가 여기로 와요."
+)
 HELP_TEXT = (
     "개인 비서예요. 메시지를 보내면 도와드릴게요.\n\n"
     "명령어:\n"
@@ -117,6 +122,7 @@ HELP_TEXT = (
     "/cron — 예약 작업 관리\n"
     "/delegate <에이전트> — 전문 에이전트에게 위임\n"
     "/undelegate — 기본 비서로 복귀\n"
+    "/setdefault — 이 채팅의 대화를 알림 기본으로 설정\n"
     "/password — 웹 비밀번호 설정 링크 받기\n"
     "/help — 명령어 보기"
 )
@@ -545,17 +551,23 @@ class KakaoGateway:
     async def _resolve_session(
         self, chat_id: str, callback_url: str
     ) -> tuple[str, str] | None:
-        user_id = await self._resolve_user(chat_id)
-        if user_id is None:
-            await self._client.post_callback(callback_url, _REGISTER_PROMPT)
-            return None
+        """`(user_id, session_id)` for a registered chat — `session_id` is the
+        chat's OWN current session (`mapping.session_id`), falling back to the
+        user's `default_session_id` (the cron fallback) only until the chat has
+        one of its own. None after sending the appropriate prompt."""
         async with self._pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-        session_id = cfg.default_session_id if cfg else None
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+            if mapping is None:
+                await self._client.post_callback(callback_url, _REGISTER_PROMPT)
+                return None
+            cfg = await queries.get_user_config(conn, mapping.user_id)
+        session_id = mapping.session_id or (cfg.default_session_id if cfg else None)
         if session_id is None:
             await self._client.post_callback(callback_url, _NO_SESSION_TEXT)
             return None
-        return user_id, session_id
+        return mapping.user_id, session_id
 
     async def _handle_command(
         self, chat_id: str, callback_url: str, text: str, body: dict
@@ -587,6 +599,8 @@ class KakaoGateway:
             await self._cmd_delegate(chat_id, callback_url, body, arg)
         elif cmd == "/undelegate":
             await self._cmd_undelegate(chat_id, callback_url, body)
+        elif cmd == "/setdefault":
+            await self._cmd_setdefault(chat_id, callback_url)
         elif cmd == "/password":
             await self._cmd_password(chat_id, callback_url)
         else:
@@ -642,6 +656,26 @@ class KakaoGateway:
             self._reply_only(self._core.undelegate(user_id, session_id)),
         )
 
+    async def _cmd_setdefault(self, chat_id: str, callback_url: str) -> None:
+        """Point default_session_id (the cron fallback / async delivery target)
+        at THIS chat's current session (fast — no dispatch). For a
+        multi-channel user, picks which channel's conversation reminders land
+        in."""
+        async with self._pool.acquire() as conn:
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+            if mapping is None:
+                await self._client.post_callback(callback_url, _REGISTER_PROMPT)
+                return
+            if mapping.session_id is None:
+                await self._client.post_callback(callback_url, _NO_SESSION_TEXT)
+                return
+            await queries.set_default_session_id(
+                conn, user_id=mapping.user_id, session_id=mapping.session_id
+            )
+        await self._client.post_callback(callback_url, _SETDEFAULT_OK_TEXT)
+
     async def _cmd_password(self, chat_id: str, callback_url: str) -> None:
         """Mint a one-time password-setup token (fast — no dispatch)."""
         user_id = await self._resolve_user(chat_id)
@@ -694,7 +728,9 @@ class KakaoGateway:
         """Bind this (unmapped) chat to a pre-existing account by verifying a
         password-reset token minted on a channel the user is already on
         ([channel.md] §6). On success, map (PLATFORM, chat_id) → the returned
-        user_id so this chat shares the account's sessions/memory."""
+        user_id and open a fresh session for THIS chat, so it shares the
+        account (memory/files) but keeps its own conversation instead of
+        interleaving into another channel's thread."""
         if await self._resolve_user(chat_id) is not None:
             await self._client.post_callback(callback_url, _ALREADY_REGISTERED_TEXT)
             return
@@ -721,6 +757,31 @@ class KakaoGateway:
             await queries.upsert_platform_mapping(
                 conn, platform=PLATFORM, chat_id=chat_id, user_id=user_id
             )
+        # Open this chat's OWN session so it doesn't land in the account's
+        # other-channel conversation. Best-effort: on failure the mapping
+        # stands and the chat falls back to the default until its first /new.
+        try:
+            new_session = await self._credentials.open_session(
+                user_id=user_id, metadata={"kind": CHANNEL, "external_id": chat_id}
+            )
+            async with self._pool.acquire() as conn:
+                await queries.create_session_info(
+                    conn, session_id=new_session, user_id=user_id,
+                    channel=CHANNEL, chat_id=chat_id,
+                )
+                await queries.set_mapping_session_id(
+                    conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
+                )
+                cfg = await queries.get_user_config(conn, user_id)
+                if cfg is None or cfg.default_session_id is None:
+                    await queries.set_default_session_id(
+                        conn, user_id=user_id, session_id=new_session,
+                    )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_link_open_session_failed",
+                extra={"event": "kakao_link_open_session_failed"},
+            )
         await self._client.post_callback(callback_url, _LINK_OK_TEXT)
 
     async def _cmd_new(self, chat_id: str, callback_url: str) -> None:
@@ -731,11 +792,14 @@ class KakaoGateway:
         if self._credentials is None:
             await self._client.post_callback(callback_url, _UNAVAILABLE_TEXT)
             return
-        # Retire the previous conversation (archive + release its channel flag),
-        # best-effort, then open a fresh one — mirrors the Telegram /new path.
+        # Retire THIS chat's previous conversation (its own session, NOT the
+        # shared default — another channel may be using that), best-effort,
+        # then open a fresh one — mirrors the Telegram /new path.
         async with self._pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-        prev_session = cfg.default_session_id if cfg else None
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+        prev_session = mapping.session_id if mapping else None
         if prev_session is not None:
             try:
                 await self._credentials.close_session(
@@ -755,6 +819,11 @@ class KakaoGateway:
             await queries.create_session_info(
                 conn, session_id=new_session, user_id=user_id,
                 channel=CHANNEL, chat_id=chat_id,
+            )
+            # This chat rides the fresh session; it also becomes the cron
+            # fallback (the re-pointing rule — newest conversation wins).
+            await queries.set_mapping_session_id(
+                conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
             )
             await queries.set_default_session_id(
                 conn, user_id=user_id, session_id=new_session

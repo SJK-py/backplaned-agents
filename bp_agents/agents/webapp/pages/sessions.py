@@ -16,7 +16,12 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.pages._common import TELEGRAM_CHANNEL, owned_session
+from bp_agents.agents.webapp.pages._common import (
+    CHATBOT_CHANNELS,
+    KAKAO_CHANNEL,
+    TELEGRAM_CHANNEL,
+    owned_session,
+)
 from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.db import queries
 
@@ -48,10 +53,15 @@ class SessionRow:
         return self.channel == TELEGRAM_CHANNEL
 
     @property
+    def is_kakao(self) -> bool:
+        return self.channel == KAKAO_CHANNEL
+
+    @property
     def closable(self) -> bool:
-        """Open + not Telegram-linked. A chatbot-owned session can only be
-        retired from the chatbot (`/new`), which then releases its channel."""
-        return not self.closed and self.channel != TELEGRAM_CHANNEL
+        """Open + not chatbot-linked. A chatbot-owned session (Telegram or
+        KakaoTalk) can only be retired from the chatbot (`/new`), which then
+        releases its channel to NULL."""
+        return not self.closed and self.channel not in CHATBOT_CHANNELS
 
 
 async def _load_rows(request: Request) -> list[SessionRow]:
@@ -196,15 +206,16 @@ async def reopen_session(session_id: str, request: Request) -> Response:
 @router.post("/sessions/{session_id}/close")
 async def close_session(session_id: str, request: Request) -> Response:
     """Archive the session (router `DELETE`). History/config are kept. A
-    Telegram-linked session can't be closed here — it's retired from the
-    chatbot (`/new`), which releases it ([webapp.md] §4)."""
+    chatbot-linked session (Telegram or KakaoTalk) can't be closed here — it's
+    retired from the chatbot (`/new`), which releases it ([webapp.md] §4)."""
     info = await owned_session(request, session_id)
     if info is None:
         raise HTTPException(status_code=404)
-    if info.channel == TELEGRAM_CHANNEL:
+    if info.channel in CHATBOT_CHANNELS:
         raise HTTPException(
             status_code=409,
-            detail="Telegram-linked session can't be closed from the web app.",
+            detail="A chat-linked session can't be closed from the web app — "
+            "start a new conversation from the chat instead.",
         )
     access = request.session["access_token"]
     try:
@@ -224,7 +235,9 @@ async def close_session(session_id: str, request: Request) -> Response:
 async def remove_session(session_id: str, request: Request) -> Response:
     """Hard-delete: router purge (`DELETE …?purge=true`) THEN reclaim the
     suite rows the purge can't reach ([webapp.md] §4). Irreversible — the UI
-    confirms first."""
+    confirms first. No channel guard: remove only acts on already-closed
+    sessions (the webapp's closed list), which `/new` already moved the
+    default off of, so purging one can't strand the cron fallback."""
     if await owned_session(request, session_id) is None:
         raise HTTPException(status_code=404)
     pool = request.app.state.pool

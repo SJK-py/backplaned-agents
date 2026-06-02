@@ -86,16 +86,17 @@ Index `(session_id, agent_id, incumbent, created_at)` to serve the reload query 
 
 ### 1.6 `suite_platform_mappings` — inbound identity (the entry point)
 
-Maps a channel-native chat to a Backplaned user; populated by the **admin approve-registration** flow ([overview §2.1](./overview.md)). Identity resolution is `chat_id → user_id → user_config.default_session_id`.
+Maps a channel-native chat to a Backplaned user; populated by the **admin approve-registration** flow ([overview §2.1](./overview.md)). Identity resolution is `chat_id → user_id → the chat's own session_id` (falling back to `user_config.default_session_id` — the cron fallback — only until the chat has a session of its own).
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `platform` | enum(`telegram`,`web`) | channel kind |
+| `platform` | enum(`telegram`,`web`,`kakao`) | channel kind |
 | `chat_id` | text | channel-native chat id |
 | `user_id` | text, indexed | resolved end-user |
+| `session_id` | text null | the chat's CURRENT live session (its own conversation). Seeded at registration; rotated by `/new`; copied onto `default_session_id` by `/setdefault`. NULL ⇒ fall back to `default_session_id` |
 | `created_at` | timestamptz | |
 
-PK `(platform, chat_id)`; reverse index on `user_id`. An unmapped `(platform, chat_id)` ⇒ the `/register` prompt ([channel.md §2](./channel.md)).
+PK `(platform, chat_id)`; reverse index on `user_id`. An unmapped `(platform, chat_id)` ⇒ the `/register` prompt ([channel.md §2](./channel.md)). A user with several chats (e.g. Telegram + KakaoTalk via `/link`) has one row per chat, each with its **own** `session_id`, so the conversations don't interleave — they share only the account (memory/files) and the cron-fallback `default_session_id`.
 
 ## 2. Per-user LanceDB
 

@@ -68,12 +68,18 @@ class UserConfigRow(_Row):
 
 
 class PlatformMappingRow(_Row):
-    """Inbound identity — `chat_id → user_id` ([data-model.md] §1.6)."""
+    """Inbound identity — `chat_id → user_id` ([data-model.md] §1.6).
 
-    platform: str  # telegram | web
+    `session_id` is the chat's CURRENT live session (its own conversation);
+    inbound routing rides it, falling back to `user_config.default_session_id`
+    (the cron fallback) only when a chat has none yet. NULL right after a chat
+    is mapped but before its first session is opened."""
+
+    platform: str  # telegram | web | kakao
     chat_id: str
     user_id: str
     created_at: datetime
+    session_id: str | None = None
 
 
 class CronJobRow(_Row):

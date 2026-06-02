@@ -64,9 +64,12 @@ async def reconcile_serviced_sessions(
             existing = await queries.resolve_user_id(
                 conn, platform=platform, chat_id=rec.external_id
             )
+            # Seed the chat's CURRENT session from the discovered serviced
+            # session (COALESCE: never clobbers a session the chat moved to via
+            # /new or /setdefault since first discovery).
             await queries.upsert_platform_mapping(
                 conn, platform=platform, chat_id=rec.external_id,
-                user_id=rec.user_id,
+                user_id=rec.user_id, session_id=rec.session_id,
             )
             # Seeds default_session_id + per-tier presets on first create;
             # a no-op for an existing config (so a later /new isn't clobbered).

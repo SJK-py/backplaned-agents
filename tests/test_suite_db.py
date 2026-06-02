@@ -138,6 +138,34 @@ def test_suite_db_round_trips(suite_db_url: str) -> None:
                 assert await queries.resolve_user_id(
                     conn, platform="telegram", chat_id="tg-42"
                 ) == "usr_b"
+
+                # --- per-chat current session (session_id) ---
+                # Seeded on first insert; re-bind without a session_id keeps it
+                # (COALESCE), so a later reconcile can't clobber a /new move.
+                await queries.upsert_platform_mapping(
+                    conn, platform="telegram", chat_id="tg-99",
+                    user_id="usr_a", session_id="ses_seed",
+                )
+                m = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg-99"
+                )
+                assert m is not None and m.session_id == "ses_seed"
+                await queries.upsert_platform_mapping(
+                    conn, platform="telegram", chat_id="tg-99", user_id="usr_a"
+                )  # no session_id -> COALESCE preserves the existing one
+                m = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg-99"
+                )
+                assert m.session_id == "ses_seed"
+                # set_mapping_session_id moves it unconditionally (/new path).
+                await queries.set_mapping_session_id(
+                    conn, platform="telegram", chat_id="tg-99",
+                    session_id="ses_moved",
+                )
+                m = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg-99"
+                )
+                assert m.session_id == "ses_moved"
         finally:
             await pool.close()
 

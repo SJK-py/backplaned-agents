@@ -17,6 +17,7 @@ from bp_agents.agents.chatbot.gateway import (
     _LINK_INVALID,
     _LINK_OK,
     _LINK_USAGE,
+    _SETDEFAULT_OK,
     BOT_COMMANDS,
     HELP_TEXT,
     REGISTER_PROMPT,
@@ -71,7 +72,8 @@ async def _seed(pool, *, chat_id="tg1", user_id="usr_a", session_id="ses_1") -> 
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
-            conn, platform="telegram", chat_id=chat_id, user_id=user_id
+            conn, platform="telegram", chat_id=chat_id, user_id=user_id,
+            session_id=session_id,
         )
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id
@@ -491,28 +493,36 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
 
 class _LinkCreds:
     """Credentials double for the /link flow: verify_link_token returns the
-    configured user_id (or None to simulate a bad token), recording the
-    token it was asked to verify."""
+    configured user_id (or None to simulate a bad token), and open_session
+    hands back a fresh session id for the linked chat's own conversation."""
 
-    def __init__(self, *, user_id: str | None) -> None:
+    def __init__(self, *, user_id: str | None, new_session: str = "ses_link") -> None:
         self._user_id = user_id
+        self._new = new_session
         self.verified: list[str] = []
+        self.opened: list[str] = []
 
     async def verify_link_token(self, *, token: str) -> str | None:
         self.verified.append(token)
         return self._user_id
 
+    async def open_session(self, *, user_id, metadata=None) -> str:
+        self.opened.append(user_id)
+        return self._new
+
 
 def test_link_binds_unmapped_chat_to_existing_account(suite_db_url: str) -> None:
-    """`/link <token>` on an unmapped chat verifies the token and maps the
-    chat to the returned user_id — so it now resolves to the same account."""
+    """`/link <token>` on an unmapped chat verifies the token, maps the chat to
+    the returned user_id, AND opens the chat its OWN session — so it joins the
+    account but keeps a separate conversation (not the account's default
+    ses_1)."""
 
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)  # usr_a mapped to chat "tg1"
+            await _seed(pool)  # usr_a mapped to chat "tg1", default = ses_1
             tg = _FakeTelegram()
-            creds = _LinkCreds(user_id="usr_a")
+            creds = _LinkCreds(user_id="usr_a", new_session="ses_link")
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
@@ -521,12 +531,17 @@ def test_link_binds_unmapped_chat_to_existing_account(suite_db_url: str) -> None
             await gw.handle_update("tg_new", "/link tok-abc")
 
             assert creds.verified == ["tok-abc"]
+            assert creds.opened == ["usr_a"]  # opened the linked chat's session
             assert tg.sent == [("tg_new", _LINK_OK)]
             async with pool.acquire() as conn:
-                resolved = await queries.resolve_user_id(
+                mapping = await queries.get_platform_mapping(
                     conn, platform="telegram", chat_id="tg_new"
                 )
-            assert resolved == "usr_a"
+                cfg = await queries.get_user_config(conn, "usr_a")
+            assert mapping is not None and mapping.user_id == "usr_a"
+            # Its OWN session, distinct from the account's default (ses_1).
+            assert mapping.session_id == "ses_link"
+            assert cfg.default_session_id == "ses_1"  # default untouched
         finally:
             await pool.close()
 
@@ -575,6 +590,120 @@ def test_link_without_token_shows_usage(suite_db_url: str) -> None:
 
             assert tg.sent == [("tg_new", _LINK_USAGE)]
             assert creds.verified == []  # never reached the router
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+async def _seed_two_chats(pool) -> None:
+    """usr_a with TWO chats, each on its OWN session: tg1->ses_1 (also the
+    user's default) and tg2->ses_2. Models a multi-channel/linked user."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "suite_platform_mappings RESTART IDENTITY"
+        )
+        await queries.create_user_config(
+            conn, user_id="usr_a", default_session_id="ses_1"
+        )
+        for chat, sid in (("tg1", "ses_1"), ("tg2", "ses_2")):
+            await queries.create_session_info(
+                conn, session_id=sid, user_id="usr_a", channel="chatbot_telegram",
+                chat_id=chat,
+            )
+            await queries.upsert_platform_mapping(
+                conn, platform="telegram", chat_id=chat, user_id="usr_a",
+                session_id=sid,
+            )
+
+
+def test_each_chat_routes_to_its_own_session(suite_db_url: str) -> None:
+    """Two chats on one account route to their OWN sessions, not the shared
+    default — a message on tg2 dispatches to ses_2 even though the user's
+    default_session_id is ses_1."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed_two_chats(pool)
+            disp = _FakeDispatcher(reply="ok")
+            gw = ChatbotGateway(
+                dispatcher=disp, pool=pool, telegram=_FakeTelegram()
+            )
+
+            await gw.handle_update("tg2", "hello from kakao-side")
+
+            # Dispatched to tg2's own session, not the default ses_1.
+            assert disp.spawns == [
+                ("orchestrator", "hello from kakao-side", "usr_a", "ses_2",
+                 "message")
+            ]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_setdefault_points_default_at_this_chats_session(suite_db_url: str) -> None:
+    """/setdefault moves the cron-fallback default to the session of the chat
+    it's issued from (tg2 -> ses_2), without touching other chats."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed_two_chats(pool)  # default starts at ses_1
+            tg = _FakeTelegram()
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool, telegram=tg
+            )
+
+            await gw.handle_update("tg2", "/setdefault")
+
+            assert tg.sent == [("tg2", _SETDEFAULT_OK)]
+            async with pool.acquire() as conn:
+                cfg = await queries.get_user_config(conn, "usr_a")
+                m1 = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg1"
+                )
+            assert cfg.default_session_id == "ses_2"  # moved to tg2's session
+            assert m1.session_id == "ses_1"  # tg1's own session unchanged
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_new_repoints_only_this_chats_session(suite_db_url: str) -> None:
+    """/new on tg2 closes tg2's OWN session (ses_2), opens a fresh one, and
+    re-points both tg2's mapping and the default — WITHOUT closing tg1's
+    session (ses_1)."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed_two_chats(pool)
+            creds = _FakeCreds(new_session="ses_2b")
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=_FakeTelegram(), credentials=creds,
+            )
+
+            await gw.handle_update("tg2", "/new")
+
+            # Closed tg2's own session only — NOT tg1's ses_1.
+            assert creds.closed == [("usr_a", "ses_2")]
+            async with pool.acquire() as conn:
+                m1 = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg1"
+                )
+                m2 = await queries.get_platform_mapping(
+                    conn, platform="telegram", chat_id="tg2"
+                )
+                cfg = await queries.get_user_config(conn, "usr_a")
+            assert m1.session_id == "ses_1"  # untouched
+            assert m2.session_id == "ses_2b"  # tg2 moved to the fresh session
+            assert cfg.default_session_id == "ses_2b"  # re-pointed (newest wins)
         finally:
             await pool.close()
 

@@ -388,23 +388,67 @@ async def resolve_user_id(
     )
 
 
+async def get_platform_mapping(
+    conn: asyncpg.Connection, *, platform: str, chat_id: str
+) -> PlatformMappingRow | None:
+    """The full mapping row — `user_id` AND the chat's current `session_id` —
+    or None for an unmapped chat. Inbound routing uses this to ride the chat's
+    OWN session, falling back to `default_session_id` when `session_id` is
+    NULL."""
+    row = await conn.fetchrow(
+        "SELECT * FROM suite_platform_mappings WHERE platform = $1 AND chat_id = $2",
+        platform,
+        chat_id,
+    )
+    return PlatformMappingRow.model_validate(dict(row)) if row else None
+
+
 async def upsert_platform_mapping(
-    conn: asyncpg.Connection, *, platform: str, chat_id: str, user_id: str
+    conn: asyncpg.Connection,
+    *,
+    platform: str,
+    chat_id: str,
+    user_id: str,
+    session_id: str | None = None,
 ) -> PlatformMappingRow:
     """Bind a channel-native chat to a user (the admin approve-registration
-    flow). Re-binding a chat updates the `user_id`."""
+    flow). Re-binding a chat updates the `user_id`. `session_id` SEEDS the
+    chat's current session but never clobbers one already set — a later
+    reconcile (which may carry a stale serviced session) must not overwrite a
+    session the chat moved to via `/new` or `/setdefault`."""
     row = await conn.fetchrow(
         """
-        INSERT INTO suite_platform_mappings (platform, chat_id, user_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (platform, chat_id) DO UPDATE SET user_id = EXCLUDED.user_id
+        INSERT INTO suite_platform_mappings (platform, chat_id, user_id, session_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (platform, chat_id) DO UPDATE SET
+            user_id = EXCLUDED.user_id,
+            session_id = COALESCE(
+                suite_platform_mappings.session_id, EXCLUDED.session_id
+            )
         RETURNING *
         """,
         platform,
         chat_id,
         user_id,
+        session_id,
     )
     return PlatformMappingRow.model_validate(dict(row))
+
+
+async def set_mapping_session_id(
+    conn: asyncpg.Connection, *, platform: str, chat_id: str, session_id: str
+) -> None:
+    """Point a chat at its current live session (unconditional). Used by
+    `/new` (the chat's fresh session) and `/link` (the linked chat's own
+    session); `/setdefault` is the inverse — it copies this onto
+    `default_session_id`."""
+    await conn.execute(
+        "UPDATE suite_platform_mappings SET session_id = $3 "
+        "WHERE platform = $1 AND chat_id = $2",
+        platform,
+        chat_id,
+        session_id,
+    )
 
 
 async def list_platform_mappings_for_user(

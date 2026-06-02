@@ -409,7 +409,8 @@ async def _seed(pool, *, chat_id="kc1", user_id="usr_k", session_id="ses_k") -> 
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
-            conn, platform="kakao", chat_id=chat_id, user_id=user_id
+            conn, platform="kakao", chat_id=chat_id, user_id=user_id,
+            session_id=session_id,
         )
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id
@@ -733,28 +734,36 @@ def test_password_command(suite_db_url: str) -> None:
 
 
 class _LinkCreds:
-    """Credentials double for the /link flow."""
+    """Credentials double for the /link flow; open_session hands the linked
+    chat its own session id."""
 
-    def __init__(self, *, user_id: str | None) -> None:
+    def __init__(self, *, user_id: str | None, new_session: str = "ses_link") -> None:
         self._user_id = user_id
+        self._new = new_session
         self.verified: list[str] = []
+        self.opened: list[str] = []
 
     async def verify_link_token(self, *, token: str) -> str | None:
         self.verified.append(token)
         return self._user_id
 
+    async def open_session(self, *, user_id, metadata=None) -> str:
+        self.opened.append(user_id)
+        return self._new
+
 
 def test_link_binds_unmapped_chat(suite_db_url: str) -> None:
-    """`/link <token>` on an unmapped Kakao chat verifies the token and maps
-    the chat to the returned user_id (the existing account, usr_k)."""
+    """`/link <token>` on an unmapped Kakao chat verifies the token, maps the
+    chat to the existing account (usr_k), AND opens it its OWN session — so it
+    keeps a separate conversation from the account's default (ses_k)."""
 
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)  # usr_k mapped to chat "kc1"
+            await _seed(pool)  # usr_k mapped to chat "kc1", default = ses_k
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-            creds = _LinkCreds(user_id="usr_k")
+            creds = _LinkCreds(user_id="usr_k", new_session="ses_link")
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(), pool=pool, client=client,
                 registry=reg, settings=_settings(), credentials=creds, redis=None,
@@ -762,12 +771,52 @@ def test_link_binds_unmapped_chat(suite_db_url: str) -> None:
             await gw.handle_job(_job(chat_id="kc_new", utterance="/link tok-abc"))
 
             assert creds.verified == ["tok-abc"]
+            assert creds.opened == ["usr_k"]
             assert client.posts[-1][1] == kg._LINK_OK_TEXT
             async with pool.acquire() as conn:
-                resolved = await queries.resolve_user_id(
+                mapping = await queries.get_platform_mapping(
                     conn, platform="kakao", chat_id="kc_new"
                 )
-            assert resolved == "usr_k"
+                cfg = await queries.get_user_config(conn, "usr_k")
+            assert mapping is not None and mapping.user_id == "usr_k"
+            assert mapping.session_id == "ses_link"  # its own session
+            assert cfg.default_session_id == "ses_k"  # default untouched
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_setdefault_points_default_at_this_chats_session(suite_db_url: str) -> None:
+    """/setdefault moves the cron-fallback default to the Kakao chat's own
+    session (kc1 -> ses_k here; default already ses_k, so assert it's set and
+    confirmed)."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)  # kc1 -> ses_k, default ses_k
+            # Point the user's default elsewhere so the move is observable.
+            async with pool.acquire() as conn:
+                await queries.create_session_info(
+                    conn, session_id="ses_other", user_id="usr_k",
+                    channel="chatbot_telegram", chat_id="tg9",
+                )
+                await queries.set_default_session_id(
+                    conn, user_id="usr_k", session_id="ses_other"
+                )
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(), pool=pool, client=client,
+                registry=reg, settings=_settings(), credentials=None, redis=None,
+            )
+            await gw.handle_job(_job(chat_id="kc1", utterance="/setdefault"))
+
+            assert client.posts[-1][1] == kg._SETDEFAULT_OK_TEXT
+            async with pool.acquire() as conn:
+                cfg = await queries.get_user_config(conn, "usr_k")
+            assert cfg.default_session_id == "ses_k"  # moved to kc1's session
         finally:
             await pool.close()
 

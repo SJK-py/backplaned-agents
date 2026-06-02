@@ -52,6 +52,9 @@
             {% if row.is_telegram %}
               <span class="rounded bg-sky-100 px-2 py-0.5 text-xs text-sky-700"
                     title="Telegram-linked — manage it from the chatbot.">Telegram</span>
+            {% elif row.is_kakao %}
+              <span class="rounded bg-yellow-100 px-2 py-0.5 text-xs text-yellow-700"
+                    title="KakaoTalk-linked — manage it from the chatbot.">KakaoTalk</span>
             {% elif row.channel %}
               <span class="rounded bg-brand-500/10 px-2 py-0.5 text-xs text-brand-500">{{ row.channel }}</span>
             {% else %}
