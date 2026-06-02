@@ -12,6 +12,7 @@ a minted PER-USER access token.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -89,6 +90,14 @@ class HttpChannelCredentials:
         self._service_access: tuple[str, datetime] | None = None
         # user_id → (refresh_token, access_token, access_expiry)
         self._user_tokens: dict[str, tuple[str, str, datetime]] = {}
+        # Serialize token refresh. The router ROTATES a refresh token on use
+        # (single-use), so two concurrent refreshes with the same token race —
+        # one wins, the other 401s. The chatbot runs concurrent callers (the
+        # Telegram + KakaoTalk approval loops, per-user ops), so a refresh
+        # must be exclusive; a second caller then reuses the freshly-cached
+        # token instead of re-refreshing.
+        self._service_lock = asyncio.Lock()
+        self._user_locks: dict[str, asyncio.Lock] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -105,46 +114,74 @@ class HttpChannelCredentials:
         resp.raise_for_status()
         return resp.json()
 
-    async def _service_token(self) -> str:
-        now = datetime.now(UTC)
+    def _service_cached(self) -> str | None:
         if self._service_access is not None:
             token, exp = self._service_access
-            if now < exp - timedelta(seconds=_TOKEN_SKEW_S):
+            if datetime.now(UTC) < exp - timedelta(seconds=_TOKEN_SKEW_S):
                 return token
-        if not self._config.service_refresh_token:
-            raise RuntimeError(
-                "channel has no service refresh token (not provisioned at "
-                "onboarding)"
-            )
-        pair = await self._refresh(self._config.service_refresh_token)
-        # Refresh rotates the token — persist the new one so the next
-        # process start / refresh uses it.
-        persist_service_token(
-            self._config,
-            refresh_token=pair["refresh_token"],
-            expires_at=pair.get("expires_at"),
-        )
-        exp = _parse_dt(pair["expires_at"])
-        self._service_access = (pair["access_token"], exp)
-        return pair["access_token"]
+        return None
 
-    async def _user_token(self, user_id: str) -> str:
-        now = datetime.now(UTC)
+    async def _service_token(self) -> str:
+        cached = self._service_cached()
+        if cached is not None:
+            return cached
+        async with self._service_lock:
+            # Double-check: a concurrent caller may have refreshed while we
+            # waited on the lock — reuse its token rather than rotate again
+            # (which would 401 the loser of the race).
+            cached = self._service_cached()
+            if cached is not None:
+                return cached
+            if not self._config.service_refresh_token:
+                raise RuntimeError(
+                    "channel has no service refresh token (not provisioned at "
+                    "onboarding)"
+                )
+            pair = await self._refresh(self._config.service_refresh_token)
+            # Refresh rotates the token — persist the new one so the next
+            # process start / refresh uses it.
+            persist_service_token(
+                self._config,
+                refresh_token=pair["refresh_token"],
+                expires_at=pair.get("expires_at"),
+            )
+            exp = _parse_dt(pair["expires_at"])
+            self._service_access = (pair["access_token"], exp)
+            return pair["access_token"]
+
+    def _user_cached(self, user_id: str) -> str | None:
         cached = self._user_tokens.get(user_id)
         if cached is not None:
             _refresh_tok, access, exp = cached
-            if now < exp - timedelta(seconds=_TOKEN_SKEW_S):
+            if datetime.now(UTC) < exp - timedelta(seconds=_TOKEN_SKEW_S):
                 return access
-            pair = await self._refresh(_refresh_tok)
-        else:
-            # Mint a fresh per-user refresh token via serviced_by rights.
-            minted = await self._mint_user_refresh(user_id)
-            pair = await self._refresh(minted)
-        exp = _parse_dt(pair["expires_at"])
-        self._user_tokens[user_id] = (
-            pair["refresh_token"], pair["access_token"], exp
-        )
-        return pair["access_token"]
+        return None
+
+    async def _user_token(self, user_id: str) -> str:
+        cached = self._user_cached(user_id)
+        if cached is not None:
+            return cached
+        lock = self._user_locks.get(user_id)
+        if lock is None:
+            lock = self._user_locks[user_id] = asyncio.Lock()
+        async with lock:
+            # Double-check after acquiring the per-user lock (same rotation
+            # race as the service token, scoped per user).
+            cached = self._user_cached(user_id)
+            if cached is not None:
+                return cached
+            stale = self._user_tokens.get(user_id)
+            if stale is not None:
+                pair = await self._refresh(stale[0])
+            else:
+                # Mint a fresh per-user refresh token via serviced_by rights.
+                minted = await self._mint_user_refresh(user_id)
+                pair = await self._refresh(minted)
+            exp = _parse_dt(pair["expires_at"])
+            self._user_tokens[user_id] = (
+                pair["refresh_token"], pair["access_token"], exp
+            )
+            return pair["access_token"]
 
     async def _mint_user_refresh(self, user_id: str) -> str:
         token = await self._service_token()
