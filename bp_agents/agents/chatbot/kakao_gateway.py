@@ -65,10 +65,9 @@ CONFIG_AGENT_ID = "config"
 CHECK_LABEL = "확인"
 STOP_LABEL = "중지"
 
-# Kakao's callback TTL is ~60s; if a pulled job is already older than this
-# (the agent was down), its callback is dead — process it park-only so the
-# user turn is recorded and answered on next touch ([kakao-channel.md] §7).
-_CALLBACK_TTL_S = 60.0
+# Safety margin subtracted from the callback's remaining TTL when sizing the
+# delivery budget, so we never start a delivery that would land right as the
+# callback expires. (The TTL itself is `settings.kakao_callback_ttl_s`.)
 _CALLBACK_MARGIN_S = 5.0
 
 # User-facing scaffolding text (Korean, matching the relay's "처리 중…").
@@ -133,6 +132,7 @@ class KakaoGateway:
         self._egress = egress
         self._pool = pool
         self._deadline = settings.kakao_callback_deadline_s
+        self._callback_ttl = settings.kakao_callback_ttl_s
         self._core = ChannelCore(
             dispatcher=dispatcher,
             pool=pool,
@@ -211,6 +211,10 @@ class KakaoGateway:
         try:
             return [(u, a) for u, a in json.loads(images_json)]
         except Exception:  # noqa: BLE001
+            logger.warning(
+                "kakao_parked_images_corrupt",
+                extra={"event": "kakao_parked_images_corrupt"},
+            )
             return []
 
     async def _deliver(self, callback_url: str, reply: TurnReply) -> None:
@@ -349,14 +353,16 @@ class KakaoGateway:
         compute.add_done_callback(lambda t: self._schedule_park(chat_id, t))
 
     def _callback_budget(self, body: dict) -> float:
-        """Seconds we may spend before the callback dies: the deadline,
-        capped by the callback's remaining TTL given when the relay enqueued
-        it. ≤0 means the callback is already (near) dead → park-only."""
+        """Seconds we may spend before the callback dies: the configured
+        deadline, capped by the callback's remaining TTL given when the relay
+        enqueued it (`received_at`, epoch ms). ≤0 means the callback is
+        already (near) dead → park-only. A missing `received_at` (the relay
+        always sets it) is treated as already-stale, the safe default."""
         received_at = body.get("received_at")
         if not received_at:
-            return self._deadline
+            return 0.0
         age = max(0.0, time.time() - float(received_at) / 1000.0)
-        return min(self._deadline, _CALLBACK_TTL_S - _CALLBACK_MARGIN_S - age)
+        return min(self._deadline, self._callback_ttl - _CALLBACK_MARGIN_S - age)
 
     def _schedule_park(self, chat_id: str, task: asyncio.Task) -> None:
         """Done-callback (sync) → schedule the async park of a finished turn."""
@@ -387,7 +393,6 @@ class KakaoGateway:
         """Run one turn through ChannelCore under the session lock and return
         the user-facing reply (+ any outbound images). Delivery (now vs
         parked) is the caller's call."""
-        reply = ""
         image_url = body.get("image_url")
         async with self._core.session_lock(session_id):
             dest, mode = await self._core.route(session_id)

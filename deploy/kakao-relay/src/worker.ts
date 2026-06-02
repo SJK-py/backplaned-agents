@@ -67,11 +67,22 @@ export default {
       return new Response("bad request", { status: 400 });
     }
 
+    const chatId = p?.userRequest?.user?.id;
+    const callbackUrl = p?.userRequest?.callbackUrl; // ⚠ verify field (design §16)
+    if (!chatId || !callbackUrl) {
+      // No user id / callback → the agent couldn't route or reply; don't
+      // enqueue a guaranteed-dead job. Answer the webhook synchronously.
+      return Response.json({
+        version: "2.0",
+        template: { outputs: [{ simpleText: { text: "처리할 수 없는 요청이에요." } }] },
+      });
+    }
+
     const job: KakaoJob = {
-      chat_id: p?.userRequest?.user?.id,
+      chat_id: chatId,
       utterance: p?.userRequest?.utterance ?? "",
       image_url: extractImage(p),
-      callback_url: p?.userRequest?.callbackUrl, // ⚠ verify field (design §16)
+      callback_url: callbackUrl,
       received_at: Date.now(),
     };
     await env.KAKAO_JOBS.send(job);
