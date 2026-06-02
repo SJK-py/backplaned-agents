@@ -62,15 +62,24 @@ class KakaoTaskRegistry:
 
     # -- in-flight / parked turn ----------------------------------------
 
-    async def set_inflight(self, chat_id: str, user_id: str, task_id: str) -> None:
-        """Record a freshly-spawned turn as pending (clears any prior state)."""
+    async def try_begin(self, chat_id: str) -> bool:
+        """Atomically claim the chat for a new turn: create the `pending`
+        marker only if no turn exists. Returns True if claimed, False if a
+        turn is already in flight (or a result is parked) for this chat —
+        the race-free "one turn per chat" gate, safe under concurrent
+        consumers. `HSETNX` is the atomic primitive (single-field create)."""
+        key = self._turn_key(chat_id)
+        created = await self._r.hsetnx(key, "state", "pending")
+        if created:
+            await self._r.expire(key, self._ttl)
+        return bool(created)
+
+    async def set_task(self, chat_id: str, user_id: str, task_id: str) -> None:
+        """Attach the spawned router task to the already-claimed pending turn
+        (so `[중지]` can cancel it)."""
         key = self._turn_key(chat_id)
         async with self._r.pipeline(transaction=True) as pipe:
-            pipe.delete(key)
-            pipe.hset(
-                key,
-                mapping={"state": "pending", "user_id": user_id, "task_id": task_id},
-            )
+            pipe.hset(key, mapping={"user_id": user_id, "task_id": task_id})
             pipe.expire(key, self._ttl)
             await pipe.execute()
 
@@ -84,29 +93,59 @@ class KakaoTaskRegistry:
         the cancel parks nothing (they already saw the stop ack)."""
         await self._r.hset(self._turn_key(chat_id), "stopped", "1")
 
-    async def store_ready(
+    async def store_ready_unless_stopped(
         self, chat_id: str, result: str, images: str = ""
-    ) -> None:
-        """Park a completed turn's answer (text + optional JSON-encoded image
-        list) for the next touch to deliver."""
+    ) -> bool:
+        """Park a completed turn's answer for the next touch — but ONLY if the
+        turn still exists and wasn't `/stop`'d. Atomic via WATCH/MULTI so a
+        concurrent `[중지]` (`mark_stopped`) or `/new` (`clear`) can't be lost
+        and an answer can't resurrect a turn the user abandoned. Returns True
+        if parked, False if the turn was stopped/cleared underneath."""
+        try:
+            from redis.exceptions import WatchError  # noqa: PLC0415
+        except Exception:  # pragma: no cover — redis present when a client is
+            WatchError = ()  # type: ignore[assignment, misc]
         key = self._turn_key(chat_id)
-        async with self._r.pipeline(transaction=True) as pipe:
-            pipe.hset(
-                key, mapping={"state": "ready", "result": result, "images": images}
-            )
-            pipe.hdel(key, "task_id")
-            pipe.expire(key, self._ttl)
-            await pipe.execute()
+        async with self._r.pipeline() as pipe:
+            try:
+                await pipe.watch(key)
+                data = _decode_map(await pipe.hgetall(key))
+                if not data or data.get("stopped"):
+                    await pipe.unwatch()
+                    return False
+                pipe.multi()
+                pipe.hset(
+                    key, mapping={"state": "ready", "result": result, "images": images}
+                )
+                pipe.hdel(key, "task_id")
+                pipe.expire(key, self._ttl)
+                await pipe.execute()
+                return True
+            except WatchError:
+                return False
 
     async def take_ready(self, chat_id: str) -> tuple[str, str] | None:
-        """Pop a parked answer `(text, images_json)` if one is ready, else
-        None (clears it on take)."""
+        """Atomically pop a parked answer `(text, images_json)` if one is
+        ready, else None. WATCH/MULTI so two concurrent next-touch deliveries
+        can't both pop the same answer (double-deliver)."""
+        try:
+            from redis.exceptions import WatchError  # noqa: PLC0415
+        except Exception:  # pragma: no cover
+            WatchError = ()  # type: ignore[assignment, misc]
         key = self._turn_key(chat_id)
-        data = _decode_map(await self._r.hgetall(key))
-        if data.get("state") == "ready":
-            await self._r.delete(key)
-            return data.get("result", ""), data.get("images", "")
-        return None
+        async with self._r.pipeline() as pipe:
+            try:
+                await pipe.watch(key)
+                data = _decode_map(await pipe.hgetall(key))
+                if data.get("state") != "ready":
+                    await pipe.unwatch()
+                    return None
+                pipe.multi()
+                pipe.delete(key)
+                await pipe.execute()
+                return data.get("result", ""), data.get("images", "")
+            except WatchError:
+                return None
 
     async def clear(self, chat_id: str) -> None:
         await self._r.delete(self._turn_key(chat_id))
