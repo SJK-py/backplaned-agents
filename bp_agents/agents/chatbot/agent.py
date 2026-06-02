@@ -75,6 +75,7 @@ _cron_task: asyncio.Task | None = None
 _kakao: HttpKakaoClient | None = None
 _kakao_gateway: KakaoGateway | None = None
 _kakao_task: asyncio.Task | None = None
+_kakao_approval_task: asyncio.Task | None = None
 _inflight: set[asyncio.Task] = set()
 
 
@@ -144,7 +145,7 @@ async def _startup() -> None:
     # Redis is required: the deadline/next-touch registry (next PR) is
     # Redis-backed, so the gate is declared now — enabling Kakao without
     # Redis fails loudly rather than half-working.
-    global _kakao, _kakao_gateway, _kakao_task  # noqa: PLW0603
+    global _kakao, _kakao_gateway, _kakao_task, _kakao_approval_task  # noqa: PLW0603
     if _kakao_configured(_settings) and _redis is not None:
         _kakao = HttpKakaoClient(_settings)
         # Outbound images go to R2 (presigned urls) when configured; inbound
@@ -163,6 +164,16 @@ async def _startup() -> None:
         _kakao_task = asyncio.create_task(
             kakao_consume_loop(_kakao_gateway, _kakao, _settings, _stop)
         )
+        # Reconcile admin-approved KakaoTalk registrations into
+        # suite_platform_mappings(platform='kakao') — a second approval loop
+        # for the kakao channel (the telegram one above is separate).
+        if _credentials is not None:
+            _kakao_approval_task = asyncio.create_task(
+                approval_poll_loop(
+                    credentials=_credentials, pool=_pool, settings=_settings,
+                    stop=_stop, channel="chatbot_kakao", platform="kakao",
+                )
+            )
     elif _kakao_configured(_settings):
         logger.warning(
             "kakao_redis_required", extra={"event": "kakao_redis_required"}
@@ -210,7 +221,9 @@ async def _startup() -> None:
 @agent.on_shutdown
 async def _shutdown() -> None:
     _stop.set()
-    for t in (_poll_task, _approval_task, _cron_task, _kakao_task):
+    for t in (
+        _poll_task, _approval_task, _cron_task, _kakao_task, _kakao_approval_task
+    ):
         if t is not None:
             t.cancel()
     for t in list(_inflight):

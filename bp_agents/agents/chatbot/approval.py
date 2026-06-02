@@ -31,11 +31,19 @@ CHANNEL = "chatbot_telegram"
 
 
 async def reconcile_serviced_sessions(
-    pool: asyncpg.Pool, records: list[ServicedSession], *, settings: SuiteSettings
+    pool: asyncpg.Pool,
+    records: list[ServicedSession],
+    *,
+    settings: SuiteSettings,
+    platform: str = PLATFORM,
+    channel: str = CHANNEL,
 ) -> int:
     """Write the suite-side identity for each discovered session. Returns
     the count of newly-mapped chats (an already-mapped chat is a no-op).
     Idempotent — safe to call repeatedly with overlapping records.
+
+    `platform`/`channel` default to Telegram but are parametrized so the
+    same reconcile serves the KakaoTalk channel (`kakao`/`chatbot_kakao`).
 
     A first-time `user_config` row seeds its per-tier LLM presets from
     `settings.default_preset_*` (`SUITE_DEFAULT_PRESET_{PRO,BALANCED,LITE,
@@ -47,10 +55,10 @@ async def reconcile_serviced_sessions(
             continue
         async with pool.acquire() as conn:
             existing = await queries.resolve_user_id(
-                conn, platform=PLATFORM, chat_id=rec.external_id
+                conn, platform=platform, chat_id=rec.external_id
             )
             await queries.upsert_platform_mapping(
-                conn, platform=PLATFORM, chat_id=rec.external_id,
+                conn, platform=platform, chat_id=rec.external_id,
                 user_id=rec.user_id,
             )
             # Seeds default_session_id + per-tier presets on first create;
@@ -64,7 +72,7 @@ async def reconcile_serviced_sessions(
             )
             await queries.create_session_info(
                 conn, session_id=rec.session_id, user_id=rec.user_id,
-                channel=CHANNEL, chat_id=rec.external_id,
+                channel=channel, chat_id=rec.external_id,
             )
         if existing is None:
             newly_mapped += 1
@@ -86,23 +94,29 @@ async def approval_poll_loop(
     settings: SuiteSettings,
     stop: asyncio.Event,
     interval_s: float = 30.0,
+    channel: str = CHANNEL,
+    platform: str = PLATFORM,
 ) -> None:
-    """Poll `serviced-sessions` on an interval and reconcile new ones. The
-    cursor is in-memory (advances past the newest seen `opened_at`); a
-    restart re-lists from scratch, which is safe because reconcile is
-    idempotent."""
+    """Poll `serviced-sessions` for `channel` on an interval and reconcile new
+    ones into `platform` mappings. The cursor is in-memory (advances past the
+    newest seen `opened_at`); a restart re-lists from scratch, which is safe
+    because reconcile is idempotent. Run one loop per channel."""
     cursor: datetime | None = None
     while not stop.is_set():
         try:
             records = await credentials.list_serviced_sessions(
-                channel=CHANNEL, since=cursor
+                channel=channel, since=cursor
             )
             if records:
-                await reconcile_serviced_sessions(pool, records, settings=settings)
+                await reconcile_serviced_sessions(
+                    pool, records, settings=settings,
+                    platform=platform, channel=channel,
+                )
                 cursor = max(r.opened_at for r in records)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "approval_poll_error", extra={"event": "approval_poll_error"}
+                "approval_poll_error",
+                extra={"event": "approval_poll_error", "channel": channel},
             )
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)

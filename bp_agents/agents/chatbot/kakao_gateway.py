@@ -34,6 +34,7 @@ from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
 from bp_agents.channel import ChannelCore, agent_tag
 from bp_agents.db import queries
+from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
     import asyncpg
@@ -57,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 PLATFORM = "kakao"
 CHANNEL = "chatbot_kakao"
+CONFIG_AGENT_ID = "config"
 
 # Quick-reply button labels (also the `messageText` they echo back as the
 # next utterance).
@@ -91,13 +93,20 @@ _REGISTER_SUBMITTED_TEXT = (
 )
 _REGISTER_FAILED_TEXT = "등록 요청에 실패했어요. 다시 시도해 주세요."
 _NEW_STARTED_TEXT = "새 대화를 시작했어요."
+_DONE_TEXT = "완료했어요."
 _UNKNOWN_CMD_TEXT = "지원하지 않는 명령이에요. /help 를 입력해 보세요."
+_PASSWORD_INTRO = "비밀번호 설정용 일회용 토큰이에요 (곧 만료됩니다):"
 HELP_TEXT = (
     "개인 비서예요. 메시지를 보내면 도와드릴게요.\n\n"
     "명령어:\n"
     "/register — 접근 요청 (관리자 승인)\n"
     "/new — 새 대화 시작\n"
     "/stop — 진행 중인 작업 중지\n"
+    "/config — 설정 보기/변경\n"
+    "/cron — 예약 작업 관리\n"
+    "/delegate <에이전트> — 전문 에이전트에게 위임\n"
+    "/undelegate — 기본 비서로 복귀\n"
+    "/password — 웹 비밀번호 설정 링크 받기\n"
     "/help — 명령어 보기"
 )
 
@@ -174,7 +183,7 @@ class KakaoGateway:
             if utterance in (CHECK_LABEL, STOP_LABEL):
                 await self._handle_poll(chat_id, callback_url, utterance)
             elif utterance.startswith("/"):
-                await self._handle_command(chat_id, callback_url, utterance)
+                await self._handle_command(chat_id, callback_url, utterance, body)
             else:
                 await self._handle_message(chat_id, callback_url, utterance, body)
         except Exception:  # noqa: BLE001
@@ -253,40 +262,40 @@ class KakaoGateway:
 
     # -- normal message → turn lifecycle --------------------------------
 
-    async def _handle_message(
-        self, chat_id: str, callback_url: str, text: str, body: dict
-    ) -> None:
-        # A ready answer takes priority: deliver it on this callback.
+    async def _guard_busy(self, chat_id: str, callback_url: str) -> bool:
+        """One turn per chat. Returns True (caller should stop) if a parked
+        answer was delivered on this callback, or a turn is still pending."""
         if await self._deliver_ready(chat_id, callback_url):
-            return
+            return True
         turn = await self._registry.get_turn(chat_id)
         if turn and turn.get("state") == "pending":
-            # One turn per chat — don't start a second alongside the running one.
             await self._client.post_callback(
                 callback_url, _STILL_WORKING_TEXT, quick_replies=self._poll_buttons()
             )
-            return
+            return True
+        return False
 
+    async def _handle_message(
+        self, chat_id: str, callback_url: str, text: str, body: dict
+    ) -> None:
+        if await self._guard_busy(chat_id, callback_url):
+            return
         resolved = await self._resolve_session(chat_id, callback_url)
         if resolved is None:
             return  # register / no-session prompt already sent
         user_id, session_id = resolved
-        await self._run_turn(chat_id, callback_url, user_id, session_id, text, body)
-
-    async def _run_turn(
-        self,
-        chat_id: str,
-        callback_url: str,
-        user_id: str,
-        session_id: str,
-        text: str,
-        body: dict,
-    ) -> None:
-        """Start the turn and race it against the callback budget: deliver
-        in-time, otherwise post a status + park for the next touch."""
-        compute = asyncio.create_task(
-            self._compute_turn(chat_id, user_id, session_id, text, body)
+        await self._run_compute(
+            chat_id, callback_url, body,
+            self._compute_turn(chat_id, user_id, session_id, text, body),
         )
+
+    async def _run_compute(
+        self, chat_id: str, callback_url: str, body: dict, coro: Any
+    ) -> None:
+        """Run a TurnReply-producing coroutine, racing it against the callback
+        budget: deliver in-time, otherwise post a status + park for the next
+        touch. Shared by normal turns and dispatching commands."""
+        compute = asyncio.create_task(coro)
         self._turns.add(compute)
         compute.add_done_callback(self._turns.discard)
 
@@ -302,8 +311,7 @@ class KakaoGateway:
                 reply = compute.result()
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "kakao_turn_error",
-                    extra={"event": "kakao_turn_error", "bp.session_id": session_id},
+                    "kakao_turn_error", extra={"event": "kakao_turn_error"}
                 )
                 await self._client.post_callback(callback_url, _DISPATCH_FAILED_TEXT)
                 return
@@ -387,6 +395,33 @@ class KakaoGateway:
         self._core.fire_memory_add(user_id, session_id, text, reply)
         self._core.fire_name_session(user_id, session_id, text)
         return TurnReply(reply_text, images)
+
+    @staticmethod
+    async def _reply_only(coro: Any) -> TurnReply:
+        """Wrap a coroutine that returns a plain message string as a
+        (text, no-images) TurnReply, so command messages reuse the same
+        deadline/park delivery path."""
+        return TurnReply(await coro, [])
+
+    async def _compute_command(
+        self, chat_id: str, user_id: str, session_id: str,
+        dest: str, mode: str, prompt: str,
+    ) -> TurnReply:
+        """Dispatch a slash command to an agent (config / cron), bypassing the
+        orchestrator and the conversation thread (no history, no summarize,
+        no memory) — mirrors ChatbotGateway._cmd_agent but returns a
+        TurnReply for the shared deadline/park path."""
+        task_id = await self._core.spawn(user_id, session_id, dest, mode, prompt)
+        await self._registry.set_inflight(chat_id, user_id, task_id)
+        result = await self._core.await_result(task_id)
+        if result.status != TaskStatus.SUCCEEDED:
+            logger.warning(
+                "kakao_command_task_failed",
+                extra={"event": "kakao_command_task_failed", "mode": mode},
+            )
+            return TurnReply(_DISPATCH_FAILED_TEXT, [])
+        reply = (result.output.content if result.output else "") or _DONE_TEXT
+        return TurnReply(reply, [])
 
     async def _save_inbound_image(
         self, user_id: str, session_id: str, dest: str, image_url: str
@@ -484,7 +519,7 @@ class KakaoGateway:
         return user_id, session_id
 
     async def _handle_command(
-        self, chat_id: str, callback_url: str, text: str
+        self, chat_id: str, callback_url: str, text: str, body: dict
     ) -> None:
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
@@ -497,10 +532,94 @@ class KakaoGateway:
             await self._cmd_new(chat_id, callback_url)
         elif cmd == "/stop":
             await self._stop(chat_id, callback_url)
+        elif cmd == "/config":
+            await self._cmd_agent(
+                chat_id, callback_url, body, CONFIG_AGENT_ID, "message",
+                arg or "Show my current settings.",
+            )
+        elif cmd == "/cron":
+            await self._cmd_agent(
+                chat_id, callback_url, body, CONFIG_AGENT_ID, "cron",
+                arg or "List my scheduled jobs.",
+            )
+        elif cmd == "/delegate":
+            await self._cmd_delegate(chat_id, callback_url, body, arg)
+        elif cmd == "/undelegate":
+            await self._cmd_undelegate(chat_id, callback_url, body)
+        elif cmd == "/password":
+            await self._cmd_password(chat_id, callback_url)
         else:
-            # /config, /cron, /delegate, /undelegate, /password land with the
-            # registration-polish PR; surface a clear notice until then.
             await self._client.post_callback(callback_url, _UNKNOWN_CMD_TEXT)
+
+    async def _cmd_agent(
+        self, chat_id: str, callback_url: str, body: dict,
+        dest: str, mode: str, prompt: str,
+    ) -> None:
+        """Route /config·/cron to an agent and relay its reply (deadline/park
+        aware). Bypasses the orchestrator + conversation thread."""
+        if await self._guard_busy(chat_id, callback_url):
+            return
+        resolved = await self._resolve_session(chat_id, callback_url)
+        if resolved is None:
+            return
+        user_id, session_id = resolved
+        await self._run_compute(
+            chat_id, callback_url, body,
+            self._compute_command(chat_id, user_id, session_id, dest, mode, prompt),
+        )
+
+    async def _cmd_delegate(
+        self, chat_id: str, callback_url: str, body: dict, arg: str
+    ) -> None:
+        if await self._guard_busy(chat_id, callback_url):
+            return
+        resolved = await self._resolve_session(chat_id, callback_url)
+        if resolved is None:
+            return
+        user_id, session_id = resolved
+        target = arg.split(maxsplit=1)[0] if arg.split(maxsplit=1) else ""
+        await self._run_compute(
+            chat_id, callback_url, body,
+            self._reply_only(self._core.delegate(user_id, session_id, target)),
+        )
+
+    async def _cmd_undelegate(
+        self, chat_id: str, callback_url: str, body: dict
+    ) -> None:
+        if await self._guard_busy(chat_id, callback_url):
+            return
+        resolved = await self._resolve_session(chat_id, callback_url)
+        if resolved is None:
+            return
+        user_id, session_id = resolved
+        await self._run_compute(
+            chat_id, callback_url, body,
+            self._reply_only(self._core.undelegate(user_id, session_id)),
+        )
+
+    async def _cmd_password(self, chat_id: str, callback_url: str) -> None:
+        """Mint a one-time password-setup token (fast — no dispatch)."""
+        user_id = await self._resolve_user(chat_id)
+        if user_id is None:
+            await self._client.post_callback(callback_url, _REGISTER_PROMPT)
+            return
+        if self._credentials is None:
+            await self._client.post_callback(callback_url, _UNAVAILABLE_TEXT)
+            return
+        try:
+            token = await self._credentials.mint_password_reset_token(user_id=user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_password_mint_failed",
+                extra={"event": "kakao_password_mint_failed"},
+            )
+            await self._client.post_callback(
+                callback_url, "비밀번호 설정 링크 생성에 실패했어요. 다시 시도해 주세요."
+            )
+            return
+        await self._client.post_callback(
+            callback_url, f"{_PASSWORD_INTRO}\n{token}"
+        )
 
     async def _cmd_register(
         self, chat_id: str, callback_url: str, email_arg: str

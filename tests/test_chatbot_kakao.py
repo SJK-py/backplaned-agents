@@ -644,3 +644,147 @@ def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
             await pool.close()
 
     asyncio.run(_drive())
+
+
+# --- PR4: remaining commands + registration reconcile ------------------
+
+from datetime import UTC, datetime  # noqa: E402
+
+from bp_agents.agents.chatbot import approval as kapproval  # noqa: E402
+from bp_agents.agents.chatbot.credentials import ServicedSession  # noqa: E402
+
+
+class _CredsForCmds:
+    """Minimal credentials for the command tests."""
+
+    def __init__(self, *, token="pw-token-123") -> None:
+        self.token = token
+
+    async def mint_password_reset_token(self, *, user_id):
+        return self.token
+
+
+def test_help_and_unknown_command() -> None:
+    async def _drive() -> None:
+        reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+        client = _RecordingClient()
+        gw = _poll_gateway(client, reg)
+        await gw.handle_job(_job(utterance="/help"))
+        await gw.handle_job(_job(msg_id="m2", utterance="/wat"))
+        assert client.posts[0][1] == kg.HELP_TEXT
+        assert client.posts[1][1] == kg._UNKNOWN_CMD_TEXT
+
+    asyncio.run(_drive())
+
+
+def test_password_command(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(), pool=pool, client=client,
+                registry=reg, settings=_settings(),
+                credentials=_CredsForCmds(token="tok-xyz"), redis=None,
+            )
+            await gw.handle_job(_job(utterance="/password"))
+            assert "tok-xyz" in client.posts[-1][1]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_config_command_dispatches_to_config_agent(suite_db_url: str) -> None:
+    class _ConfigDispatcher(_FakeDispatcher):
+        def __init__(self) -> None:
+            super().__init__(reply="your settings: ...")
+            self.spawns: list[tuple] = []
+
+        async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+            self.spawns.append((dest, mode, getattr(payload, "prompt", None)))
+            return await super().spawn_root_for_user(
+                dest, payload, user_id=user_id, session_id=session_id, mode=mode
+            )
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            disp = _ConfigDispatcher()
+            gw = KakaoGateway(
+                dispatcher=disp, pool=pool, client=client, registry=reg,
+                settings=_settings(), credentials=None, redis=None,
+            )
+            await gw.handle_job(_job(utterance="/config"))
+            assert ("config", "message") == disp.spawns[0][:2]
+            assert client.posts[-1][1] == "your settings: ..."
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_delegate_and_reject(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(reply="summary"), pool=pool,
+                client=client, registry=reg, settings=_settings(),
+                credentials=None, redis=None,
+            )
+            # unknown target → rejected, no state change
+            await gw.handle_job(_job(utterance="/delegate nope"))
+            assert "delegate" in client.posts[-1][1].lower()
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_k")
+            assert info.delegated_to is None
+
+            # valid target (research is in the default allow-list)
+            await gw.handle_job(_job(msg_id="m2", utterance="/delegate research"))
+            async with pool.acquire() as conn:
+                info = await queries.get_session_info(conn, "ses_k")
+            assert info.delegated_to == "research"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "suite_platform_mappings RESTART IDENTITY"
+                )
+            rec = ServicedSession(
+                user_id="usr_k2", session_id="ses_k2", external_id="kchat2",
+                channel="chatbot_kakao", opened_at=datetime.now(UTC),
+            )
+            n = await kapproval.reconcile_serviced_sessions(
+                pool, [rec], settings=_settings(),
+                platform="kakao", channel="chatbot_kakao",
+            )
+            assert n == 1
+            async with pool.acquire() as conn:
+                uid = await queries.resolve_user_id(
+                    conn, platform="kakao", chat_id="kchat2"
+                )
+                info = await queries.get_session_info(conn, "ses_k2")
+            assert uid == "usr_k2"
+            assert info.channel == "chatbot_kakao"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
