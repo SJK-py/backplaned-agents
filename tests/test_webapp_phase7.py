@@ -103,8 +103,8 @@ def test_telegram_session_shows_one_time_note(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
     html = _chat(suite_db_url, "ses_tg")
     assert "started on Telegram" in html
-    # Per-session, per-browser dismissal via localStorage.
-    assert "tgnote:ses_tg" in html
+    # Per-session, per-browser dismissal via localStorage (channel-agnostic key).
+    assert "chatnote:ses_tg" in html
     assert "Dismiss" in html
 
 

@@ -107,6 +107,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("cron", "manage scheduled reminders/tasks"),
     ("delegate", "hand this chat to a specialist (e.g. /delegate research)"),
     ("undelegate", "return to the main assistant"),
+    ("setdefault", "make this chat's conversation your default for reminders"),
     ("password", "get a one-time link to set a web password"),
     ("v", "verbose: prefix a message to see step-by-step progress"),
     ("help", "show the command list"),
@@ -127,10 +128,17 @@ _LINK_USAGE = (
     "token by sending /password from a chat that's already linked (or the "
     "web app)."
 )
-_LINK_OK = "Linked — this chat now uses your existing account."
+_LINK_OK = (
+    "Linked — this chat now uses your existing account, with its own "
+    "conversation here (separate from your other chats)."
+)
 _LINK_INVALID = (
     "That token is invalid or expired. Mint a fresh one with /password and "
     "try again."
+)
+_SETDEFAULT_OK = (
+    "Done — this chat's conversation is now your default. Scheduled reminders "
+    "and out-of-band messages will arrive here."
 )
 _REGISTER_SUBMITTED = (
     "Thanks — your registration request was submitted. An administrator "
@@ -225,18 +233,11 @@ class ChatbotGateway:
         if not text and not attachments:
             return
 
-        async with self._pool.acquire() as conn:
-            user_id = await queries.resolve_user_id(
-                conn, platform=PLATFORM, chat_id=chat_id
-            )
-            if user_id is None:
-                await self._telegram.send_message(
-                    chat_id=chat_id, text=REGISTER_PROMPT
-                )
-                return
-            cfg = await queries.get_user_config(conn, user_id)
-
-        session_id = cfg.default_session_id if cfg else None
+        resolved = await self._resolve_chat(chat_id)
+        if resolved is None:
+            await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
+            return
+        user_id, cfg, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
@@ -273,6 +274,8 @@ class ChatbotGateway:
             await self._cmd_delegate(chat_id, arg)
         elif cmd == "/undelegate":
             await self._cmd_undelegate(chat_id)
+        elif cmd == "/setdefault":
+            await self._cmd_setdefault(chat_id)
         else:
             await self._telegram.send_message(
                 chat_id=chat_id,
@@ -284,13 +287,11 @@ class ChatbotGateway:
     ) -> None:
         """Route a slash command to an agent (config / cron), bypassing the
         orchestrator and the conversation thread, and relay the reply."""
-        user_id = await self._resolve_user(chat_id)
-        if user_id is None:
+        resolved = await self._resolve_chat(chat_id)
+        if resolved is None:
             await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
             return
-        async with self._pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-        session_id = cfg.default_session_id if cfg else None
+        user_id, _cfg, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
@@ -324,16 +325,32 @@ class ChatbotGateway:
     # ([delegation.md] §6: the deterministic, channel-driven path).
     # ------------------------------------------------------------------
 
+    async def _resolve_chat(
+        self, chat_id: str
+    ) -> tuple[str, Any, str | None] | None:
+        """`(user_id, cfg, session_id)` for a registered chat, or None if the
+        chat is unmapped. `session_id` is the chat's OWN current session
+        (`mapping.session_id`), falling back to the user's `default_session_id`
+        (the cron fallback) only until the chat has one of its own; it may
+        still be None when the user has no session at all."""
+        async with self._pool.acquire() as conn:
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+            if mapping is None:
+                return None
+            cfg = await queries.get_user_config(conn, mapping.user_id)
+        session_id = mapping.session_id or (cfg.default_session_id if cfg else None)
+        return mapping.user_id, cfg, session_id
+
     async def _resolve_session(self, chat_id: str) -> tuple[str, str] | None:
         """`(user_id, session_id)` for a registered chat, or None after
         sending the appropriate prompt."""
-        user_id = await self._resolve_user(chat_id)
-        if user_id is None:
+        resolved = await self._resolve_chat(chat_id)
+        if resolved is None:
             await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
             return None
-        async with self._pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-        session_id = cfg.default_session_id if cfg else None
+        user_id, _cfg, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return None
@@ -355,6 +372,27 @@ class ChatbotGateway:
         user_id, session_id = resolved
         msg = await self._core.undelegate(user_id, session_id)
         await self._telegram.send_message(chat_id=chat_id, text=msg)
+
+    async def _cmd_setdefault(self, chat_id: str) -> None:
+        """Point the user's `default_session_id` (the cron fallback / async
+        delivery target) at THIS chat's current session. For a multi-channel
+        user this picks which channel's conversation reminders land in."""
+        async with self._pool.acquire() as conn:
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+            if mapping is None:
+                await self._telegram.send_message(
+                    chat_id=chat_id, text=REGISTER_PROMPT
+                )
+                return
+            if mapping.session_id is None:
+                await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
+                return
+            await queries.set_default_session_id(
+                conn, user_id=mapping.user_id, session_id=mapping.session_id
+            )
+        await self._telegram.send_message(chat_id=chat_id, text=_SETDEFAULT_OK)
 
     async def _resolve_user(self, chat_id: str) -> str | None:
         async with self._pool.acquire() as conn:
@@ -395,8 +433,9 @@ class ChatbotGateway:
         """Bind this (unmapped) chat to a pre-existing account by verifying a
         password-reset token minted on a channel the user is already on
         ([channel.md] §6). The token proves ownership; on success we map
-        (PLATFORM, chat_id) → the returned user_id, so this chat shares the
-        account's sessions/memory."""
+        (PLATFORM, chat_id) → the returned user_id and open a fresh session for
+        THIS chat, so it shares the account (memory/files) but keeps its own
+        conversation instead of interleaving into another channel's thread."""
         if await self._resolve_user(chat_id) is not None:
             await self._telegram.send_message(
                 chat_id=chat_id, text=_ALREADY_REGISTERED
@@ -424,6 +463,33 @@ class ChatbotGateway:
             await queries.upsert_platform_mapping(
                 conn, platform=PLATFORM, chat_id=chat_id, user_id=user_id
             )
+        # Open this chat's OWN session so it doesn't land in the account's
+        # other-channel conversation. Best-effort: if it fails, the mapping
+        # stands and the chat falls back to the default until its first /new.
+        try:
+            new_session = await self._credentials.open_session(
+                user_id=user_id,
+                metadata={"kind": CHANNEL, "external_id": chat_id},
+            )
+            async with self._pool.acquire() as conn:
+                await queries.create_session_info(
+                    conn, session_id=new_session, user_id=user_id,
+                    channel=CHANNEL, chat_id=chat_id,
+                )
+                await queries.set_mapping_session_id(
+                    conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
+                )
+                # Adopt it as the cron fallback only if the account has none.
+                cfg = await queries.get_user_config(conn, user_id)
+                if cfg is None or cfg.default_session_id is None:
+                    await queries.set_default_session_id(
+                        conn, user_id=user_id, session_id=new_session,
+                    )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "link_open_session_failed",
+                extra={"event": "link_open_session_failed"},
+            )
         await self._telegram.send_message(chat_id=chat_id, text=_LINK_OK)
 
     async def _cmd_new(self, chat_id: str) -> None:
@@ -436,14 +502,16 @@ class ChatbotGateway:
         if self._credentials is None:
             await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
             return
-        # Retire the previous conversation: close it on the router (archive)
-        # and release its channel-origin flag so the webapp can reopen/remove
-        # it ([webapp.md] §4). Best-effort — a failure here must not block
-        # starting the new conversation.
-        prev_session = None
+        # Retire THIS chat's previous conversation (its own session, NOT the
+        # shared default — another channel may be using that): close it on the
+        # router (archive) and release its channel-origin flag so the webapp
+        # can reopen/remove it ([webapp.md] §4). Best-effort — a failure here
+        # must not block starting the new conversation.
         async with self._pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-            prev_session = cfg.default_session_id if cfg else None
+            mapping = await queries.get_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id
+            )
+        prev_session = mapping.session_id if mapping else None
         if prev_session is not None:
             try:
                 await self._credentials.close_session(
@@ -467,6 +535,11 @@ class ChatbotGateway:
             await queries.create_session_info(
                 conn, session_id=new_session, user_id=user_id,
                 channel=CHANNEL, chat_id=chat_id,
+            )
+            # This chat now rides the fresh session; it also becomes the cron
+            # fallback (the re-pointing rule — the newest conversation wins).
+            await queries.set_mapping_session_id(
+                conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
             )
             await queries.set_default_session_id(
                 conn, user_id=user_id, session_id=new_session

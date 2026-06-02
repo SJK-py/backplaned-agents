@@ -20,12 +20,13 @@ Each inbound message spawns a per-message handler task (tracked for graceful shu
 ## 2. Identity resolution
 
 ```
-chat_id ──(suite_platform_mappings)──▶ user_id ──(user_config.default_session_id)──▶ session_id
+chat_id ──(suite_platform_mappings)──▶ user_id + the chat's own session_id
+                                       (falls back to user_config.default_session_id)
 ```
 
 - `suite_platform_mappings(platform, chat_id) → user_id` is populated by the **admin approve-registration** flow ([overview §2.1](./overview.md)).
-- The chat's active session is the user's `default_session_id`; `/new` rotates it.
-- An **unmapped** chat gets the `/register` prompt. `/register` submits `POST /v1/registrations` as the channel's service principal (`usr_service_{agent_id}`, §3); on admin approval the router creates the user with `serviced_by=[usr_service_{agent_id}]` and opens the initial session (the `default_session_id` seed).
+- Each chat's active session is its **own** `suite_platform_mappings.session_id`; `/new` rotates *this chat's* session. A user with multiple chats (e.g. Telegram + KakaoTalk linked to one account via `/link`) keeps a separate conversation per chat — they don't interleave. `user_config.default_session_id` is the shared **cron fallback** ([cron.md](./cron.md)); it's re-pointed by `/new` (newest conversation wins) and explicitly by `/setdefault`, and a chat falls back to it only until it has a session of its own.
+- An **unmapped** chat gets the `/register` prompt. `/register` submits `POST /v1/registrations` as the channel's service principal (`usr_service_{agent_id}`, §3); on admin approval the router creates the user with `serviced_by=[usr_service_{agent_id}]` and opens the initial session (seeding both the chat's `session_id` and `default_session_id`).
 
 ## 3. Credentials — three identities
 
@@ -74,7 +75,8 @@ Every verbose line leads with a **`💭` marker** so it's visually distinct from
 
 | Command | Effect |
 | --- | --- |
-| `/new` | open a new session (rotate `default_session_id`; archive + move the pointer off the old session) |
+| `/new` | open a new session for THIS chat (rotate its `suite_platform_mappings.session_id`; archive + release the old one) and re-point `default_session_id` at it (the cron fallback follows the newest conversation) |
+| `/setdefault` | make THIS chat's current conversation the user's `default_session_id` — the cron fallback / out-of-band delivery target. For a multi-channel user, picks which channel's conversation reminders land in |
 | `/stop` | cancel the in-flight `current_task_id` (per-user HTTP cancel) |
 | `/register [email]` | submit a pending registration (email optional) |
 | `/password` | mint a one-time password-setup token |
