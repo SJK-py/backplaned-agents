@@ -69,20 +69,26 @@ automatically for a local router.
 - `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`
 - `SUITE_LANCE_ROOT` — per-user LanceDB root (`/lancedb`; shared volume
   for `knowledge_base` + `memory`).
-- chatbot: `SUITE_TELEGRAM_BOT_TOKEN`; `SUITE_REDIS_URL` makes the
-  per-session turn lock distributed — **required when both the chatbot and
-  the webapp run**, so the two channels serialize turns for a shared
-  session; a chatbot-only Telegram deploy needs no Redis.
+- chatbot / webapp Redis: `SUITE_REDIS_URL` makes the per-session turn lock
+  **distributed** so the two channels serialize turns on a shared session
+  (the lock key is `session_id`-only, so a Telegram turn and a webapp turn
+  for the same session contend on the same key). The reference
+  `docker-compose.prod.yml` **defaults it on** (in-cluster `redis` on db 1;
+  db 0 is the router's) — because v1 runs both channels — and the lock
+  **fails open** if Redis is unreachable. Override only to point at a
+  different Redis; a single-channel deploy can unset it for an in-process
+  lock.
+- chatbot: `SUITE_TELEGRAM_BOT_TOKEN` (Telegram).
 - chatbot (KakaoTalk, optional): an egress-only second channel. The agent
   **pulls** turns from a Cloudflare Queue fed by the
   [`deploy/kakao-relay`](../../deploy/kakao-relay/) Worker — it opens no
   inbound port. Gate it with `SUITE_KAKAO_CF_ACCOUNT_ID` /
   `SUITE_KAKAO_CF_QUEUE_ID` / `SUITE_KAKAO_CF_API_TOKEN` (a token scoped to
-  Queues pull+ack); **`SUITE_REDIS_URL` is required** (the deadline /
-  next-touch registry), so set it even on a chatbot-only deploy if you
-  enable Kakao. Outbound images additionally need the `SUITE_KAKAO_R2_*`
-  vars (a presigned-URL bucket); inbound images reuse the router file
-  store. Design + the relay/queue setup: [`../design/kakao-channel.md`](../design/kakao-channel.md)
+  Queues pull+ack); it uses the same `SUITE_REDIS_URL` above for its
+  deadline / next-touch registry (so keep Redis on when Kakao is enabled).
+  Outbound images additionally need the `SUITE_KAKAO_R2_*` vars (a
+  presigned-URL bucket); inbound images reuse the router file store. Design
+  + the relay/queue setup: [`../design/kakao-channel.md`](../design/kakao-channel.md)
   and [`deploy/kakao-relay/README.md`](../../deploy/kakao-relay/README.md).
   Approved Kakao registrations reconcile to `platform=kakao` via a second
   approval poller, mirroring Telegram.

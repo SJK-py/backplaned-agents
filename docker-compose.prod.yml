@@ -76,6 +76,13 @@ x-suite-agent: &suite-agent
     AGENT_STATE_DIR: /state
     SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
     SUITE_LANCE_ROOT: /lancedb
+    # Suite Redis (db 1; the router uses db 0). Consumed only by the channel
+    # agents (chatbot, webapp): it makes the per-session turn lock a
+    # DISTRIBUTED lock so the two channels serialize turns on a shared
+    # session, and it backs the KakaoTalk deadline/next-touch registry.
+    # Defaults to the in-cluster redis (on the `suite` network); the lock
+    # fails open if it's unreachable. Worker agents inherit but ignore it.
+    SUITE_REDIS_URL: ${SUITE_REDIS_URL:-redis://redis:6379/1}
     # Per-tier preset defaults seeded into a new user's config (chatbot
     # approval). prod.sh wires these to the chosen provider's
     # aliases; empty → the seeded `default` (Gemini).
@@ -361,11 +368,9 @@ services:
       SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
       # KakaoTalk channel (optional). Egress-only pull consumer behind the
       # deploy/kakao-relay Cloudflare Worker + a Cloudflare Queue. Inert
-      # unless the three CF queue vars are set; it REQUIRES Redis (the
-      # deadline/next-touch registry), so SUITE_REDIS_URL must be set too —
-      # the in-cluster redis is reachable on the `suite` network (use db 1 so
-      # suite keys don't collide with the router's db 0).
-      SUITE_REDIS_URL: ${SUITE_REDIS_URL:-}
+      # unless the three CF queue vars are set. Needs Redis (the
+      # deadline/next-touch registry) — already provided by SUITE_REDIS_URL
+      # in the suite-env anchor above.
       SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
       SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}
       SUITE_KAKAO_CF_API_TOKEN: ${SUITE_KAKAO_CF_API_TOKEN:-}
