@@ -558,20 +558,26 @@ Phased so every PR is independently shippable and inert until configured.
 
 ## 16. Open questions / external verification
 
-These are **Kakao/Cloudflare doc checks**, not code decisions — to
-confirm before/while building PR1, none blocking the design:
+Kakao/Cloudflare doc checks. Several are now **confirmed** against a live
+deploy + current docs:
 
-  1. **`callbackUrl` field path** in the skill webhook payload and that
-     **callback mode is enabled** on the skill (the §4 relay assumes
-     `userRequest.callbackUrl` and `useCallback: true`). Confirm the
-     callback **TTL** (~1 min) and the **5 s** sync budget against current
-     Kakao i Open Builder docs — `kakao_callback_deadline_s` is tuned
-     from these.
-  2. **Inbound image field** shape in the payload (where `extractImage`
-     reads the URL from) and its temporary-URL TTL.
-  3. **Cloudflare Queues HTTP pull API** — exact `pull`/`ack` request and
-     lease-id/response shape, and the producer binding name
-     (`KAKAO_JOBS`), against the current CF Queues API.
-  4. **Quick-reply vs. card buttons** for `[확인]`/`[중지]` — confirm the
-     `quickReplies` payload renders as expected for a `simpleText`
-     callback response.
+  * **Response shapes — confirmed.** The relay's sync **ack** uses
+    `{version, useCallback: true, data: {text}}` and **must not** include a
+    `template`; the later **callback POST** and any **immediate** reply use
+    `{version, template: {outputs[…], quickReplies}}` (Kakao's AI-chatbot
+    callback guide). The agent's `post_callback` and the relay's no-callback
+    fallback follow this.
+  * **CF Queues pull body — confirmed.** The HTTP pull API returns a
+    json-content body as a JSON *string* (occasionally base64), not a parsed
+    object; `kakao_client._coerce_body` normalizes it.
+
+Still worth eyeballing on your skill:
+
+  1. The exact **`callbackUrl` field path** (`userRequest.callbackUrl`) and
+     that **callback mode is enabled** on the skill; confirm the callback
+     **TTL** (~1 min) and **5 s** sync budget — `kakao_callback_ttl_s` /
+     `kakao_callback_deadline_s` are tuned from these.
+  2. The **inbound image field** shape (where `extractImage` reads the URL).
+  3. That **`quickReplies` render on a *callback* response** (not just the
+     sync ack) for the `[확인]`/`[중지]` buttons. If they don't, the
+     affordance degrades to instructing the user to type "확인"/"중지".
