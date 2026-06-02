@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import mimetypes
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.agents.chatbot.kakao_client import KakaoClient
+from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
 from bp_agents.channel import ChannelCore, agent_tag
 from bp_agents.db import queries
@@ -37,7 +41,17 @@ if TYPE_CHECKING:
     from bp_agents.agents.chatbot.credentials import ChannelCredentials
     from bp_agents.agents.chatbot.gateway import RootDispatcher
     from bp_agents.agents.chatbot.kakao_client import KakaoJob
+    from bp_agents.agents.chatbot.kakao_files import R2FileEgress
     from bp_agents.settings import SuiteSettings
+
+
+@dataclass
+class TurnReply:
+    """A computed turn's user-facing output: the reply text and any outbound
+    images (presigned url, alt) to render as Kakao simpleImage bubbles."""
+
+    text: str
+    images: list[tuple[str, str]]
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +115,13 @@ class KakaoGateway:
         registry: KakaoTaskRegistry,
         settings: SuiteSettings,
         credentials: ChannelCredentials | None = None,
+        egress: R2FileEgress | None = None,
         redis: Any | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
         self._credentials = credentials
+        self._egress = egress
         self._pool = pool
         self._deadline = settings.kakao_callback_deadline_s
         self._core = ChannelCore(
@@ -174,6 +190,31 @@ class KakaoGateway:
     def _poll_buttons(self) -> list[tuple[str, str]]:
         return [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
 
+    @staticmethod
+    def _decode_images(images_json: str) -> list[tuple[str, str]]:
+        if not images_json:
+            return []
+        try:
+            return [(u, a) for u, a in json.loads(images_json)]
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def _deliver(self, callback_url: str, reply: TurnReply) -> None:
+        await self._client.post_callback(
+            callback_url, reply.text, images=reply.images or None
+        )
+
+    async def _deliver_ready(self, chat_id: str, callback_url: str) -> bool:
+        """Deliver a parked (ready) answer on `callback_url` if one exists."""
+        raw = await self._registry.take_ready(chat_id)
+        if raw is None:
+            return False
+        text, images_json = raw
+        await self._client.post_callback(
+            callback_url, text, images=self._decode_images(images_json) or None
+        )
+        return True
+
     async def _handle_poll(
         self, chat_id: str, callback_url: str, utterance: str
     ) -> None:
@@ -181,9 +222,7 @@ class KakaoGateway:
             await self._stop(chat_id, callback_url)
             return
         # [확인] — deliver a ready answer, else report still-working / idle.
-        ready = await self._registry.take_ready(chat_id)
-        if ready is not None:
-            await self._client.post_callback(callback_url, ready)
+        if await self._deliver_ready(chat_id, callback_url):
             return
         turn = await self._registry.get_turn(chat_id)
         if turn and turn.get("state") == "pending":
@@ -200,8 +239,8 @@ class KakaoGateway:
             return
         # The work finished before the user pressed stop — deliver it.
         if turn.get("state") == "ready":
-            ready = await self._registry.take_ready(chat_id)
-            await self._client.post_callback(callback_url, ready or _NOTHING_RUNNING_TEXT)
+            if not await self._deliver_ready(chat_id, callback_url):
+                await self._client.post_callback(callback_url, _NOTHING_RUNNING_TEXT)
             return
         await self._registry.mark_stopped(chat_id)
         task_id, user_id = turn.get("task_id"), turn.get("user_id")
@@ -218,9 +257,7 @@ class KakaoGateway:
         self, chat_id: str, callback_url: str, text: str, body: dict
     ) -> None:
         # A ready answer takes priority: deliver it on this callback.
-        ready = await self._registry.take_ready(chat_id)
-        if ready is not None:
-            await self._client.post_callback(callback_url, ready)
+        if await self._deliver_ready(chat_id, callback_url):
             return
         turn = await self._registry.get_turn(chat_id)
         if turn and turn.get("state") == "pending":
@@ -248,7 +285,7 @@ class KakaoGateway:
         """Start the turn and race it against the callback budget: deliver
         in-time, otherwise post a status + park for the next touch."""
         compute = asyncio.create_task(
-            self._compute_turn(chat_id, user_id, session_id, text)
+            self._compute_turn(chat_id, user_id, session_id, text, body)
         )
         self._turns.add(compute)
         compute.add_done_callback(self._turns.discard)
@@ -270,7 +307,7 @@ class KakaoGateway:
                 )
                 await self._client.post_callback(callback_url, _DISPATCH_FAILED_TEXT)
                 return
-            await self._client.post_callback(callback_url, reply)
+            await self._deliver(callback_url, reply)
             return
 
         # Overran (or stale callback) — park the rest, status if we still can.
@@ -306,24 +343,34 @@ class KakaoGateway:
             return  # process shutting down — leave state for next touch
         except Exception:  # noqa: BLE001
             logger.exception("kakao_turn_error", extra={"event": "kakao_turn_error"})
-            reply = _DISPATCH_FAILED_TEXT
+            reply = TurnReply(_DISPATCH_FAILED_TEXT, [])
         if stopped:
             await self._registry.clear(chat_id)  # user already saw the stop ack
             return
-        await self._registry.store_ready(chat_id, reply)
+        await self._registry.store_ready(
+            chat_id, reply.text, json.dumps(reply.images)
+        )
 
     async def _compute_turn(
-        self, chat_id: str, user_id: str, session_id: str, text: str
-    ) -> str:
+        self, chat_id: str, user_id: str, session_id: str, text: str, body: dict
+    ) -> TurnReply:
         """Run one turn through ChannelCore under the session lock and return
-        the user-facing reply. Delivery (now vs parked) is the caller's call.
-        (Inbound/outbound files are deferred to a follow-up PR.)"""
+        the user-facing reply (+ any outbound images). Delivery (now vs
+        parked) is the caller's call."""
         reply = ""
+        image_url = body.get("image_url")
         async with self._core.session_lock(session_id):
             dest, mode = await self._core.route(session_id)
+            # Inbound image (before dispatch, so the agent's reload sees it).
+            if image_url and self._credentials is not None:
+                await self._save_inbound_image(user_id, session_id, dest, image_url)
             if text:
                 await self._core.record_user_turn(session_id, dest, text)
-            prompt = text or "(the user sent a message with no text.)"
+            prompt = text or (
+                "(the user sent an image — see the attached file.)"
+                if image_url
+                else "(the user sent a message with no text.)"
+            )
             task_id = await self._core.spawn(user_id, session_id, dest, mode, prompt)
             await self._registry.set_inflight(chat_id, user_id, task_id)
             result = await self._core.await_result(task_id)
@@ -332,12 +379,86 @@ class KakaoGateway:
             reply_text = (
                 f"{agent_tag(result.agent_id)}{reply}" if reply else _NO_RESPONSE_TEXT
             )
+            out_names = list(result.output.files) if result.output else []
+            images = await self._upload_outbound(user_id, session_id, out_names)
             context_tokens = await self._core.after_result(session_id, dest, result)
             await self._core.maybe_summarize(session_id, dest, context_tokens)
 
         self._core.fire_memory_add(user_id, session_id, text, reply)
         self._core.fire_name_session(user_id, session_id, text)
-        return reply_text
+        return TurnReply(reply_text, images)
+
+    async def _save_inbound_image(
+        self, user_id: str, session_id: str, dest: str, image_url: str
+    ) -> None:
+        """Fetch a Kakao-provided image url → router named store → (T,T)
+        hidden history row, so the agent discovers it. Best-effort: a file
+        failure never breaks the turn (mirrors the Telegram inbound path)."""
+        assert self._credentials is not None
+        try:
+            data = await self._client.fetch_inbound_image(image_url)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_inbound_image_fetch_failed",
+                extra={"event": "kakao_inbound_image_fetch_failed"},
+            )
+            return
+        try:
+            mime = detect_image_mime(data)
+            filename = f"image{mimetypes.guess_extension(mime) or '.jpg'}"
+            saved = await self._credentials.store_named_file(
+                user_id=user_id, session_id=session_id, filename=filename,
+                data=data, mime_type=mime,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_inbound_image_store_failed",
+                extra={"event": "kakao_inbound_image_store_failed"},
+            )
+            return
+        async with self._pool.acquire() as conn:
+            await queries.append_history(
+                conn, session_id=session_id, agent_id=dest, role="user",
+                message=f"user-attached image saved as {saved}",
+                incumbent=True, hidden=True,
+            )
+
+    async def _upload_outbound(
+        self, user_id: str, session_id: str, names: list[str]
+    ) -> list[tuple[str, str]]:
+        """Resolve produced file names → bytes → R2 presigned urls for Kakao
+        to render. Images only — Kakao can't inline arbitrary documents, so a
+        non-image produced file is skipped (logged). Needs R2 configured."""
+        if self._egress is None or self._credentials is None or not names:
+            return []
+        images: list[tuple[str, str]] = []
+        for name in names:
+            try:
+                file_id = await self._credentials.resolve_named_file(
+                    user_id=user_id, session_id=session_id, name=name
+                )
+                if file_id is None:
+                    continue
+                data = await self._credentials.fetch_file(
+                    user_id=user_id, file_id=file_id
+                )
+                mime = detect_image_mime(data, name)
+                if not mime.startswith("image/"):
+                    logger.info(
+                        "kakao_outbound_skip_nonimage",
+                        extra={"event": "kakao_outbound_skip_nonimage"},
+                    )
+                    continue
+                url = await self._egress.put_image(
+                    data, content_type=mime, key=egress_key(session_id, name)
+                )
+                images.append((url, name.rsplit("/", 1)[-1]))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "kakao_outbound_image_failed",
+                    extra={"event": "kakao_outbound_image_failed"},
+                )
+        return images
 
     # -- identity + commands --------------------------------------------
 
