@@ -62,6 +62,8 @@ class ChannelCredentials(Protocol):
 
     async def mint_password_reset_token(self, *, user_id: str) -> str: ...
 
+    async def verify_link_token(self, *, token: str) -> str | None: ...
+
     async def store_named_file(
         self, *, user_id: str, session_id: str, filename: str, data: bytes,
         mime_type: str | None = None,
@@ -288,6 +290,25 @@ class HttpChannelCredentials:
         )
         resp.raise_for_status()
         return resp.json()["reset_token"]
+
+    async def verify_link_token(self, *, token: str) -> str | None:
+        """Verify a password-reset token for the channel-link flow (the
+        `/link` command). Calls the router's verify-only endpoint, which
+        consumes the token (single-use) and returns the owning `user_id`
+        WITHOUT setting a password. The token IS the auth — no Bearer.
+
+        Returns the `user_id` on success, or None when the token is
+        rejected (4xx: missing / expired / already-used, or the user is
+        inactive) so the caller can tell the user it didn't take. Network
+        / server (5xx) errors propagate."""
+        resp = await self._client.post(
+            f"{self._http_url}/v1/auth/verify-reset-token",
+            json={"token": token},
+        )
+        if 400 <= resp.status_code < 500:
+            return None
+        resp.raise_for_status()
+        return resp.json()["user_id"]
 
     # ------------------------------------------------------------------
     # Named file store (session-authed; per-user token)

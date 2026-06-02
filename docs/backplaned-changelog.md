@@ -18,6 +18,33 @@
 
 ---
 
+## 2026-06-02
+
+### Added — verify-only password-reset endpoint for channel linking
+
+- **What:** new public route `POST /v1/auth/verify-reset-token` (auth.py).
+  It **consumes** a password-reset token (single-use, via the existing
+  `consume_password_reset_token`) and returns `{user_id}` **without**
+  setting a password or issuing a session — the verify-only sibling of
+  `POST /v1/auth/reset-password`. Like reset-password the token IS the auth
+  (no Bearer header), and it reuses the **same** per-IP rate-limit bucket
+  (`BUCKET_RESET_PASSWORD`, `password_reset_consume_rate_limit_per_ip_*`) so
+  the two consumption paths share one enumeration budget. Returns 401 on a
+  missing/expired/already-used token and 409 if the user is inactive.
+  Audited as `auth.password_reset_token_verified` (payload
+  `{"purpose": "link"}`); rejects reuse the existing
+  `auth.password_reset_token_invalid` event.
+- **Why:** the agent suite needed a way to attach a **new** channel chat
+  (e.g. KakaoTalk) to a user's **pre-existing** account. The suite's
+  `/link <token>` command verifies a token the user minted on a channel
+  they're already on (`/password`), proving ownership, then binds the chat
+  to the returned `user_id`. Consuming on verify (rather than a non-
+  destructive peek) means a leaked token can't be replayed to hijack a
+  link. No password is touched, so this is strictly less powerful than the
+  already-public reset-password path. Backward-compatible: purely additive.
+
+---
+
 ## 2026-05-29
 
 ### Changed — eviction frees the agent_id for reuse (tombstone rename)

@@ -82,8 +82,19 @@ _DISPATCH_FAILED_TEXT = "죄송해요, 처리 중 문제가 생겼어요. 다시
 _NO_RESPONSE_TEXT = "(응답 없음)"
 _REGISTER_PROMPT = (
     "아직 등록되지 않았어요. /register 를 보내 접근을 요청하면 "
-    "관리자가 검토할게요. (이메일을 함께 보내도 돼요: /register you@example.com)"
+    "관리자가 검토할게요. (이메일을 함께 보내도 돼요: /register you@example.com)\n\n"
+    "이미 웹이나 다른 채팅에 계정이 있나요? 거기서 /password 로 토큰을 받은 뒤 "
+    "여기서 /link <토큰> 을 보내면 이 채팅을 기존 계정에 연결할 수 있어요."
 )
+_LINK_USAGE_TEXT = (
+    "/link <토큰> 형식으로 보내 이 채팅을 기존 계정에 연결하세요. "
+    "이미 연결된 채팅(또는 웹)에서 /password 로 토큰을 받을 수 있어요."
+)
+_LINK_OK_TEXT = "연결됐어요 — 이제 이 채팅이 기존 계정을 사용해요."
+_LINK_INVALID_TEXT = (
+    "토큰이 올바르지 않거나 만료됐어요. /password 로 새 토큰을 받아 다시 시도해 주세요."
+)
+_LINK_FAILED_TEXT = "연결에 실패했어요. 잠시 후 다시 시도해 주세요."
 _NO_SESSION_TEXT = "활성화된 대화가 없어요. 관리자에게 문의해 주세요."
 _UNAVAILABLE_TEXT = "지금은 이 명령을 사용할 수 없어요."
 _ALREADY_REGISTERED_TEXT = "이미 등록되어 있어요. 그냥 메시지를 보내 주세요!"
@@ -99,6 +110,7 @@ HELP_TEXT = (
     "개인 비서예요. 메시지를 보내면 도와드릴게요.\n\n"
     "명령어:\n"
     "/register — 접근 요청 (관리자 승인)\n"
+    "/link <토큰> — 이 채팅을 기존 계정에 연결\n"
     "/new — 새 대화 시작\n"
     "/stop — 진행 중인 작업 중지\n"
     "/config — 설정 보기/변경\n"
@@ -555,6 +567,8 @@ class KakaoGateway:
             await self._client.post_callback(callback_url, HELP_TEXT)
         elif cmd == "/register":
             await self._cmd_register(chat_id, callback_url, arg)
+        elif cmd == "/link":
+            await self._cmd_link(chat_id, callback_url, arg)
         elif cmd == "/new":
             await self._cmd_new(chat_id, callback_url)
         elif cmd == "/stop":
@@ -673,6 +687,41 @@ class KakaoGateway:
             await self._client.post_callback(callback_url, _REGISTER_FAILED_TEXT)
             return
         await self._client.post_callback(callback_url, _REGISTER_SUBMITTED_TEXT)
+
+    async def _cmd_link(
+        self, chat_id: str, callback_url: str, arg: str
+    ) -> None:
+        """Bind this (unmapped) chat to a pre-existing account by verifying a
+        password-reset token minted on a channel the user is already on
+        ([channel.md] §6). On success, map (PLATFORM, chat_id) → the returned
+        user_id so this chat shares the account's sessions/memory."""
+        if await self._resolve_user(chat_id) is not None:
+            await self._client.post_callback(callback_url, _ALREADY_REGISTERED_TEXT)
+            return
+        token = arg.split(maxsplit=1)[0] if arg else ""
+        if not token:
+            await self._client.post_callback(callback_url, _LINK_USAGE_TEXT)
+            return
+        if self._credentials is None:
+            await self._client.post_callback(callback_url, _UNAVAILABLE_TEXT)
+            return
+        try:
+            user_id = await self._credentials.verify_link_token(token=token)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_link_verify_failed",
+                extra={"event": "kakao_link_verify_failed"},
+            )
+            await self._client.post_callback(callback_url, _LINK_FAILED_TEXT)
+            return
+        if user_id is None:
+            await self._client.post_callback(callback_url, _LINK_INVALID_TEXT)
+            return
+        async with self._pool.acquire() as conn:
+            await queries.upsert_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id, user_id=user_id
+            )
+        await self._client.post_callback(callback_url, _LINK_OK_TEXT)
 
     async def _cmd_new(self, chat_id: str, callback_url: str) -> None:
         user_id = await self._resolve_user(chat_id)

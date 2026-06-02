@@ -14,6 +14,9 @@ import json
 import httpx
 
 from bp_agents.agents.chatbot.gateway import (
+    _LINK_INVALID,
+    _LINK_OK,
+    _LINK_USAGE,
     BOT_COMMANDS,
     HELP_TEXT,
     REGISTER_PROMPT,
@@ -480,6 +483,98 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
             # New session tracked + made default.
             assert new is not None and new.channel == "chatbot_telegram"
             assert cfg.default_session_id == "ses_2"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+class _LinkCreds:
+    """Credentials double for the /link flow: verify_link_token returns the
+    configured user_id (or None to simulate a bad token), recording the
+    token it was asked to verify."""
+
+    def __init__(self, *, user_id: str | None) -> None:
+        self._user_id = user_id
+        self.verified: list[str] = []
+
+    async def verify_link_token(self, *, token: str) -> str | None:
+        self.verified.append(token)
+        return self._user_id
+
+
+def test_link_binds_unmapped_chat_to_existing_account(suite_db_url: str) -> None:
+    """`/link <token>` on an unmapped chat verifies the token and maps the
+    chat to the returned user_id — so it now resolves to the same account."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)  # usr_a mapped to chat "tg1"
+            tg = _FakeTelegram()
+            creds = _LinkCreds(user_id="usr_a")
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=tg, credentials=creds,
+            )
+
+            await gw.handle_update("tg_new", "/link tok-abc")
+
+            assert creds.verified == ["tok-abc"]
+            assert tg.sent == [("tg_new", _LINK_OK)]
+            async with pool.acquire() as conn:
+                resolved = await queries.resolve_user_id(
+                    conn, platform="telegram", chat_id="tg_new"
+                )
+            assert resolved == "usr_a"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_link_invalid_token_reports_and_does_not_map(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            creds = _LinkCreds(user_id=None)  # router rejected the token
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=tg, credentials=creds,
+            )
+
+            await gw.handle_update("tg_new", "/link bad")
+
+            assert tg.sent == [("tg_new", _LINK_INVALID)]
+            async with pool.acquire() as conn:
+                resolved = await queries.resolve_user_id(
+                    conn, platform="telegram", chat_id="tg_new"
+                )
+            assert resolved is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_link_without_token_shows_usage(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            creds = _LinkCreds(user_id="usr_a")
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=tg, credentials=creds,
+            )
+
+            await gw.handle_update("tg_new", "/link")
+
+            assert tg.sent == [("tg_new", _LINK_USAGE)]
+            assert creds.verified == []  # never reached the router
         finally:
             await pool.close()
 
