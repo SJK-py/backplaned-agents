@@ -6,7 +6,7 @@ Loaded from environment variables prefixed `SUITE_`.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -99,6 +99,62 @@ class SuiteSettings(BaseSettings):
     dispatch_result_timeout_s: float = Field(default=600.0, gt=0.0)
     """How long the channel waits for an injected turn's result before
     surfacing a failure to the user."""
+
+    # ------------------------------------------------------------------
+    # chatbot channel (KakaoTalk)
+    #
+    # A second chatbot channel behind a stateless Cloudflare Worker relay
+    # + Cloudflare Queue ([../docs/design/kakao-channel.md]). The agent is
+    # egress-only: it PULLS jobs from the queue over HTTPS (it never
+    # listens), mirroring the Telegram poll loop. Unset → the consumer is
+    # never launched (boot is byte-for-byte identical to today). The
+    # relay's own secret (`KAKAO_SKILL_SECRET`) lives on the Worker, not
+    # here — the activation gate is the three queue-credential fields.
+    # ------------------------------------------------------------------
+
+    kakao_cf_account_id: str | None = None
+    """Cloudflare account id owning the jobs queue. One of the three
+    queue-credential fields that gate the KakaoTalk consumer."""
+
+    kakao_cf_queue_id: str | None = None
+    """Cloudflare Queue id the relay produces to and the agent pulls from."""
+
+    kakao_cf_api_token: SecretStr | None = None
+    """Cloudflare API token scoped to Queues pull+ack on the queue above.
+    An outbound-only credential; it never sits on a public surface."""
+
+    kakao_pull_batch_size: int = Field(default=10, ge=1)
+    """Max messages pulled per CF Queues `messages/pull` call."""
+
+    kakao_pull_visibility_timeout_s: int = Field(default=60, ge=1)
+    """Lease/visibility timeout for a pulled batch — an unacked message
+    reappears after this, so the loop retries a turn it failed to handle."""
+
+    kakao_callback_deadline_s: float = Field(default=50.0, gt=0.0)
+    """Budget for delivering a turn on Kakao's single-use `callbackUrl`
+    before the channel falls back to park + next-touch delivery; kept
+    below Kakao's ~60s callback TTL."""
+
+    kakao_carry_ttl_s: int = Field(default=900, ge=1)
+    """How long a parked (overran-the-callback) result waits in Redis for
+    the user's next touch before it lapses and they must re-ask."""
+
+    kakao_msg_char_limit: int = Field(default=1000, ge=1)
+    """Per-bubble character cap for an outbound Kakao `simpleText` (a long
+    reply is chunked below this)."""
+
+    # KakaoTalk outbound images (R2 / S3-compatible). Rendering an image in
+    # KakaoTalk requires a PUBLIC url Kakao's servers fetch; the router blob
+    # store is internal-only, so outbound images go to a dedicated bucket
+    # and Kakao gets a short-TTL presigned GET ([kakao-channel.md] §8).
+    # Inbound images reuse the router named store (no config here). Needs
+    # the `kakaotalk` (aioboto3) extra.
+    kakao_r2_endpoint_url: str | None = None
+    kakao_r2_bucket: str | None = None
+    kakao_r2_access_key_id: str | None = None
+    kakao_r2_secret_access_key: SecretStr | None = None
+    kakao_r2_url_ttl_s: int = Field(default=600, ge=1)
+    """Lifetime of a presigned outbound-image url handed to Kakao."""
 
     # ------------------------------------------------------------------
     # deep_reasoning plan_mode ([agents.md] deep_reasoning)
