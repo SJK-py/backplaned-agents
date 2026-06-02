@@ -96,11 +96,13 @@ def test_sidebar_groups_and_button_rules(suite_db_url: str) -> None:
             await _seed(pool, [
                 ("ses_web", "webapp"),
                 ("ses_tg", "chatbot_telegram"),
+                ("ses_kt", "chatbot_kakao"),
                 ("ses_closed", None),
             ])
             up = _Upstream(sessions=[
                 {"session_id": "ses_web", "opened_at": _TS, "closed_at": None},
                 {"session_id": "ses_tg", "opened_at": _TS, "closed_at": None},
+                {"session_id": "ses_kt", "opened_at": _TS, "closed_at": None},
                 {"session_id": "ses_closed", "opened_at": _TS,
                  "closed_at": "2026-05-02T00:00:00Z"},
             ])
@@ -122,6 +124,9 @@ def test_sidebar_groups_and_button_rules(suite_db_url: str) -> None:
     # Open Telegram session: TG flag, NO close button.
     assert ">TG<" in html
     assert 'hx-post="/sessions/ses_tg/close"' not in html
+    # Open KakaoTalk session: KT flag, NO close button (same chatbot guard).
+    assert ">KT<" in html
+    assert 'hx-post="/sessions/ses_kt/close"' not in html
     # Closed session: not clickable, Reopen + Remove.
     assert 'href="/chat/ses_closed"' not in html
     assert 'hx-post="/sessions/ses_closed/reopen"' in html
@@ -161,6 +166,34 @@ def test_close_telegram_session_is_blocked(suite_db_url: str) -> None:
     assert web_status == 204
     assert deleted == [("ses_web", False)]
     assert web_trigger == ["sessionsChanged"]
+
+
+def test_close_kakao_session_is_blocked(suite_db_url: str) -> None:
+    """A KakaoTalk-linked session is protected from the web-app close the same
+    way Telegram is — it's retired from the chatbot (`/new`)."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, list]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool, [("ses_kt", "chatbot_kakao")])
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client, "/")
+                kt = await client.post(
+                    "/sessions/ses_kt/close", headers={"X-CSRF-Token": token}
+                )
+            return kt.status_code, up.deleted
+        finally:
+            await pool.close()
+
+    kt_status, deleted = asyncio.run(_drive())
+    assert kt_status == 409  # KakaoTalk-linked → refused
+    assert deleted == []  # never reached the router
 
 
 def test_rename_sets_name_via_hx_prompt(suite_db_url: str) -> None:

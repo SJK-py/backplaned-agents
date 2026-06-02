@@ -17,10 +17,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# session_info.channel value the chatbot writes for Telegram-origin
-# sessions — flagged in the UI (list badge + a one-time note on open) so the
-# user knows progress won't mirror back to Telegram if continued here.
+# session_info.channel values the chatbot writes for chat-origin sessions —
+# flagged in the UI (list badge + a one-time note on open) so the user knows
+# progress won't mirror back to the chat if continued here. A chat-origin
+# session is retired only from the chatbot (`/new`, which releases its channel
+# to NULL); the web app must NOT close/remove it while the channel is still
+# set, or it would yank the cron-fallback `default_session_id` out from under
+# the chat.
 TELEGRAM_CHANNEL = "chatbot_telegram"
+KAKAO_CHANNEL = "chatbot_kakao"
+# Channels owned by a chatbot gateway — protected from web-app close/remove.
+CHATBOT_CHANNELS = frozenset({TELEGRAM_CHANNEL, KAKAO_CHANNEL})
 
 
 async def owned_session(request: Request, session_id: str) -> SessionInfoRow | None:

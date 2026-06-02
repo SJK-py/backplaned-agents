@@ -18,6 +18,9 @@
       {% if row.is_telegram %}
         <span class="rounded bg-sky-500/20 px-1.5 py-0.5 text-[10px] text-sky-200"
               title="Telegram-linked — manage it from the chatbot.">TG</span>
+      {% elif row.is_kakao %}
+        <span class="rounded bg-yellow-500/20 px-1.5 py-0.5 text-[10px] text-yellow-200"
+              title="KakaoTalk-linked — manage it from the chatbot.">KT</span>
       {% endif %}
       {% if row.delegated_to %}
         <span class="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-200"

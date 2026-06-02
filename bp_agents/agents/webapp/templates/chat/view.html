@@ -48,18 +48,18 @@
     </div>
   </div>
 
-  {% if is_telegram %}
-    {# One-time (per session, per browser) note: continuing a Telegram-origin
-       session here means Telegram won't mirror the replies/progress. #}
-    <div x-data="{ show: !localStorage.getItem('tgnote:{{ session_id }}') }"
+  {% if chat_channel_label %}
+    {# One-time (per session, per browser) note: continuing a chat-origin
+       session here means the chat app won't mirror the replies/progress. #}
+    <div x-data="{ show: !localStorage.getItem('chatnote:{{ session_id }}') }"
          x-show="show" x-cloak
          class="mb-3 flex items-start justify-between gap-3 rounded border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
       <span>
-        This conversation started on Telegram. If you continue it here,
-        replies and progress won’t appear in Telegram.
+        This conversation started on {{ chat_channel_label }}. If you continue
+        it here, replies and progress won’t appear in {{ chat_channel_label }}.
       </span>
       <button class="shrink-0 font-medium text-sky-700 hover:text-sky-900"
-              @click="show = false; localStorage.setItem('tgnote:{{ session_id }}', '1')">
+              @click="show = false; localStorage.setItem('chatnote:{{ session_id }}', '1')">
         Dismiss
       </button>
     </div>
