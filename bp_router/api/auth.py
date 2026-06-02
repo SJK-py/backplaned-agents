@@ -699,3 +699,92 @@ async def reset_password(
         expires_at=expires_at,
         level=user.level,
     )
+
+
+class VerifyResetTokenRequest(BaseModel):
+    token: str
+
+
+class VerifyResetTokenResponse(BaseModel):
+    user_id: str
+
+
+@router.post(
+    "/verify-reset-token",
+    response_model=VerifyResetTokenResponse,
+    status_code=200,
+)
+async def verify_reset_token(
+    req: VerifyResetTokenRequest,
+    request: Request,
+) -> VerifyResetTokenResponse:
+    """Consume a password-reset token and return the user it belongs to —
+    WITHOUT setting a password or issuing a session.
+
+    The verify-only sibling of `reset-password`: the suite's channel-link
+    flow (`/link <token>`) uses it to prove that whoever pastes a token
+    into an unmapped chat owns an existing account, then binds the chat to
+    the returned `user_id`. Like reset-password, the token IS the auth (no
+    Bearer header) and it is SINGLE-USE — consumed here, so a leaked token
+    can't be replayed to hijack a link. The same per-IP rate limit bounds
+    token enumeration; the bucket is shared with reset-password so the two
+    consumption paths draw on one enumeration budget.
+
+    On a missing / expired / already-used token: 401. If the user has been
+    deactivated since the token was minted: 409.
+    """
+    state = request.app.state.bp
+    settings = state.settings
+    pool = state.db_pool
+
+    ip = _client_ip(request)
+    wait = await _enforce_single_bucket_rate_limit(
+        quota=state.login_quota,
+        key=f"{BUCKET_RESET_PASSWORD}:ip:{ip}",
+        rate_per_s=settings.password_reset_consume_rate_limit_per_ip_per_s,
+        burst=settings.password_reset_consume_rate_limit_per_ip_burst,
+    )
+    if wait > 0:
+        retry_after = max(int(wait + 0.999), 1)
+        try:
+            async with pool.acquire() as conn:
+                await queries.append_audit_event(
+                    conn, actor_kind="user", actor_id=None,
+                    event="auth.password_reset_rate_limited",
+                    payload={"ip": ip, "retry_after_s": retry_after,
+                             "purpose": "verify"},
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "auth_rate_limit_audit_failed",
+                extra={"event": "auth_rate_limit_audit_failed"},
+                exc_info=True,
+            )
+        raise HTTPException(
+            status_code=429,
+            detail="too many verify-reset-token attempts; retry later",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            user_id = await queries.consume_password_reset_token(
+                conn, token_hash=_hash_refresh_token(req.token),
+            )
+            if user_id is None:
+                await queries.append_audit_event(
+                    conn, actor_kind="user", actor_id=None,
+                    event="auth.password_reset_token_invalid",
+                    payload={"purpose": "verify"},
+                )
+                raise HTTPException(401, "invalid or expired token")
+            user = await queries.get_user_by_id(conn, user_id)
+            if not queries.user_is_active(user):
+                raise HTTPException(409, "user inactive")
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=user_id,
+                event="auth.password_reset_token_verified",
+                target_kind="user", target_id=user_id,
+                payload={"purpose": "link"},
+            )
+    return VerifyResetTokenResponse(user_id=user_id)

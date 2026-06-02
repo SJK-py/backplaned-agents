@@ -243,3 +243,67 @@ def test_reset_password_endpoint_is_unauthenticated() -> None:
     sig = inspect.signature(auth.reset_password)
     # No `principal` parameter, no Depends().
     assert "principal" not in sig.parameters
+
+
+# ===========================================================================
+# verify-reset-token (verify-only sibling, for channel linking)
+# ===========================================================================
+
+
+def test_verify_reset_token_consumes_single_use() -> None:
+    """Verify-only path still CONSUMES the token (single-use) so a leaked
+    token can't be replayed to hijack a link — it reuses the same consume
+    helper as reset-password."""
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    src = inspect.getsource(auth.verify_reset_token)
+    assert "consume_password_reset_token" in src
+
+
+def test_verify_reset_token_does_not_set_password_or_issue_session() -> None:
+    """It returns the user_id only — no password write, no token issuance."""
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    src = inspect.getsource(auth.verify_reset_token)
+    assert "set_user_password_hash" not in src
+    assert "issue_session_token" not in src
+    assert "TokenPair" not in src
+
+
+def test_verify_reset_token_shares_reset_password_rate_limit_bucket() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    src = inspect.getsource(auth.verify_reset_token)
+    assert "BUCKET_RESET_PASSWORD" in src
+    assert "password_reset_consume_rate_limit_per_ip_per_s" in src
+
+
+def test_verify_reset_token_invalid_returns_401_inactive_409() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    src = inspect.getsource(auth.verify_reset_token)
+    assert "if user_id is None:" in src
+    assert "401" in src and "invalid or expired token" in src
+    assert "user_is_active(" in src
+    assert "409" in src and "user inactive" in src
+
+
+def test_verify_reset_token_audits_verification() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    src = inspect.getsource(auth.verify_reset_token)
+    assert "auth.password_reset_token_verified" in src
+
+
+def test_verify_reset_token_endpoint_is_unauthenticated() -> None:
+    """The token IS the auth — no Bearer dependency."""
+    pytest.importorskip("fastapi")
+    from bp_router.api import auth
+
+    sig = inspect.signature(auth.verify_reset_token)
+    assert "principal" not in sig.parameters

@@ -100,6 +100,7 @@ CHATBOT_AGENT_ID = "chatbot"
 # text and the Telegram `setMyCommands` registration (the "/" menu).
 BOT_COMMANDS: list[tuple[str, str]] = [
     ("register", "request access (an admin approves it)"),
+    ("link", "link this chat to your existing account (/link <token>)"),
     ("new", "start a fresh conversation"),
     ("stop", "stop the current in-progress reply"),
     ("config", "view or change your settings"),
@@ -117,7 +118,19 @@ HELP_TEXT = (
 )
 REGISTER_PROMPT = (
     "You're not registered yet. Send /register (optionally with your "
-    "email) to request access; an administrator will review it."
+    "email) to request access; an administrator will review it.\n\n"
+    "Already have an account on the web or another chat? Get a token there "
+    "with /password, then send /link <token> here to use it from this chat."
+)
+_LINK_USAGE = (
+    "Send /link <token> to link this chat to your existing account. Get a "
+    "token by sending /password from a chat that's already linked (or the "
+    "web app)."
+)
+_LINK_OK = "Linked — this chat now uses your existing account."
+_LINK_INVALID = (
+    "That token is invalid or expired. Mint a fresh one with /password and "
+    "try again."
 )
 _REGISTER_SUBMITTED = (
     "Thanks — your registration request was submitted. An administrator "
@@ -242,6 +255,8 @@ class ChatbotGateway:
             await self._telegram.send_message(chat_id=chat_id, text=HELP_TEXT)
         elif cmd == "/register":
             await self._cmd_register(chat_id, arg)
+        elif cmd == "/link":
+            await self._cmd_link(chat_id, arg)
         elif cmd == "/new":
             await self._cmd_new(chat_id)
         elif cmd == "/stop":
@@ -375,6 +390,41 @@ class ChatbotGateway:
         await self._telegram.send_message(
             chat_id=chat_id, text=_REGISTER_SUBMITTED
         )
+
+    async def _cmd_link(self, chat_id: str, arg: str) -> None:
+        """Bind this (unmapped) chat to a pre-existing account by verifying a
+        password-reset token minted on a channel the user is already on
+        ([channel.md] §6). The token proves ownership; on success we map
+        (PLATFORM, chat_id) → the returned user_id, so this chat shares the
+        account's sessions/memory."""
+        if await self._resolve_user(chat_id) is not None:
+            await self._telegram.send_message(
+                chat_id=chat_id, text=_ALREADY_REGISTERED
+            )
+            return
+        token = arg.split(maxsplit=1)[0] if arg else ""
+        if not token:
+            await self._telegram.send_message(chat_id=chat_id, text=_LINK_USAGE)
+            return
+        if self._credentials is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
+            return
+        try:
+            user_id = await self._credentials.verify_link_token(token=token)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "link_verify_failed", extra={"event": "link_verify_failed"}
+            )
+            await self._telegram.send_message(chat_id=chat_id, text=_DISPATCH_FAILED)
+            return
+        if user_id is None:
+            await self._telegram.send_message(chat_id=chat_id, text=_LINK_INVALID)
+            return
+        async with self._pool.acquire() as conn:
+            await queries.upsert_platform_mapping(
+                conn, platform=PLATFORM, chat_id=chat_id, user_id=user_id
+            )
+        await self._telegram.send_message(chat_id=chat_id, text=_LINK_OK)
 
     async def _cmd_new(self, chat_id: str) -> None:
         user_id = await self._resolve_user(chat_id)

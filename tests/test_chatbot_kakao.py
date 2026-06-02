@@ -732,6 +732,74 @@ def test_password_command(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+class _LinkCreds:
+    """Credentials double for the /link flow."""
+
+    def __init__(self, *, user_id: str | None) -> None:
+        self._user_id = user_id
+        self.verified: list[str] = []
+
+    async def verify_link_token(self, *, token: str) -> str | None:
+        self.verified.append(token)
+        return self._user_id
+
+
+def test_link_binds_unmapped_chat(suite_db_url: str) -> None:
+    """`/link <token>` on an unmapped Kakao chat verifies the token and maps
+    the chat to the returned user_id (the existing account, usr_k)."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)  # usr_k mapped to chat "kc1"
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            creds = _LinkCreds(user_id="usr_k")
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(), pool=pool, client=client,
+                registry=reg, settings=_settings(), credentials=creds, redis=None,
+            )
+            await gw.handle_job(_job(chat_id="kc_new", utterance="/link tok-abc"))
+
+            assert creds.verified == ["tok-abc"]
+            assert client.posts[-1][1] == kg._LINK_OK_TEXT
+            async with pool.acquire() as conn:
+                resolved = await queries.resolve_user_id(
+                    conn, platform="kakao", chat_id="kc_new"
+                )
+            assert resolved == "usr_k"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_link_invalid_token_does_not_map(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            creds = _LinkCreds(user_id=None)
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(), pool=pool, client=client,
+                registry=reg, settings=_settings(), credentials=creds, redis=None,
+            )
+            await gw.handle_job(_job(chat_id="kc_new", utterance="/link bad"))
+
+            assert client.posts[-1][1] == kg._LINK_INVALID_TEXT
+            async with pool.acquire() as conn:
+                resolved = await queries.resolve_user_id(
+                    conn, platform="kakao", chat_id="kc_new"
+                )
+            assert resolved is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 def test_config_command_dispatches_to_config_agent(suite_db_url: str) -> None:
     class _ConfigDispatcher(_FakeDispatcher):
         def __init__(self) -> None:
