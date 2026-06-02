@@ -84,22 +84,28 @@ class KakaoTaskRegistry:
         the cancel parks nothing (they already saw the stop ack)."""
         await self._r.hset(self._turn_key(chat_id), "stopped", "1")
 
-    async def store_ready(self, chat_id: str, result: str) -> None:
-        """Park a completed turn's answer for the next touch to deliver."""
+    async def store_ready(
+        self, chat_id: str, result: str, images: str = ""
+    ) -> None:
+        """Park a completed turn's answer (text + optional JSON-encoded image
+        list) for the next touch to deliver."""
         key = self._turn_key(chat_id)
         async with self._r.pipeline(transaction=True) as pipe:
-            pipe.hset(key, mapping={"state": "ready", "result": result})
+            pipe.hset(
+                key, mapping={"state": "ready", "result": result, "images": images}
+            )
             pipe.hdel(key, "task_id")
             pipe.expire(key, self._ttl)
             await pipe.execute()
 
-    async def take_ready(self, chat_id: str) -> str | None:
-        """Pop a parked answer if one is ready, else None (clears it on take)."""
+    async def take_ready(self, chat_id: str) -> tuple[str, str] | None:
+        """Pop a parked answer `(text, images_json)` if one is ready, else
+        None (clears it on take)."""
         key = self._turn_key(chat_id)
         data = _decode_map(await self._r.hgetall(key))
         if data.get("state") == "ready":
             await self._r.delete(key)
-            return data.get("result", "")
+            return data.get("result", ""), data.get("images", "")
         return None
 
     async def clear(self, chat_id: str) -> None:

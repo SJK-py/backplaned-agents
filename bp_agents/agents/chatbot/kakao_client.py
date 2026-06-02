@@ -36,10 +36,15 @@ logger = logging.getLogger(__name__)
 
 _CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
-# A Kakao callback template renders at most a few simpleText bubbles; cap
-# how many an over-long reply is split into (the tail is truncated).
-_MAX_CALLBACK_BUBBLES = 3
+# A Kakao callback template renders at most a few outputs; cap how many an
+# over-long reply is split into (the tail is truncated) and the total
+# outputs (text bubbles + images) in one template.
+_MAX_CALLBACK_OUTPUTS = 3
 _TRUNCATED_SUFFIX = "…(생략됨)"
+_ALT_TEXT_MAX = 50  # Kakao simpleImage altText cap
+
+# Cap on an inbound image fetched from the (Kakao-provided) url.
+_INBOUND_IMAGE_CAP = 10 * 1024 * 1024
 
 
 def chunk_for_kakao(text: str, *, limit: int, max_bubbles: int) -> list[str]:
@@ -95,7 +100,10 @@ class KakaoClient(Protocol):
         text: str,
         *,
         quick_replies: list[tuple[str, str]] | None = None,
+        images: list[tuple[str, str]] | None = None,
     ) -> None: ...
+
+    async def fetch_inbound_image(self, url: str) -> bytes: ...
 
     async def aclose(self) -> None: ...
 
@@ -166,15 +174,37 @@ class HttpKakaoClient:
         text: str,
         *,
         quick_replies: list[tuple[str, str]] | None = None,
+        images: list[tuple[str, str]] | None = None,
     ) -> None:
-        """Deliver `text` on a Kakao callback url as simpleText bubble(s),
-        optionally with quick-reply buttons (label, messageText)."""
-        outputs = [
-            {"simpleText": {"text": chunk}}
-            for chunk in chunk_for_kakao(
-                text, limit=self._char_limit, max_bubbles=_MAX_CALLBACK_BUBBLES
+        """Deliver `text` (and optional images) on a Kakao callback url as
+        simpleText + simpleImage outputs, optionally with quick-reply
+        buttons (label, messageText). Total outputs are capped at Kakao's
+        limit, reserving room for images when present."""
+        images = images or []
+        text_budget = (
+            max(1, _MAX_CALLBACK_OUTPUTS - len(images))
+            if images
+            else _MAX_CALLBACK_OUTPUTS
+        )
+        outputs: list[dict[str, Any]] = (
+            [
+                {"simpleText": {"text": chunk}}
+                for chunk in chunk_for_kakao(
+                    text, limit=self._char_limit, max_bubbles=text_budget
+                )
+            ]
+            if text
+            else []
+        )
+        for url, alt in images:
+            if len(outputs) >= _MAX_CALLBACK_OUTPUTS:
+                break
+            outputs.append(
+                {"simpleImage": {"imageUrl": url, "altText": (alt or "")[:_ALT_TEXT_MAX]}}
             )
-        ]
+        if not outputs:  # Kakao requires at least one output
+            outputs = [{"simpleText": {"text": text or ""}}]
+
         template: dict[str, Any] = {"outputs": outputs}
         if quick_replies:
             template["quickReplies"] = [
@@ -185,6 +215,24 @@ class HttpKakaoClient:
             callback_url, json={"version": "2.0", "template": template}
         )
         resp.raise_for_status()
+
+    async def fetch_inbound_image(self, url: str) -> bytes:
+        """Download an inbound image from a (Kakao-provided) url, capped.
+
+        The agent fetches it itself — the router deliberately does no
+        outbound fetch ([router-managed-file-store.md] §4.1). The url
+        originates from an authenticated Kakao skill payload; we still
+        restrict the scheme as a minimal SSRF guard."""
+        if not url.lower().startswith(("http://", "https://")):
+            raise ValueError("unsupported inbound image url scheme")
+        buf = bytearray()
+        async with self._callback_client.stream("GET", url) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes():
+                buf += chunk
+                if len(buf) > _INBOUND_IMAGE_CAP:
+                    raise ValueError("inbound image exceeds cap")
+        return bytes(buf)
 
     async def aclose(self) -> None:
         await self._queue_client.aclose()

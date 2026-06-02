@@ -25,6 +25,7 @@ from bp_agents.agents.chatbot.cron import CronScheduler
 from bp_agents.agents.chatbot.gateway import BOT_COMMANDS, ChatbotGateway
 from bp_agents.agents.chatbot.kakao_client import HttpKakaoClient
 from bp_agents.agents.chatbot.kakao_consumer import kakao_consume_loop
+from bp_agents.agents.chatbot.kakao_files import R2FileEgress
 from bp_agents.agents.chatbot.kakao_gateway import KakaoGateway
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
 from bp_agents.agents.chatbot.telegram import (
@@ -146,6 +147,9 @@ async def _startup() -> None:
     global _kakao, _kakao_gateway, _kakao_task  # noqa: PLW0603
     if _kakao_configured(_settings) and _redis is not None:
         _kakao = HttpKakaoClient(_settings)
+        # Outbound images go to R2 (presigned urls) when configured; inbound
+        # images reuse the router named store regardless.
+        _egress = R2FileEgress(_settings) if R2FileEgress.configured(_settings) else None
         _kakao_gateway = KakaoGateway(
             dispatcher=agent,
             pool=_pool,
@@ -153,6 +157,7 @@ async def _startup() -> None:
             registry=KakaoTaskRegistry(_redis, ttl_s=_settings.kakao_carry_ttl_s),
             settings=_settings,
             credentials=_credentials,
+            egress=_egress,
             redis=_redis,
         )
         _kakao_task = asyncio.create_task(

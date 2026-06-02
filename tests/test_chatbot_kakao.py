@@ -60,10 +60,12 @@ def _job(msg_id="m1", **body) -> KakaoJob:
 
 
 class _RecordingClient:
-    """Captures post_callback so the gateway's delivery can be asserted."""
+    """Captures post_callback so the gateway's delivery can be asserted.
+    posts are (callback_url, text, quick_replies, images)."""
 
     def __init__(self) -> None:
-        self.posts: list[tuple[str, str, object]] = []
+        self.posts: list[tuple[str, str, object, object]] = []
+        self.inbound_bytes: bytes = b""
 
     async def pull(self, *, batch_size, visibility_timeout_s):
         return []
@@ -71,8 +73,11 @@ class _RecordingClient:
     async def ack(self, lease_ids):
         return None
 
-    async def post_callback(self, callback_url, text, *, quick_replies=None):
-        self.posts.append((callback_url, text, quick_replies))
+    async def post_callback(self, callback_url, text, *, quick_replies=None, images=None):
+        self.posts.append((callback_url, text, quick_replies, images))
+
+    async def fetch_inbound_image(self, url):
+        return self.inbound_bytes
 
     async def aclose(self) -> None:
         return None
@@ -209,7 +214,7 @@ def test_registry_dedupe_and_park_lifecycle() -> None:
 
         await reg.store_ready("c", "the answer")
         assert (await reg.get_turn("c"))["state"] == "ready"
-        assert await reg.take_ready("c") == "the answer"
+        assert await reg.take_ready("c") == ("the answer", "")
         assert await reg.take_ready("c") is None  # cleared on take
         assert await reg.get_turn("c") is None
 
@@ -234,7 +239,7 @@ def test_check_delivers_ready_result() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance=CHECK_LABEL))
-        assert client.posts == [("https://cb.kakao/x", "parked answer", None)]
+        assert client.posts == [("https://cb.kakao/x", "parked answer", None, None)]
         assert await reg.get_turn("kc1") is None  # cleared
 
     asyncio.run(_drive())
@@ -247,7 +252,7 @@ def test_check_while_pending_reports_still_working() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance=CHECK_LABEL))
-        url, text, qr = client.posts[0]
+        url, text, qr, imgs = client.posts[0]
         assert text == kg._STILL_WORKING_TEXT
         assert qr == [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
 
@@ -269,7 +274,7 @@ def test_stop_cancels_pending_turn() -> None:
         gw = _poll_gateway(client, reg, credentials=creds)
         await gw.handle_job(_job(utterance=STOP_LABEL))
         assert creds.cancelled == [("usr", "tsk1")]
-        assert client.posts == [("https://cb.kakao/x", kg._STOPPED_TEXT, None)]
+        assert client.posts == [("https://cb.kakao/x", kg._STOPPED_TEXT, None, None)]
         assert (await reg.get_turn("kc1")).get("stopped") == "1"
 
     asyncio.run(_drive())
@@ -281,7 +286,7 @@ def test_stop_with_nothing_running() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance=STOP_LABEL))
-        assert client.posts == [("https://cb.kakao/x", kg._NOTHING_RUNNING_TEXT, None)]
+        assert client.posts == [("https://cb.kakao/x", kg._NOTHING_RUNNING_TEXT, None, None)]
 
     asyncio.run(_drive())
 
@@ -343,9 +348,10 @@ def test_consumer_acks_only_successes() -> None:
 
 
 class _FakeDispatcher:
-    def __init__(self, *, reply="the answer", delay=0.0) -> None:
+    def __init__(self, *, reply="the answer", delay=0.0, files=None) -> None:
         self.reply = reply
         self.delay = delay
+        self.files = files or []
 
     async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
         return f"tsk:{getattr(payload, 'prompt', None)}"
@@ -357,7 +363,7 @@ class _FakeDispatcher:
         return ResultFrame(
             agent_id="orchestrator", trace_id="0" * 32, span_id="0" * 16,
             task_id=task_id, status=TaskStatus.SUCCEEDED, status_code=200,
-            output=AgentOutput(content=self.reply),
+            output=AgentOutput(content=self.reply, files=self.files),
         )
 
 
@@ -397,7 +403,7 @@ def test_turn_delivers_in_time(suite_db_url: str) -> None:
             await gw.handle_job(_job(utterance="hello?"))
 
             # delivered on the callback, no buttons, no parked state left
-            assert client.posts == [("https://cb.kakao/x", "hi back", None)]
+            assert client.posts == [("https://cb.kakao/x", "hi back", None, None)]
             assert await reg.get_turn("kc1") is None
             async with pool.acquire() as conn:
                 rows = await queries.reload_incumbent(
@@ -424,7 +430,7 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
 
             await gw.handle_job(_job(utterance="do something slow"))
             # first callback is the "still working" status + buttons
-            url, text, qr = client.posts[0]
+            url, text, qr, imgs = client.posts[0]
             assert text == kg._WORKING_TEXT
             assert qr == [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
 
@@ -437,8 +443,203 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
             # next touch ([확인]) delivers the parked answer on a fresh callback
             client.posts.clear()
             await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
-            assert client.posts == [("https://cb.kakao/x", "slow answer", None)]
+            assert client.posts == [("https://cb.kakao/x", "slow answer", None, None)]
             assert await reg.get_turn("kc1") is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+# --- PR3: images -------------------------------------------------------
+
+from bp_agents.agents.chatbot.kakao_files import (  # noqa: E402
+    R2FileEgress,
+    detect_image_mime,
+)
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+class _FakeCreds:
+    """Records inbound stores; serves a fixed blob for outbound resolves."""
+
+    def __init__(self, *, file_bytes=b"", saved="image.png") -> None:
+        self.stored: list[tuple[str, str | None, int]] = []
+        self.file_bytes = file_bytes
+        self.saved = saved
+
+    async def store_named_file(self, *, user_id, session_id, filename, data, mime_type=None):
+        self.stored.append((filename, mime_type, len(data)))
+        return self.saved
+
+    async def resolve_named_file(self, *, user_id, session_id, name):
+        return f"fid:{name}"
+
+    async def fetch_file(self, *, user_id, file_id):
+        return self.file_bytes
+
+
+class _FakeEgress:
+    def __init__(self, url="https://r2.example/signed.png") -> None:
+        self.url = url
+        self.puts: list[tuple[str, str]] = []
+
+    async def put_image(self, data, *, content_type, key):
+        self.puts.append((content_type, key))
+        return self.url
+
+
+def test_detect_image_mime() -> None:
+    assert detect_image_mime(_PNG) == "image/png"
+    assert detect_image_mime(b"\xff\xd8\xff\xe0") == "image/jpeg"
+    assert detect_image_mime(b"GIF89a....") == "image/gif"
+    assert detect_image_mime(b"RIFF\x00\x00\x00\x00WEBPxx") == "image/webp"
+    assert detect_image_mime(b"\x00\x00", "x.png") == "image/png"  # ext fallback
+    assert detect_image_mime(b"\x00\x00", "x") == "application/octet-stream"
+
+
+def test_r2_egress_configured_gate() -> None:
+    assert R2FileEgress.configured(_settings()) is False
+    s = _settings(
+        kakao_r2_endpoint_url="https://r2", kakao_r2_bucket="b",
+        kakao_r2_access_key_id="k", kakao_r2_secret_access_key="sec",
+    )
+    assert R2FileEgress.configured(s) is True
+
+
+def test_r2_egress_put_image_awaits_presigned() -> None:
+    s = _settings(
+        kakao_r2_endpoint_url="https://r2", kakao_r2_bucket="b",
+        kakao_r2_access_key_id="k", kakao_r2_secret_access_key="sec",
+        kakao_r2_url_ttl_s=300,
+    )
+    egress = R2FileEgress(s)
+    calls: dict = {}
+
+    class _S3:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def put_object(self, **kw):
+            calls["put"] = kw
+
+        async def generate_presigned_url(self, **kw):  # must be awaited
+            calls["presign"] = kw
+            return "https://r2.example/signed"
+
+    egress._client = _S3  # bypass aioboto3/botocore entirely (ctx-mgr factory)
+
+    url = asyncio.run(
+        egress.put_image(_PNG, content_type="image/png", key="kakao/s/abc/x.png")
+    )
+    assert url == "https://r2.example/signed"
+    assert calls["put"]["Bucket"] == "b" and calls["put"]["ContentType"] == "image/png"
+    assert calls["presign"]["ClientMethod"] == "get_object"
+    assert calls["presign"]["ExpiresIn"] == 300
+
+
+def test_post_callback_with_images_no_token_leak() -> None:
+    captured: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("authorization")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    async def _drive() -> None:
+        c = HttpKakaoClient(_settings())
+        c._callback_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await c.post_callback(
+            "https://cb.kakao/x", "caption",
+            images=[("https://r2/a.png", "a.png")],
+        )
+        await c.aclose()
+
+    asyncio.run(_drive())
+    assert captured["auth"] is None
+    outs = captured["body"]["template"]["outputs"]
+    assert {"simpleText": {"text": "caption"}} in outs
+    assert {
+        "simpleImage": {"imageUrl": "https://r2/a.png", "altText": "a.png"}
+    } in outs
+
+
+def test_fetch_inbound_image_caps_and_guards_scheme() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_PNG)
+
+    async def _drive() -> bytes:
+        c = HttpKakaoClient(_settings())
+        c._callback_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        data = await c.fetch_inbound_image("https://img.kakao/x.png")
+        with pytest.raises(ValueError):
+            await c.fetch_inbound_image("ftp://nope")  # scheme guard
+        await c.aclose()
+        return data
+
+    assert asyncio.run(_drive()).startswith(b"\x89PNG")
+
+
+def test_inbound_image_stored_and_recorded(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            client.inbound_bytes = _PNG
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            creds = _FakeCreds(saved="image.png")
+            gw = KakaoGateway(
+                dispatcher=_FakeDispatcher(reply="nice pic"), pool=pool,
+                client=client, registry=reg, settings=_settings(),
+                credentials=creds, egress=None, redis=None,
+            )
+            await gw.handle_job(_job(utterance="", image_url="https://img.kakao/x.png"))
+
+            # stored to the router named store as image/png
+            assert creds.stored and creds.stored[0][1] == "image/png"
+            # a hidden (T,T) row records the saved name
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT role, message, hidden FROM session_history "
+                    "WHERE session_id='ses_k' ORDER BY id"
+                )
+            assert any(
+                r["hidden"] and "image saved as image.png" in r["message"]
+                for r in rows
+            )
+            # the reply is still delivered on the callback
+            assert client.posts[-1][1] == "nice pic"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            creds = _FakeCreds(file_bytes=_PNG)
+            egress = _FakeEgress("https://r2.example/chart.png")
+            disp = _FakeDispatcher(reply="here is your chart", files=["chart.png"])
+            gw = KakaoGateway(
+                dispatcher=disp, pool=pool, client=client, registry=reg,
+                settings=_settings(), credentials=creds, egress=egress, redis=None,
+            )
+            await gw.handle_job(_job(utterance="make a chart"))
+
+            url, text, qr, imgs = client.posts[-1]
+            assert text == "here is your chart"
+            assert imgs == [("https://r2.example/chart.png", "chart.png")]
+            assert egress.puts and egress.puts[0][0] == "image/png"
         finally:
             await pool.close()
 
