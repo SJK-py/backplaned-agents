@@ -341,6 +341,20 @@ build_env() {
         echo
         echo "# --- Channel ---"
         echo "SUITE_TELEGRAM_BOT_TOKEN=$TELEGRAM"
+        echo "# KakaoTalk (optional, 2nd chatbot channel). Egress-only pull"
+        echo "# consumer behind the deploy/kakao-relay Cloudflare Worker + a"
+        echo "# Cloudflare Queue (deploy that separately — see its README)."
+        echo "# Redis is on by default (compose -> redis://redis:6379/1), which"
+        echo "# also backs Kakao's registry; only set SUITE_REDIS_URL to override."
+        echo "# SUITE_REDIS_URL=redis://redis:6379/1"
+        echo "# SUITE_KAKAO_CF_ACCOUNT_ID="
+        echo "# SUITE_KAKAO_CF_QUEUE_ID="
+        echo "# SUITE_KAKAO_CF_API_TOKEN="
+        echo "# Outbound images only (presigned R2); inbound reuse the file store."
+        echo "# SUITE_KAKAO_R2_ENDPOINT_URL="
+        echo "# SUITE_KAKAO_R2_BUCKET="
+        echo "# SUITE_KAKAO_R2_ACCESS_KEY_ID="
+        echo "# SUITE_KAKAO_R2_SECRET_ACCESS_KEY="
         echo
         echo "# --- Web search (research agent) ---"
         if [[ "$SEARXNG_URL" == "$BUNDLED_SEARXNG_URL" ]]; then
