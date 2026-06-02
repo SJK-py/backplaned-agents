@@ -90,8 +90,14 @@ class KakaoTaskRegistry:
 
     async def mark_stopped(self, chat_id: str) -> None:
         """Flag that the user pressed `[중지]`, so a turn that finishes after
-        the cancel parks nothing (they already saw the stop ack)."""
-        await self._r.hset(self._turn_key(chat_id), "stopped", "1")
+        the cancel parks nothing (they already saw the stop ack). Re-applies
+        the TTL so a key recreated by this `hset` (had it just lapsed) can't
+        leak untouched."""
+        key = self._turn_key(chat_id)
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.hset(key, "stopped", "1")
+            pipe.expire(key, self._ttl)
+            await pipe.execute()
 
     async def store_ready_unless_stopped(
         self, chat_id: str, result: str, images: str = ""

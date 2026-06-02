@@ -130,18 +130,25 @@ class SuiteSettings(BaseSettings):
     """Lease/visibility timeout for a pulled batch — an unacked message
     reappears after this, so the loop retries a turn it failed to handle."""
 
+    kakao_callback_ttl_s: float = Field(default=60.0, gt=0.0)
+    """Kakao's own single-use `callbackUrl` lifetime, as a tunable (the
+    documented value is ~60s; verify against current Kakao docs). The
+    channel caps its delivery budget by the callback's remaining TTL, so a
+    job pulled after an outage delivers via park + next-touch instead of a
+    dead callback."""
+
     kakao_callback_deadline_s: float = Field(default=50.0, gt=0.0)
     """Budget for delivering a turn on Kakao's single-use `callbackUrl`
     before the channel falls back to park + next-touch delivery; kept
-    below Kakao's ~60s callback TTL."""
+    below `kakao_callback_ttl_s`."""
 
     kakao_carry_ttl_s: int = Field(default=900, ge=1)
     """How long a parked (overran-the-callback) result waits in Redis for
     the user's next touch before it lapses and they must re-ask."""
 
-    kakao_msg_char_limit: int = Field(default=1000, ge=1)
+    kakao_msg_char_limit: int = Field(default=1000, ge=10)
     """Per-bubble character cap for an outbound Kakao `simpleText` (a long
-    reply is chunked below this)."""
+    reply is chunked below this). Floored well above the truncation marker."""
 
     # KakaoTalk outbound images (R2 / S3-compatible). Rendering an image in
     # KakaoTalk requires a PUBLIC url Kakao's servers fetch; the router blob

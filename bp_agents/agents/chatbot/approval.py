@@ -7,6 +7,11 @@ channel-native `external_id`, the channel writes the suite-side identity:
 `suite_platform_mappings` (chat_id → user_id), a `user_config` row (seeding
 `default_session_id`), and a `session_info` row. All writes are idempotent,
 so re-polling is safe.
+
+Channel-agnostic: `reconcile_serviced_sessions` / `approval_poll_loop` take
+`channel` + `platform` (defaulting to Telegram), so the chatbot runs one
+loop per active channel — Telegram (`chatbot_telegram`/`telegram`) and,
+when enabled, KakaoTalk (`chatbot_kakao`/`kakao`).
 """
 
 from __future__ import annotations
@@ -26,6 +31,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Default channel/platform for the reconcile (overridable per call — the
+# chatbot passes channel="chatbot_kakao"/platform="kakao" for its Kakao loop).
 PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
 

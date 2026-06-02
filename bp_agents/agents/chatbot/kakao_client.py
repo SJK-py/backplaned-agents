@@ -68,7 +68,9 @@ def chunk_for_kakao(text: str, *, limit: int, max_bubbles: int) -> list[str]:
         if rest[:1] in ("\n", " "):
             rest = rest[1:]
     if len(rest) > limit:
-        rest = rest[: limit - len(_TRUNCATED_SUFFIX)] + _TRUNCATED_SUFFIX
+        # Leave room for the marker; `max(0, …)` guards an absurdly small
+        # limit (the settings floor keeps `limit` well above the marker).
+        rest = rest[: max(0, limit - len(_TRUNCATED_SUFFIX))] + _TRUNCATED_SUFFIX
     chunks.append(rest)
     return chunks
 

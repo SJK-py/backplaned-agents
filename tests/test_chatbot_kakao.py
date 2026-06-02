@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -54,7 +55,12 @@ def _redis():
 
 
 def _job(msg_id="m1", **body) -> KakaoJob:
-    b = {"chat_id": "kc1", "callback_url": "https://cb.kakao/x", "utterance": ""}
+    # `received_at` defaults to now (epoch ms) so the callback budget is fresh;
+    # the relay always sets it, and a missing value is treated as stale.
+    b = {
+        "chat_id": "kc1", "callback_url": "https://cb.kakao/x", "utterance": "",
+        "received_at": int(time.time() * 1000),
+    }
     b.update(body)
     return KakaoJob(msg_id=msg_id, lease_id="L1", body=b)
 
@@ -919,5 +925,30 @@ def test_in_time_delivery_failure_parks_for_next_touch(suite_db_url: str) -> Non
             assert client.posts[-1][1] == "answer"
         finally:
             await pool.close()
+
+    asyncio.run(_drive())
+
+
+# --- cleanup sweep: budget default + mark_stopped ttl ------------------
+
+
+def test_callback_budget_fresh_missing_and_stale() -> None:
+    gw = _poll_gateway(_RecordingClient(), KakaoTaskRegistry(_redis(), ttl_s=60))
+    now = int(time.time() * 1000)
+    # fresh → ~deadline (50), capped by ttl-margin (55)
+    assert gw._callback_budget({"received_at": now}) > 40
+    # missing → 0.0 (treated as stale; the safe default → park-only)
+    assert gw._callback_budget({}) == 0.0
+    # older than the TTL → ≤ 0 → park-only
+    assert gw._callback_budget({"received_at": now - 120_000}) <= 0
+
+
+def test_mark_stopped_sets_ttl() -> None:
+    async def _drive() -> None:
+        r = _redis()
+        reg = KakaoTaskRegistry(r, ttl_s=60)
+        await reg.try_begin("c")
+        await reg.mark_stopped("c")
+        assert await r.ttl("kakao:turn:c") > 0  # recreated key can't leak
 
     asyncio.run(_drive())
