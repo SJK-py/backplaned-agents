@@ -408,6 +408,9 @@ def test_html_fetch_kagi_extract_backend() -> None:
         assert captured["url"] == KAGI_EXTRACT_URL
         assert captured["headers"]["Authorization"] == "Bearer tok"
         assert captured["json"]["pages"] == [{"url": "http://a"}, {"url": "http://b"}]
+        # `format` must be "json" — "markdown" returns a bare body that breaks
+        # JSON decoding.
+        assert captured["json"]["format"] == "json"
         assert "Page A" in out and "Couldn't extract: timeout" in out
 
     asyncio.run(_drive())

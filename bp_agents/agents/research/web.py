@@ -351,7 +351,11 @@ async def _kagi_extract(
     headers = {"Authorization": f"Bearer {settings.kagi_api_key.get_secret_value()}"}
     data = await request(
         "POST", KAGI_EXTRACT_URL,
-        json={"pages": pages, "format": "markdown"},
+        # `format` selects the *response* serialization, not the per-page
+        # content type — "json" keeps the `data[].markdown` envelope (markdown
+        # is the extracted content); "markdown" would return a bare text body
+        # that resp.json() can't parse.
+        json={"pages": pages, "format": "json"},
         headers=headers, timeout=settings.web_fetch_timeout_s,
     )
     items = data.get("data") or []
