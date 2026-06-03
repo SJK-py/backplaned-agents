@@ -602,6 +602,10 @@ def test_turn_progress_recorded_and_shown_on_check(suite_db_url: str) -> None:
             gw = _gateway(pool, client, disp, reg, settings)
 
             await gw.handle_job(_job(utterance="do something slow"))
+            # The 50 s overrun status (the FIRST callback) already carries the
+            # progress recorded during the turn.
+            assert kg._WORKING_TEXT in client.posts[0][1]
+            assert "research를 호출하여 처리 중이에요." in client.posts[0][1]
             # Turn overran → parked pending; progress recorded as it ran.
             for _ in range(50):
                 if (await reg.get_turn("kc1") or {}).get("progress"):

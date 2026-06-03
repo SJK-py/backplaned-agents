@@ -124,11 +124,12 @@ def _format_progress(lp: dict, producer: str | None) -> str:
     return _PROGRESS_FALLBACK_TEXT
 
 
-def _still_working_text(turn: dict | None) -> str:
-    """The "still working" status, with the latest tool-progress line appended
-    when one has been recorded for the in-flight turn."""
+def _with_progress(base: str, turn: dict | None) -> str:
+    """Append the in-flight turn's latest tool-progress line to a status text,
+    when one has been recorded. Shared by every "still working" reply — the
+    50 s overrun status, the `/check` poll, and the busy-claim status."""
     progress = (turn or {}).get("progress")
-    return f"{_STILL_WORKING_TEXT}\n{progress}" if progress else _STILL_WORKING_TEXT
+    return f"{base}\n{progress}" if progress else base
 _REGISTER_PROMPT = (
     "아직 등록되지 않았어요. /register 를 보내 접근을 요청하면 "
     "관리자가 검토할게요. (이메일을 함께 보내도 돼요: /register you@example.com)\n\n"
@@ -309,7 +310,7 @@ class KakaoGateway:
         turn = await self._registry.get_turn(chat_id)
         if turn and turn.get("state") == "pending":
             await self._client.post_callback(
-                callback_url, _still_working_text(turn),
+                callback_url, _with_progress(_STILL_WORKING_TEXT, turn),
                 quick_replies=self._poll_buttons(),
             )
             return
@@ -348,7 +349,7 @@ class KakaoGateway:
         if not await self._registry.try_begin(chat_id):
             turn = await self._registry.get_turn(chat_id)
             await self._client.post_callback(
-                callback_url, _still_working_text(turn),
+                callback_url, _with_progress(_STILL_WORKING_TEXT, turn),
                 quick_replies=self._poll_buttons(),
             )
             return True
@@ -412,10 +413,14 @@ class KakaoGateway:
             return
 
         # Overran (or stale callback) — park the rest, status if we still can.
+        # By the deadline (~50 s) the turn has usually emitted tool steps, so
+        # surface the latest one alongside the "still working" status.
         if budget > 0:
+            turn = await self._registry.get_turn(chat_id)
             with contextlib.suppress(Exception):
                 await self._client.post_callback(
-                    callback_url, _WORKING_TEXT, quick_replies=self._poll_buttons()
+                    callback_url, _with_progress(_WORKING_TEXT, turn),
+                    quick_replies=self._poll_buttons(),
                 )
         compute.add_done_callback(lambda t: self._schedule_park(chat_id, t))
 
