@@ -32,9 +32,14 @@ from typing import TYPE_CHECKING, Any
 from bp_agents.agents.chatbot.kakao_client import KakaoClient
 from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
-from bp_agents.channel import ChannelCore, agent_tag
+from bp_agents.channel import ChannelCore, agent_tag, progress_producer
+from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 from bp_protocol.types import TaskStatus
+
+# The root agent — its tool steps are reported without an agent prefix (it's
+# the default "assistant" the user is talking to).
+ORCHESTRATOR_AGENT_ID = "orchestrator"
 
 if TYPE_CHECKING:
     import asyncpg
@@ -80,6 +85,44 @@ _STOPPED_TEXT = "중지했어요."
 _NOTHING_RUNNING_TEXT = "지금 진행 중인 작업이 없어요."
 _DISPATCH_FAILED_TEXT = "죄송해요, 처리 중 문제가 생겼어요. 다시 시도해 주세요."
 _NO_RESPONSE_TEXT = "(응답 없음)"
+_PROGRESS_FALLBACK_TEXT = "처리 중이에요."
+
+
+def _format_progress(lp: dict, producer: str | None) -> str:
+    """Render a `LoopProgress` (a `tool_call` / `tool_result`) as a one-line
+    Korean status, so a "still working" reply tells the user WHAT the turn is
+    doing. A `call_<agent>` peer tool reads as calling / analysing that agent;
+    any other tool reads as the producing agent using it (the prefix is
+    dropped for the orchestrator — the user's default assistant)."""
+    kind = lp.get("kind")
+    tool = lp.get("tool") or ""
+    if tool.startswith("call_"):
+        target = tool.removeprefix("call_") or "에이전트"
+        if kind == "tool_call":
+            return f"{target}를 호출하여 처리 중이에요."
+        if kind == "tool_result":
+            return f"{target}의 결과 보고를 분석 중이에요."
+    else:
+        # Bracket-tag the producing agent (a particle like 가/이 would have to
+        # agree with the agent_id's final sound; the tag sidesteps that).
+        # Dropped for the orchestrator — the user's default assistant.
+        prefix = (
+            f"[{producer}] "
+            if producer and producer != ORCHESTRATOR_AGENT_ID
+            else ""
+        )
+        if kind == "tool_call":
+            return f"{prefix}{tool}도구를 이용하여 처리 중이에요."
+        if kind == "tool_result":
+            return f"{prefix}{tool} 도구를 사용하고 결과를 분석 중이에요."
+    return _PROGRESS_FALLBACK_TEXT
+
+
+def _still_working_text(turn: dict | None) -> str:
+    """The "still working" status, with the latest tool-progress line appended
+    when one has been recorded for the in-flight turn."""
+    progress = (turn or {}).get("progress")
+    return f"{_STILL_WORKING_TEXT}\n{progress}" if progress else _STILL_WORKING_TEXT
 _REGISTER_PROMPT = (
     "아직 등록되지 않았어요. /register 를 보내 접근을 요청하면 "
     "관리자가 검토할게요. (이메일을 함께 보내도 돼요: /register you@example.com)\n\n"
@@ -263,7 +306,8 @@ class KakaoGateway:
         turn = await self._registry.get_turn(chat_id)
         if turn and turn.get("state") == "pending":
             await self._client.post_callback(
-                callback_url, _STILL_WORKING_TEXT, quick_replies=self._poll_buttons()
+                callback_url, _still_working_text(turn),
+                quick_replies=self._poll_buttons(),
             )
             return
         await self._client.post_callback(callback_url, _NOTHING_RUNNING_TEXT)
@@ -299,8 +343,10 @@ class KakaoGateway:
         if await self._deliver_ready(chat_id, callback_url):
             return True
         if not await self._registry.try_begin(chat_id):
+            turn = await self._registry.get_turn(chat_id)
             await self._client.post_callback(
-                callback_url, _STILL_WORKING_TEXT, quick_replies=self._poll_buttons()
+                callback_url, _still_working_text(turn),
+                quick_replies=self._poll_buttons(),
             )
             return True
         return False
@@ -426,7 +472,26 @@ class KakaoGateway:
             )
             task_id = await self._core.spawn(user_id, session_id, dest, mode, prompt)
             await self._registry.set_task(chat_id, user_id, task_id)
-            result = await self._core.await_result(task_id)
+
+            async def _on_progress(pf: Any) -> None:
+                """Record the latest tool step so the 'still working' status can
+                show it on the user's next touch. Best-effort — a Redis hiccup
+                here must never affect the turn."""
+                lp = (getattr(pf, "metadata", None) or {}).get(LOOP_PROGRESS_KEY)
+                if not lp or lp.get("kind") not in ("tool_call", "tool_result"):
+                    return
+                try:
+                    await self._registry.set_progress(
+                        chat_id, _format_progress(lp, progress_producer(pf))
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "kakao_progress_store_failed",
+                        extra={"event": "kakao_progress_store_failed"},
+                        exc_info=True,
+                    )
+
+            result = await self._core.await_result(task_id, on_progress=_on_progress)
 
             reply = (result.output.content if result.output else "") or ""
             reply_text = (

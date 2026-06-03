@@ -13,7 +13,9 @@ Keyed by `chat_id`:
 
   * `kakao:turn:{chat_id}` — a hash: `state` (`pending`|`ready`),
     `user_id`, `task_id` (the router task, for `[중지]` cancel), `result`
-    (the parked answer once ready), `stopped` (`1` after a `[중지]`).
+    (the parked answer once ready), `stopped` (`1` after a `[중지]`),
+    `progress` (the latest tool-progress line, shown in the "still working"
+    status).
   * `kakao:seen:{msg_id}` — a short-lived flag deduping the queue's
     at-least-once redelivery ([kakao-channel.md] §13).
 """
@@ -80,6 +82,18 @@ class KakaoTaskRegistry:
         key = self._turn_key(chat_id)
         async with self._r.pipeline(transaction=True) as pipe:
             pipe.hset(key, mapping={"user_id": user_id, "task_id": task_id})
+            pipe.expire(key, self._ttl)
+            await pipe.execute()
+
+    async def set_progress(self, chat_id: str, text: str) -> None:
+        """Record the latest progress line for the in-flight turn — read by the
+        'still working' status so the user sees WHAT the turn is doing. Stored
+        in the turn hash (field `progress`) so it lives/dies with the turn;
+        re-applies the TTL so a long, actively-progressing turn can't lapse
+        mid-flight. Best-effort (called from the turn's `on_progress`)."""
+        key = self._turn_key(chat_id)
+        async with self._r.pipeline(transaction=True) as pipe:
+            pipe.hset(key, "progress", text)
             pipe.expire(key, self._ttl)
             await pipe.execute()
 
