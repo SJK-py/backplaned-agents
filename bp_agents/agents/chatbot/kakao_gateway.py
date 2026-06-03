@@ -83,13 +83,13 @@ _CALLBACK_MARGIN_S = 5.0
 
 # User-facing scaffolding text (Korean, matching the relay's "처리 중…").
 _WORKING_TEXT = (
-    "아직 작업 중이에요. — [확인]을 눌러 결과를 "
+    "⏳ 아직 작업 중이에요. [확인]을 눌러 결과를 "
     "다시 확인하거나 [중지]로 멈출 수 있어요."
 )
-_STILL_WORKING_TEXT = "아직 작업 중이에요. 잠시 후 [확인]을 눌러 주세요."
-_STOPPED_TEXT = "중지했어요."
+_STILL_WORKING_TEXT = "⏳ 아직 작업 중이에요. 잠시 후 [확인]을 눌러 주세요."
+_STOPPED_TEXT = "🛑 중지했어요."
 _NOTHING_RUNNING_TEXT = "지금 진행 중인 작업이 없어요."
-_DISPATCH_FAILED_TEXT = "죄송해요, 처리 중 문제가 생겼어요. 다시 시도해 주세요."
+_DISPATCH_FAILED_TEXT = "😥 죄송해요, 처리 중 문제가 생겼어요. 다시 시도해 주세요."
 _NO_RESPONSE_TEXT = "(응답 없음)"
 _PROGRESS_FALLBACK_TEXT = "처리 중이에요."
 
@@ -136,7 +136,7 @@ def _with_progress(base: str, turn: dict | None) -> str:
     progress = (turn or {}).get("progress")
     return f"{base}\n{progress}" if progress else base
 _REGISTER_PROMPT = (
-    "사용자 등록이 필요해요.\n\n"
+    "👋 사용자 등록이 필요해요.\n\n"
     "/register 를 보내 접근을 요청하면 관리자가 검토 후 사용 가능해요. (이메일을 함께 보내주세요: /register you@example.com)\n\n"
     "이미 등록된 사용자라면, 등록된 채팅(또는 웹)에서 /password 로 토큰을 받은 다음, "
     "여기에서 /link <토큰> 을 보내서 이 채팅을 기존 계정에 연결할 수 있어요."
@@ -146,7 +146,7 @@ _LINK_USAGE_TEXT = (
     "이미 등록된 채팅(또는 웹)에서 /password 로 토큰을 받을 수 있어요."
 )
 _LINK_OK_TEXT = (
-    "연결됐어요 — 이제 이 채팅이 기존 계정을 사용해요. (다른 채팅과는 별개의 대화를 가져요.)"
+    "🔗 연결됐어요! 이제 이 채팅이 기존 계정을 사용해요. (다른 채팅과는 별개의 대화를 가져요.)"
 )
 _LINK_INVALID_TEXT = (
     "토큰이 올바르지 않거나 만료됐어요. /password 로 새 토큰을 받아 다시 시도해 주세요."
@@ -154,20 +154,20 @@ _LINK_INVALID_TEXT = (
 _LINK_FAILED_TEXT = "연결에 실패했어요. 잠시 후 다시 시도해 주세요."
 _NO_SESSION_TEXT = "활성화된 대화가 없어요. 관리자에게 문의해 주세요."
 _UNAVAILABLE_TEXT = "지금은 이 명령을 사용할 수 없어요."
-_ALREADY_REGISTERED_TEXT = "이미 등록되어 있어요. 그냥 메시지를 보내 주세요!"
+_ALREADY_REGISTERED_TEXT = "🙂 이미 등록되어 있어요. 그냥 메시지를 보내 주세요!"
 _REGISTER_SUBMITTED_TEXT = (
-    "등록 요청을 접수했어요. 관리자 승인 후 사용이 가능해요."
+    "✅ 등록 요청을 접수했어요. 관리자 승인 후 사용이 가능해요."
 )
 _REGISTER_FAILED_TEXT = "등록 요청에 실패했어요. 다시 시도해 주세요."
-_NEW_STARTED_TEXT = "새 대화를 시작했어요."
-_DONE_TEXT = "완료했어요."
+_NEW_STARTED_TEXT = "✨ 새 대화를 시작했어요."
+_DONE_TEXT = "✅ 완료했어요."
 _UNKNOWN_CMD_TEXT = "지원하지 않는 명령이에요. /help 를 입력해 보세요."
-_PASSWORD_INTRO = "비밀번호 설정용 일회용 토큰이에요 (곧 만료됩니다):"
+_PASSWORD_INTRO = "🔑 비밀번호 설정용 일회용 토큰이에요 (곧 만료됩니다):"
 _SETDEFAULT_OK_TEXT = (
-    "이 채팅의 대화를 기본으로 설정했어요. 예약 알림과 외부 메시지가 여기로 와요."
+    "🔔 이 채팅의 대화를 기본으로 설정했어요. 예약 알림과 외부 메시지가 여기로 와요."
 )
 HELP_TEXT = (
-    "AI 에이전트 기반 개인 비서애요. 메시지를 보내 대화룰 시작하거나, 아래 명령어를 입력하세요\n\n"
+    "🤖 AI 에이전트 기반 개인 비서예요. 메시지를 보내 대화를 시작하거나, 아래 명령어를 입력하세요.\n\n"
     "명령어:\n"
     "/register <이메일> — 사용자 등록 요청 (관리자 승인 필요)\n"
     "/link <토큰> — 이 채팅을 기존 계정에 연결\n"
