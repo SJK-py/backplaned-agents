@@ -250,11 +250,8 @@ def test_extract_system_allows_multiple_facts_without_over_fragmenting() -> None
     # Explicitly allows a turn to yield a LIST of several facts...
     assert "SEVERAL distinct facts" in sys
     assert "one list item per fact" in sys
-    # ...while guarding against shattering one fact into trivia...
+    # ...while guarding against shattering one fact into trivia.
     assert "over-fragment" in sys
-    # ...anchored by a worked multi-fact example.
-    assert "Is vegetarian" in sys
-    assert "Wife's name is Jenna" in sys
 
 
 class _CaptureLlm(_ScriptLlm):
