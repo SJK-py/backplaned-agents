@@ -48,6 +48,12 @@ _CONTENT_CAP = 100_000
 # legitimately-slow download still completes).
 _CONNECT_TIMEOUT_S = 5.0
 
+# Default and per-backend ceiling for the number of results (`_KAGI_MAX_COUNT`
+# lives with the other kagi constants below). Maxes are unified at 20.
+_DEFAULT_COUNT = 10
+_SEARXNG_MAX_COUNT = 20
+_BRAVE_MAX_COUNT = 20
+
 BRAVE_CONTEXT_URL = "https://api.search.brave.com/res/v1/llm/context"
 KAGI_SEARCH_URL = "https://kagi.com/api/v1/search"
 KAGI_EXTRACT_URL = "https://kagi.com/api/v1/extract"
@@ -67,7 +73,7 @@ _KAGI_DROP = {"interesting_news", "interesting_finds", "web_archive"}
 # Contextual collections rendered above the primary list when present.
 _KAGI_HEADER = ("direct_answer", "weather")
 _KAGI_SNIPPET_CAP = 500  # Per-snippet character cap (after HTML-unescaping).
-_KAGI_MAX_COUNT = 50
+_KAGI_MAX_COUNT = 20
 _KAGI_LABELS = {
     "search": "Search results",
     "image": "Images",
@@ -156,7 +162,7 @@ async def _searxng_search(
 ) -> str:
     if not settings.searxng_url:
         return "Web search is not configured (no search backend set)."
-    count = min(max(count, 1), 10)
+    count = min(max(count, 1), _SEARXNG_MAX_COUNT)
     get = get_json or _default_get_json
     params: dict[str, Any] = {"q": query, "format": "json"}
     if time_range:
@@ -184,7 +190,7 @@ async def _brave_search(
     request_json: ApiRequester | None,
 ) -> str:
     request = request_json or _default_request_json
-    count = min(max(count, 1), 20)
+    count = min(max(count, 1), _BRAVE_MAX_COUNT)
     params: dict[str, Any] = {"q": query, "count": count}
     if country:
         params["country"] = country
@@ -312,7 +318,7 @@ async def _kagi_search(
 
 
 async def web_search(
-    query: str, *, settings: SuiteSettings, count: int = 5,
+    query: str, *, settings: SuiteSettings, count: int = _DEFAULT_COUNT,
     time_range: str | None = None, language: str | None = None,
     country: str | None = None, search_language: str | None = None,
     freshness: str | None = None, local_city: str | None = None,
@@ -445,8 +451,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     },
                     "count": {
                         "type": "integer",
-                        "description": "Number of results (1-20, default 5).",
-                        "minimum": 1, "maximum": 20,
+                        "description": (
+                            f"Number of results (1-{_BRAVE_MAX_COUNT}, "
+                            f"default {_DEFAULT_COUNT})."
+                        ),
+                        "minimum": 1, "maximum": _BRAVE_MAX_COUNT,
                     },
                     "freshness": {
                         "type": "string",
@@ -481,10 +490,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     "count": {
                         "type": "integer",
                         "description": (
-                            "Max results in the primary list (1-50, default 5). "
-                            "Contextual collections are capped tighter."
+                            f"Max results in the primary list (1-{_KAGI_MAX_COUNT}, "
+                            f"default {_DEFAULT_COUNT}). Contextual collections are "
+                            "capped tighter."
                         ),
-                        "minimum": 1, "maximum": 50,
+                        "minimum": 1, "maximum": _KAGI_MAX_COUNT,
                     },
                     "region": {
                         "type": "string",
@@ -519,8 +529,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                 "query": {"type": "string"},
                 "count": {
                     "type": "integer",
-                    "description": "Number of results (1-10, default 5).",
-                    "minimum": 1, "maximum": 10,
+                    "description": (
+                        f"Number of results (1-{_SEARXNG_MAX_COUNT}, "
+                        f"default {_DEFAULT_COUNT})."
+                    ),
+                    "minimum": 1, "maximum": _SEARXNG_MAX_COUNT,
                 },
                 "time_range": {
                     "type": "string",
@@ -544,7 +557,7 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await web_search(
             args["query"], settings=settings,
-            count=int(args.get("count", 5)),
+            count=int(args.get("count", _DEFAULT_COUNT)),
             time_range=args.get("time_range"),
             language=args.get("language"),
             country=args.get("country"),
