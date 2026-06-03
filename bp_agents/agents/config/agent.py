@@ -51,9 +51,14 @@ _SYSTEM_TAIL = (
 )
 
 
-def _system_prompt(preset_choices: dict[str, list[str]]) -> str:
+def _system_prompt(
+    preset_choices: dict[str, list[str]], language: str | None = None
+) -> str:
     """The config system prompt, with a sentence per opted-in preset tier
-    listing the names the user may pick (so the model offers real choices)."""
+    listing the names the user may pick (so the model offers real choices).
+    When the user has a `language` preference, instruct the model to write its
+    reply in it (the `/config` dispatch bypasses the orchestrator, which would
+    otherwise carry the language)."""
     lines = [_SYSTEM_BASE]
     for field, choices in preset_choices.items():
         if choices:
@@ -62,6 +67,12 @@ def _system_prompt(preset_choices: dict[str, list[str]]) -> str:
                 f"{', '.join(choices)}."
             )
     lines.append(_SYSTEM_TAIL)
+    if language:
+        lines.append(
+            f" Write your entire reply in the user's preferred language "
+            f"(their `language` setting: {language}); keep field names and "
+            f"setting values verbatim."
+        )
     return "".join(lines)
 
 
@@ -165,7 +176,12 @@ async def run_config(
     preset_choices = preset_choices_from_settings(settings)
     tools = await _build_tools(pool, preset_choices)
     messages = [
-        Message(role="system", content=_system_prompt(preset_choices)),
+        Message(
+            role="system",
+            content=_system_prompt(
+                preset_choices, language=cfg.language if cfg else None
+            ),
+        ),
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
