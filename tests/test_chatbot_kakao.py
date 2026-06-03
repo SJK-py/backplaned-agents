@@ -273,7 +273,7 @@ def test_check_delivers_ready_result() -> None:
         await _set_ready(reg, "kc1", "parked answer")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
-        await gw.handle_job(_job(utterance=CHECK_LABEL))
+        await gw.handle_job(_job(utterance="/check"))
         assert client.posts == [("https://cb.kakao/x", "parked answer", None, None)]
         assert await reg.get_turn("kc1") is None  # cleared
 
@@ -286,10 +286,23 @@ def test_check_while_pending_reports_still_working() -> None:
         await _set_pending(reg, "kc1", "usr", "tsk1")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
-        await gw.handle_job(_job(utterance=CHECK_LABEL))
+        await gw.handle_job(_job(utterance="/check"))
         url, text, qr, imgs = client.posts[0]
         assert text == kg._STILL_WORKING_TEXT
-        assert qr == [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
+        assert qr == [(CHECK_LABEL, "/check"), (STOP_LABEL, "/stop")]
+
+    asyncio.run(_drive())
+
+
+def test_check_while_idle_reports_nothing_running() -> None:
+    """/check with no active turn → 'nothing running' (routes through the
+    command path now, not a separate poll branch)."""
+    async def _drive() -> None:
+        reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+        client = _RecordingClient()
+        gw = _poll_gateway(client, reg)
+        await gw.handle_job(_job(utterance="/check"))
+        assert client.posts[0][1] == kg._NOTHING_RUNNING_TEXT
 
     asyncio.run(_drive())
 
@@ -325,7 +338,7 @@ def test_check_while_pending_appends_last_progress() -> None:
         await reg.set_progress("kc1", "research를 호출하여 처리 중이에요.")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
-        await gw.handle_job(_job(utterance=CHECK_LABEL))
+        await gw.handle_job(_job(utterance="/check"))
         _url, text, _qr, _imgs = client.posts[0]
         assert kg._STILL_WORKING_TEXT in text
         assert text.endswith("research를 호출하여 처리 중이에요.")
@@ -346,7 +359,7 @@ def test_stop_cancels_pending_turn() -> None:
         await _set_pending(reg, "kc1", "usr", "tsk1")
         client, creds = _RecordingClient(), _Creds()
         gw = _poll_gateway(client, reg, credentials=creds)
-        await gw.handle_job(_job(utterance=STOP_LABEL))
+        await gw.handle_job(_job(utterance="/stop"))
         assert creds.cancelled == [("usr", "tsk1")]
         assert client.posts == [("https://cb.kakao/x", kg._STOPPED_TEXT, None, None)]
         assert (await reg.get_turn("kc1")).get("stopped") == "1"
@@ -359,7 +372,7 @@ def test_stop_with_nothing_running() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
-        await gw.handle_job(_job(utterance=STOP_LABEL))
+        await gw.handle_job(_job(utterance="/stop"))
         assert client.posts == [("https://cb.kakao/x", kg._NOTHING_RUNNING_TEXT, None, None)]
 
     asyncio.run(_drive())
@@ -371,8 +384,8 @@ def test_duplicate_job_is_dropped() -> None:
         await _set_ready(reg, "kc1", "parked")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
-        await gw.handle_job(_job(msg_id="dup", utterance=CHECK_LABEL))
-        await gw.handle_job(_job(msg_id="dup", utterance=CHECK_LABEL))  # redelivery
+        await gw.handle_job(_job(msg_id="dup", utterance="/check"))
+        await gw.handle_job(_job(msg_id="dup", utterance="/check"))  # redelivery
         assert len(client.posts) == 1  # second is deduped away
 
     asyncio.run(_drive())
@@ -491,6 +504,33 @@ def test_turn_delivers_in_time(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_bare_confirm_word_is_a_normal_message(suite_db_url: str) -> None:
+    """Typing the bare button word '확인' is NOT hijacked into a poll — it's a
+    normal message that runs a turn. Only '/check' polls (the button sends the
+    slash command, not the visible word)."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            gw = _gateway(pool, client, _FakeDispatcher(reply="네"), reg, _settings())
+
+            await gw.handle_job(_job(utterance="확인"))
+
+            # A turn ran and delivered the reply — not the idle poll response.
+            assert client.posts == [("https://cb.kakao/x", "네", None, None)]
+            async with pool.acquire() as conn:
+                rows = await queries.reload_incumbent(
+                    conn, session_id="ses_k", agent_id="orchestrator"
+                )
+            assert [(r.role, r.message) for r in rows] == [("user", "확인")]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
@@ -507,7 +547,7 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
             # first callback is the "still working" status + buttons
             url, text, qr, imgs = client.posts[0]
             assert text == kg._WORKING_TEXT
-            assert qr == [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
+            assert qr == [(CHECK_LABEL, "/check"), (STOP_LABEL, "/stop")]
 
             # let the background turn finish and park its result
             for _ in range(50):
@@ -517,7 +557,7 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
 
             # next touch ([확인]) delivers the parked answer on a fresh callback
             client.posts.clear()
-            await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
+            await gw.handle_job(_job(msg_id="m2", utterance="/check"))
             assert client.posts == [("https://cb.kakao/x", "slow answer", None, None)]
             assert await reg.get_turn("kc1") is None
         finally:
@@ -572,7 +612,7 @@ def test_turn_progress_recorded_and_shown_on_check(suite_db_url: str) -> None:
 
             # [확인] while pending → the status carries the progress line.
             client.posts.clear()
-            await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
+            await gw.handle_job(_job(msg_id="m2", utterance="/check"))
             _url, text, _qr, _imgs = client.posts[0]
             assert "research를 호출하여 처리 중이에요." in text
 
@@ -1138,7 +1178,7 @@ def test_in_time_delivery_failure_parks_for_next_touch(suite_db_url: str) -> Non
             # the spent callback couldn't deliver → answer is PARKED, not lost
             assert (await reg.get_turn("kc1") or {}).get("state") == "ready"
             # next touch ([확인]) delivers it on a fresh callback
-            await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
+            await gw.handle_job(_job(msg_id="m2", utterance="/check"))
             assert client.posts[-1][1] == "answer"
         finally:
             await pool.close()
