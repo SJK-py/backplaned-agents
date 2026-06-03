@@ -62,8 +62,8 @@ assistant said or did, or anything that wouldn't still be useful to know \
 weeks later outside this conversation. If a fact isn't clearly worth \
 remembering, leave it out.
 
-A single turn often contains SEVERAL distinct facts — return one list item \
-per fact, never a single long run-on statement that staples them together. \
+A single turn can contain SEVERAL distinct facts — return one list item \
+per fact, not a single long run-on statement that staples them together. \
 Split whenever the pieces are independently meaningful and would be recalled \
 or updated on their own: a dietary preference and an allergy, a job and the \
 project it involves, two different people are each their own fact. But do \
@@ -85,16 +85,6 @@ user's local one. Leave facts that carry no time untouched.
 
 Return ONLY JSON, one object per fact:
 {"facts": [{"fact": "<self-contained statement>", "kind": "preference|personal_info|event|project"}]}
-
-Example — the turn "I'm vegetarian and allergic to peanuts. I'm a backend \
-engineer at Acme and I'm leading our billing system's move to Postgres. My \
-wife's name is Jenna." yields several separate, meaningful facts (not one \
-paragraph, and not split so finely the pieces lose meaning):
-{"facts": [{"fact": "Is vegetarian", "kind": "preference"}, \
-{"fact": "Is allergic to peanuts", "kind": "personal_info"}, \
-{"fact": "Works as a backend engineer at Acme", "kind": "personal_info"}, \
-{"fact": "Is leading the migration of Acme's billing system to Postgres", \
-"kind": "project"}, {"fact": "Wife's name is Jenna", "kind": "personal_info"}]}
 
 When nothing clears the bar, return {"facts": []} — this is common and \
 entirely correct.\
