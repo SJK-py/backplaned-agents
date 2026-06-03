@@ -115,6 +115,16 @@ def test_safe_stream_get_caps_redirects() -> None:
         asyncio.run(_drive())
 
 
+def test_web_fetch_settings_defaults() -> None:
+    from bp_agents.settings import SuiteSettings
+
+    s = SuiteSettings(_env_file=None)  # type: ignore[call-arg]
+    assert s.web_fetch_max_redirects == 3
+    # Honest default UA: the well-behaved-crawler convention, not a browser.
+    assert "compatible" in s.web_fetch_user_agent
+    assert "BackplanedBot" in s.web_fetch_user_agent
+
+
 def test_safe_stream_get_enforces_byte_cap() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"x" * 100)

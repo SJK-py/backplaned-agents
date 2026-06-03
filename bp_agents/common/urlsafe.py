@@ -22,13 +22,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-# An HONEST agent user-agent: it identifies the fetcher rather than
-# impersonating a real browser. The "Mozilla/5.0 (compatible; <bot>)" form is
-# the long-standing convention well-behaved crawlers use (Googlebot, Bingbot,
-# …), so it's the most broadly-tolerated *non-deceptive* option — though a site
-# that hard-blocks non-browser agents will still refuse it.
-WEB_FETCH_USER_AGENT = "Mozilla/5.0 (compatible; BackplanedBot/1.0)"
-
 # Literal cloud-metadata hostnames (the IP-range checks already cover
 # 169.254.169.254, but proxies sometimes resolve these names locally).
 _METADATA_HOSTS = frozenset({

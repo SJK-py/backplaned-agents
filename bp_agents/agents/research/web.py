@@ -18,7 +18,8 @@ from urllib.parse import urlparse
 import httpx
 
 from bp_agents.common import LocalTool
-from bp_agents.common.urlsafe import WEB_FETCH_USER_AGENT, safe_stream_get
+from bp_agents.common.urlsafe import safe_stream_get
+from bp_agents.settings import load_suite_settings
 from bp_sdk import ToolSpec
 
 if TYPE_CHECKING:
@@ -37,7 +38,8 @@ JsonGetter = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
 BytesGetter = Callable[[str, float, int], Awaitable[bytes]]
 
 
-_FETCH_HEADERS = {"User-Agent": WEB_FETCH_USER_AGENT}
+_settings = load_suite_settings()
+_FETCH_HEADERS = {"User-Agent": _settings.web_fetch_user_agent}
 
 
 async def _default_get_json(url: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -52,7 +54,9 @@ async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
     # safe_stream_get re-validates each redirect hop against the SSRF guard.
     t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
     async with httpx.AsyncClient(timeout=t, headers=_FETCH_HEADERS) as client:
-        return await safe_stream_get(client, url, cap=cap)
+        return await safe_stream_get(
+            client, url, cap=cap, max_redirects=_settings.web_fetch_max_redirects
+        )
 
 
 async def web_search(

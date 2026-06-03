@@ -20,11 +20,14 @@ import httpx
 from pydantic import BaseModel
 
 from bp_agents.common import text_output
-from bp_agents.common.urlsafe import WEB_FETCH_USER_AGENT, safe_stream_get
+from bp_agents.common.urlsafe import safe_stream_get
+from bp_agents.settings import load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
 
 logger = logging.getLogger(__name__)
+
+_settings = load_suite_settings()
 
 MD_CONVERTER_AGENT_ID = "md_converter"
 
@@ -36,10 +39,11 @@ _WEBPAGE_FETCH_CAP = 5 * 1024 * 1024  # 5 MiB
 _FETCH_CONNECT_TIMEOUT_S = 5.0
 _FETCH_TIMEOUT_S = 15.0
 
-# An honest agent UA + Accept (the default `python-httpx` agent gets 403'd by
-# many sites). `safe_stream_get` follows redirects with a per-hop SSRF re-check.
+# Configurable UA (honest default) + Accept; the default `python-httpx` agent
+# gets 403'd by many sites. `safe_stream_get` follows up to
+# `web_fetch_max_redirects` hops with a per-hop SSRF re-check.
 _FETCH_HEADERS = {
-    "User-Agent": WEB_FETCH_USER_AGENT,
+    "User-Agent": _settings.web_fetch_user_agent,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -168,7 +172,10 @@ async def _default_fetch(url: str) -> bytes:
     # tighter than the bulk `web_fetch_timeout_s` download path.
     timeout = httpx.Timeout(_FETCH_TIMEOUT_S, connect=_FETCH_CONNECT_TIMEOUT_S)
     async with httpx.AsyncClient(timeout=timeout, headers=_FETCH_HEADERS) as client:
-        return await safe_stream_get(client, url, cap=_WEBPAGE_FETCH_CAP)
+        return await safe_stream_get(
+            client, url, cap=_WEBPAGE_FETCH_CAP,
+            max_redirects=_settings.web_fetch_max_redirects,
+        )
 
 
 @agent.handler(
