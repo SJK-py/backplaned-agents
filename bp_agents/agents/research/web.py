@@ -48,8 +48,9 @@ _CONTENT_CAP = 100_000
 # legitimately-slow download still completes).
 _CONNECT_TIMEOUT_S = 5.0
 
-# Per-backend ceiling on the number of results (`_KAGI_MAX_COUNT` lives with the
-# other kagi constants below). Unified at 20 across backends.
+# Default and per-backend ceiling for the number of results (`_KAGI_MAX_COUNT`
+# lives with the other kagi constants below). Maxes are unified at 20.
+_DEFAULT_COUNT = 10
 _SEARXNG_MAX_COUNT = 20
 _BRAVE_MAX_COUNT = 20
 
@@ -317,7 +318,7 @@ async def _kagi_search(
 
 
 async def web_search(
-    query: str, *, settings: SuiteSettings, count: int = 10,
+    query: str, *, settings: SuiteSettings, count: int = _DEFAULT_COUNT,
     time_range: str | None = None, language: str | None = None,
     country: str | None = None, search_language: str | None = None,
     freshness: str | None = None, local_city: str | None = None,
@@ -450,8 +451,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     },
                     "count": {
                         "type": "integer",
-                        "description": "Number of results (1-20, default 10).",
-                        "minimum": 1, "maximum": 20,
+                        "description": (
+                            f"Number of results (1-{_BRAVE_MAX_COUNT}, "
+                            f"default {_DEFAULT_COUNT})."
+                        ),
+                        "minimum": 1, "maximum": _BRAVE_MAX_COUNT,
                     },
                     "freshness": {
                         "type": "string",
@@ -486,10 +490,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     "count": {
                         "type": "integer",
                         "description": (
-                            "Max results in the primary list (1-20, default 10). "
-                            "Contextual collections are capped tighter."
+                            f"Max results in the primary list (1-{_KAGI_MAX_COUNT}, "
+                            f"default {_DEFAULT_COUNT}). Contextual collections are "
+                            "capped tighter."
                         ),
-                        "minimum": 1, "maximum": 20,
+                        "minimum": 1, "maximum": _KAGI_MAX_COUNT,
                     },
                     "region": {
                         "type": "string",
@@ -524,8 +529,11 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                 "query": {"type": "string"},
                 "count": {
                     "type": "integer",
-                    "description": "Number of results (1-20, default 10).",
-                    "minimum": 1, "maximum": 20,
+                    "description": (
+                        f"Number of results (1-{_SEARXNG_MAX_COUNT}, "
+                        f"default {_DEFAULT_COUNT})."
+                    ),
+                    "minimum": 1, "maximum": _SEARXNG_MAX_COUNT,
                 },
                 "time_range": {
                     "type": "string",
@@ -549,7 +557,7 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await web_search(
             args["query"], settings=settings,
-            count=int(args.get("count", 10)),
+            count=int(args.get("count", _DEFAULT_COUNT)),
             time_range=args.get("time_range"),
             language=args.get("language"),
             country=args.get("country"),
