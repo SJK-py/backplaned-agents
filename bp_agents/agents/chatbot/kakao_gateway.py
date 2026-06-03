@@ -83,8 +83,8 @@ _CALLBACK_MARGIN_S = 5.0
 
 # User-facing scaffolding text (Korean, matching the relay's "처리 중…").
 _WORKING_TEXT = (
-    "아직 작업 중이에요. 끝나면 알려드릴게요 — [확인]을 눌러 결과를 "
-    "확인하거나 [중지]로 멈출 수 있어요."
+    "아직 작업 중이에요. — [확인]을 눌러 결과를 "
+    "다시 확인하거나 [중지]로 멈출 수 있어요."
 )
 _STILL_WORKING_TEXT = "아직 작업 중이에요. 잠시 후 [확인]을 눌러 주세요."
 _STOPPED_TEXT = "중지했어요."
@@ -136,14 +136,14 @@ def _with_progress(base: str, turn: dict | None) -> str:
     progress = (turn or {}).get("progress")
     return f"{base}\n{progress}" if progress else base
 _REGISTER_PROMPT = (
-    "아직 등록되지 않았어요. /register 를 보내 접근을 요청하면 "
-    "관리자가 검토할게요. (이메일을 함께 보내도 돼요: /register you@example.com)\n\n"
-    "이미 웹이나 다른 채팅에 계정이 있나요? 거기서 /password 로 토큰을 받은 뒤 "
-    "여기서 /link <토큰> 을 보내면 이 채팅을 기존 계정에 연결할 수 있어요."
+    "사용자 등록이 필요해요.\n\n"
+    "/register 를 보내 접근을 요청하면 관리자가 검토 후 사용 가능해요. (이메일을 함께 보내주세요: /register you@example.com)\n\n"
+    "이미 등록된 사용자라면, 등록된 채팅(또는 웹)에서 /password 로 토큰을 받은 다음, "
+    "여기에서 /link <토큰> 을 보내서 이 채팅을 기존 계정에 연결할 수 있어요."
 )
 _LINK_USAGE_TEXT = (
-    "/link <토큰> 형식으로 보내 이 채팅을 기존 계정에 연결하세요. "
-    "이미 연결된 채팅(또는 웹)에서 /password 로 토큰을 받을 수 있어요."
+    "/link <토큰> 형식으로 보내 이 채팅을 기존 계정에 연결하세요.\n"
+    "이미 등록된 채팅(또는 웹)에서 /password 로 토큰을 받을 수 있어요."
 )
 _LINK_OK_TEXT = (
     "연결됐어요 — 이제 이 채팅이 기존 계정을 사용해요. (다른 채팅과는 별개의 대화를 가져요.)"
@@ -156,7 +156,7 @@ _NO_SESSION_TEXT = "활성화된 대화가 없어요. 관리자에게 문의해 
 _UNAVAILABLE_TEXT = "지금은 이 명령을 사용할 수 없어요."
 _ALREADY_REGISTERED_TEXT = "이미 등록되어 있어요. 그냥 메시지를 보내 주세요!"
 _REGISTER_SUBMITTED_TEXT = (
-    "등록 요청을 접수했어요. 관리자 승인 후 바로 도와드릴게요."
+    "등록 요청을 접수했어요. 관리자 승인 후 사용이 가능해요."
 )
 _REGISTER_FAILED_TEXT = "등록 요청에 실패했어요. 다시 시도해 주세요."
 _NEW_STARTED_TEXT = "새 대화를 시작했어요."
@@ -167,9 +167,9 @@ _SETDEFAULT_OK_TEXT = (
     "이 채팅의 대화를 기본으로 설정했어요. 예약 알림과 외부 메시지가 여기로 와요."
 )
 HELP_TEXT = (
-    "개인 비서예요. 메시지를 보내면 도와드릴게요.\n\n"
+    "AI 에이전트 기반 개인 비서애요. 메시지를 보내 대화룰 시작하거나, 아래 명령어를 입력하세요\n\n"
     "명령어:\n"
-    "/register — 접근 요청 (관리자 승인)\n"
+    "/register <이메일> — 사용자 등록 요청 (관리자 승인 필요)\n"
     "/link <토큰> — 이 채팅을 기존 계정에 연결\n"
     "/new — 새 대화 시작\n"
     "/check — 진행 상황 확인 / 완료된 답변 받기\n"
@@ -177,8 +177,7 @@ HELP_TEXT = (
     "/config — 설정 보기/변경\n"
     "/cron — 예약 작업 관리\n"
     "/delegate <에이전트> — 전문 에이전트에게 위임\n"
-    "/undelegate — 기본 비서로 복귀\n"
-    "/setdefault — 이 채팅의 대화를 알림 기본으로 설정\n"
+    "/undelegate — 기본 에이전트로 복귀\n"
     "/password — 웹 비밀번호 설정 링크 받기\n"
     "/help — 명령어 보기"
 )
