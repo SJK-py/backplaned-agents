@@ -223,7 +223,10 @@ async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     async with _pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
     preset = cfg.preset_lite if cfg else _settings.default_preset_lite
-    return await run_cron_management(ctx, payload, pool=_pool, preset=preset)
+    return await run_cron_management(
+        ctx, payload, pool=_pool, preset=preset,
+        language=cfg.language if cfg else None,
+    )
 
 
 if __name__ == "__main__":
