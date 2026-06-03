@@ -425,8 +425,15 @@ def test_web_search_tool_schema_reflects_backend() -> None:
     }
     props = brave_tools["web_search"].spec.parameters["properties"]
     assert {"query", "country", "search_language", "freshness", "local_city"} <= set(props)
+    # All backends advertise a unified max count of 20.
+    assert props["count"]["maximum"] == 20
     # html_fetch always takes a list of urls.
     assert brave_tools["html_fetch"].spec.parameters["properties"]["urls"]["type"] == "array"
+
+    searxng_tools = {
+        t.spec.name: t for t in make_web_tools(SuiteSettings(searxng_url="http://x"))
+    }
+    assert searxng_tools["web_search"].spec.parameters["properties"]["count"]["maximum"] == 20
 
     kagi_tools = {
         t.spec.name: t
@@ -437,3 +444,4 @@ def test_web_search_tool_schema_reflects_backend() -> None:
     kagi_props = kagi_tools["web_search"].spec.parameters["properties"]
     assert {"query", "kind", "count", "region", "file_type", "time_relative",
             "time_after", "time_before"} <= set(kagi_props)
+    assert kagi_props["count"]["maximum"] == 20

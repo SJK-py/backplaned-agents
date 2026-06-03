@@ -67,7 +67,7 @@ _KAGI_DROP = {"interesting_news", "interesting_finds", "web_archive"}
 # Contextual collections rendered above the primary list when present.
 _KAGI_HEADER = ("direct_answer", "weather")
 _KAGI_SNIPPET_CAP = 500  # Per-snippet character cap (after HTML-unescaping).
-_KAGI_MAX_COUNT = 50
+_KAGI_MAX_COUNT = 20
 _KAGI_LABELS = {
     "search": "Search results",
     "image": "Images",
@@ -156,7 +156,7 @@ async def _searxng_search(
 ) -> str:
     if not settings.searxng_url:
         return "Web search is not configured (no search backend set)."
-    count = min(max(count, 1), 10)
+    count = min(max(count, 1), 20)
     get = get_json or _default_get_json
     params: dict[str, Any] = {"q": query, "format": "json"}
     if time_range:
@@ -312,7 +312,7 @@ async def _kagi_search(
 
 
 async def web_search(
-    query: str, *, settings: SuiteSettings, count: int = 5,
+    query: str, *, settings: SuiteSettings, count: int = 10,
     time_range: str | None = None, language: str | None = None,
     country: str | None = None, search_language: str | None = None,
     freshness: str | None = None, local_city: str | None = None,
@@ -445,7 +445,7 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     },
                     "count": {
                         "type": "integer",
-                        "description": "Number of results (1-20, default 5).",
+                        "description": "Number of results (1-20, default 10).",
                         "minimum": 1, "maximum": 20,
                     },
                     "freshness": {
@@ -481,10 +481,10 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                     "count": {
                         "type": "integer",
                         "description": (
-                            "Max results in the primary list (1-50, default 5). "
+                            "Max results in the primary list (1-20, default 10). "
                             "Contextual collections are capped tighter."
                         ),
-                        "minimum": 1, "maximum": 50,
+                        "minimum": 1, "maximum": 20,
                     },
                     "region": {
                         "type": "string",
@@ -519,8 +519,8 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                 "query": {"type": "string"},
                 "count": {
                     "type": "integer",
-                    "description": "Number of results (1-10, default 5).",
-                    "minimum": 1, "maximum": 10,
+                    "description": "Number of results (1-20, default 10).",
+                    "minimum": 1, "maximum": 20,
                 },
                 "time_range": {
                     "type": "string",
@@ -544,7 +544,7 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await web_search(
             args["query"], settings=settings,
-            count=int(args.get("count", 5)),
+            count=int(args.get("count", 10)),
             time_range=args.get("time_range"),
             language=args.get("language"),
             country=args.get("country"),
