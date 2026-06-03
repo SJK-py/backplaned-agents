@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 from bp_agents.common import LocalTool
-from bp_agents.common.urlsafe import ensure_fetchable_url
+from bp_agents.common.urlsafe import WEB_FETCH_USER_AGENT, safe_stream_get
 from bp_sdk import ToolSpec
 
 if TYPE_CHECKING:
@@ -37,26 +37,22 @@ JsonGetter = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
 BytesGetter = Callable[[str, float, int], Awaitable[bytes]]
 
 
+_FETCH_HEADERS = {"User-Agent": WEB_FETCH_USER_AGENT}
+
+
 async def _default_get_json(url: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
     t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
-    async with httpx.AsyncClient(timeout=t) as client:
+    async with httpx.AsyncClient(timeout=t, headers=_FETCH_HEADERS) as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         return resp.json()
 
 
 async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
-    await ensure_fetchable_url(url)
+    # safe_stream_get re-validates each redirect hop against the SSRF guard.
     t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
-    async with httpx.AsyncClient(timeout=t) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                buf += chunk
-                if len(buf) > cap:
-                    raise ValueError("download exceeds cap")
-            return bytes(buf)
+    async with httpx.AsyncClient(timeout=t, headers=_FETCH_HEADERS) as client:
+        return await safe_stream_get(client, url, cap=cap)
 
 
 async def web_search(

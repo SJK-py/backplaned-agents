@@ -20,7 +20,7 @@ import httpx
 from pydantic import BaseModel
 
 from bp_agents.common import text_output
-from bp_agents.common.urlsafe import ensure_fetchable_url
+from bp_agents.common.urlsafe import WEB_FETCH_USER_AGENT, safe_stream_get
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
 
@@ -36,14 +36,10 @@ _WEBPAGE_FETCH_CAP = 5 * 1024 * 1024  # 5 MiB
 _FETCH_CONNECT_TIMEOUT_S = 5.0
 _FETCH_TIMEOUT_S = 15.0
 
-# A browser-like UA + Accept: many sites 403 the default `python-httpx` agent.
-# Headers don't change which host is fetched, so this stays SSRF-safe (we keep
-# redirects OFF — following them would skip the `ensure_fetchable_url` guard).
+# An honest agent UA + Accept (the default `python-httpx` agent gets 403'd by
+# many sites). `safe_stream_get` follows redirects with a per-hop SSRF re-check.
 _FETCH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": WEB_FETCH_USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -167,20 +163,12 @@ async def run_webpage(
 
 
 async def _default_fetch(url: str) -> bytes:
-    await ensure_fetchable_url(url)
     # Fail fast: this is the interactive research path, so an unreachable or
     # slow page shouldn't stall the turn. Short connect, bounded read — much
     # tighter than the bulk `web_fetch_timeout_s` download path.
     timeout = httpx.Timeout(_FETCH_TIMEOUT_S, connect=_FETCH_CONNECT_TIMEOUT_S)
     async with httpx.AsyncClient(timeout=timeout, headers=_FETCH_HEADERS) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                buf += chunk
-                if len(buf) > _WEBPAGE_FETCH_CAP:
-                    raise ValueError("webpage exceeds fetch cap")
-            return bytes(buf)
+        return await safe_stream_get(client, url, cap=_WEBPAGE_FETCH_CAP)
 
 
 @agent.handler(

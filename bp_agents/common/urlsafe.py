@@ -20,6 +20,15 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
+import httpx
+
+# An HONEST agent user-agent: it identifies the fetcher rather than
+# impersonating a real browser. The "Mozilla/5.0 (compatible; <bot>)" form is
+# the long-standing convention well-behaved crawlers use (Googlebot, Bingbot,
+# …), so it's the most broadly-tolerated *non-deceptive* option — though a site
+# that hard-blocks non-browser agents will still refuse it.
+WEB_FETCH_USER_AGENT = "Mozilla/5.0 (compatible; BackplanedBot/1.0)"
+
 # Literal cloud-metadata hostnames (the IP-range checks already cover
 # 169.254.169.254, but proxies sometimes resolve these names locally).
 _METADATA_HOSTS = frozenset({
@@ -78,3 +87,33 @@ async def ensure_fetchable_url(url: str) -> None:
     """Raise `UnsafeUrlError` if `url` is unsafe to fetch. Resolves DNS in a
     thread so the event loop isn't blocked."""
     await asyncio.to_thread(_check, url)
+
+
+async def safe_stream_get(
+    client: httpx.AsyncClient, url: str, *, cap: int, max_redirects: int = 3
+) -> bytes:
+    """GET `url` and return its body, following up to `max_redirects` redirects
+    while re-validating EVERY hop with `ensure_fetchable_url`.
+
+    httpx's own `follow_redirects` would chase a `Location` straight past the
+    SSRF guard (a public page could 302 to `169.254.169.254`), so we follow
+    manually: validate, request, and on a 3xx re-validate the target before the
+    next hop. The `client` MUST keep `follow_redirects=False` (the default).
+    Streams with a `cap` byte limit; `raise_for_status` on the final response."""
+    redirects = 0
+    while True:
+        await ensure_fetchable_url(url)
+        async with client.stream("GET", url) as resp:
+            if resp.is_redirect:
+                redirects += 1
+                if redirects > max_redirects:
+                    raise UnsafeUrlError(f"too many redirects (> {max_redirects})")
+                url = str(httpx.URL(url).join(resp.headers["location"]))
+                continue
+            resp.raise_for_status()
+            buf = bytearray()
+            async for chunk in resp.aiter_bytes():
+                buf += chunk
+                if len(buf) > cap:
+                    raise ValueError("fetch exceeds cap")
+            return bytes(buf)
