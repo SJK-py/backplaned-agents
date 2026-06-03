@@ -379,6 +379,74 @@ def test_config_set_persists(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_config_system_prompt_has_language_directive() -> None:
+    """No language → no directive; a language → an explicit 'reply in it'."""
+    from bp_agents.agents.config.agent import _system_prompt
+
+    assert "preferred language" not in _system_prompt({})
+    p = _system_prompt({}, language="ko")
+    assert "preferred language" in p
+    assert "ko" in p
+
+
+def test_config_reply_uses_user_language(suite_db_url: str) -> None:
+    """run_config threads the user's `language` into the system prompt, so
+    /config (which bypasses the orchestrator) still replies in their language."""
+    captured: dict = {}
+
+    class _CapturingLlm(_ScriptLlm):
+        async def generate(self, messages, **kw):
+            captured["system"] = messages[0].content
+            return await super().generate(messages, **kw)
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.create_user_config(
+                    conn, user_id="usr_a", language="ko"
+                )
+            llm = _CapturingLlm([LlmResponse(text="설정을 보여드릴게요.")])
+            await run_config(
+                _Ctx(llm), MessagePayload(prompt="show settings"),
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            assert "ko" in captured["system"]
+            assert "preferred language" in captured["system"]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_cron_reply_uses_user_language(suite_db_url: str) -> None:
+    """run_cron_management threads the user's language into the system prompt
+    (the /cron dispatch bypasses the orchestrator that would carry it)."""
+    captured: dict = {}
+
+    class _CapturingLlm(_ScriptLlm):
+        async def generate(self, messages, **kw):
+            captured["system"] = messages[0].content
+            return await super().generate(messages, **kw)
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            llm = _CapturingLlm([LlmResponse(text="예약된 작업이 없어요.")])
+            await run_cron_management(
+                _Ctx(llm), MessagePayload(prompt="list my jobs"),
+                pool=pool, preset="lite", language="ko",
+            )
+            assert "ko" in captured["system"]
+            assert "preferred language" in captured["system"]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 def test_orchestrator_cron_message_structured(suite_db_url: str) -> None:
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))

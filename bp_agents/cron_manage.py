@@ -165,10 +165,19 @@ plain language, and when listing jobs, present them clearly.\
 
 
 async def run_cron_management(
-    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool, preset: str
+    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool, preset: str,
+    language: str | None = None,
 ) -> AgentOutput:
+    # /cron dispatches straight here, bypassing the orchestrator that would
+    # otherwise carry the user's language — so instruct the model explicitly.
+    system = _CRON_SYSTEM
+    if language:
+        system += (
+            f" Write your entire reply in the user's preferred language "
+            f"(their `language` setting: {language})."
+        )
     messages = [
-        Message(role="system", content=_CRON_SYSTEM),
+        Message(role="system", content=system),
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(

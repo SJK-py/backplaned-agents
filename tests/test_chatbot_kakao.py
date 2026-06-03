@@ -1071,6 +1071,7 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
             n = await kapproval.reconcile_serviced_sessions(
                 pool, [rec], settings=_settings(),
                 platform="kakao", channel="chatbot_kakao",
+                default_language="ko",
             )
             assert n == 1
             async with pool.acquire() as conn:
@@ -1078,8 +1079,11 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                     conn, platform="kakao", chat_id="kchat2"
                 )
                 info = await queries.get_session_info(conn, "ses_k2")
+                cfg = await queries.get_user_config(conn, "usr_k2")
             assert uid == "usr_k2"
             assert info.channel == "chatbot_kakao"
+            # KakaoTalk seeds Korean as the user's default language.
+            assert cfg.language == "ko"
         finally:
             await pool.close()
 
