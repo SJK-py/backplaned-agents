@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 
 MD_CONVERTER_AGENT_ID = "md_converter"
 _CONTENT_CAP = 100_000
+# Two-stage timeout: a dead/unreachable host fails the CONNECT fast instead of
+# burning the full `web_fetch_timeout_s` (the read stays generous so a large,
+# legitimately-slow download still completes).
+_CONNECT_TIMEOUT_S = 5.0
 
 # Injectable fetchers (overridden in tests).
 JsonGetter = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
@@ -34,7 +38,8 @@ BytesGetter = Callable[[str, float, int], Awaitable[bytes]]
 
 
 async def _default_get_json(url: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+    t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
+    async with httpx.AsyncClient(timeout=t) as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         return resp.json()
@@ -42,7 +47,8 @@ async def _default_get_json(url: str, params: dict[str, Any], timeout: float) ->
 
 async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
     await ensure_fetchable_url(url)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+    t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
+    async with httpx.AsyncClient(timeout=t) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
             buf = bytearray()
