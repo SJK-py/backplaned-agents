@@ -172,6 +172,9 @@ async def _startup() -> None:
                 approval_poll_loop(
                     credentials=_credentials, pool=_pool, settings=_settings,
                     stop=_stop, channel="chatbot_kakao", platform="kakao",
+                    # KakaoTalk is a Korea-only product → default new users to
+                    # Korean (they can change it via /config).
+                    default_language="ko",
                 )
             )
     elif _kakao_configured(_settings):

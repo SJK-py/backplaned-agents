@@ -44,6 +44,7 @@ async def reconcile_serviced_sessions(
     settings: SuiteSettings,
     platform: str = PLATFORM,
     channel: str = CHANNEL,
+    default_language: str = "en",
 ) -> int:
     """Write the suite-side identity for each discovered session. Returns
     the count of newly-mapped chats (an already-mapped chat is a no-op).
@@ -51,6 +52,8 @@ async def reconcile_serviced_sessions(
 
     `platform`/`channel` default to Telegram but are parametrized so the
     same reconcile serves the KakaoTalk channel (`kakao`/`chatbot_kakao`).
+    `default_language` seeds a first-time `user_config.language` (e.g. `ko`
+    for the Korea-only KakaoTalk channel); the user can change it later.
 
     A first-time `user_config` row seeds its per-tier LLM presets from
     `settings.default_preset_*` (`SUITE_DEFAULT_PRESET_{PRO,BALANCED,LITE,
@@ -79,6 +82,7 @@ async def reconcile_serviced_sessions(
                 preset_balanced=settings.default_preset_balanced,
                 preset_lite=settings.default_preset_lite,
                 preset_embedding=settings.default_preset_embedding,
+                language=default_language,
             )
             await queries.create_session_info(
                 conn, session_id=rec.session_id, user_id=rec.user_id,
@@ -106,11 +110,15 @@ async def approval_poll_loop(
     interval_s: float = 30.0,
     channel: str = CHANNEL,
     platform: str = PLATFORM,
+    default_language: str = "en",
 ) -> None:
     """Poll `serviced-sessions` for `channel` on an interval and reconcile new
     ones into `platform` mappings. The cursor is in-memory (advances past the
     newest seen `opened_at`); a restart re-lists from scratch, which is safe
-    because reconcile is idempotent. Run one loop per channel."""
+    because reconcile is idempotent. Run one loop per channel.
+
+    `default_language` seeds a first-time user's `user_config.language` (e.g.
+    `ko` for KakaoTalk)."""
     cursor: datetime | None = None
     while not stop.is_set():
         try:
@@ -121,6 +129,7 @@ async def approval_poll_loop(
                 await reconcile_serviced_sessions(
                     pool, records, settings=settings,
                     platform=platform, channel=channel,
+                    default_language=default_language,
                 )
                 cursor = max(r.opened_at for r in records)
         except Exception:  # noqa: BLE001

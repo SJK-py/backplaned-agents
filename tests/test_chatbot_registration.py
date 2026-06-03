@@ -104,6 +104,8 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 ) == "usr_a"
                 cfg = await queries.get_user_config(conn, "usr_a")
                 assert cfg is not None and cfg.default_session_id == "ses_1"
+                # No default_language passed → the en default (Telegram path).
+                assert cfg.language == "en"
                 assert await queries.get_session_info(conn, "ses_1") is not None
 
             # Idempotent: a re-poll maps nothing new.
