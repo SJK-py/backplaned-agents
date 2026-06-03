@@ -62,6 +62,17 @@ assistant said or did, or anything that wouldn't still be useful to know \
 weeks later outside this conversation. If a fact isn't clearly worth \
 remembering, leave it out.
 
+A single turn can contain SEVERAL distinct facts — return one list item \
+per fact, not a single long run-on statement that staples them together. \
+Split whenever the pieces are independently meaningful and would be recalled \
+or updated on their own: a dietary preference and an allergy, a job and the \
+project it involves, two different people are each their own fact. But do \
+NOT over-fragment: every fact must be ONE self-contained idea that carries \
+clear meaning on its own. Never shatter a coherent fact into trivial pieces \
+(keep "works as a backend engineer at Acme" whole — don't split it into "is \
+an engineer" and "works at Acme"), and never merge unrelated facts. Aim for \
+the smallest statement that still stands alone and means something.
+
 Resolve every relative or partial time expression to an ABSOLUTE timestamp \
 using the current time given above, and bake it into the fact so it stands \
 alone without the conversation. Compute concrete dates from the weekday and \
@@ -72,8 +83,9 @@ evening"). For example, "we'll release the example project next Monday at \
 if only a date was given); append the timezone only when it differs from the \
 user's local one. Leave facts that carry no time untouched.
 
-Return ONLY JSON:
+Return ONLY JSON, one object per fact:
 {"facts": [{"fact": "<self-contained statement>", "kind": "preference|personal_info|event|project"}]}
+
 When nothing clears the bar, return {"facts": []} — this is common and \
 entirely correct.\
 """

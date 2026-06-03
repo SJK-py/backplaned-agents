@@ -245,6 +245,15 @@ def test_extract_system_instructs_absolute_time_conversion() -> None:
     assert "next Monday" in sys  # the worked example is present
 
 
+def test_extract_system_allows_multiple_facts_without_over_fragmenting() -> None:
+    sys = _extract_system("2025-06-06 09:00 UTC (Friday)")
+    # Explicitly allows a turn to yield a LIST of several facts...
+    assert "SEVERAL distinct facts" in sys
+    assert "one list item per fact" in sys
+    # ...while guarding against shattering one fact into trivia.
+    assert "over-fragment" in sys
+
+
 class _CaptureLlm(_ScriptLlm):
     def __init__(self, responses: list[str]) -> None:
         super().__init__(responses)
