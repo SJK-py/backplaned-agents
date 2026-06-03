@@ -60,8 +60,8 @@ Web + RAG + document research; owns the knowledge base.
 Same three modes as computer_use (`subagent` tool-visible; `on_delegation` / `delegated_message` `tool=false`).
 
 **Local tools:**
-- `web_search` — default backend SearXNG (Brave-API-compatible).
-- `html_fetch(url, raw=false, truncate=2000≤100k)` — `raw=true` returns raw HTML; `raw=false` routes the URL to `md_converter.webpage` (content). Caps: see [data-model.md](./data-model.md).
+- `web_search` — backend via `SUITE_WEB_SEARCH_BACKEND`: `searxng` (default, Brave-API-compatible link list), `brave` (LLM-Context API — params `country`/`search_language`/`count`/`freshness`/`local_city`), or `kagi` (FastGPT answer + cited sources). The tool's parameter schema reflects the active backend; an unset key falls back to SearXNG. See [deployment.md § Web search](./deployment.md#web-search).
+- `html_fetch(urls[], raw=false, truncate=2000≤100k)` — fetches a list of URLs; `raw=true` returns raw HTML; `raw=false` routes each URL to `md_converter.webpage` (content), or — when backend=`kagi` — batches them through Kagi's Extract API. Caps: see [data-model.md](./data-model.md).
 - `web_download(url)` — downloads to a file-store **name**; 50 MB / 150 s caps (env-configurable).
 - knowledge_base calls, `file_tools`, `read_file`.
 

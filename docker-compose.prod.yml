@@ -418,9 +418,16 @@ services:
       <<: *suite-env
       SUITE_AGENT: research
       AGENT_INVITATION_TOKEN: ${RESEARCH_INVITATION:?}
-      # Web-search backend. The env file (scripts/prod.sh) is the
-      # single source of truth: set it to the bundled SearXNG
-      # (http://searxng:8080, also pass `--profile search`), an external
+      # Web-search backend selector: searxng (default) | brave | kagi.
+      # brave/kagi run an LLM under the hood (Brave LLM-Context / Kagi
+      # FastGPT) and need their API key below; if the chosen backend's key
+      # is unset the research agent falls back to SearXNG (logged).
+      SUITE_WEB_SEARCH_BACKEND: ${SUITE_WEB_SEARCH_BACKEND:-searxng}
+      SUITE_BRAVE_API_KEY: ${SUITE_BRAVE_API_KEY:-}
+      SUITE_KAGI_API_KEY: ${SUITE_KAGI_API_KEY:-}
+      # SearXNG endpoint (used when backend=searxng). The env file
+      # (scripts/prod.sh) is the single source of truth: set it to the bundled
+      # SearXNG (http://searxng:8080, also pass `--profile search`), an external
       # instance, or leave it EMPTY to run research with no web search.
       # Default empty — NOT http://searxng:8080 — so an unset value doesn't
       # silently point research at a SearXNG that isn't running.

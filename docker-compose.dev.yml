@@ -60,9 +60,12 @@ services:
       timeout: 3s
       retries: 10
 
-  # Optional web-search backend for the research agent. Off by default;
-  # enable with `--profile search`. Point SUITE_SEARXNG_URL at
-  # http://localhost:8888 (or an external Brave-API-compatible endpoint).
+  # Optional SearXNG for the research agent (SUITE_WEB_SEARCH_BACKEND=searxng,
+  # the default). Off by default; enable with `--profile search` and point
+  # SUITE_SEARXNG_URL at http://localhost:8888 (or an external Brave-API-
+  # compatible endpoint). For the hosted backends set SUITE_WEB_SEARCH_BACKEND
+  # to brave/kagi + the matching SUITE_BRAVE_API_KEY / SUITE_KAGI_API_KEY in
+  # .env — no extra container needed.
   searxng:
     image: searxng/searxng:latest
     container_name: bp-searxng

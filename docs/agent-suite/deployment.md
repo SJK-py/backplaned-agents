@@ -99,8 +99,11 @@ automatically for a local router.
   logged-in user's own token (no service principal). Optional
   `WEBAPP_USE_BUILT_CSS=true` swaps the Tailwind CDN for a pre-built
   stylesheet (see `bp_agents/agents/webapp/tailwind.config.js`).
-- research: `SUITE_SEARXNG_URL` (the bundled SearXNG or an external
-  Brave-API-compatible endpoint).
+- research web search: `SUITE_WEB_SEARCH_BACKEND` picks the backend —
+  `searxng` (default; `SUITE_SEARXNG_URL` → bundled or external endpoint),
+  `brave` (`SUITE_BRAVE_API_KEY` → Brave's LLM-Context API), or `kagi`
+  (`SUITE_KAGI_API_KEY` → Kagi FastGPT for search + Extract for `html_fetch`).
+  See [Web search](#web-search) below.
 - LLM presets are router-side (`llm_presets` table); the suite only names
   presets (`SUITE_DEFAULT_PRESET_*` / per-user `user_config`).
 
@@ -115,7 +118,23 @@ python -m bp_agents.load_acl        # PUT /v1/admin/acl/rules
 
 This replaces the router's ACL with `bp_agents.acl.suite_acl_rules()`.
 
-## Web search (SearXNG)
+## Web search
+
+`SUITE_WEB_SEARCH_BACKEND` selects how the research agent's `web_search`
+(and, for Kagi, `html_fetch`) works:
+
+| Backend | Key / config | Behaviour |
+|---|---|---|
+| `searxng` (default) | `SUITE_SEARXNG_URL` | Classic metasearch — returns a list of result links (title/url/snippet). |
+| `brave` | `SUITE_BRAVE_API_KEY` | Brave's [LLM-Context API](https://brave.com/search/api/) — returns AI-grounded context. `web_search` exposes `country` / `search_language` / `count` / `freshness` / `local_city` (the last is sent as the `X-Loc-City` header for location-aware results). |
+| `kagi` | `SUITE_KAGI_API_KEY` | Kagi [FastGPT](https://help.kagi.com/kagi/api/fastgpt.html) — returns an AI answer with cited sources; `html_fetch` routes URLs through Kagi's [Extract](https://help.kagi.com/kagi/api/) API (batch, Markdown). |
+
+The chosen backend's key must be set — if it's missing the agent **falls back
+to SearXNG** and logs a warning, so `web_search` only goes fully dark when
+neither a key nor a SearXNG URL is configured. `prod.sh` prompts for the
+backend and its key/URL.
+
+### SearXNG
 
 The `searxng` service is behind the `search` compose profile — enable it
 with `docker compose --profile search up`, or leave it off and set
