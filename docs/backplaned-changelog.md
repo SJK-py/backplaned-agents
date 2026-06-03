@@ -31,6 +31,13 @@
   provider adapters consume, so it applies to Anthropic / Gemini / OpenAI
   alike. Best-effort: an undecodable image is fed as-is. Adds a `pillow`
   dependency to the `router` extra.
+- **Over-cap rescue:** when resizing is on, an image OVER
+  `llm_attachment_inline_max_bytes` is now loaded up to a new
+  `ROUTER_LLM_IMAGE_RESCALE_SOURCE_MAX_BYTES` bound (default 20 MiB),
+  downscaled, then re-checked against the inline cap on the *resized* result —
+  so a large image that fits once shrunk is fed instead of refused (it's
+  refused only if it's still over-cap after downscaling, or can't be decoded).
+  Documents and resize-disabled images obey the inline cap directly, as before.
 - **Why:** multimodal token cost is dimension-based, so a large image burned a
   lot of tokens (and ate headroom under `llm_attachment_inline_max_bytes`).
   1568 px matches Anthropic's own internal long-edge downscale, so the default

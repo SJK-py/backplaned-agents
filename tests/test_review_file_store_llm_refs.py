@@ -47,12 +47,13 @@ class _AcquireCtx:
         return False
 
 
-def _state(*, data: bytes = b"PNGBYTES", inline_cap: int = 5_000_000, image_max_long_side: int = 0):  # type: ignore[no-untyped-def]
+def _state(*, data: bytes = b"PNGBYTES", inline_cap: int = 5_000_000, image_max_long_side: int = 0, image_source_cap: int = 20_000_000):  # type: ignore[no-untyped-def]
     return SimpleNamespace(
         settings=SimpleNamespace(
             llm_request_max_file_refs=16,
             llm_attachment_inline_max_bytes=inline_cap,
             llm_image_max_long_side_px=image_max_long_side,
+            llm_image_rescale_source_max_bytes=image_source_cap,
         ),
         file_store=SimpleNamespace(open=_store_returning(data)),
         # `acquire()` returns a fresh async-ctx each call; the class
@@ -492,6 +493,91 @@ def test_undecodable_image_fed_as_is(monkeypatch) -> None:  # type: ignore[no-un
 
     part = msgs[0]["content"][1]
     assert base64.b64decode(part["image"]["data"]) == b"NOT-AN-IMAGE"
+
+
+def _noisy_png_bytes(w: int, h: int) -> bytes:
+    """A random-noise PNG — compresses poorly, so it's genuinely large in
+    bytes (a solid-colour PNG would shrink to nothing and couldn't exercise
+    the byte cap)."""
+    pytest.importorskip("PIL")
+    import io
+    import os
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.frombytes("RGB", (w, h), os.urandom(w * h * 3)).save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_over_cap_image_rescued_by_downscale(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An image OVER the inline cap is loaded under the higher source cap,
+    shrunk, and accepted because the resized result fits the inline cap."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(1200, 800)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("photo.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=big, inline_cap=orig // 2, image_max_long_side=64,
+               image_source_cap=orig * 2),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert "image" in part
+    assert max(_envelope_image_size(part)) == 64
+    assert len(base64.b64decode(part["image"]["data"])) <= orig // 2
+
+
+def test_over_cap_image_rejected_when_still_too_big(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An over-cap image whose longer side is already within the pixel limit
+    (so downscaling can't shrink it) is rejected — rescue tried, didn't fit."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(1200, 800)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    with pytest.raises(AttachmentResolutionError) as ei:
+        asyncio.run(resolve_request_file_refs(
+            _state(data=big, inline_cap=orig // 2, image_max_long_side=2000,
+                   image_source_cap=orig * 2),
+            messages=_msg("photo.png"), user_id="u1",
+            caller_agent_id="a", task_id="t1",
+        ))
+    assert ei.value.code == "attachment_too_large"
+
+
+def test_over_cap_image_not_rescued_when_resize_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With resizing off (0), an over-cap image obeys the inline cap directly —
+    no rescue, rejected before load like before."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(800, 600)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    with pytest.raises(AttachmentResolutionError) as ei:
+        asyncio.run(resolve_request_file_refs(
+            _state(data=big, inline_cap=orig // 2, image_max_long_side=0,
+                   image_source_cap=orig * 2),
+            messages=_msg("photo.png"), user_id="u1",
+            caller_agent_id="a", task_id="t1",
+        ))
+    assert ei.value.code == "attachment_too_large"
 
 
 def test_document_not_downscaled(monkeypatch) -> None:  # type: ignore[no-untyped-def]

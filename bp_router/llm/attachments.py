@@ -182,12 +182,18 @@ async def _inline_blob(
     display_name: str | None,
     inline_cap: int,
     image_max_long_side: int = 0,
+    image_source_cap: int = 0,
 ) -> None:
     """Resolve a blob into a provider-ready content part IN PLACE,
     routing by type (see the module docstring): images/PDFs base64-
     inline as `{"image"|"document": …}`; text files inline their
     decoded contents as `{"text": …}`; any other type becomes a
-    `{"text": …}` reference note (no bytes inlined)."""
+    `{"text": …}` reference note (no bytes inlined).
+
+    Images that will be downscaled (`image_max_long_side > 0`) may be loaded up
+    to `image_source_cap` (≥ the inline cap) and are then re-checked against
+    the inline cap AFTER shrinking — so an over-cap image is rescued when it
+    fits once resized. Everything else obeys the inline cap directly."""
     name = display_name or "file"
     shown_mime = _base_mime(mime_type) or "application/octet-stream"
     strategy = _classify(mime_type, fr.get("as"))
@@ -202,12 +208,16 @@ async def _inline_blob(
         }
         return
 
-    # image / document / text all inline the bytes — enforce the cap.
-    if byte_size is not None and byte_size > inline_cap:
+    # image / document / text all inline the bytes — enforce the cap. A
+    # downscalable image may be loaded past the inline cap (up to the source
+    # cap) and re-checked AFTER shrinking, so over-cap images get rescued.
+    resize_enabled = strategy == "image" and image_max_long_side > 0
+    stream_cap = max(image_source_cap, inline_cap) if resize_enabled else inline_cap
+    if byte_size is not None and byte_size > stream_cap:
         raise AttachmentResolutionError(
             "attachment_too_large",
             f"LLM file attachment is {byte_size} bytes, over the "
-            f"{inline_cap}-byte inline cap (provider-native upload "
+            f"{stream_cap}-byte cap (provider-native upload "
             f"for large media is not yet supported — send a smaller "
             f"file or a provider-native reference part)",
         )
@@ -219,11 +229,10 @@ async def _inline_blob(
     stream = await file_store.open(sha256)
     async for chunk in stream:
         buf += chunk
-        if len(buf) > inline_cap:
+        if len(buf) > stream_cap:
             raise AttachmentResolutionError(
                 "attachment_too_large",
-                f"LLM file attachment exceeds the {inline_cap}-byte "
-                f"inline cap",
+                f"LLM file attachment exceeds the {stream_cap}-byte cap",
             )
 
     if strategy == "text":
@@ -246,6 +255,17 @@ async def _inline_blob(
         blob_bytes, mime_type = _downscale_image(
             blob_bytes, mime_type or "application/octet-stream", image_max_long_side
         )
+        # An over-cap image was loaded under the higher source cap to be
+        # rescued; if it's STILL over the inline cap after shrinking (or it
+        # couldn't be decoded to shrink), reject it now.
+        if len(blob_bytes) > inline_cap:
+            raise AttachmentResolutionError(
+                "attachment_too_large",
+                f"image is {len(blob_bytes)} bytes after downscaling to "
+                f"{image_max_long_side}px, still over the {inline_cap}-byte "
+                f"inline cap — send a smaller image or lower "
+                f"ROUTER_LLM_IMAGE_MAX_LONG_SIDE_PX",
+            )
     envelope: dict[str, Any] = {
         "mime_type": mime_type or "application/octet-stream",
         "data": base64.b64encode(blob_bytes).decode("ascii"),
@@ -294,6 +314,7 @@ async def resolve_request_file_refs(
 
     inline_cap = settings.llm_attachment_inline_max_bytes
     image_max_long_side = settings.llm_image_max_long_side_px
+    image_source_cap = settings.llm_image_rescale_source_max_bytes
     # Every file_ref must carry a name.
     if any(loc[2].get("name") is None for loc in locations):
         raise AttachmentResolutionError(
@@ -346,4 +367,5 @@ async def resolve_request_file_refs(
                 display_name=blob.original_filename or bare,
                 inline_cap=inline_cap,
                 image_max_long_side=image_max_long_side,
+                image_source_cap=image_source_cap,
             )
