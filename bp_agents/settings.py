@@ -271,6 +271,19 @@ class SuiteSettings(BaseSettings):
     # research web tools
     # ------------------------------------------------------------------
 
+    web_search_backend: str = "searxng"
+    """Which backend `web_search` (and, for Kagi, `html_fetch`) uses:
+    `searxng` (default), `brave`, or `kagi`. The chosen backend's API key must
+    be set — if it isn't, the suite falls back to SearXNG with a logged warning.
+    `brave` uses Brave's LLM-Context API and `kagi` uses Kagi's FastGPT, so for
+    those backends `web_search` returns LLM-grounded context/answer text rather
+    than a plain list of links."""
+    brave_api_key: SecretStr | None = None
+    """`X-Subscription-Token` for Brave's LLM-Context API (web_search_backend=brave)."""
+    kagi_api_key: SecretStr | None = None
+    """Bearer token for Kagi's FastGPT (search) and Extract (fetch) APIs
+    (web_search_backend=kagi)."""
+
     searxng_url: str | None = None
     """Brave-API-compatible search endpoint (e.g. a SearXNG instance).
     When unset, web_search returns an unavailable notice."""

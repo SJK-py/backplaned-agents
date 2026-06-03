@@ -8,7 +8,14 @@ import os
 
 import pytest
 
-from bp_agents.agents.research.web import html_fetch, make_web_tools, web_search
+from bp_agents.agents.research.web import (
+    BRAVE_CONTEXT_URL,
+    KAGI_EXTRACT_URL,
+    KAGI_FASTGPT_URL,
+    html_fetch,
+    make_web_tools,
+    web_search,
+)
 from bp_agents.agents.sandbox import Bash, run_bash
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
@@ -233,7 +240,7 @@ def test_html_fetch_routes_to_md_converter() -> None:
         peers = _StubPeers("# Page\n\nbody")
         ctx = _Ctx(peers=peers)
         out = await html_fetch(
-            ctx, url="http://x", raw=False, settings=SuiteSettings()
+            ctx, urls=["http://x"], raw=False, settings=SuiteSettings()
         )
         assert "Page" in out
         # Routed to md_converter.webpage.
@@ -243,6 +250,126 @@ def test_html_fetch_routes_to_md_converter() -> None:
     asyncio.run(_drive())
 
 
+def test_html_fetch_multiple_urls_each_headed() -> None:
+    async def _drive() -> None:
+        peers = _StubPeers("body")
+        ctx = _Ctx(peers=peers)
+        out = await html_fetch(
+            ctx, urls=["http://a", "http://b"], raw=False, settings=SuiteSettings()
+        )
+        # Each URL gets its own header + spawn when more than one is given.
+        assert "## http://a" in out and "## http://b" in out
+        assert len(peers.spawns) == 2
+
+    asyncio.run(_drive())
+
+
 def test_make_web_tools_names() -> None:
     tools = make_web_tools(SuiteSettings())
     assert {t.spec.name for t in tools} == {"web_search", "html_fetch", "web_download"}
+
+
+def test_web_search_falls_back_to_searxng_when_key_missing() -> None:
+    # backend=brave but no key → fall back to SearXNG (here unconfigured).
+    async def _drive() -> None:
+        out = await web_search(
+            "x", settings=SuiteSettings(web_search_backend="brave", searxng_url=None)
+        )
+        assert "not configured" in out
+
+    asyncio.run(_drive())
+
+
+def test_web_search_brave_backend() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["method"] = method
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            return {"grounding": {"generic": [
+                {"title": "Cats", "url": "http://x", "snippets": ["meow", "purr"]},
+            ]}}
+
+        out = await web_search(
+            "cats",
+            settings=SuiteSettings(web_search_backend="brave", brave_api_key="k"),
+            country="kr", search_language="ko", freshness="pw",
+            local_city="Seoul", request_json=_request,
+        )
+        assert captured["url"] == BRAVE_CONTEXT_URL
+        assert captured["params"]["country"] == "kr"
+        assert captured["params"]["search_lang"] == "ko"
+        assert captured["params"]["freshness"] == "pw"
+        assert captured["headers"]["X-Subscription-Token"] == "k"
+        assert captured["headers"]["X-Loc-City"] == "Seoul"
+        assert "Cats" in out and "http://x" in out and "meow" in out
+
+    asyncio.run(_drive())
+
+
+def test_web_search_kagi_backend() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return {"data": {
+                "output": "Cats are great [1].",
+                "references": [{"title": "Cats", "url": "http://x", "snippet": "s"}],
+            }}
+
+        out = await web_search(
+            "cats",
+            settings=SuiteSettings(web_search_backend="kagi", kagi_api_key="tok"),
+            request_json=_request,
+        )
+        assert captured["url"] == KAGI_FASTGPT_URL
+        assert captured["json"] == {"query": "cats"}
+        assert captured["headers"]["Authorization"] == "Bot tok"
+        assert "Cats are great" in out and "http://x" in out
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_kagi_extract_backend() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return {"data": [
+                {"url": "http://a", "markdown": "# Page A"},
+                {"url": "http://b", "markdown": None, "error": "timeout"},
+            ]}
+
+        out = await html_fetch(
+            None, urls=["http://a", "http://b"],
+            settings=SuiteSettings(web_search_backend="kagi", kagi_api_key="tok"),
+            request_json=_request,
+        )
+        assert captured["url"] == KAGI_EXTRACT_URL
+        assert captured["headers"]["Authorization"] == "Bearer tok"
+        assert captured["json"]["pages"] == [{"url": "http://a"}, {"url": "http://b"}]
+        assert "Page A" in out and "Couldn't extract: timeout" in out
+
+    asyncio.run(_drive())
+
+
+def test_web_search_tool_schema_reflects_backend() -> None:
+    brave_tools = {
+        t.spec.name: t
+        for t in make_web_tools(
+            SuiteSettings(web_search_backend="brave", brave_api_key="k")
+        )
+    }
+    props = brave_tools["web_search"].spec.parameters["properties"]
+    assert {"query", "country", "search_language", "freshness", "local_city"} <= set(props)
+    # html_fetch always takes a list of urls.
+    assert brave_tools["html_fetch"].spec.parameters["properties"]["urls"]["type"] == "array"
