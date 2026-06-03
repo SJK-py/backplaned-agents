@@ -294,6 +294,45 @@ def test_check_while_pending_reports_still_working() -> None:
     asyncio.run(_drive())
 
 
+def test_format_progress_lines() -> None:
+    """Each progress kind/tool renders the spec'd Korean status line."""
+    f = kg._format_progress
+    # call_<agent> peer tool → calling / analysing that agent.
+    assert f({"kind": "tool_call", "tool": "call_research"}, "orchestrator") == \
+        "research를 호출하여 처리 중이에요."
+    assert f({"kind": "tool_result", "tool": "call_research"}, "orchestrator") == \
+        "research의 결과 보고를 분석 중이에요."
+    # Plain tool run by the orchestrator → no agent prefix.
+    assert f({"kind": "tool_call", "tool": "web_search"}, "orchestrator") == \
+        "web_search도구를 이용하여 처리 중이에요."
+    assert f({"kind": "tool_result", "tool": "web_search"}, "orchestrator") == \
+        "web_search 도구를 사용하고 결과를 분석 중이에요."
+    # Plain tool run by a specialist → bracket-tagged with the agent.
+    assert f({"kind": "tool_call", "tool": "web_search"}, "research") == \
+        "[research] web_search도구를 이용하여 처리 중이에요."
+    assert f({"kind": "tool_result", "tool": "web_search"}, "research") == \
+        "[research] web_search 도구를 사용하고 결과를 분석 중이에요."
+    # Non-tool kinds (and no producer) → bare fallback.
+    assert f({"kind": "thinking"}, "orchestrator") == "처리 중이에요."
+    assert f({"kind": "message"}, None) == "처리 중이에요."
+
+
+def test_check_while_pending_appends_last_progress() -> None:
+    """The [확인] status carries the latest recorded tool-progress line."""
+    async def _drive() -> None:
+        reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+        await _set_pending(reg, "kc1", "usr", "tsk1")
+        await reg.set_progress("kc1", "research를 호출하여 처리 중이에요.")
+        client = _RecordingClient()
+        gw = _poll_gateway(client, reg)
+        await gw.handle_job(_job(utterance=CHECK_LABEL))
+        _url, text, _qr, _imgs = client.posts[0]
+        assert kg._STILL_WORKING_TEXT in text
+        assert text.endswith("research를 호출하여 처리 중이에요.")
+
+    asyncio.run(_drive())
+
+
 def test_stop_cancels_pending_turn() -> None:
     class _Creds:
         def __init__(self) -> None:
@@ -481,6 +520,67 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
             await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
             assert client.posts == [("https://cb.kakao/x", "slow answer", None, None)]
             assert await reg.get_turn("kc1") is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+class _ProgressDispatcher(_FakeDispatcher):
+    """Replays tool-progress frames through `on_progress` before returning."""
+
+    def __init__(self, *, frames, **kw) -> None:
+        super().__init__(**kw)
+        self._frames = frames
+
+    async def await_root_result(self, task_id, *, timeout_s=None, on_progress=None, **kw):
+        if on_progress:
+            for fr in self._frames:
+                await on_progress(fr)
+        return await super().await_root_result(task_id, timeout_s=timeout_s)
+
+
+def test_turn_progress_recorded_and_shown_on_check(suite_db_url: str) -> None:
+    """End to end: a turn's tool steps are recorded as it runs and surface in
+    the [확인] 'still working' status while it's in flight."""
+    from types import SimpleNamespace
+
+    from bp_agents.common.progress import LOOP_PROGRESS_KEY
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            settings = _settings(kakao_callback_deadline_s=0.05)
+            frame = SimpleNamespace(
+                metadata={LOOP_PROGRESS_KEY: {"kind": "tool_call", "tool": "call_research"}},
+                agent_id="orchestrator",
+            )
+            disp = _ProgressDispatcher(frames=[frame], reply="done", delay=0.3)
+            gw = _gateway(pool, client, disp, reg, settings)
+
+            await gw.handle_job(_job(utterance="do something slow"))
+            # Turn overran → parked pending; progress recorded as it ran.
+            for _ in range(50):
+                if (await reg.get_turn("kc1") or {}).get("progress"):
+                    break
+                await asyncio.sleep(0.02)
+            assert (await reg.get_turn("kc1") or {}).get("progress") == \
+                "research를 호출하여 처리 중이에요."
+
+            # [확인] while pending → the status carries the progress line.
+            client.posts.clear()
+            await gw.handle_job(_job(msg_id="m2", utterance=CHECK_LABEL))
+            _url, text, _qr, _imgs = client.posts[0]
+            assert "research를 호출하여 처리 중이에요." in text
+
+            # Let the background turn finish so loop teardown is clean.
+            for _ in range(50):
+                if (await reg.get_turn("kc1") or {}).get("state") in ("ready", None):
+                    break
+                await asyncio.sleep(0.02)
         finally:
             await pool.close()
 
