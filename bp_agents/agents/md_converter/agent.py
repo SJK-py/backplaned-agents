@@ -107,6 +107,27 @@ def _normalize(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _decode_html(data: bytes) -> str:
+    """Decode fetched HTML bytes, DETECTING the charset (BOM / `<meta charset>`
+    / statistical) like a browser — Korean sites are frequently EUC-KR / CP949,
+    not UTF-8, so a naive `decode("utf-8")` turns their text into `�`. Uses
+    bs4's UnicodeDammit (present via markitdown); UTF-8 + replace is the last
+    resort. (The primary markitdown path already does this; this is only for
+    the regex fallback below.)"""
+    try:
+        from bs4 import UnicodeDammit  # noqa: PLC0415
+
+        decoded = UnicodeDammit(data).unicode_markup
+        if decoded is not None:
+            return decoded
+    except Exception:  # noqa: BLE001 — detection must never break the fallback
+        logger.warning(
+            "html_charset_detect_failed",
+            extra={"event": "html_charset_detect_failed"},
+        )
+    return data.decode("utf-8", errors="replace")
+
+
 def _html_to_text(raw_html: str) -> str:
     """Regex HTML→text fallback when MarkItDown can't parse a page —
     preserves headers/lists/paragraph breaks so a bad page still yields
@@ -161,7 +182,7 @@ async def run_webpage(
             "markitdown_webpage_failed_fallback_regex",
             extra={"event": "markitdown_webpage_failed", "url": payload.url},
         )
-        md = _html_to_text(data.decode("utf-8", errors="replace"))
+        md = _html_to_text(_decode_html(data))
     truncate = min(max(payload.truncate, 0), _CONTENT_HARD_CAP)
     return text_output(md[:truncate])
 
