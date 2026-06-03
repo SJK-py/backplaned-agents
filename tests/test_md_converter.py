@@ -68,6 +68,38 @@ def test_webpage_with_stub_fetch() -> None:
     asyncio.run(_drive())
 
 
+def test_webpage_fetch_error_is_handled_gracefully() -> None:
+    """A fetch failure (403, read timeout, …) returns a clean message instead
+    of raising an unhandled exception out of the handler."""
+    import httpx
+
+    async def _drive() -> None:
+        ctx = _Ctx(None)
+
+        req = httpx.Request("GET", "http://blocked.example")
+        resp = httpx.Response(403, request=req)
+
+        async def _fetch_403(url: str) -> bytes:
+            raise httpx.HTTPStatusError("forbidden", request=req, response=resp)
+
+        out = await run_webpage(
+            ctx, Webpage(url="http://blocked.example"), fetch=_fetch_403
+        )
+        assert "Couldn't fetch" in out.content
+        assert "HTTP 403" in out.content
+
+        async def _fetch_timeout(url: str) -> bytes:
+            raise httpx.ReadTimeout("slow")
+
+        out2 = await run_webpage(
+            ctx, Webpage(url="http://slow.example"), fetch=_fetch_timeout
+        )
+        assert "Couldn't fetch" in out2.content
+        assert "timed out" in out2.content
+
+    asyncio.run(_drive())
+
+
 def test_html_to_text_regex_fallback() -> None:
     # The fallback used when MarkItDown can't parse a page.
     raw = (

@@ -5,9 +5,18 @@ from __future__ import annotations
 import asyncio
 import socket
 
+import httpx
 import pytest
 
-from bp_agents.common.urlsafe import UnsafeUrlError, ensure_fetchable_url
+from bp_agents.common.urlsafe import (
+    UnsafeUrlError,
+    ensure_fetchable_url,
+    safe_stream_get,
+)
+
+
+def _mock_client(handler):  # type: ignore[no-untyped-def]
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 def _check(url: str) -> None:
@@ -58,3 +67,71 @@ def test_hostname_resolving_public_is_allowed(monkeypatch) -> None:
         lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))],
     )
     _check("http://example.com/")  # public — must not raise
+
+
+# --- safe_stream_get: redirect following with per-hop SSRF re-check ---------
+
+
+def test_safe_stream_get_follows_redirect() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/a":
+            return httpx.Response(302, headers={"location": "/b"})  # relative
+        return httpx.Response(200, content=b"final body")
+
+    async def _drive() -> bytes:
+        async with _mock_client(handler) as c:
+            return await safe_stream_get(c, "http://8.8.8.8/a", cap=1000)
+
+    assert asyncio.run(_drive()) == b"final body"
+
+
+def test_safe_stream_get_revalidates_each_redirect_hop() -> None:
+    """A public page that 302s to the cloud-metadata endpoint is blocked BEFORE
+    the metadata request is made (the hop is re-validated)."""
+    requested: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        requested.append(req.url.host)
+        return httpx.Response(302, headers={"location": "http://169.254.169.254/"})
+
+    async def _drive() -> None:
+        async with _mock_client(handler) as c:
+            await safe_stream_get(c, "http://8.8.8.8/x", cap=1000)
+
+    with pytest.raises(UnsafeUrlError):
+        asyncio.run(_drive())
+    assert requested == ["8.8.8.8"]  # the metadata host was never contacted
+
+
+def test_safe_stream_get_caps_redirects() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "/loop"})
+
+    async def _drive() -> None:
+        async with _mock_client(handler) as c:
+            await safe_stream_get(c, "http://8.8.8.8/loop", cap=1000, max_redirects=2)
+
+    with pytest.raises(UnsafeUrlError):
+        asyncio.run(_drive())
+
+
+def test_web_fetch_settings_defaults() -> None:
+    from bp_agents.settings import SuiteSettings
+
+    s = SuiteSettings(_env_file=None)  # type: ignore[call-arg]
+    assert s.web_fetch_max_redirects == 3
+    # Honest default UA: the well-behaved-crawler convention, not a browser.
+    assert "compatible" in s.web_fetch_user_agent
+    assert "BackplanedBot" in s.web_fetch_user_agent
+
+
+def test_safe_stream_get_enforces_byte_cap() -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 100)
+
+    async def _drive() -> None:
+        async with _mock_client(handler) as c:
+            await safe_stream_get(c, "http://8.8.8.8/big", cap=10)
+
+    with pytest.raises(ValueError):
+        asyncio.run(_drive())

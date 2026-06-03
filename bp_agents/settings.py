@@ -276,6 +276,17 @@ class SuiteSettings(BaseSettings):
     When unset, web_search returns an unavailable notice."""
     web_fetch_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     web_fetch_timeout_s: float = Field(default=120.0, gt=0.0)
+    web_fetch_user_agent: str = Field(
+        default="Mozilla/5.0 (compatible; BackplanedBot/1.0)"
+    )
+    """User-Agent for agent web fetches. The default is HONEST — it identifies
+    the fetcher via the well-behaved-crawler `(compatible; <bot>)` convention
+    rather than impersonating a browser. Operators can override it (e.g. add
+    their own bot name + a `+https://…` contact URL) to improve trust; a
+    browser UA gets accepted more widely but is deceptive."""
+    web_fetch_max_redirects: int = Field(default=3, ge=0)
+    """Max redirect hops an agent fetch follows. Each hop is re-validated
+    against the SSRF guard. `0` disables redirect-following."""
 
 
 def load_suite_settings() -> SuiteSettings:

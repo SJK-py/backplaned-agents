@@ -20,17 +20,44 @@ import httpx
 from pydantic import BaseModel
 
 from bp_agents.common import text_output
-from bp_agents.common.urlsafe import ensure_fetchable_url
+from bp_agents.common.urlsafe import safe_stream_get
+from bp_agents.settings import load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
 
 logger = logging.getLogger(__name__)
+
+_settings = load_suite_settings()
 
 MD_CONVERTER_AGENT_ID = "md_converter"
 
 _AUTO_CONTENT_LIMIT = 2000  # auto → content if ≤ this many chars, else file
 _CONTENT_HARD_CAP = 100_000  # content mode force-truncates here
 _WEBPAGE_FETCH_CAP = 5 * 1024 * 1024  # 5 MiB
+# Interactive-path fetch timeouts (seconds): connect fails fast on a dead host;
+# the overall read is bounded so a slow/forbidden page can't stall a turn.
+_FETCH_CONNECT_TIMEOUT_S = 5.0
+_FETCH_TIMEOUT_S = 15.0
+
+# Configurable UA (honest default) + Accept; the default `python-httpx` agent
+# gets 403'd by many sites. `safe_stream_get` follows up to
+# `web_fetch_max_redirects` hops with a per-hop SSRF re-check.
+_FETCH_HEADERS = {
+    "User-Agent": _settings.web_fetch_user_agent,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _fetch_reason(exc: Exception) -> str:
+    """A short, human-readable reason for a failed webpage fetch."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "the request timed out"
+    if isinstance(exc, httpx.HTTPError):
+        return "a network error"
+    return str(exc) or type(exc).__name__
 
 
 class Convert(BaseModel):
@@ -115,7 +142,18 @@ async def run_webpage(
     *,
     fetch: Callable[[str], Awaitable[bytes]] | None = None,
 ) -> AgentOutput:
-    data = await (fetch(payload.url) if fetch else _default_fetch(payload.url))
+    try:
+        data = await (fetch(payload.url) if fetch else _default_fetch(payload.url))
+    except Exception as exc:  # noqa: BLE001 — a fetch failure must not crash the handler
+        logger.warning(
+            "webpage_fetch_failed",
+            extra={
+                "event": "webpage_fetch_failed",
+                "url": payload.url,
+                "error": type(exc).__name__,
+            },
+        )
+        return text_output(f"[Couldn't fetch {payload.url}: {_fetch_reason(exc)}.]")
     try:
         md = await asyncio.to_thread(_markitdown_bytes, data, ".html")
     except Exception:  # noqa: BLE001 — one bad page must not break the fetch
@@ -129,16 +167,15 @@ async def run_webpage(
 
 
 async def _default_fetch(url: str) -> bytes:
-    await ensure_fetchable_url(url)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                buf += chunk
-                if len(buf) > _WEBPAGE_FETCH_CAP:
-                    raise ValueError("webpage exceeds fetch cap")
-            return bytes(buf)
+    # Fail fast: this is the interactive research path, so an unreachable or
+    # slow page shouldn't stall the turn. Short connect, bounded read — much
+    # tighter than the bulk `web_fetch_timeout_s` download path.
+    timeout = httpx.Timeout(_FETCH_TIMEOUT_S, connect=_FETCH_CONNECT_TIMEOUT_S)
+    async with httpx.AsyncClient(timeout=timeout, headers=_FETCH_HEADERS) as client:
+        return await safe_stream_get(
+            client, url, cap=_WEBPAGE_FETCH_CAP,
+            max_redirects=_settings.web_fetch_max_redirects,
+        )
 
 
 @agent.handler(

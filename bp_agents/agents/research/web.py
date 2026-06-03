@@ -18,7 +18,8 @@ from urllib.parse import urlparse
 import httpx
 
 from bp_agents.common import LocalTool
-from bp_agents.common.urlsafe import ensure_fetchable_url
+from bp_agents.common.urlsafe import safe_stream_get
+from bp_agents.settings import load_suite_settings
 from bp_sdk import ToolSpec
 
 if TYPE_CHECKING:
@@ -27,30 +28,35 @@ if TYPE_CHECKING:
 
 MD_CONVERTER_AGENT_ID = "md_converter"
 _CONTENT_CAP = 100_000
+# Two-stage timeout: a dead/unreachable host fails the CONNECT fast instead of
+# burning the full `web_fetch_timeout_s` (the read stays generous so a large,
+# legitimately-slow download still completes).
+_CONNECT_TIMEOUT_S = 5.0
 
 # Injectable fetchers (overridden in tests).
 JsonGetter = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
 BytesGetter = Callable[[str, float, int], Awaitable[bytes]]
 
 
+_settings = load_suite_settings()
+_FETCH_HEADERS = {"User-Agent": _settings.web_fetch_user_agent}
+
+
 async def _default_get_json(url: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+    t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
+    async with httpx.AsyncClient(timeout=t, headers=_FETCH_HEADERS) as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         return resp.json()
 
 
 async def _default_get_bytes(url: str, timeout: float, cap: int) -> bytes:
-    await ensure_fetchable_url(url)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            buf = bytearray()
-            async for chunk in resp.aiter_bytes():
-                buf += chunk
-                if len(buf) > cap:
-                    raise ValueError("download exceeds cap")
-            return bytes(buf)
+    # safe_stream_get re-validates each redirect hop against the SSRF guard.
+    t = httpx.Timeout(timeout, connect=min(_CONNECT_TIMEOUT_S, timeout))
+    async with httpx.AsyncClient(timeout=t, headers=_FETCH_HEADERS) as client:
+        return await safe_stream_get(
+            client, url, cap=cap, max_redirects=_settings.web_fetch_max_redirects
+        )
 
 
 async def web_search(
