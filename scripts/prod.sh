@@ -220,24 +220,45 @@ build_env() {
     ask TELEGRAM "Telegram bot token (from @BotFather)" ""
 
     # --- Web search backend (research agent) --------------------------------
-    # 1) bundled SearXNG (URL -> http://searxng:8080; start/restart auto-adds
-    #    the compose `search` profile), 2) external SearXNG (ask for the URL),
-    #    3) none — research runs without web search (SUITE_SEARXNG_URL empty).
+    # Pick the backend, then its config: searxng (bundled/external/none),
+    # brave (LLM-Context API key), or kagi (FastGPT + Extract API key).
+    # brave/kagi run an LLM under the hood; with no key research falls back to
+    # SearXNG. Only the bundled SearXNG auto-adds the compose `search` profile.
+    WEB_BACKEND="searxng"; SEARXNG_URL=""; BRAVE_KEY=""; KAGI_KEY=""
     echo
     echo "Web search backend for the research agent:"
-    echo "  1) Deploy SearXNG with compose (bundled 'search' profile)"
-    echo "  2) Use an external SearXNG (you provide the URL)"
-    echo "  3) Don't configure now (research runs without web search)"
-    ask SEARXNG_CHOICE "Choose 1-3" "1"
-    case "${SEARXNG_CHOICE,,}" in
-        1|compose|bundled)
-            SEARXNG_URL="$BUNDLED_SEARXNG_URL" ;;
-        2|external)
-            ask SEARXNG_URL "External SearXNG base URL (e.g. https://searx.example.com)" ""
-            [[ -z "$SEARXNG_URL" ]] && echo "  WARNING: empty URL — research will have no web search." ;;
-        3|none|"")
-            SEARXNG_URL="" ;;
-        *) echo "invalid search choice: $SEARXNG_CHOICE" >&2; exit 1 ;;
+    echo "  1) SearXNG (self-hosted metasearch)"
+    echo "  2) Brave  (LLM-Context API — needs a Brave API key)"
+    echo "  3) Kagi   (FastGPT + Extract — needs a Kagi API key)"
+    ask WEB_BACKEND_CHOICE "Choose 1-3" "1"
+    case "${WEB_BACKEND_CHOICE,,}" in
+        1|searxng|"")
+            WEB_BACKEND="searxng"
+            echo
+            echo "SearXNG instance:"
+            echo "  1) Deploy SearXNG with compose (bundled 'search' profile)"
+            echo "  2) Use an external SearXNG (you provide the URL)"
+            echo "  3) Don't configure now (research runs without web search)"
+            ask SEARXNG_CHOICE "Choose 1-3" "1"
+            case "${SEARXNG_CHOICE,,}" in
+                1|compose|bundled)
+                    SEARXNG_URL="$BUNDLED_SEARXNG_URL" ;;
+                2|external)
+                    ask SEARXNG_URL "External SearXNG base URL (e.g. https://searx.example.com)" ""
+                    [[ -z "$SEARXNG_URL" ]] && echo "  WARNING: empty URL — research will have no web search." ;;
+                3|none|"")
+                    SEARXNG_URL="" ;;
+                *) echo "invalid search choice: $SEARXNG_CHOICE" >&2; exit 1 ;;
+            esac ;;
+        2|brave)
+            WEB_BACKEND="brave"
+            ask BRAVE_KEY "Brave API key (X-Subscription-Token)" ""
+            [[ -z "$BRAVE_KEY" ]] && echo "  WARNING: empty key — research falls back to SearXNG." ;;
+        3|kagi)
+            WEB_BACKEND="kagi"
+            ask KAGI_KEY "Kagi API key (FastGPT + Extract)" ""
+            [[ -z "$KAGI_KEY" ]] && echo "  WARNING: empty key — research falls back to SearXNG." ;;
+        *) echo "invalid backend choice: $WEB_BACKEND_CHOICE" >&2; exit 1 ;;
     esac
 
     local GENERATED_PW=0
@@ -357,6 +378,9 @@ build_env() {
         echo "# SUITE_KAKAO_R2_SECRET_ACCESS_KEY="
         echo
         echo "# --- Web search (research agent) ---"
+        echo "# Backend: searxng | brave | kagi. brave/kagi use the API key below;"
+        echo "# an unset key falls back to SearXNG (logged)."
+        echo "SUITE_WEB_SEARCH_BACKEND=$WEB_BACKEND"
         if [[ "$SEARXNG_URL" == "$BUNDLED_SEARXNG_URL" ]]; then
             echo "# bundled SearXNG — prod.sh auto-adds '--profile search' on start/restart."
             echo "# deploy/searxng/settings.yml enables the json format + GET method the"
@@ -367,6 +391,8 @@ build_env() {
             echo "SEARXNG_SECRET=$(gen 32)"
         fi
         echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
+        [[ -n "$BRAVE_KEY" ]] && echo "SUITE_BRAVE_API_KEY=$BRAVE_KEY"
+        [[ -n "$KAGI_KEY" ]] && echo "SUITE_KAGI_API_KEY=$KAGI_KEY"
     } > "$OUT"
     chmod 600 "$OUT"
     # Invitation tokens are the ONE thing not written above: they're single-use
