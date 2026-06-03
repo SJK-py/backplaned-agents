@@ -30,6 +30,8 @@ See `docs/design/router-managed-file-store.md` §8.1.
 from __future__ import annotations
 
 import base64
+import io
+import logging
 from typing import Any
 
 from bp_router.attachments import (
@@ -38,6 +40,44 @@ from bp_router.attachments import (
 )
 from bp_router.db import queries
 from bp_router.file_store import _PERSIST_PREFIX
+
+logger = logging.getLogger(__name__)
+
+
+def _downscale_image(data: bytes, mime: str, max_long_side: int) -> tuple[bytes, str]:
+    """Shrink an image so its LONGER side is at most `max_long_side` px,
+    preserving aspect ratio and only ever shrinking (never upscaling). Returns
+    `(bytes, mime)` — the originals unchanged when resizing is off, the image
+    is already small enough, or anything goes wrong (best-effort: never fail
+    the LLM call over a thumbnail). Multimodal token cost is dimension-based,
+    so this is what actually cuts the per-image token bill."""
+    if max_long_side <= 0:
+        return data, mime
+    try:
+        from PIL import Image  # noqa: PLC0415
+
+        img = Image.open(io.BytesIO(data))
+        fmt = (img.format or "PNG").upper()
+        if max(img.size) <= max_long_side:
+            return data, mime
+        # thumbnail() is in-place, aspect-preserving, and downscale-only.
+        img.thumbnail((max_long_side, max_long_side))
+        out = io.BytesIO()
+        if fmt in ("JPEG", "JPG"):
+            # JPEG can't hold alpha/palette modes — flatten to RGB.
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(out, format="JPEG", quality=85)
+        else:
+            img.save(out, format=fmt)
+        return out.getvalue(), mime
+    except Exception:  # noqa: BLE001 — never break the call over a resize
+        logger.warning(
+            "llm_image_downscale_failed",
+            extra={"event": "llm_image_downscale_failed"},
+            exc_info=True,
+        )
+        return data, mime
 
 # Textual `application/*` subtypes fed as text alongside every
 # `text/*`. Structured-syntax `+json`/`+xml`/`+yaml` suffixes are
@@ -141,6 +181,7 @@ async def _inline_blob(
     mime_type: str | None,
     display_name: str | None,
     inline_cap: int,
+    image_max_long_side: int = 0,
 ) -> None:
     """Resolve a blob into a provider-ready content part IN PLACE,
     routing by type (see the module docstring): images/PDFs base64-
@@ -198,10 +239,16 @@ async def _inline_blob(
         content[idx] = {"text": f"File: {name}\n\n{text}"}
         return
 
-    # image / document → base64 multimodal envelope.
+    # image / document → base64 multimodal envelope. Downscale images first
+    # (token cost is dimension-based) — documents/PDFs are passed through.
+    blob_bytes = bytes(buf)
+    if strategy == "image":
+        blob_bytes, mime_type = _downscale_image(
+            blob_bytes, mime_type or "application/octet-stream", image_max_long_side
+        )
     envelope: dict[str, Any] = {
         "mime_type": mime_type or "application/octet-stream",
-        "data": base64.b64encode(bytes(buf)).decode("ascii"),
+        "data": base64.b64encode(blob_bytes).decode("ascii"),
     }
     if display_name:
         envelope["display_name"] = display_name
@@ -246,6 +293,7 @@ async def resolve_request_file_refs(
         )
 
     inline_cap = settings.llm_attachment_inline_max_bytes
+    image_max_long_side = settings.llm_image_max_long_side_px
     # Every file_ref must carry a name.
     if any(loc[2].get("name") is None for loc in locations):
         raise AttachmentResolutionError(
@@ -297,4 +345,5 @@ async def resolve_request_file_refs(
                 mime_type=blob.mime_type,
                 display_name=blob.original_filename or bare,
                 inline_cap=inline_cap,
+                image_max_long_side=image_max_long_side,
             )
