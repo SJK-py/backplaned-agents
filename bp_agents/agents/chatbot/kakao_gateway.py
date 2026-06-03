@@ -121,7 +121,7 @@ def _format_progress(lp: dict, producer: str | None) -> str:
             else ""
         )
         if kind == "tool_call":
-            body = f"{prefix}{tool}도구를 이용하여 처리 중이에요."
+            body = f"{prefix}{tool} 도구를 이용하여 처리 중이에요."
         elif kind == "tool_result":
             body = f"{prefix}{tool} 도구를 사용하고 결과를 분석 중이에요."
         else:
