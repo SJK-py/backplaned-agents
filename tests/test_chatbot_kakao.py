@@ -317,12 +317,12 @@ def test_format_progress_lines() -> None:
         "(research 에이전트의 결과 보고를 분석 중이에요.)"
     # Plain tool run by the orchestrator → no agent prefix.
     assert f({"kind": "tool_call", "tool": "web_search"}, "orchestrator") == \
-        "(web_search도구를 이용하여 처리 중이에요.)"
+        "(web_search 도구를 이용하여 처리 중이에요.)"
     assert f({"kind": "tool_result", "tool": "web_search"}, "orchestrator") == \
         "(web_search 도구를 사용하고 결과를 분석 중이에요.)"
     # Plain tool run by a specialist → "<agent> 에이전트 - " prefix.
     assert f({"kind": "tool_call", "tool": "web_search"}, "research") == \
-        "(research 에이전트 - web_search도구를 이용하여 처리 중이에요.)"
+        "(research 에이전트 - web_search 도구를 이용하여 처리 중이에요.)"
     assert f({"kind": "tool_result", "tool": "web_search"}, "research") == \
         "(research 에이전트 - web_search 도구를 사용하고 결과를 분석 중이에요.)"
     # Non-tool kinds (and no producer) → bare fallback, still parenthesised.
