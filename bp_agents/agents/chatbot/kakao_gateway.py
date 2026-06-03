@@ -92,6 +92,9 @@ _NOTHING_RUNNING_TEXT = "지금 진행 중인 작업이 없어요."
 _DISPATCH_FAILED_TEXT = "😥 죄송해요, 처리 중 문제가 생겼어요. 다시 시도해 주세요."
 _NO_RESPONSE_TEXT = "(응답 없음)"
 _PROGRESS_FALLBACK_TEXT = "처리 중이에요."
+# Header for non-image produced files — Kakao can't inline documents, so they
+# ride as presigned download links in the reply text (short-lived URLs).
+_FILE_LINKS_INTRO = "📎 첨부 파일이에요 (링크는 곧 만료돼요):"
 
 
 def _format_progress(lp: dict, producer: str | None) -> str:
@@ -506,11 +509,15 @@ class KakaoGateway:
             result = await self._core.await_result(task_id, on_progress=_on_progress)
 
             reply = (result.output.content if result.output else "") or ""
-            reply_text = (
-                f"{agent_tag(result.agent_id)}{reply}" if reply else _NO_RESPONSE_TEXT
-            )
             out_names = list(result.output.files) if result.output else []
-            images = await self._upload_outbound(user_id, session_id, out_names)
+            images, files = await self._upload_outbound(user_id, session_id, out_names)
+            reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else ""
+            if files:
+                links = "\n".join(f"• {fn}\n{url}" for fn, url in files)
+                block = f"{_FILE_LINKS_INTRO}\n{links}"
+                reply_text = f"{reply_text}\n\n{block}" if reply_text else block
+            if not reply_text:
+                reply_text = _NO_RESPONSE_TEXT
             context_tokens = await self._core.after_result(session_id, dest, result)
             await self._core.maybe_summarize(session_id, dest, context_tokens)
 
@@ -582,13 +589,16 @@ class KakaoGateway:
 
     async def _upload_outbound(
         self, user_id: str, session_id: str, names: list[str]
-    ) -> list[tuple[str, str]]:
-        """Resolve produced file names → bytes → R2 presigned urls for Kakao
-        to render. Images only — Kakao can't inline arbitrary documents, so a
-        non-image produced file is skipped (logged). Needs R2 configured."""
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """Resolve produced file names → bytes → R2 presigned urls. Returns
+        `(images, files)`: `images` (url, alt) render inline as Kakao
+        simpleImage bubbles; `files` (filename, url) are non-image downloads
+        surfaced as links in the reply text (Kakao can't inline documents).
+        Needs R2 configured; a file that can't be uploaded is skipped (logged)."""
         if self._egress is None or self._credentials is None or not names:
-            return []
+            return [], []
         images: list[tuple[str, str]] = []
+        files: list[tuple[str, str]] = []
         for name in names:
             try:
                 file_id = await self._credentials.resolve_named_file(
@@ -600,22 +610,20 @@ class KakaoGateway:
                     user_id=user_id, file_id=file_id
                 )
                 mime = detect_image_mime(data, name)
-                if not mime.startswith("image/"):
-                    logger.info(
-                        "kakao_outbound_skip_nonimage",
-                        extra={"event": "kakao_outbound_skip_nonimage"},
-                    )
-                    continue
-                url = await self._egress.put_image(
+                url = await self._egress.put_file(
                     data, content_type=mime, key=egress_key(session_id, name)
                 )
-                images.append((url, name.rsplit("/", 1)[-1]))
+                short = name.rsplit("/", 1)[-1]
+                if mime.startswith("image/"):
+                    images.append((url, short))
+                else:
+                    files.append((short, url))
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "kakao_outbound_image_failed",
-                    extra={"event": "kakao_outbound_image_failed"},
+                    "kakao_outbound_file_failed",
+                    extra={"event": "kakao_outbound_file_failed"},
                 )
-        return images
+        return images, files
 
     # -- identity + commands --------------------------------------------
 

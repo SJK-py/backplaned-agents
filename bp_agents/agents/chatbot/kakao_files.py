@@ -1,10 +1,11 @@
-"""chatbot.kakao_files — outbound image hosting for KakaoTalk.
+"""chatbot.kakao_files — outbound file hosting for KakaoTalk.
 
 To render an image in KakaoTalk you must hand Kakao a PUBLIC `imageUrl`
-its servers fetch directly. The router's blob store is internal-only and
+its servers fetch directly; a non-image file likewise needs a public URL
+to offer as a download link. The router's blob store is internal-only and
 streams downloads through the router under an auth token, so it can't
 serve that ([../../../docs/design/kakao-channel.md] §8). This module
-uploads an outbound image to a dedicated S3-compatible bucket (R2) and
+uploads an outbound file to a dedicated S3-compatible bucket (R2) and
 returns a short-TTL presigned GET — a public surface decoupled from the
 router. Inbound images, by contrast, reuse the router named store.
 
@@ -50,17 +51,17 @@ def detect_image_mime(data: bytes, filename: str = "") -> str:
 
 
 def egress_key(session_id: str, filename: str) -> str:
-    """A unique, unguessable object key for an outbound image (the
+    """A unique, unguessable object key for an outbound file (the
     presigned URL is the only handle; the key itself is not a capability)."""
-    base = filename.rsplit("/", 1)[-1] or "image"
+    base = filename.rsplit("/", 1)[-1] or "file"
     return f"kakao/{session_id}/{uuid.uuid4().hex}/{base}"
 
 
 class R2FileEgress:
-    """Uploads an image to an S3-compatible bucket and mints a presigned
-    GET url for Kakao to fetch. One instance per process; the aioboto3
-    session is built lazily so the suite boots without the extra unless
-    KakaoTalk image egress is actually configured."""
+    """Uploads a file to an S3-compatible bucket and mints a presigned
+    GET url for Kakao to fetch (inline image, or download link for other
+    types). One instance per process; the aioboto3 session is built lazily so
+    the suite boots without the extra unless KakaoTalk egress is configured."""
 
     def __init__(self, settings: SuiteSettings) -> None:
         assert settings.kakao_r2_bucket is not None
@@ -117,8 +118,10 @@ class R2FileEgress:
             "s3", endpoint_url=self._endpoint, config=self._botocore_config()
         )
 
-    async def put_image(self, data: bytes, *, content_type: str, key: str) -> str:
-        """Upload `data` and return a short-TTL presigned GET url."""
+    async def put_file(self, data: bytes, *, content_type: str, key: str) -> str:
+        """Upload `data` (any type) and return a short-TTL presigned GET url.
+        Images are rendered inline by Kakao; other files are surfaced as a
+        download link (the URL expires with the configured TTL)."""
         async with self._client() as s3:
             await s3.put_object(
                 Bucket=self._bucket, Key=key, Body=data, ContentType=content_type
