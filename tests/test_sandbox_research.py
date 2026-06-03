@@ -11,7 +11,7 @@ import pytest
 from bp_agents.agents.research.web import (
     BRAVE_CONTEXT_URL,
     KAGI_EXTRACT_URL,
-    KAGI_FASTGPT_URL,
+    KAGI_SEARCH_URL,
     html_fetch,
     make_web_tools,
     web_search,
@@ -319,19 +319,70 @@ def test_web_search_kagi_backend() -> None:
             captured["json"] = json
             captured["headers"] = headers
             return {"data": {
-                "output": "Cats are great [1].",
-                "references": [{"title": "Cats", "url": "http://x", "snippet": "s"}],
+                "direct_answer": [{"title": "42", "url": "http://a"}],
+                "search": [
+                    {
+                        "url": "http://x",
+                        "title": "Cats &amp; Dogs",
+                        "snippet": "meow &quot;purr&quot;",
+                        "props": {"language": "en"},
+                    },
+                ],
+                "related_search": [{"title": "kittens", "url": "http://k"}],
+                "interesting_finds": [{"title": "drop me", "url": "http://d"}],
+                "web_archive": [{"title": "drop me too", "url": "http://w"}],
             }}
 
         out = await web_search(
-            "cats",
+            "cats", count=9,
+            settings=SuiteSettings(web_search_backend="kagi", kagi_api_key="tok"),
+            region="kr", file_type="pdf", time_relative="week",
+            request_json=_request,
+        )
+        assert captured["url"] == KAGI_SEARCH_URL
+        assert captured["json"]["query"] == "cats"
+        assert captured["json"]["workflow"] == "search"
+        assert captured["json"]["limit"] == 9
+        assert captured["json"]["lens"] == {
+            "file_type": "pdf", "time_relative": "week", "search_region": "kr",
+        }
+        assert captured["headers"]["Authorization"] == "Bearer tok"
+        # `.props` dropped; HTML entities unescaped.
+        assert "language" not in out
+        assert "Cats & Dogs" in out and 'meow "purr"' in out and "http://x" in out
+        # direct_answer is a header (appears before the primary search list).
+        assert out.index("Direct answer") < out.index("Search results")
+        # related_search is a footer; dropped collections never appear.
+        assert "Related searches" in out
+        assert "drop me" not in out
+
+    asyncio.run(_drive())
+
+
+def test_web_search_kagi_snippet_cap_and_aux_limit() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["json"] = json
+            return {"data": {
+                "search": [{"url": "http://x", "title": "T", "snippet": "z" * 900}],
+                "related_search": [
+                    {"url": f"http://r{i}", "title": f"q{i}"} for i in range(10)
+                ],
+            }}
+
+        out = await web_search(
+            "cats", count=6,
             settings=SuiteSettings(web_search_backend="kagi", kagi_api_key="tok"),
             request_json=_request,
         )
-        assert captured["url"] == KAGI_FASTGPT_URL
-        assert captured["json"] == {"query": "cats"}
-        assert captured["headers"]["Authorization"] == "Bot tok"
-        assert "Cats are great" in out and "http://x" in out
+        # No lens when no restrictive options were passed.
+        assert "lens" not in captured["json"]
+        # Snippet capped at 500 chars.
+        assert "z" * 500 in out and "z" * 501 not in out
+        # Aux collections capped at count // 3 == 2.
+        assert "q0" in out and "q1" in out and "q2" not in out
 
     asyncio.run(_drive())
 
@@ -373,3 +424,13 @@ def test_web_search_tool_schema_reflects_backend() -> None:
     assert {"query", "country", "search_language", "freshness", "local_city"} <= set(props)
     # html_fetch always takes a list of urls.
     assert brave_tools["html_fetch"].spec.parameters["properties"]["urls"]["type"] == "array"
+
+    kagi_tools = {
+        t.spec.name: t
+        for t in make_web_tools(
+            SuiteSettings(web_search_backend="kagi", kagi_api_key="tok")
+        )
+    }
+    kagi_props = kagi_tools["web_search"].spec.parameters["properties"]
+    assert {"query", "kind", "count", "region", "file_type", "time_relative",
+            "time_after", "time_before"} <= set(kagi_props)

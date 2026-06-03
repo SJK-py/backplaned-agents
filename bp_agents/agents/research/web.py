@@ -6,8 +6,10 @@
   (`SUITE_SEARXNG_URL`); returns a classic list of result links.
 * `brave` — Brave's LLM-Context API (`SUITE_BRAVE_API_KEY`); returns
   AI-grounded context (title/url/snippets) for the query.
-* `kagi` — Kagi's FastGPT (`SUITE_KAGI_API_KEY`); returns an AI answer with
-  cited sources, and routes `html_fetch` through Kagi's Extract API.
+* `kagi` — Kagi's Search API (`SUITE_KAGI_API_KEY`); returns ranked results
+  plus contextual collections (direct answer / weather up top, related
+  questions / searches and infoboxes below), and routes `html_fetch` through
+  Kagi's Extract API.
 
 The chosen backend's key must be set; if it isn't, the suite falls back to
 SearXNG with a logged warning. `html_fetch` returns Markdown (or raw HTML for
@@ -19,6 +21,7 @@ the `web_search` tool's parameter schema reflects the active backend.
 
 from __future__ import annotations
 
+import html
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
@@ -46,9 +49,42 @@ _CONTENT_CAP = 100_000
 _CONNECT_TIMEOUT_S = 5.0
 
 BRAVE_CONTEXT_URL = "https://api.search.brave.com/res/v1/llm/context"
-KAGI_FASTGPT_URL = "https://kagi.com/api/v0/fastgpt"
+KAGI_SEARCH_URL = "https://kagi.com/api/v1/search"
 KAGI_EXTRACT_URL = "https://kagi.com/api/v1/extract"
 _KAGI_EXTRACT_MAX_URLS = 10  # Kagi Extract accepts 1-10 pages per call.
+
+# Kagi Search API: `data` is keyed by collection name; the `workflow` request
+# field decides which collection is the primary result list.
+_KAGI_WORKFLOW_PRIMARY = {
+    "search": "search",
+    "images": "image",
+    "videos": "video",
+    "news": "news",
+    "podcasts": "podcast",
+}
+# Noisy index dumps we never surface.
+_KAGI_DROP = {"interesting_news", "interesting_finds", "web_archive"}
+# Contextual collections rendered above the primary list when present.
+_KAGI_HEADER = ("direct_answer", "weather")
+_KAGI_SNIPPET_CAP = 500  # Per-snippet character cap (after HTML-unescaping).
+_KAGI_MAX_COUNT = 50
+_KAGI_LABELS = {
+    "search": "Search results",
+    "image": "Images",
+    "video": "Videos",
+    "news": "News",
+    "podcast": "Podcasts",
+    "podcast_creator": "Podcast creators",
+    "adjacent_question": "Related questions",
+    "direct_answer": "Direct answer",
+    "infobox": "Infobox",
+    "code": "Code",
+    "package_tracking": "Package tracking",
+    "public_records": "Public records",
+    "weather": "Weather",
+    "related_search": "Related searches",
+    "listicle": "Listicles",
+}
 
 # Injectable fetchers (overridden in tests).
 JsonGetter = Callable[[str, dict[str, Any], float], Awaitable[dict[str, Any]]]
@@ -181,28 +217,98 @@ async def _brave_search(
     return "\n\n".join(blocks)
 
 
+def _kagi_label(name: str) -> str:
+    return _KAGI_LABELS.get(name, name.replace("_", " ").capitalize())
+
+
+def _kagi_result_line(n: int, item: dict[str, Any]) -> str:
+    """One numbered result: title / url / snippet. `props` is intentionally
+    dropped, and the snippet is HTML-unescaped then capped."""
+    title = html.unescape(item.get("title") or "")
+    url = item.get("url") or ""
+    snippet = html.unescape(item.get("snippet") or "")[:_KAGI_SNIPPET_CAP]
+    lines = [f"{n}. {title}".rstrip()]
+    if url:
+        lines.append(url)
+    if snippet:
+        lines.append(snippet)
+    return "\n".join(lines)
+
+
+def _kagi_collection_block(name: str, items: Any, limit: int) -> str:
+    """Render a single collection (heading + up to `limit` results), or "" if
+    it holds nothing usable."""
+    if not isinstance(items, list):
+        return ""
+    rendered = [
+        _kagi_result_line(i + 1, it)
+        for i, it in enumerate(items[:limit])
+        if isinstance(it, dict)
+    ]
+    if not rendered:
+        return ""
+    return f"## {_kagi_label(name)}\n" + "\n\n".join(rendered)
+
+
 async def _kagi_search(
-    query: str, *, settings: SuiteSettings, request_json: ApiRequester | None,
+    query: str, *, settings: SuiteSettings, count: int,
+    kind: str | None, time_after: str | None, time_before: str | None,
+    time_relative: str | None, region: str | None, file_type: str | None,
+    request_json: ApiRequester | None,
 ) -> str:
     request = request_json or _default_request_json
-    headers = {"Authorization": f"Bot {settings.kagi_api_key.get_secret_value()}"}
+    workflow = (kind or "search").lower()
+    if workflow not in _KAGI_WORKFLOW_PRIMARY:
+        workflow = "search"
+    count = min(max(count, 1), _KAGI_MAX_COUNT)
+    # Contextual collections get a tighter cap so they don't drown the primary
+    # list (but always at least one).
+    aux_count = max(1, count // 3)
+
+    body: dict[str, Any] = {"query": query, "workflow": workflow, "limit": count}
+    # Restrictive options ride on an inline lens (the only place file_type /
+    # relative-time live; takes priority over query-embedded operators).
+    lens: dict[str, Any] = {}
+    if file_type:
+        lens["file_type"] = file_type
+    if time_after:
+        lens["time_after"] = time_after
+    if time_before:
+        lens["time_before"] = time_before
+    if time_relative:
+        lens["time_relative"] = time_relative
+    if region:
+        lens["search_region"] = region
+    if lens:
+        body["lens"] = lens
+
+    headers = {"Authorization": f"Bearer {settings.kagi_api_key.get_secret_value()}"}
     data = await request(
-        "POST", KAGI_FASTGPT_URL,
-        json={"query": query}, headers=headers, timeout=settings.web_fetch_timeout_s,
+        "POST", KAGI_SEARCH_URL,
+        json=body, headers=headers, timeout=settings.web_fetch_timeout_s,
     )
-    d = data.get("data") or {}
-    output = (d.get("output") or "").strip()
-    refs = d.get("references") or []
-    if not output and not refs:
+    # Error payloads carry an empty `data` list; success uses a keyed object.
+    collections = data.get("data")
+    if not isinstance(collections, dict):
         return f"No results for {query!r}."
-    parts = [output] if output else []
-    if refs:
-        cites = "\n".join(
-            f"[{i + 1}] {r.get('title', '')}\n{r.get('url', '')}"
-            for i, r in enumerate(refs)
-        )
-        parts.append(f"Sources:\n{cites}")
-    return "\n\n".join(parts)
+
+    primary = _KAGI_WORKFLOW_PRIMARY[workflow]
+    header = [
+        block for name in _KAGI_HEADER
+        if (block := _kagi_collection_block(name, collections.get(name), aux_count))
+    ]
+    primary_block = _kagi_collection_block(primary, collections.get(primary), count)
+    footer = [
+        block
+        for name, items in collections.items()
+        if name != primary and name not in _KAGI_HEADER and name not in _KAGI_DROP
+        and (block := _kagi_collection_block(name, items, aux_count))
+    ]
+
+    blocks = [b for b in (*header, primary_block, *footer) if b]
+    if not blocks:
+        return f"No results for {query!r}."
+    return "\n\n".join(blocks)
 
 
 async def web_search(
@@ -210,6 +316,9 @@ async def web_search(
     time_range: str | None = None, language: str | None = None,
     country: str | None = None, search_language: str | None = None,
     freshness: str | None = None, local_city: str | None = None,
+    kind: str | None = None, time_after: str | None = None,
+    time_before: str | None = None, time_relative: str | None = None,
+    region: str | None = None, file_type: str | None = None,
     get_json: JsonGetter | None = None, request_json: ApiRequester | None = None,
 ) -> str:
     backend = _resolve_backend(settings)
@@ -220,7 +329,12 @@ async def web_search(
             local_city=local_city, request_json=request_json,
         )
     if backend == "kagi":
-        return await _kagi_search(query, settings=settings, request_json=request_json)
+        return await _kagi_search(
+            query, settings=settings, count=count, kind=kind,
+            time_after=time_after, time_before=time_before,
+            time_relative=time_relative, region=region, file_type=file_type,
+            request_json=request_json,
+        )
     return await _searxng_search(
         query, settings=settings, count=count, time_range=time_range,
         language=language, get_json=get_json,
@@ -347,11 +461,49 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
         )
     if backend == "kagi":
         return (
-            "Web search via Kagi's FastGPT: returns an AI-generated answer "
-            "with cited sources for your query.",
+            "Web search via Kagi's Search API: returns ranked results (title, "
+            "url, snippet) plus contextual collections — a direct answer or "
+            "weather box up top, related questions / searches and infoboxes "
+            "below.",
             {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["search", "images", "videos", "news", "podcasts"],
+                        "description": "Result workflow (default 'search').",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": (
+                            "Max results in the primary list (1-50, default 5). "
+                            "Contextual collections are capped tighter."
+                        ),
+                        "minimum": 1, "maximum": 50,
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "2-letter country code to localize results, e.g. 'us', 'kr'.",
+                    },
+                    "file_type": {
+                        "type": "string",
+                        "description": "Restrict to a file type, e.g. 'pdf'.",
+                    },
+                    "time_relative": {
+                        "type": "string",
+                        "enum": ["day", "week", "month"],
+                        "description": "Restrict to results from the last day/week/month.",
+                    },
+                    "time_after": {
+                        "type": "string",
+                        "description": "Only results updated/published after this date (YYYY-MM-DD).",
+                    },
+                    "time_before": {
+                        "type": "string",
+                        "description": "Only results updated/published before this date (YYYY-MM-DD).",
+                    },
+                },
                 "required": ["query"],
             },
         )
@@ -395,6 +547,12 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
             search_language=args.get("search_language"),
             freshness=args.get("freshness"),
             local_city=args.get("local_city"),
+            kind=args.get("kind"),
+            time_after=args.get("time_after"),
+            time_before=args.get("time_before"),
+            time_relative=args.get("time_relative"),
+            region=args.get("region"),
+            file_type=args.get("file_type"),
         )
 
     async def _fetch(ctx: TaskContext, args: dict[str, Any]) -> str:
