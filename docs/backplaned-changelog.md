@@ -18,6 +18,22 @@
 
 ---
 
+## 2026-06-03
+
+### Changed — `read_file` tool description (precise + provider-agnostic)
+
+- **What:** reworded the `read_file` tool description in `bp_sdk/file_tools.py`.
+  Dropped the under-the-hood claim that content "is attached on the next turn —
+  you do not receive raw bytes here"; it now reads "Show a stash file's content
+  so you can read it … text, images, and documents are all supported."
+- **Why:** the old wording leaked dispatch internals and was inaccurate for the
+  Anthropic and Gemini adapters, which feed image bytes back **in the tool
+  result** (same turn), not on a following turn. The description is what the LLM
+  reads, so it should describe the effect (you get to see the file), not the
+  transport. Behaviour of the tool itself is unchanged.
+
+---
+
 ## 2026-06-02
 
 ### Added — verify-only password-reset endpoint for channel linking

@@ -43,10 +43,12 @@ COPY --from=css-build /webapp/static/tailwind.css \
      bp_agents/agents/webapp/static/tailwind.css
 # `suite` brings asyncpg/alembic/sqlalchemy/lancedb/markitdown/croniter;
 # `webapp` adds the browser channel's FastAPI/uvicorn/Jinja2 stack (one
-# image serves the whole roster, so the webapp agent ships here too). The
-# SDK + protocol come with the package. No router/provider extras — agents
-# reach the LLM through the router's LlmService.
-RUN pip install ".[suite,webapp]"
+# image serves the whole roster, so the webapp agent ships here too);
+# `kakaotalk` adds aioboto3 for the KakaoTalk channel's OUTBOUND-image R2
+# egress (bp_agents.agents.chatbot.kakao_files). The SDK + protocol come
+# with the package. No router/provider extras — agents reach the LLM
+# through the router's LlmService.
+RUN pip install ".[suite,webapp,kakaotalk]"
 
 # Pre-create the mount points for the named volumes (AGENT_STATE_DIR=/state,
 # SUITE_LANCE_ROOT=/lancedb) OWNED BY the runtime uid. Docker seeds an empty

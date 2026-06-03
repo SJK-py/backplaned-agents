@@ -75,9 +75,9 @@ _SPECS: dict[str, ToolSpec] = {
     ),
     "read_file": _spec(
         "read_file",
-        "Show a stash file to the model. Pass any stash file name "
-        "(`{filename}` or `persist/{filename}`). The file's content "
-        "is attached on the next turn — you do not receive raw bytes here.",
+        "Show a stash file's content so you can read it. Pass any stash file "
+        "name (`{filename}` or `persist/{filename}`); text, images, and "
+        "documents are all supported.",
         {
             "name": {
                 "type": "string",
