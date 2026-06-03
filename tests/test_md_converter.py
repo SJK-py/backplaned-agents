@@ -110,3 +110,45 @@ def test_html_to_text_regex_fallback() -> None:
     assert "## Title" in out
     assert "Hello world" in out
     assert "- one" in out and "- two" in out
+
+
+def test_decode_html_detects_non_utf8_charset() -> None:
+    """The fallback decode must honour the page's charset — a naive UTF-8
+    decode mangles EUC-KR/CP949 Korean pages into replacement chars."""
+    from bp_agents.agents.md_converter.agent import _decode_html
+
+    kr = "안녕하세요 세계"
+    euckr = f'<meta charset="euc-kr"><h1>{kr}</h1>'.encode("euc-kr")
+    assert kr in _decode_html(euckr)  # not '�…' mojibake
+    # UTF-8 still works.
+    assert kr in _decode_html(f"<h1>{kr}</h1>".encode())
+
+
+def test_webpage_fallback_decodes_non_utf8_page(monkeypatch) -> None:
+    """End to end: markitdown fails → the regex fallback still yields correct
+    Korean from an EUC-KR page (previously came out as `�…`)."""
+    import sys
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+
+    def _boom(*a, **k):
+        raise RuntimeError("markitdown unavailable")
+
+    monkeypatch.setattr(mod, "_markitdown_bytes", _boom)
+
+    async def _drive() -> str:
+        kr = "안녕하세요 세계"
+        euckr = (
+            f'<html><head><meta charset="euc-kr"></head>'
+            f"<body><h1>{kr}</h1></body></html>"
+        ).encode("euc-kr")
+
+        async def _fetch(url: str) -> bytes:
+            return euckr
+
+        out = await run_webpage(
+            _Ctx(None), Webpage(url="http://x", truncate=2000), fetch=_fetch
+        )
+        return out.content
+
+    assert "안녕하세요 세계" in asyncio.run(_drive())
