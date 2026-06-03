@@ -32,6 +32,29 @@ _AUTO_CONTENT_LIMIT = 2000  # auto → content if ≤ this many chars, else file
 _CONTENT_HARD_CAP = 100_000  # content mode force-truncates here
 _WEBPAGE_FETCH_CAP = 5 * 1024 * 1024  # 5 MiB
 
+# A browser-like UA + Accept: many sites 403 the default `python-httpx` agent.
+# Headers don't change which host is fetched, so this stays SSRF-safe (we keep
+# redirects OFF — following them would skip the `ensure_fetchable_url` guard).
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _fetch_reason(exc: Exception) -> str:
+    """A short, human-readable reason for a failed webpage fetch."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "the request timed out"
+    if isinstance(exc, httpx.HTTPError):
+        return "a network error"
+    return str(exc) or type(exc).__name__
+
 
 class Convert(BaseModel):
     name: str
@@ -115,7 +138,18 @@ async def run_webpage(
     *,
     fetch: Callable[[str], Awaitable[bytes]] | None = None,
 ) -> AgentOutput:
-    data = await (fetch(payload.url) if fetch else _default_fetch(payload.url))
+    try:
+        data = await (fetch(payload.url) if fetch else _default_fetch(payload.url))
+    except Exception as exc:  # noqa: BLE001 — a fetch failure must not crash the handler
+        logger.warning(
+            "webpage_fetch_failed",
+            extra={
+                "event": "webpage_fetch_failed",
+                "url": payload.url,
+                "error": type(exc).__name__,
+            },
+        )
+        return text_output(f"[Couldn't fetch {payload.url}: {_fetch_reason(exc)}.]")
     try:
         md = await asyncio.to_thread(_markitdown_bytes, data, ".html")
     except Exception:  # noqa: BLE001 — one bad page must not break the fetch
@@ -130,7 +164,9 @@ async def run_webpage(
 
 async def _default_fetch(url: str) -> bytes:
     await ensure_fetchable_url(url)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0), headers=_FETCH_HEADERS
+    ) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
             buf = bytearray()
