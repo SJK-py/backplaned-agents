@@ -31,6 +31,10 @@ MD_CONVERTER_AGENT_ID = "md_converter"
 _AUTO_CONTENT_LIMIT = 2000  # auto → content if ≤ this many chars, else file
 _CONTENT_HARD_CAP = 100_000  # content mode force-truncates here
 _WEBPAGE_FETCH_CAP = 5 * 1024 * 1024  # 5 MiB
+# Interactive-path fetch timeouts (seconds): connect fails fast on a dead host;
+# the overall read is bounded so a slow/forbidden page can't stall a turn.
+_FETCH_CONNECT_TIMEOUT_S = 5.0
+_FETCH_TIMEOUT_S = 15.0
 
 # A browser-like UA + Accept: many sites 403 the default `python-httpx` agent.
 # Headers don't change which host is fetched, so this stays SSRF-safe (we keep
@@ -164,9 +168,11 @@ async def run_webpage(
 
 async def _default_fetch(url: str) -> bytes:
     await ensure_fetchable_url(url)
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0), headers=_FETCH_HEADERS
-    ) as client:
+    # Fail fast: this is the interactive research path, so an unreachable or
+    # slow page shouldn't stall the turn. Short connect, bounded read — much
+    # tighter than the bulk `web_fetch_timeout_s` download path.
+    timeout = httpx.Timeout(_FETCH_TIMEOUT_S, connect=_FETCH_CONNECT_TIMEOUT_S)
+    async with httpx.AsyncClient(timeout=timeout, headers=_FETCH_HEADERS) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
             buf = bytearray()
