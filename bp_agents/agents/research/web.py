@@ -48,6 +48,11 @@ _CONTENT_CAP = 100_000
 # legitimately-slow download still completes).
 _CONNECT_TIMEOUT_S = 5.0
 
+# Per-backend ceiling on the number of results (`_KAGI_MAX_COUNT` lives with the
+# other kagi constants below). Unified at 20 across backends.
+_SEARXNG_MAX_COUNT = 20
+_BRAVE_MAX_COUNT = 20
+
 BRAVE_CONTEXT_URL = "https://api.search.brave.com/res/v1/llm/context"
 KAGI_SEARCH_URL = "https://kagi.com/api/v1/search"
 KAGI_EXTRACT_URL = "https://kagi.com/api/v1/extract"
@@ -156,7 +161,7 @@ async def _searxng_search(
 ) -> str:
     if not settings.searxng_url:
         return "Web search is not configured (no search backend set)."
-    count = min(max(count, 1), 20)
+    count = min(max(count, 1), _SEARXNG_MAX_COUNT)
     get = get_json or _default_get_json
     params: dict[str, Any] = {"q": query, "format": "json"}
     if time_range:
@@ -184,7 +189,7 @@ async def _brave_search(
     request_json: ApiRequester | None,
 ) -> str:
     request = request_json or _default_request_json
-    count = min(max(count, 1), 20)
+    count = min(max(count, 1), _BRAVE_MAX_COUNT)
     params: dict[str, Any] = {"q": query, "count": count}
     if country:
         params["country"] = country
