@@ -665,7 +665,7 @@ class _FakeEgress:
         self.url = url
         self.puts: list[tuple[str, str]] = []
 
-    async def put_image(self, data, *, content_type, key):
+    async def put_file(self, data, *, content_type, key):
         self.puts.append((content_type, key))
         return self.url
 
@@ -688,7 +688,7 @@ def test_r2_egress_configured_gate() -> None:
     assert R2FileEgress.configured(s) is True
 
 
-def test_r2_egress_put_image_awaits_presigned() -> None:
+def test_r2_egress_put_file_awaits_presigned() -> None:
     s = _settings(
         kakao_r2_endpoint_url="https://r2", kakao_r2_bucket="b",
         kakao_r2_access_key_id="k", kakao_r2_secret_access_key="sec",
@@ -714,7 +714,7 @@ def test_r2_egress_put_image_awaits_presigned() -> None:
     egress._client = _S3  # bypass aioboto3/botocore entirely (ctx-mgr factory)
 
     url = asyncio.run(
-        egress.put_image(_PNG, content_type="image/png", key="kakao/s/abc/x.png")
+        egress.put_file(_PNG, content_type="image/png", key="kakao/s/abc/x.png")
     )
     assert url == "https://r2.example/signed"
     assert calls["put"]["Bucket"] == "b" and calls["put"]["ContentType"] == "image/png"
@@ -820,6 +820,38 @@ def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
             assert text == "here is your chart"
             assert imgs == [("https://r2.example/chart.png", "chart.png")]
             assert egress.puts and egress.puts[0][0] == "image/png"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_outbound_nonimage_file_delivered_as_link(suite_db_url: str) -> None:
+    """A produced non-image file rides as a presigned download link in the
+    reply text (Kakao can't inline documents); no image bubble."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            creds = _FakeCreds(file_bytes=b"%PDF-1.4 hello")
+            egress = _FakeEgress("https://r2.example/report.pdf")
+            disp = _FakeDispatcher(reply="여기 보고서예요", files=["report.pdf"])
+            gw = KakaoGateway(
+                dispatcher=disp, pool=pool, client=client, registry=reg,
+                settings=_settings(), credentials=creds, egress=egress, redis=None,
+            )
+            await gw.handle_job(_job(utterance="보고서 만들어줘"))
+
+            _url, text, _qr, imgs = client.posts[-1]
+            assert "여기 보고서예요" in text
+            assert kg._FILE_LINKS_INTRO in text
+            assert "report.pdf" in text
+            assert "https://r2.example/report.pdf" in text
+            assert imgs is None  # a document → link in text, not an image bubble
+            # uploaded under its detected (non-image) content type
+            assert egress.puts and egress.puts[0][0] == "application/pdf"
         finally:
             await pool.close()
 
