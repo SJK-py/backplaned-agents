@@ -310,24 +310,24 @@ def test_check_while_idle_reports_nothing_running() -> None:
 def test_format_progress_lines() -> None:
     """Each progress kind/tool renders the spec'd Korean status line."""
     f = kg._format_progress
-    # call_<agent> peer tool → calling / analysing that agent.
+    # call_<agent> peer tool → calling / analysing "<agent> 에이전트".
     assert f({"kind": "tool_call", "tool": "call_research"}, "orchestrator") == \
-        "research를 호출하여 처리 중이에요."
+        "(research 에이전트를 호출하여 처리 중이에요.)"
     assert f({"kind": "tool_result", "tool": "call_research"}, "orchestrator") == \
-        "research의 결과 보고를 분석 중이에요."
+        "(research 에이전트의 결과 보고를 분석 중이에요.)"
     # Plain tool run by the orchestrator → no agent prefix.
     assert f({"kind": "tool_call", "tool": "web_search"}, "orchestrator") == \
-        "web_search도구를 이용하여 처리 중이에요."
+        "(web_search도구를 이용하여 처리 중이에요.)"
     assert f({"kind": "tool_result", "tool": "web_search"}, "orchestrator") == \
-        "web_search 도구를 사용하고 결과를 분석 중이에요."
-    # Plain tool run by a specialist → bracket-tagged with the agent.
+        "(web_search 도구를 사용하고 결과를 분석 중이에요.)"
+    # Plain tool run by a specialist → "<agent> 에이전트 - " prefix.
     assert f({"kind": "tool_call", "tool": "web_search"}, "research") == \
-        "[research] web_search도구를 이용하여 처리 중이에요."
+        "(research 에이전트 - web_search도구를 이용하여 처리 중이에요.)"
     assert f({"kind": "tool_result", "tool": "web_search"}, "research") == \
-        "[research] web_search 도구를 사용하고 결과를 분석 중이에요."
-    # Non-tool kinds (and no producer) → bare fallback.
-    assert f({"kind": "thinking"}, "orchestrator") == "처리 중이에요."
-    assert f({"kind": "message"}, None) == "처리 중이에요."
+        "(research 에이전트 - web_search 도구를 사용하고 결과를 분석 중이에요.)"
+    # Non-tool kinds (and no producer) → bare fallback, still parenthesised.
+    assert f({"kind": "thinking"}, "orchestrator") == "(처리 중이에요.)"
+    assert f({"kind": "message"}, None) == "(처리 중이에요.)"
 
 
 def test_check_while_pending_appends_last_progress() -> None:
@@ -335,13 +335,13 @@ def test_check_while_pending_appends_last_progress() -> None:
     async def _drive() -> None:
         reg = KakaoTaskRegistry(_redis(), ttl_s=60)
         await _set_pending(reg, "kc1", "usr", "tsk1")
-        await reg.set_progress("kc1", "research를 호출하여 처리 중이에요.")
+        await reg.set_progress("kc1", "(research 에이전트를 호출하여 처리 중이에요.)")
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance="/check"))
         _url, text, _qr, _imgs = client.posts[0]
         assert kg._STILL_WORKING_TEXT in text
-        assert text.endswith("research를 호출하여 처리 중이에요.")
+        assert text.endswith("(research 에이전트를 호출하여 처리 중이에요.)")
 
     asyncio.run(_drive())
 
@@ -602,19 +602,23 @@ def test_turn_progress_recorded_and_shown_on_check(suite_db_url: str) -> None:
             gw = _gateway(pool, client, disp, reg, settings)
 
             await gw.handle_job(_job(utterance="do something slow"))
+            # The 50 s overrun status (the FIRST callback) already carries the
+            # progress recorded during the turn.
+            assert kg._WORKING_TEXT in client.posts[0][1]
+            assert "(research 에이전트를 호출하여 처리 중이에요.)" in client.posts[0][1]
             # Turn overran → parked pending; progress recorded as it ran.
             for _ in range(50):
                 if (await reg.get_turn("kc1") or {}).get("progress"):
                     break
                 await asyncio.sleep(0.02)
             assert (await reg.get_turn("kc1") or {}).get("progress") == \
-                "research를 호출하여 처리 중이에요."
+                "(research 에이전트를 호출하여 처리 중이에요.)"
 
             # [확인] while pending → the status carries the progress line.
             client.posts.clear()
             await gw.handle_job(_job(msg_id="m2", utterance="/check"))
             _url, text, _qr, _imgs = client.posts[0]
-            assert "research를 호출하여 처리 중이에요." in text
+            assert "(research 에이전트를 호출하여 처리 중이에요.)" in text
 
             # Let the background turn finish so loop teardown is clean.
             for _ in range(50):
