@@ -579,5 +579,7 @@ Still worth eyeballing on your skill:
      `kakao_callback_deadline_s` are tuned from these.
   2. The **inbound image field** shape (where `extractImage` reads the URL).
   3. That **`quickReplies` render on a *callback* response** (not just the
-     sync ack) for the `[확인]`/`[중지]` buttons. If they don't, the
-     affordance degrades to instructing the user to type "확인"/"중지".
+     sync ack) for the `[확인]`/`[중지]` buttons (which send the slash commands
+     `/check` / `/stop` — the Korean label is display-only, so typing the bare
+     word isn't mistaken for a poll). If they don't render, the affordance
+     degrades to instructing the user to type "/check"/"/stop".

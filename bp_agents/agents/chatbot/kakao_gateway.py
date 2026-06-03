@@ -9,7 +9,9 @@ callback deadline is parked and delivered on the user's next touch
 
 State machine per inbound job:
 
-  * a `[확인]`/`[중지]` quick-reply  → poll / cancel the parked turn.
+  * the `[확인]`/`[중지]` buttons     → send `/check` / `/stop` (poll / cancel
+    the parked turn); the Korean labels are display-only, so typing the bare
+    words isn't mistaken for a poll.
   * a `/command`                     → the command set (subset in this PR).
   * any message, chat idle           → start a turn, race it against the
     callback deadline: deliver in-time, else post a "still working" status
@@ -65,10 +67,14 @@ PLATFORM = "kakao"
 CHANNEL = "chatbot_kakao"
 CONFIG_AGENT_ID = "config"
 
-# Quick-reply button labels (also the `messageText` they echo back as the
-# next utterance).
+# Quick-reply buttons: a Korean `label` the user sees, paired with the
+# `messageText` it sends — a slash command, NOT the visible word, so a user
+# who simply types "확인"/"중지" starts a normal turn instead of being
+# hijacked into the poll/stop path.
 CHECK_LABEL = "확인"
 STOP_LABEL = "중지"
+_CHECK_CMD = "/check"
+_STOP_CMD = "/stop"
 
 # Safety margin subtracted from the callback's remaining TTL when sizing the
 # delivery budget, so we never start a delivery that would land right as the
@@ -160,6 +166,7 @@ HELP_TEXT = (
     "/register — 접근 요청 (관리자 승인)\n"
     "/link <토큰> — 이 채팅을 기존 계정에 연결\n"
     "/new — 새 대화 시작\n"
+    "/check — 진행 상황 확인 / 완료된 답변 받기\n"
     "/stop — 진행 중인 작업 중지\n"
     "/config — 설정 보기/변경\n"
     "/cron — 예약 작업 관리\n"
@@ -246,9 +253,7 @@ class KakaoGateway:
             utterance = utterance[3:].strip()
 
         try:
-            if utterance in (CHECK_LABEL, STOP_LABEL):
-                await self._handle_poll(chat_id, callback_url, utterance)
-            elif utterance.startswith("/"):
+            if utterance.startswith("/"):
                 await self._handle_command(chat_id, callback_url, utterance, body)
             else:
                 await self._handle_message(chat_id, callback_url, utterance, body)
@@ -263,7 +268,8 @@ class KakaoGateway:
     # -- quick-reply poll / stop ----------------------------------------
 
     def _poll_buttons(self) -> list[tuple[str, str]]:
-        return [(CHECK_LABEL, CHECK_LABEL), (STOP_LABEL, STOP_LABEL)]
+        # (label, messageText): Korean face, slash-command payload.
+        return [(CHECK_LABEL, _CHECK_CMD), (STOP_LABEL, _STOP_CMD)]
 
     @staticmethod
     def _decode_images(images_json: str) -> list[tuple[str, str]]:
@@ -294,13 +300,10 @@ class KakaoGateway:
         )
         return True
 
-    async def _handle_poll(
-        self, chat_id: str, callback_url: str, utterance: str
-    ) -> None:
-        if utterance == STOP_LABEL:
-            await self._stop(chat_id, callback_url)
-            return
-        # [확인] — deliver a ready answer, else report still-working / idle.
+    async def _cmd_check(self, chat_id: str, callback_url: str) -> None:
+        """`/check` (the `[확인]` button): deliver a parked answer if ready,
+        else report still-working (with the latest progress) / idle. A pure
+        poll — never claims or starts a turn."""
         if await self._deliver_ready(chat_id, callback_url):
             return
         turn = await self._registry.get_turn(chat_id)
@@ -648,7 +651,9 @@ class KakaoGateway:
             await self._cmd_link(chat_id, callback_url, arg)
         elif cmd == "/new":
             await self._cmd_new(chat_id, callback_url)
-        elif cmd == "/stop":
+        elif cmd == _CHECK_CMD:
+            await self._cmd_check(chat_id, callback_url)
+        elif cmd == _STOP_CMD:
             await self._stop(chat_id, callback_url)
         elif cmd == "/config":
             await self._cmd_agent(
