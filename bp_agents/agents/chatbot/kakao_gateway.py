@@ -95,33 +95,38 @@ _PROGRESS_FALLBACK_TEXT = "처리 중이에요."
 
 
 def _format_progress(lp: dict, producer: str | None) -> str:
-    """Render a `LoopProgress` (a `tool_call` / `tool_result`) as a one-line
-    Korean status, so a "still working" reply tells the user WHAT the turn is
-    doing. A `call_<agent>` peer tool reads as calling / analysing that agent;
-    any other tool reads as the producing agent using it (the prefix is
-    dropped for the orchestrator — the user's default assistant)."""
+    """Render a `LoopProgress` (a `tool_call` / `tool_result`) as a one-line,
+    parenthesised Korean status, so a "still working" reply tells the user WHAT
+    the turn is doing. A `call_<agent>` peer tool reads as calling / analysing
+    "<agent> 에이전트"; any other tool reads as "<agent> 에이전트 - <tool>…",
+    the agent prefix dropped for the orchestrator (the default assistant)."""
     kind = lp.get("kind")
     tool = lp.get("tool") or ""
     if tool.startswith("call_"):
-        target = tool.removeprefix("call_") or "에이전트"
+        agent = tool.removeprefix("call_") or "에이전트"
         if kind == "tool_call":
-            return f"{target}를 호출하여 처리 중이에요."
-        if kind == "tool_result":
-            return f"{target}의 결과 보고를 분석 중이에요."
+            body = f"{agent} 에이전트를 호출하여 처리 중이에요."
+        elif kind == "tool_result":
+            body = f"{agent} 에이전트의 결과 보고를 분석 중이에요."
+        else:
+            body = _PROGRESS_FALLBACK_TEXT
     else:
-        # Bracket-tag the producing agent (a particle like 가/이 would have to
-        # agree with the agent_id's final sound; the tag sidesteps that).
-        # Dropped for the orchestrator — the user's default assistant.
+        # "<agent> 에이전트 - " names the specialist that ran the tool; dropped
+        # for the orchestrator (the user's default assistant). The dash keeps
+        # the agent clear of the tool without needing a 가/이 particle to agree
+        # with the agent_id's final sound.
         prefix = (
-            f"[{producer}] "
+            f"{producer} 에이전트 - "
             if producer and producer != ORCHESTRATOR_AGENT_ID
             else ""
         )
         if kind == "tool_call":
-            return f"{prefix}{tool}도구를 이용하여 처리 중이에요."
-        if kind == "tool_result":
-            return f"{prefix}{tool} 도구를 사용하고 결과를 분석 중이에요."
-    return _PROGRESS_FALLBACK_TEXT
+            body = f"{prefix}{tool}도구를 이용하여 처리 중이에요."
+        elif kind == "tool_result":
+            body = f"{prefix}{tool} 도구를 사용하고 결과를 분석 중이에요."
+        else:
+            body = _PROGRESS_FALLBACK_TEXT
+    return f"({body})"
 
 
 def _with_progress(base: str, turn: dict | None) -> str:
