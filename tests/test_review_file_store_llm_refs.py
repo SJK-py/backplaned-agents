@@ -47,11 +47,13 @@ class _AcquireCtx:
         return False
 
 
-def _state(*, data: bytes = b"PNGBYTES", inline_cap: int = 5_000_000):  # type: ignore[no-untyped-def]
+def _state(*, data: bytes = b"PNGBYTES", inline_cap: int = 5_000_000, image_max_long_side: int = 0, image_source_cap: int = 20_000_000):  # type: ignore[no-untyped-def]
     return SimpleNamespace(
         settings=SimpleNamespace(
             llm_request_max_file_refs=16,
             llm_attachment_inline_max_bytes=inline_cap,
+            llm_image_max_long_side_px=image_max_long_side,
+            llm_image_rescale_source_max_bytes=image_source_cap,
         ),
         file_store=SimpleNamespace(open=_store_returning(data)),
         # `acquire()` returns a fresh async-ctx each call; the class
@@ -382,6 +384,222 @@ def test_resolver_uses_shared_derive_helper() -> None:
     assert "derive_task_file_scope(conn, task_id, caller_agent_id)" in src
     # Name refs require a task_id.
     assert '"file_ref_requires_task"' in src
+
+
+# ---------------------------------------------------------------------------
+# Image downscaling (llm_image_max_long_side_px)
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(w: int, h: int) -> bytes:
+    pytest.importorskip("PIL")
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (w, h), (123, 50, 200)).save(out, format="PNG")
+    return out.getvalue()
+
+
+def _envelope_image_size(part) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+    import base64
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(base64.b64decode(part["image"]["data"]))) as im:
+        return im.size
+
+
+def test_large_image_downscaled_to_long_side(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An image whose longer side exceeds the cap is shrunk to it, aspect
+    ratio preserved (2000x1000 → 500x250 at cap 500)."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _png_bytes(2000, 1000)
+    fake = _FakeScope(
+        names={("session:sess_1", "chart.png"): "fil_a"},
+        blobs={"fil_a": _blob(size=len(big))},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("chart.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=big, image_max_long_side=500),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    part = msgs[0]["content"][1]
+    assert "image" in part
+    assert _envelope_image_size(part) == (500, 250)
+
+
+def test_small_image_left_untouched(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An image already within the cap is inlined byte-for-byte (no re-encode)."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    small = _png_bytes(300, 200)
+    fake = _FakeScope(
+        names={("session:sess_1", "chart.png"): "fil_a"},
+        blobs={"fil_a": _blob(size=len(small))},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("chart.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=small, image_max_long_side=1568),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert base64.b64decode(part["image"]["data"]) == small
+
+
+def test_disabled_when_cap_is_zero(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _png_bytes(2000, 1000)
+    fake = _FakeScope(
+        names={("session:sess_1", "chart.png"): "fil_a"},
+        blobs={"fil_a": _blob(size=len(big))},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("chart.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=big, image_max_long_side=0),  # disabled
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert base64.b64decode(part["image"]["data"]) == big  # untouched
+
+
+def test_undecodable_image_fed_as_is(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Best-effort: a blob labelled image/* that PIL can't open is inlined
+    unchanged rather than failing the LLM call."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    fake = _FakeScope(
+        names={("session:sess_1", "chart.png"): "fil_a"},
+        blobs={"fil_a": _blob()},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("chart.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=b"NOT-AN-IMAGE", image_max_long_side=500),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert base64.b64decode(part["image"]["data"]) == b"NOT-AN-IMAGE"
+
+
+def _noisy_png_bytes(w: int, h: int) -> bytes:
+    """A random-noise PNG — compresses poorly, so it's genuinely large in
+    bytes (a solid-colour PNG would shrink to nothing and couldn't exercise
+    the byte cap)."""
+    pytest.importorskip("PIL")
+    import io
+    import os
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.frombytes("RGB", (w, h), os.urandom(w * h * 3)).save(out, format="PNG")
+    return out.getvalue()
+
+
+def test_over_cap_image_rescued_by_downscale(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An image OVER the inline cap is loaded under the higher source cap,
+    shrunk, and accepted because the resized result fits the inline cap."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(1200, 800)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("photo.png")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=big, inline_cap=orig // 2, image_max_long_side=64,
+               image_source_cap=orig * 2),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert "image" in part
+    assert max(_envelope_image_size(part)) == 64
+    assert len(base64.b64decode(part["image"]["data"])) <= orig // 2
+
+
+def test_over_cap_image_rejected_when_still_too_big(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An over-cap image whose longer side is already within the pixel limit
+    (so downscaling can't shrink it) is rejected — rescue tried, didn't fit."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(1200, 800)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    with pytest.raises(AttachmentResolutionError) as ei:
+        asyncio.run(resolve_request_file_refs(
+            _state(data=big, inline_cap=orig // 2, image_max_long_side=2000,
+                   image_source_cap=orig * 2),
+            messages=_msg("photo.png"), user_id="u1",
+            caller_agent_id="a", task_id="t1",
+        ))
+    assert ei.value.code == "attachment_too_large"
+
+
+def test_over_cap_image_not_rescued_when_resize_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """With resizing off (0), an over-cap image obeys the inline cap directly —
+    no rescue, rejected before load like before."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    big = _noisy_png_bytes(800, 600)
+    orig = len(big)
+    fake = _FakeScope(
+        names={("session:sess_1", "photo.png"): "fil_a"},
+        blobs={"fil_a": _blob(fn="photo.png", size=orig)},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    with pytest.raises(AttachmentResolutionError) as ei:
+        asyncio.run(resolve_request_file_refs(
+            _state(data=big, inline_cap=orig // 2, image_max_long_side=0,
+                   image_source_cap=orig * 2),
+            messages=_msg("photo.png"), user_id="u1",
+            caller_agent_id="a", task_id="t1",
+        ))
+    assert ei.value.code == "attachment_too_large"
+
+
+def test_document_not_downscaled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Only images are resized — a PDF document envelope is passed through
+    untouched even with the cap set."""
+    from bp_router.llm.attachments import resolve_request_file_refs
+
+    fake = _FakeScope(
+        names={("persist", "r.pdf"): "fil_p"},
+        blobs={"fil_p": _blob(mime="application/pdf", fn="r.pdf")},
+    )
+    _patch(monkeypatch, scope_result=("u1", "sess_1"), fake_scope=fake)
+    msgs = _msg("persist/r.pdf")
+    asyncio.run(resolve_request_file_refs(
+        _state(data=b"%PDF-1.4 ...", image_max_long_side=100),
+        messages=msgs, user_id="u1", caller_agent_id="a", task_id="t1",
+    ))
+    import base64
+
+    part = msgs[0]["content"][1]
+    assert "document" in part
+    assert base64.b64decode(part["document"]["data"]) == b"%PDF-1.4 ..."
 
 
 def test_derive_helper_is_shared_not_duplicated() -> None:

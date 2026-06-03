@@ -123,6 +123,28 @@ class Settings(BaseSettings):
     Bounds the stream/base64 work one request can trigger — keyed
     access does not imply unbounded fan-out."""
 
+    llm_image_max_long_side_px: int = Field(default=1568, ge=0)
+    """Downscale an inlined image so its LONGER side is at most this many
+    pixels BEFORE base64-feeding it to the provider. Multimodal token cost
+    is dimension-based (Anthropic/Gemini), so this is the main lever on the
+    per-image token bill. Aspect ratio is preserved and images are only ever
+    shrunk (never upscaled). `0` disables resizing. The 1568 default matches
+    Anthropic's own internal long-edge downscale, so above it there's
+    effectively no quality loss; lower it to trade detail for fewer tokens.
+    Best-effort: an undecodable image is fed as-is."""
+
+    llm_image_rescale_source_max_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1024
+    )  # 20 MiB
+    """When image downscaling is on (`llm_image_max_long_side_px > 0`), the
+    router will LOAD an image up to this many source bytes — even past
+    `llm_attachment_inline_max_bytes` — so an over-cap image can be RESCUED by
+    shrinking it, then re-checked against the inline cap on the resized result.
+    Bounds the decode memory one request can trigger (a stash blob is already
+    ≤ `max_upload_bytes`; PIL's decompression-bomb guard caps pixels). Should
+    be ≥ the inline cap; ignored when resizing is disabled (images then obey
+    the inline cap directly, like documents)."""
+
     llm_preset_catalog_path: str | None = None
     """Path to a JSONC preset catalogue used to seed an empty `llm_presets`
     table (and as the in-memory fallback). Unset → the catalogue bundled with

@@ -38,6 +38,10 @@ router = [
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "jsonschema>=4.21",
+    # Downscale inlined images before feeding them to the LLM (bp_router.llm.
+    # attachments) — cuts dimension-based multimodal token cost. Weak floor so
+    # it never fights a transitive pin.
+    "pillow>=10.0",
 ]
 
 # LLM provider adapters (one extra per provider SDK; add more as adapters

@@ -20,6 +20,33 @@
 
 ## 2026-06-03
 
+### Added — downscale inlined LLM images (longer-side pixel cap)
+
+- **What:** the router now downscales an image before base64-inlining it into a
+  provider request, so its longer side is at most
+  `ROUTER_LLM_IMAGE_MAX_LONG_SIDE_PX` (new setting,
+  `Settings.llm_image_max_long_side_px`, **default 1568**; `0` disables).
+  Aspect ratio is preserved and images are only ever shrunk, in
+  `bp_router/llm/attachments.py:_downscale_image` — the single choke point all
+  provider adapters consume, so it applies to Anthropic / Gemini / OpenAI
+  alike. Best-effort: an undecodable image is fed as-is. Adds a `pillow`
+  dependency to the `router` extra.
+- **Over-cap rescue:** when resizing is on, an image OVER
+  `llm_attachment_inline_max_bytes` is now loaded up to a new
+  `ROUTER_LLM_IMAGE_RESCALE_SOURCE_MAX_BYTES` bound (default 20 MiB),
+  downscaled, then re-checked against the inline cap on the *resized* result —
+  so a large image that fits once shrunk is fed instead of refused (it's
+  refused only if it's still over-cap after downscaling, or can't be decoded).
+  Documents and resize-disabled images obey the inline cap directly, as before.
+- **Why:** multimodal token cost is dimension-based, so a large image burned a
+  lot of tokens (and ate headroom under `llm_attachment_inline_max_bytes`).
+  1568 px matches Anthropic's own internal long-edge downscale, so the default
+  trims tokens with effectively no quality loss; operators can lower it to
+  trade detail for cost or set `0` to keep full resolution.
+- **Behaviour change:** images with a longer side > 1568 px are now resized by
+  default (previously inlined at full resolution). Set
+  `ROUTER_LLM_IMAGE_MAX_LONG_SIDE_PX=0` to restore the old behaviour.
+
 ### Changed — `read_file` tool description (precise + provider-agnostic)
 
 - **What:** reworded the `read_file` tool description in `bp_sdk/file_tools.py`.
