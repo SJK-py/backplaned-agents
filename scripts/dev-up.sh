@@ -92,10 +92,14 @@ ROUTER_JWT_SECRET=$JWT
 ROUTER_ADMIN_SESSION_SECRET=$SESS
 ROUTER_DEPLOYMENT_ENV=dev
 ROUTER_LOG_LEVEL=INFO
-# Redis is opt-in for dev (single-worker uses the per-process fallback).
-# To enable: docker compose -f docker-compose.dev.yml --profile redis up -d
-# and uncomment the next line.
-# ROUTER_REDIS_URL=redis://localhost:6379/0
+# Redis is opt-in for dev. Without it the router uses a per-process fallback
+# and the suite uses an in-process session lock — fine for single-channel use.
+# Enable it (one container backs both) for cross-process correctness, e.g.
+# driving the SAME session from both the Telegram bot and the webapp:
+#   docker compose -f docker-compose.dev.yml --profile redis up -d
+# then uncomment both:
+# ROUTER_REDIS_URL=redis://localhost:6379/0    # router: JWT revocation + rate-limit
+# SUITE_REDIS_URL=redis://localhost:6379/1     # suite: distributed session lock
 # LLM provider key for the router's seeded presets (the suite's `default`
 # preset resolves env://GEMINI_API_KEY). Set this before booting the router.
 GEMINI_API_KEY=
