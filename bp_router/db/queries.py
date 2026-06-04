@@ -3102,10 +3102,10 @@ async def record_mcp_server_tools_refreshed(
     result = await conn.execute(
         """
         UPDATE mcp_servers
-        SET tools_cache               = $2,
-            last_connected_at         = now(),
-            refresh_requested_at      = NULL,
-            pending_invitation_token  = NULL,
+        SET tools_cache          = $2,
+            last_connected_at    = now(),
+            refresh_requested_at = NULL,
+            pending_invitation_token = NULL,
             pending_invitation_expires_at = NULL
         WHERE server_id = $1
         """,

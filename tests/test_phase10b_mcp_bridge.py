@@ -628,8 +628,11 @@ def test_server_bridge_rejects_unknown_transport(tmp_path) -> None:  # type: ign
         server_id="fs", url="https://x/", transport="grpc",  # invalid
         auth_kind="none", auth_value_ref=None, auth_header_name=None,
         groups=[], expose_to_llm=True, refresh_requested_at=None,
+        pending_invitation_token="inv-tok",  # lets run() get past onboarding gate
     )
-    admin_client = AdminClient("http://router/", "tok")
+    admin_client = AdminClient(
+        "http://router/", refresh_token="tok", state_dir=tmp_path
+    )
     bridge = ServerBridge(
         row,
         admin_client=admin_client,
@@ -641,21 +644,20 @@ def test_server_bridge_rejects_unknown_transport(tmp_path) -> None:  # type: ign
 
 
 def test_server_bridge_invitation_skips_when_credentials_already_persisted() -> None:
-    """Source pin: bridge checks for existing credentials.json
-    before self-issuing an invitation. Avoids burning an
-    invitation when the SDK will resume from disk anyway."""
+    """Source pin: bridge resumes from existing credentials.json instead of
+    consuming the onboarding invitation (the SDK ignores it when auth_token
+    loads)."""
     from bp_mcp_bridge.server_bridge import ServerBridge
 
-    src = inspect.getsource(ServerBridge._issue_invitation_if_needed)
-    assert "creds.exists()" in src
+    src = inspect.getsource(ServerBridge._onboarding_invitation)
+    assert "_creds_path().exists()" in src
     assert 'return ""' in src
 
 
-def test_server_bridge_invitation_token_is_url_safe_32_chars() -> None:
-    """Source pin: token generation uses secrets.token_urlsafe(32)
-    so it conforms to the Phase 1 F10 grammar (≥32 chars, URL-safe
-    alphabet) the router validates against."""
+def test_server_bridge_onboards_from_pending_invitation() -> None:
+    """Source pin: the bridge onboards using the admin-stashed pending
+    invitation token on the row — it no longer self-mints."""
     from bp_mcp_bridge.server_bridge import ServerBridge
 
-    src = inspect.getsource(ServerBridge._issue_invitation_if_needed)
-    assert "secrets.token_urlsafe(32)" in src
+    src = inspect.getsource(ServerBridge._onboarding_invitation)
+    assert "self._row.pending_invitation_token" in src
