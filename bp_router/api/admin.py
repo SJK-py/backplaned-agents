@@ -32,7 +32,9 @@ from bp_router.quota import (
 from bp_router.security.jwt import (
     SessionPrincipal,
     require_admin,
+    require_admin_or_mcp_bridge,
     require_authenticated,
+    require_mcp_bridge,
     require_service,
 )
 from bp_router.security.passwords import hash_password
@@ -3594,10 +3596,36 @@ def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
     )
 
 
+_MCP_INVITATION_TTL_S = 600  # short-lived; the bridge consumes it on next poll.
+
+
+async def _mint_mcp_pending_invitation(
+    conn: Any, server_id: str, *, created_by: str
+) -> None:
+    """Mint a short-TTL `service` invitation for `mcp_<server_id>` and stash it
+    on the row for the bridge to consume on its next poll. Admin-gated callers
+    only — the bridge's own `service_mcp` identity can't mint invitations. Must
+    run inside the caller's transaction (after the row exists)."""
+    token = _secrets.token_urlsafe(32)
+    expires_at = _now() + timedelta(seconds=_MCP_INVITATION_TTL_S)
+    await queries.insert_invitation(
+        conn,
+        token_hash=_hash(token),
+        level="service",
+        expires_at=expires_at,
+        created_by=created_by,
+        idempotency_key=None,
+        provisions_service_user=False,
+    )
+    await queries.set_mcp_pending_invitation(
+        conn, server_id, token=token, expires_at=expires_at
+    )
+
+
 @router.get("/mcp-servers", response_model=list[McpServerView])
 async def list_mcp_servers(
     request: Request,
-    principal: SessionPrincipal = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
 ) -> list[McpServerView]:
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
@@ -3609,7 +3637,7 @@ async def list_mcp_servers(
 async def get_mcp_server(
     server_id: str,
     request: Request,
-    principal: SessionPrincipal = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
 ) -> McpServerView:
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
@@ -3663,6 +3691,11 @@ async def create_mcp_server(
                     "auth_kind": req.auth_kind,
                     "expose_to_llm": req.expose_to_llm,
                 },
+            )
+            # Mint the onboarding invitation now so the bridge can bring up
+            # `mcp_<server_id>` on its next poll (the bridge can't self-mint).
+            await _mint_mcp_pending_invitation(
+                conn, req.server_id, created_by=principal.user_id
             )
     return _mcp_row_to_view(row)
 
@@ -3774,19 +3807,23 @@ async def refresh_mcp_server_tools(
     request: Request,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Signal the bridge to re-fetch `tools/list` from the upstream.
+    """Signal the bridge to re-fetch `tools/list` AND re-arm onboarding.
 
-    Sets `mcp_servers.refresh_requested_at = now()`; the bridge
-    (`bp_mcp_bridge`) picks it up on its next poll, re-fetches tools,
-    re-publishes the catalog, and clears the timestamp. With no bridge
-    running, the signal is set but unconsumed — visible to operators
-    via `last_connected_at` not changing."""
+    Sets `mcp_servers.refresh_requested_at = now()` and re-mints the pending
+    onboarding invitation, so this doubles as "reconnect": a connected bridge
+    just re-fetches tools (the unused invitation expires harmlessly), while a
+    bridge that lost its `mcp_<server>` creds uses the fresh invitation to
+    re-onboard. With no bridge running, both signals sit unconsumed — visible
+    via `last_connected_at` not advancing."""
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
         async with conn.transaction():
             ok = await queries.mark_mcp_server_refresh_requested(conn, server_id)
             if not ok:
                 raise HTTPException(404, "mcp server not found")
+            await _mint_mcp_pending_invitation(
+                conn, server_id, created_by=principal.user_id
+            )
             await queries.append_audit_event(
                 conn, actor_kind="admin", actor_id=principal.user_id,
                 event="mcp_server.refresh_requested",
@@ -3814,7 +3851,7 @@ async def record_mcp_tools_refreshed(
     server_id: str,
     req: McpToolsRefreshedRequest,
     request: Request,
-    principal: SessionPrincipal = Depends(require_admin),
+    principal: SessionPrincipal = Depends(require_mcp_bridge),
 ) -> dict[str, Any]:
     """Bridge callback after a successful upstream tools/list.
 
