@@ -1,4 +1,4 @@
-"""bp_admin.pages.mcp_servers — MCP bridge config UI (Phase 10a).
+"""bp_admin.pages.mcp_servers — MCP bridge config UI.
 
 Mounts under `/admin/mcp-servers`. Wraps:
   - GET    /v1/admin/mcp-servers
@@ -8,9 +8,10 @@ Mounts under `/admin/mcp-servers`. Wraps:
   - DELETE /v1/admin/mcp-servers/{server_id}
   - POST   /v1/admin/mcp-servers/{server_id}/refresh-tools
 
-Phase 10a is config-only — the bridge process (Phase 10b/c) is the
-runtime that turns these rows into live agents. Operators can stage
-config now; the bridge picks it up when it ships.
+This UI manages config only; the `bp_mcp_bridge` process is the
+runtime that turns these rows into live per-tool agents. The bridge
+is not part of the default deployment yet — run it separately
+(`python -m bp_mcp_bridge`) to bring configured servers online.
 """
 
 from __future__ import annotations

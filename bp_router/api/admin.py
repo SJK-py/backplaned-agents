@@ -3398,7 +3398,7 @@ async def delete_llm_preset(
 
 
 # ---------------------------------------------------------------------------
-# Phase 10a: MCP servers — admin-managed bridge configurations
+# MCP servers — admin-managed bridge configurations (consumed by bp_mcp_bridge)
 # ---------------------------------------------------------------------------
 
 
@@ -3622,9 +3622,9 @@ async def create_mcp_server(
     request: Request,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> McpServerView:
-    """Create an MCP server config. Phase 10a ships config only —
-    the bridge process (Phase 10b/c) will pick it up and onboard
-    derived per-tool agents at runtime."""
+    """Create an MCP server config. The `bp_mcp_bridge` process picks
+    it up and onboards the derived per-tool agents at runtime (when the
+    bridge is running — it isn't part of the default deployment yet)."""
     req._check_auth_consistency()
     _check_mcp_url_ssrf(req.url, request)
     state = request.app.state.bp
@@ -3772,10 +3772,10 @@ async def refresh_mcp_server_tools(
     """Signal the bridge to re-fetch `tools/list` from the upstream.
 
     Sets `mcp_servers.refresh_requested_at = now()`; the bridge
-    (Phase 10b/c) picks it up on its next poll, re-fetches tools,
-    re-publishes the catalog, and clears the timestamp. Phase 10a
-    sets the signal but no bridge consumes it yet — visible to
-    operators via `last_connected_at` not changing."""
+    (`bp_mcp_bridge`) picks it up on its next poll, re-fetches tools,
+    re-publishes the catalog, and clears the timestamp. With no bridge
+    running, the signal is set but unconsumed — visible to operators
+    via `last_connected_at` not changing."""
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
         async with conn.transaction():
