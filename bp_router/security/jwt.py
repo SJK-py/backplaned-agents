@@ -502,6 +502,33 @@ async def require_service(
     return principal
 
 
+def _is_mcp_bridge(principal: SessionPrincipal) -> bool:
+    # Exact id + level match — the MCP bridge is a single fixed principal, so
+    # this stands in for a per-endpoint capability without a capability system.
+    from bp_router.principals import MCP_BRIDGE_USER_ID  # noqa: PLC0415
+
+    return principal.level == "service" and principal.user_id == MCP_BRIDGE_USER_ID
+
+
+async def require_mcp_bridge(
+    principal: SessionPrincipal = Depends(_principal_from_request),
+) -> SessionPrincipal:
+    """Only the fixed `service_mcp` bridge principal (bridge-write endpoints)."""
+    if not _is_mcp_bridge(principal):
+        raise HTTPException(status_code=403, detail="mcp bridge service only")
+    return principal
+
+
+async def require_admin_or_mcp_bridge(
+    principal: SessionPrincipal = Depends(_principal_from_request),
+) -> SessionPrincipal:
+    """`admin` (the UI) OR the `service_mcp` bridge — the MCP config reads
+    served to both the admin console and the bridge's poll loop."""
+    if principal.level != "admin" and not _is_mcp_bridge(principal):
+        raise HTTPException(status_code=403, detail="admin or mcp bridge only")
+    return principal
+
+
 def require_tier(max_tier: int) -> Callable[..., Any]:
     """Dependency factory: admit admin, service, and tier0..tierN.
 

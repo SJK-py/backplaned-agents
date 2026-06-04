@@ -1982,6 +1982,37 @@ async def insert_refresh_token(
     )
 
 
+async def arm_refresh_token(
+    conn: asyncpg.Connection,
+    *,
+    token_hash: str,
+    user_id: str,
+    expires_at: datetime,
+) -> None:
+    """Idempotently (re)arm a refresh token to a fixed hash: insert it, or if
+    the hash already exists, reset it to UNUSED with a fresh expiry. Used to
+    seed/recover the MCP bridge's bootstrap token (`service_mcp`) from
+    `ROUTER_MCP_BRIDGE_SECRET` on every startup — re-running never accumulates
+    rows, and clearing `used_at`/`replaced_by` keeps the env secret a valid
+    recovery credential without tripping single-use replay invalidation."""
+    await conn.execute(
+        """
+        INSERT INTO auth_refresh_tokens (token_hash, user_id, issued_at, expires_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (token_hash) DO UPDATE
+          SET user_id = EXCLUDED.user_id,
+              issued_at = EXCLUDED.issued_at,
+              expires_at = EXCLUDED.expires_at,
+              used_at = NULL,
+              replaced_by = NULL
+        """,
+        token_hash,
+        user_id,
+        _now(),
+        expires_at,
+    )
+
+
 async def revoke_refresh_token(
     conn: asyncpg.Connection, token_hash: str
 ) -> bool:

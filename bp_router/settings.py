@@ -246,6 +246,14 @@ class Settings(BaseSettings):
     `bp_router.security.passwords.hash_password` before being
     written to `users.auth_secret_hash`."""
 
+    mcp_bridge_secret: SecretStr | None = None
+    """Shared secret for the MCP bridge's `service_mcp` principal
+    (`ROUTER_MCP_BRIDGE_SECRET`). When set, startup idempotently seeds a fixed
+    `level=service` user `service_mcp` and arms this value as its refresh token
+    (see `app._bootstrap_mcp_bridge_user`); the bridge presents it to
+    `/v1/auth/refresh` for short-lived access tokens, rotating + persisting like
+    any other service principal. Unset = the MCP bridge is not provisioned."""
+
     # ------------------------------------------------------------------
     # Protocol limits / runtime parameters
     # ------------------------------------------------------------------
