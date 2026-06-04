@@ -3,7 +3,7 @@
 # Brings up the full stack from THIS monorepo: edge proxy, router (+ a
 # one-shot `migrate`), Postgres (router + suite DBs), Redis, SeaweedFS (S3),
 # and the AGENT SUITE (chatbot, webapp, sandbox, orchestrator/l1, stores,
-# helpers, searxng) — all defined below and built from this repo's
+# helpers, searxng, mcp_bridge) — all defined below and built from this repo's
 # Dockerfile / Dockerfile.suite. See docs/agent-suite/deployment.md.
 #
 # Secrets: this skeleton reads ${VARS} from a `.env` file for brevity.
@@ -45,6 +45,7 @@ volumes:
   md_converter_state: {}
   config_state: {}
   sandbox_state: {}
+  mcp_bridge_state: {}  # bp_mcp_bridge: service_mcp token + per-server agent creds
 
 # Common config shared by every suite agent. Each service sets
 # SUITE_AGENT + its own AGENT_INVITATION_TOKEN. NOTE: no `build:` here on
@@ -279,6 +280,10 @@ services:
       # First-boot admin seed (idempotent; safe to leave set).
       ROUTER_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local.test}
       ROUTER_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set a strong value}
+      # MCP bridge principal (service_mcp): seeds + re-arms the bridge's
+      # refresh-token credential each boot. SAME value the mcp_bridge service
+      # presents as BP_MCP_BRIDGE_SERVICE_SECRET. Empty → bridge not provisioned.
+      ROUTER_MCP_BRIDGE_SECRET: ${MCP_BRIDGE_SECRET:-}
       # LLM provider-key secrets. Presets themselves live in the
       # llm_presets table (admin-managed via /admin); a preset's
       # api_key_ref (e.g. env://GEMINI_API_KEY) resolves to one of these.
@@ -529,3 +534,32 @@ services:
       # the image regenerates an html-only/POST-only default every boot and
       # the research agent's `GET /search?format=json` gets 403. See the file.
       - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+  mcp_bridge:                      # optional MCP bridge (profile)
+    # Connects admin-configured MCP servers (admin UI → mcp_servers table) and
+    # onboards one backplane agent per server (mcp_<server>, one mode per tool).
+    # Runs the suite image's bp_mcp_bridge entrypoint (the package ships in the
+    # wheel). Gated behind the `mcp` profile so a bare `up` (no MCP_BRIDGE_SECRET)
+    # doesn't start it; prod.sh adds `--profile mcp` when the secret is set.
+    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 30s
+    profiles: ["mcp"]
+    depends_on:
+      router: {condition: service_started}
+      suite-migrate: {condition: service_completed_successfully}
+      bootstrap: {condition: service_completed_successfully}
+    command: ["python", "-m", "bp_mcp_bridge"]
+    environment:
+      BP_MCP_BRIDGE_ROUTER_URL: ws://router:8000/v1/agent
+      BP_MCP_BRIDGE_ROUTER_ADMIN_URL: http://router:8000
+      # The service_mcp refresh token — SAME value the router seeds as
+      # ROUTER_MCP_BRIDGE_SECRET. The bridge rotates + persists it under /state.
+      BP_MCP_BRIDGE_SERVICE_SECRET: ${MCP_BRIDGE_SECRET:?set MCP_BRIDGE_SECRET (prod.sh generates it)}
+      BP_MCP_BRIDGE_STATE_DIR: /state
+    volumes: [mcp_bridge_state:/state]
+    # router-only: the `agents` net carries both the per-server agents' WS
+    # connections and the bridge's admin HTTP calls (same as the channel agents'
+    # control-plane traffic). No db/redis/web access.
+    networks: [agents]

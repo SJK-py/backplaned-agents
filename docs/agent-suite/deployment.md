@@ -158,6 +158,25 @@ server:
   method: GET
 ```
 
+### MCP bridge
+
+The `mcp_bridge` service (suite image, `python -m bp_mcp_bridge`) connects the
+MCP servers configured in the **admin UI** (`/admin/mcp-servers`) and onboards
+one backplane agent per server (`mcp_<server>`, one mode per tool, exposed to
+the LLM as `call_mcp_<server>_<tool>`). It's behind the `mcp` compose profile;
+`prod.sh` generates `MCP_BRIDGE_SECRET` and **auto-adds `--profile mcp`**, so the
+bridge runs by default. With no MCP servers configured it simply idles.
+
+Auth: the bridge authenticates as a fixed `service_mcp` principal — a
+`level=service` user the **router** seeds + re-arms each boot from
+`ROUTER_MCP_BRIDGE_SECRET` (the same value the service presents as
+`BP_MCP_BRIDGE_SERVICE_SECRET`). It holds a refresh token (rotated + persisted to
+its `/state` volume), not an admin token, and **cannot mint invitations**: an
+admin action (create / **Reconnect**) stashes a short-TTL invitation on the
+server's row, which the bridge consumes to onboard. To run it elsewhere, point
+`BP_MCP_BRIDGE_ROUTER_URL` / `_ROUTER_ADMIN_URL` at the router and supply the
+secret. To NOT run it, leave `MCP_BRIDGE_SECRET` empty.
+
 ## Sandbox isolation (v1 caveat)
 
 v1 uses the **shared-container / per-uid** model: the sandbox runs bash
