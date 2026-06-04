@@ -46,8 +46,9 @@ _SYSTEM_BASE = (
 _SYSTEM_TAIL = (
     " ALWAYS end your reply by stating the relevant settings in plain "
     "language: on a read, list the current values; after a change, restate "
-    "the field's new value. Never reply with only an acknowledgement like "
-    '"done".'
+    "the field's new value. State ONLY values that appear in a tool result — "
+    "never guess or recall a value you have not just read. Never reply with "
+    'only an acknowledgement like "done".'
 )
 
 
@@ -111,7 +112,14 @@ async def _build_tools(
             return str(exc)
         async with pool.acquire() as conn:
             await queries.update_user_config(conn, ctx.user_id, **{field: value})
-        return f"Set {field} = {value}."
+            # Read the row back (same conn) and return the full, current config.
+            # Without this the model only sees the one changed field and, when
+            # asked to summarize, fabricates the values of the others.
+            cfg = await queries.get_user_config(conn, ctx.user_id)
+        return (
+            f"Set {field} = {value}.\n\nCurrent settings:\n"
+            f"{_format_config(cfg, preset_choices)}"
+        )
 
     return LocalToolset([
         LocalTool(
