@@ -106,7 +106,7 @@ class SupervisorConfig:
 
     router_url: str          # WebSocket URL for agent connections
     router_admin_url: str    # HTTP base URL for /v1/admin/...
-    admin_token: str         # admin JWT (resolved env://… by operator)
+    service_secret: str      # service_mcp refresh token (env secret), rotated
     state_dir: Path
     poll_interval_s: float = 30.0
     metrics_port: int = 9464
@@ -142,7 +142,7 @@ class SupervisorConfig:
             router_admin_url=e.get(
                 "BP_MCP_BRIDGE_ROUTER_ADMIN_URL", "http://localhost:8000",
             ),
-            admin_token=_require_env(e, "BP_MCP_BRIDGE_ADMIN_TOKEN"),
+            service_secret=_require_env(e, "BP_MCP_BRIDGE_SERVICE_SECRET"),
             state_dir=Path(
                 e.get("BP_MCP_BRIDGE_STATE_DIR", "/var/lib/bp_mcp_bridge")
             ),

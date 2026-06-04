@@ -44,7 +44,11 @@ async def _main() -> None:
     # carries on without observability rather than failing to boot.
     metrics.start_metrics_server(config.metrics_port)
 
-    admin_client = AdminClient(config.router_admin_url, config.admin_token)
+    admin_client = AdminClient(
+        config.router_admin_url,
+        refresh_token=config.service_secret,
+        state_dir=config.state_dir,
+    )
     supervisor = Supervisor(
         admin_client=admin_client,
         router_url=config.router_url,
