@@ -77,9 +77,13 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
 
 # 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
-#    SearXNG, and an S3 store are opt-in profiles (single-worker dev needs none):
+#    SearXNG, and an S3 store are opt-in profiles (none required to run):
 #    docker compose -f docker-compose.dev.yml up -d
 #    # extras: … --profile redis --profile search --profile s3 up -d
+#    Redis: the router falls back to per-process state without it, and the
+#    suite uses an in-process session lock. Enable `--profile redis` + set
+#    ROUTER_REDIS_URL / SUITE_REDIS_URL only for cross-process correctness
+#    (e.g. driving one session from both the Telegram bot and the webapp).
 docker compose -f docker-compose.dev.yml up -d
 
 # 2. Router — generates ./.env (and prints a bootstrap admin password),
