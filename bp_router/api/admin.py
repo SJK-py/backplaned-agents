@@ -3568,6 +3568,10 @@ class McpServerView(BaseModel):
     created_at: datetime
     last_connected_at: datetime | None = None
     created_by: str | None = None
+    # Onboarding handoff for the bridge poll. Exposed in the API (both admin
+    # and service_mcp read this endpoint) but NOT rendered by the admin UI; an
+    # admin can mint invitations anyway, so this is not a privilege leak.
+    pending_invitation_token: str | None = None
 
 
 def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
@@ -3586,6 +3590,7 @@ def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
         created_at=row.created_at,
         last_connected_at=row.last_connected_at,
         created_by=row.created_by,
+        pending_invitation_token=row.pending_invitation_token,
     )
 
 
