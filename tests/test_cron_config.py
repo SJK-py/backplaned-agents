@@ -379,6 +379,46 @@ def test_config_set_persists(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_config_set_returns_grounded_snapshot(suite_db_url: str) -> None:
+    """After a change, set_config returns the full freshly-read config so the
+    model can't fabricate the other (untouched) fields when it summarizes."""
+    seen: dict = {}
+
+    class _CapturingLlm(_ScriptLlm):
+        async def generate(self, messages, **kw):
+            seen["messages"] = list(messages)
+            return await super().generate(messages, **kw)
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.create_user_config(
+                    conn, user_id="usr_a", full_name="Sam", timezone="Asia/Seoul"
+                )
+            llm = _CapturingLlm([
+                LlmResponse(text="", tool_calls=[ToolCall(
+                    id="c", name="set_config",
+                    args={"field": "timezone", "value": "Asia/Tokyo"},
+                )]),
+                LlmResponse(text="Your timezone is now Asia/Tokyo."),
+            ])
+            await run_config(
+                _Ctx(llm), MessagePayload(prompt="set tz tokyo"),
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            # The set_config tool result (fed back on the 2nd turn) must carry
+            # the full read-back: the changed field AND an untouched one.
+            blob = "\n".join(str(m.content) for m in seen["messages"])
+            assert "timezone: Asia/Tokyo" in blob
+            assert "full_name: Sam" in blob
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 def test_config_system_prompt_has_language_directive() -> None:
     """No language → no directive; a language → an explicit 'reply in it'."""
     from bp_agents.agents.config.agent import _system_prompt
