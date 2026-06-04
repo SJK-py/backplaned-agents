@@ -9,9 +9,9 @@ Mounts under `/admin/mcp-servers`. Wraps:
   - POST   /v1/admin/mcp-servers/{server_id}/refresh-tools
 
 This UI manages config only; the `bp_mcp_bridge` process is the
-runtime that turns these rows into live per-tool agents. The bridge
-is not part of the default deployment yet — run it separately
-(`python -m bp_mcp_bridge`) to bring configured servers online.
+runtime that turns each row into one live agent (`mcp_<server>`, one mode
+per tool). The bridge is not part of the default deployment yet — run it
+separately (`python -m bp_mcp_bridge`) to bring configured servers online.
 """
 
 from __future__ import annotations

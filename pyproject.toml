@@ -175,7 +175,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["bp_admin", "bp_agents", "bp_protocol", "bp_router", "bp_sdk"]
+packages = ["bp_admin", "bp_agents", "bp_mcp_bridge", "bp_protocol", "bp_router", "bp_sdk"]
 artifacts = [
     "bp_admin/templates/**", "bp_admin/static/**",
     "bp_agents/agents/webapp/templates/**", "bp_agents/agents/webapp/static/**",

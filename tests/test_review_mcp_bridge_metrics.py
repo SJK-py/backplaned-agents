@@ -363,7 +363,7 @@ def test_supervisor_config_metrics_port_default_and_override() -> None:
     from bp_mcp_bridge.config import SupervisorConfig
 
     base_env = {
-        "BP_MCP_BRIDGE_ADMIN_TOKEN": "t",
+        "BP_MCP_BRIDGE_SERVICE_SECRET": "t",
     }
     cfg = SupervisorConfig.from_env(base_env)
     assert cfg.metrics_port == 9464
@@ -409,11 +409,6 @@ def test_server_bridge_wires_lifecycle_and_reconcile_metrics() -> None:
     # `_reconcile_tools` calls into it after the upstream tools/list.
     apply_src = inspect.getsource(server_bridge.ServerBridge._apply_tools)
     assert "tool_reconcile_changes_total" in apply_src
-
-    inv_src = inspect.getsource(
-        server_bridge.ServerBridge._issue_invitation_if_needed
-    )
-    assert "invitations_issued_total" in inv_src
 
 
 def test_main_starts_metrics_server() -> None:

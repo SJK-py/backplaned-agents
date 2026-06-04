@@ -305,9 +305,9 @@ class LlmPresetRow(_Row):
 
 class McpServerRow(_Row):
     """Admin-managed config for one MCP server bridged into the
-    backplane. PK is `server_id`, not `agent_id` — one row generates
-    N runtime agents (one per MCP tool, named
-    `mcp_<server_id>_<tool>`) when the bridge connects."""
+    backplane. PK is `server_id`, not `agent_id` — one row generates one
+    runtime agent `mcp_<server_id>` (one mode per MCP tool, exposed to the
+    LLM as `call_mcp_<server_id>_<tool>`) when the bridge connects."""
 
     server_id: str
     description: str
@@ -323,3 +323,7 @@ class McpServerRow(_Row):
     created_at: datetime
     last_connected_at: datetime | None = None
     created_by: str | None = None
+    # Transient onboarding handoff: an admin-minted short-TTL invitation the
+    # bridge consumes to onboard `mcp_<server_id>`, cleared once it connects.
+    pending_invitation_token: str | None = None
+    pending_invitation_expires_at: datetime | None = None

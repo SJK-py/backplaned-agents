@@ -1982,6 +1982,37 @@ async def insert_refresh_token(
     )
 
 
+async def arm_refresh_token(
+    conn: asyncpg.Connection,
+    *,
+    token_hash: str,
+    user_id: str,
+    expires_at: datetime,
+) -> None:
+    """Idempotently (re)arm a refresh token to a fixed hash: insert it, or if
+    the hash already exists, reset it to UNUSED with a fresh expiry. Used to
+    seed/recover the MCP bridge's bootstrap token (`service_mcp`) from
+    `ROUTER_MCP_BRIDGE_SECRET` on every startup — re-running never accumulates
+    rows, and clearing `used_at`/`replaced_by` keeps the env secret a valid
+    recovery credential without tripping single-use replay invalidation."""
+    await conn.execute(
+        """
+        INSERT INTO auth_refresh_tokens (token_hash, user_id, issued_at, expires_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (token_hash) DO UPDATE
+          SET user_id = EXCLUDED.user_id,
+              issued_at = EXCLUDED.issued_at,
+              expires_at = EXCLUDED.expires_at,
+              used_at = NULL,
+              replaced_by = NULL
+        """,
+        token_hash,
+        user_id,
+        _now(),
+        expires_at,
+    )
+
+
 async def revoke_refresh_token(
     conn: asyncpg.Connection, token_hash: str
 ) -> bool:
@@ -2912,7 +2943,8 @@ _MCP_SELECT_COLS = (
     "server_id, description, url, transport, auth_kind, "
     "auth_value_ref, auth_header_name, groups, expose_to_llm, "
     "tools_cache, refresh_requested_at, created_at, "
-    "last_connected_at, created_by"
+    "last_connected_at, created_by, "
+    "pending_invitation_token, pending_invitation_expires_at"
 )
 
 
@@ -3072,10 +3104,46 @@ async def record_mcp_server_tools_refreshed(
         UPDATE mcp_servers
         SET tools_cache          = $2,
             last_connected_at    = now(),
-            refresh_requested_at = NULL
+            refresh_requested_at = NULL,
+            pending_invitation_token = NULL,
+            pending_invitation_expires_at = NULL
         WHERE server_id = $1
         """,
         server_id,
         tools_cache,
     )
     return result.endswith(" 1")
+
+
+async def set_mcp_pending_invitation(
+    conn: asyncpg.Connection,
+    server_id: str,
+    *,
+    token: str,
+    expires_at: datetime,
+) -> bool:
+    """Stash a short-TTL onboarding invitation on the server's row for the
+    bridge to consume on its next poll. Returns False when `server_id` is
+    unknown."""
+    result = await conn.execute(
+        """
+        UPDATE mcp_servers
+        SET pending_invitation_token = $2,
+            pending_invitation_expires_at = $3
+        WHERE server_id = $1
+        """,
+        server_id,
+        token,
+        expires_at,
+    )
+    return result.endswith(" 1")
+
+
+async def clear_mcp_pending_invitation(
+    conn: asyncpg.Connection, server_id: str
+) -> None:
+    await conn.execute(
+        "UPDATE mcp_servers SET pending_invitation_token = NULL, "
+        "pending_invitation_expires_at = NULL WHERE server_id = $1",
+        server_id,
+    )

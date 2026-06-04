@@ -251,6 +251,7 @@ def test_run_spawn_failure_does_not_record_tools(tmp_path: Path) -> None:
         server_id="srv1", url="https://x/", transport="streamable_http",
         auth_kind="none", auth_value_ref=None, auth_header_name=None,
         groups=["mcp_bridge"], expose_to_llm=True, refresh_requested_at=None,
+        pending_invitation_token="inv-tok",  # past the onboarding gate
     )
     bridge = sb.ServerBridge(
         row, admin_client=MagicMock(), router_url="ws://r/",
@@ -314,6 +315,7 @@ def test_refresh_loop_rearms_event_on_reconcile_failure(tmp_path: Path) -> None:
         server_id="srv1", url="https://x/", transport="streamable_http",
         auth_kind="none", auth_value_ref=None, auth_header_name=None,
         groups=["mcp_bridge"], expose_to_llm=True, refresh_requested_at=None,
+        pending_invitation_token="inv-tok",  # past the onboarding gate
     )
     bridge = sb.ServerBridge(
         row, admin_client=MagicMock(), router_url="ws://r/",

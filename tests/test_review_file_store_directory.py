@@ -55,13 +55,18 @@ def test_migration_drops_file_names_before_files() -> None:
     assert fn_idx < files_idx
 
 
-def test_still_exactly_one_migration() -> None:
-    """The repo's single-baseline invariant: the directory table is
-    folded INTO `0001`, not added as a `0002` (the consolidated
-    history forbids a chain — see test_migrations_consolidated.py)."""
+def test_file_names_table_only_in_baseline() -> None:
+    """The directory table is folded INTO `0001`, not added as a separate
+    migration. Post-baseline migrations for OTHER features are fine (the
+    single-root invariant lives in test_migrations_consolidated.py); this pins
+    that `file_names` itself isn't re-introduced in a chain."""
     versions = _MIGRATION.parent
-    files = sorted(p.name for p in versions.glob("*.py") if p.name != "__init__.py")
-    assert files == ["0001_initial_schema.py"]
+    creators = sorted(
+        p.name
+        for p in versions.glob("*.py")
+        if p.name != "__init__.py" and "CREATE TABLE file_names" in p.read_text()
+    )
+    assert creators == ["0001_initial_schema.py"]
 
 
 # ---------------------------------------------------------------------------

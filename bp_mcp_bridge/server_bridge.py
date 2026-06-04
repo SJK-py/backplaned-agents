@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,17 +59,6 @@ logger = logging.getLogger(__name__)
 # leak rather than wedge the supervisor.
 _ACLOSE_TIMEOUT_S = 5.0
 
-# TTL for bridge-self-issued service invitations. The bridge
-# consumes the invitation within seconds in the happy path; this
-# TTL is intentionally short so a crash between `issue` and
-# `onboard` leaves only a brief orphan window in the `invitations`
-# table. The reaper sweep cleans expired rows; 5 minutes keeps the
-# admin UI's invitation list uncluttered and prevents an attacker
-# from squatting on a leaked-but-orphaned token for long. If a
-# crashed bridge recovers later it just re-issues a fresh one —
-# same cost as waiting for the expiry.
-_BRIDGE_INVITATION_TTL_S = 300
-
 # Backoff before re-arming the refresh event after a failed
 # `_reconcile_tools`. Prevents a hot spin when the upstream is
 # persistently down (a set event makes `_refresh_event.wait()`
@@ -97,6 +85,10 @@ class ServerBridgeRow:
     groups: list[str]
     expose_to_llm: bool
     refresh_requested_at: str | None  # ISO timestamp or null
+    # Admin-minted short-TTL invitation for first onboard / reconnect. Consumed
+    # by the bridge; NOT part of config_signature (a mint must not restart a
+    # healthy bridge).
+    pending_invitation_token: str | None = None
 
     @classmethod
     def from_admin_dict(cls, row: dict[str, Any]) -> ServerBridgeRow:
@@ -110,6 +102,7 @@ class ServerBridgeRow:
             groups=list(row.get("groups") or []),
             expose_to_llm=bool(row.get("expose_to_llm", True)),
             refresh_requested_at=row.get("refresh_requested_at"),
+            pending_invitation_token=row.get("pending_invitation_token"),
         )
 
     def config_signature(self) -> tuple:
@@ -193,6 +186,19 @@ class ServerBridge:
         """Initialise MCP, list tools, onboard the per-server agent,
         then run forever — watching for refresh signals and
         reconciling the mode set. Returns only on cancellation."""
+        # Don't touch the upstream MCP server until we can actually onboard the
+        # agent. With no persisted creds AND no admin-minted invitation, wait
+        # for an admin to (re)connect this server — the supervisor respawns us
+        # next poll, by which point a reconnect may have stashed a token.
+        if not self._can_onboard():
+            logger.info(
+                "mcp_server_bridge_awaiting_invitation",
+                extra={
+                    "event": "mcp_server_bridge_awaiting_invitation",
+                    "bp.mcp_server_id": self._row.server_id,
+                },
+            )
+            return
         auth_value = resolve_auth_value(self._row.auth_value_ref)
         # SSE clients gain a tools/list_changed callback so server-
         # pushed tool changes trigger the same reconcile path as
@@ -507,7 +513,7 @@ class ServerBridge:
         empty upstream rather than crashing the supervisor.
         """
         assert self._mcp_client is not None
-        invitation = await self._issue_invitation_if_needed()
+        invitation = self._onboarding_invitation()
         self._agent = build_server_agent(
             self._to_bridge_config(),
             self._mcp_client,
@@ -641,41 +647,25 @@ class ServerBridge:
             state_dir=self._state_dir,
         )
 
-    async def _issue_invitation_if_needed(self) -> str:
-        """Bridge self-issues an invitation for the per-server agent
-        on first onboard. Subsequent runs resume from the persisted
-        `credentials.json`, in which case the invitation_token is
-        unused (returned empty here; SDK ignores it when auth_token
-        is loaded).
+    def _creds_path(self) -> Path:
+        return self._state_dir / agent_id_for_server(self._row.server_id) / "credentials.json"
 
-        Orphan minimisation: the bridge issues with a 5-minute TTL
-        rather than the API default of 1 hour. The bridge consumes
-        the invitation within seconds in the happy path; a longer
-        TTL just widens the window in which a crash between issue
-        and onboard leaves an orphan row sitting in the `invitations`
-        table. With 5 minutes, the invitation reaper sweep clears
-        orphans long before they accumulate or cause confusion in
-        the admin UI's invitation list.
+    def _can_onboard(self) -> bool:
+        """True if the agent can connect: it has persisted creds to resume, or
+        an admin-minted invitation to onboard with. When neither holds, the
+        bridge waits (an admin must connect/reconnect the server) rather than
+        connecting to the upstream MCP server for nothing."""
+        return self._creds_path().exists() or bool(self._row.pending_invitation_token)
 
-        If the bridge legitimately needs longer (e.g. a slow
-        cold-start under load), a crashed-and-recovered bridge will
-        simply re-issue a fresh invitation on restart — same cost
-        as the orphan-expiry path."""
-        agent_id = agent_id_for_server(self._row.server_id)
-        creds = self._state_dir / agent_id / "credentials.json"
-        if creds.exists():
+    def _onboarding_invitation(self) -> str:
+        """The invitation token used to onboard the per-server agent.
+
+        The bridge no longer self-mints (that needed the invitation-mint
+        capability, i.e. admin). Instead an admin action (create / reconnect)
+        stashes a short-TTL invitation on the `mcp_servers` row, which arrives
+        here via `ServerBridgeRow.pending_invitation_token`. Subsequent runs
+        resume from the persisted `credentials.json`; the SDK ignores the
+        invitation when `auth_token` is loaded, so "" is returned then."""
+        if self._creds_path().exists():
             return ""
-        token = secrets.token_urlsafe(32)
-        try:
-            await self._admin_client.issue_service_invitation(
-                token,
-                expires_in_s=_BRIDGE_INVITATION_TTL_S,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"failed to self-issue invitation for {agent_id!r}: {exc}"
-            ) from exc
-        metrics.invitations_issued_total.labels(
-            server_id=self._row.server_id,
-        ).inc()
-        return token
+        return self._row.pending_invitation_token or ""

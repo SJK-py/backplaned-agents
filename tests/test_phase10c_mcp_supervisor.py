@@ -149,15 +149,15 @@ def test_admin_client_list_calls_correct_path() -> None:
     assert "/v1/admin/mcp-servers" in src
 
 
-def test_admin_client_issue_invitation_uses_phase1_token_field() -> None:
-    """Source pin: POST body uses the Phase-1 F10 `token` field
-    (caller-supplied invitation token), level=service, short TTL."""
+def test_admin_client_uses_refresh_auth_not_minting() -> None:
+    """The bridge authenticates as service_mcp via service-token refresh and no
+    longer mints invitations (admin actions stash them on the row instead)."""
     from bp_mcp_bridge.admin_client import AdminClient
 
-    src = inspect.getsource(AdminClient.issue_service_invitation)
-    assert '"level": "service"' in src
-    assert '"token": token' in src
-    assert "expires_in_s" in src
+    assert not hasattr(AdminClient, "issue_service_invitation")
+    src = inspect.getsource(AdminClient._refresh)
+    assert "/v1/auth/refresh" in src
+    assert '"refresh_token": token' in src
 
 
 def test_admin_client_record_refreshed_payload_shape() -> None:
@@ -540,17 +540,17 @@ def test_supervisor_config_from_env_minimal(monkeypatch) -> None:  # type: ignor
     from bp_mcp_bridge.config import SupervisorConfig
 
     cfg = SupervisorConfig.from_env({
-        "BP_MCP_BRIDGE_ADMIN_TOKEN": "tok",
+        "BP_MCP_BRIDGE_SERVICE_SECRET": "tok",
     })
-    assert cfg.admin_token == "tok"
+    assert cfg.service_secret == "tok"
     assert cfg.router_url == "ws://localhost:8000/v1/agent"
     assert cfg.poll_interval_s == 30.0
 
 
-def test_supervisor_config_requires_admin_token() -> None:
+def test_supervisor_config_requires_service_secret() -> None:
     from bp_mcp_bridge.config import SupervisorConfig
 
-    with pytest.raises(RuntimeError, match="BP_MCP_BRIDGE_ADMIN_TOKEN"):
+    with pytest.raises(RuntimeError, match="BP_MCP_BRIDGE_SERVICE_SECRET"):
         SupervisorConfig.from_env({})
 
 
@@ -558,7 +558,7 @@ def test_supervisor_config_parses_poll_interval() -> None:
     from bp_mcp_bridge.config import SupervisorConfig
 
     cfg = SupervisorConfig.from_env({
-        "BP_MCP_BRIDGE_ADMIN_TOKEN": "tok",
+        "BP_MCP_BRIDGE_SERVICE_SECRET": "tok",
         "BP_MCP_BRIDGE_POLL_INTERVAL_S": "5",
     })
     assert cfg.poll_interval_s == 5.0
@@ -569,6 +569,6 @@ def test_supervisor_config_rejects_non_numeric_poll_interval() -> None:
 
     with pytest.raises(RuntimeError, match="must be a number"):
         SupervisorConfig.from_env({
-            "BP_MCP_BRIDGE_ADMIN_TOKEN": "tok",
+            "BP_MCP_BRIDGE_SERVICE_SECRET": "tok",
             "BP_MCP_BRIDGE_POLL_INTERVAL_S": "thirty",
         })

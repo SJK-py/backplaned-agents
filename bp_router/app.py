@@ -322,6 +322,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # to leave the env vars set across restarts.
         await _bootstrap_admin_user(state)
 
+        # 5d. MCP bridge service principal. Only fires when
+        # ROUTER_MCP_BRIDGE_SECRET is set. Idempotent + recovery-safe:
+        # seeds the fixed `service_mcp` user and (re)arms the env secret
+        # as its refresh token on every startup.
+        await _bootstrap_mcp_bridge_user(state)
+
         # 6. LLM service.
         #    Load (or seed-on-first-startup) the `llm_presets` table
         #    into the in-memory preset map. Failure here is non-fatal:
@@ -591,6 +597,72 @@ async def _bootstrap_admin_user(state: AppState) -> None:
             "event": "bootstrap_admin_created",
             "email": email,
             "user_id": user.user_id,
+        },
+    )
+
+
+async def _bootstrap_mcp_bridge_user(state: AppState) -> None:
+    """Seed the MCP bridge's fixed `service_mcp` principal from
+    `ROUTER_MCP_BRIDGE_SECRET`.
+
+    Idempotent and recovery-safe: ensures an email-less `level=service` user
+    `service_mcp` exists (mirroring the auto-provisioned `usr_service_*`
+    agents) and (re)arms the env secret as its refresh token on EVERY startup,
+    so the bridge can present it to `/v1/auth/refresh` for short-lived access
+    tokens (rotating + persisting like any other service principal). Re-arming
+    keeps the env secret a valid recovery credential after a wiped bridge
+    volume. Unset secret = bridge not provisioned (returns early)."""
+    import hashlib  # noqa: PLC0415
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from bp_router.db import queries as _q  # noqa: PLC0415
+    from bp_router.principals import MCP_BRIDGE_USER_ID  # noqa: PLC0415
+
+    settings = state.settings  # type: ignore[attr-defined]
+    secret = getattr(settings, "mcp_bridge_secret", None)
+    if secret is None:
+        return  # not configured
+
+    pool = state.db_pool  # type: ignore[attr-defined]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await _q.get_user_by_id(conn, MCP_BRIDGE_USER_ID)
+            if existing is None:
+                await _q.insert_user(
+                    conn,
+                    user_id=MCP_BRIDGE_USER_ID,
+                    email=None,
+                    level="service",
+                    auth_kind="api_key",
+                    auth_secret_hash=None,
+                )
+            elif existing.level != "service" or existing.deleted_at is not None:
+                # A non-service or soft-deleted row under the reserved name is a
+                # conflict we refuse to silently reuse (mirrors onboard.py).
+                logger.warning(
+                    "mcp_bridge_user_conflict",
+                    extra={
+                        "event": "mcp_bridge_user_conflict",
+                        "user_id": MCP_BRIDGE_USER_ID,
+                        "level": existing.level,
+                    },
+                )
+                return
+            token_hash = hashlib.sha256(
+                secret.get_secret_value().encode("utf-8")
+            ).hexdigest()
+            await _q.arm_refresh_token(
+                conn,
+                token_hash=token_hash,
+                user_id=MCP_BRIDGE_USER_ID,
+                expires_at=datetime.now(UTC)
+                + timedelta(seconds=settings.refresh_token_ttl_s),
+            )
+    logger.info(
+        "mcp_bridge_user_bootstrapped",
+        extra={
+            "event": "mcp_bridge_user_bootstrapped",
+            "user_id": MCP_BRIDGE_USER_ID,
         },
     )
 

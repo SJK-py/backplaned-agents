@@ -20,8 +20,10 @@
   </h1>
   <p class="text-sm text-brand-500 mt-1">
     Configuration only — the <code class="text-brand-700">bp_mcp_bridge</code>
-    process reads this row and onboards per-tool agents under
-    <code class="text-brand-700">mcp_{{ form.server_id or '&lt;server_id&gt;' }}_&lt;tool&gt;</code>.
+    process reads this row and onboards one agent
+    (<code class="text-brand-700">mcp_{{ form.server_id or '&lt;server_id&gt;' }}</code>)
+    with one mode per tool, exposed to the LLM as
+    <code class="text-brand-700">call_mcp_{{ form.server_id or '&lt;server_id&gt;' }}_&lt;tool&gt;</code>.
     Tools are auto-derived from the MCP server's
     <code class="text-brand-700">tools/list</code> on connect.
   </p>
@@ -157,7 +159,7 @@
            class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
     <p class="text-xs text-brand-500 mt-1">
-      Derived per-tool agents inherit these groups for ACL targeting
+      The server's agent inherits these groups for ACL targeting
       via <code>&lt;group&gt;/&lt;cap&gt;</code> rules.
     </p>
   </div>

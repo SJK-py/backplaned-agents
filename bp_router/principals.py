@@ -94,3 +94,13 @@ def service_user_id_for_agent(agent_id: str) -> str:
     (mint per-user tokens, submit registrations) without a separately
     admin-provisioned account — see `api/onboard.py`."""
     return f"{SERVICE_USER_ID_PREFIX}{agent_id}"
+
+
+MCP_BRIDGE_USER_ID = "service_mcp"
+"""Fixed `user_id` of the MCP bridge's `level=service` principal. Unlike the
+auto-provisioned `usr_service_*` agents (one per onboarded agent), the bridge is
+a single operator-configured daemon, so its identity is a fixed, well-known id
+seeded from `ROUTER_MCP_BRIDGE_SECRET` (see `app._bootstrap_mcp_bridge_user`).
+Deliberately NOT under `SERVICE_USER_ID_PREFIX` so it never collides with an
+auto-provisioned principal, and so the bridge endpoints can gate on an exact
+id match (`require_mcp_bridge`) rather than a new capability system."""
