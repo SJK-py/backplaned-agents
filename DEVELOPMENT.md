@@ -1,20 +1,57 @@
 # Development setup
 
-Bring the dev stack up from a fresh clone.
+Bring the dev stack up from a fresh clone — the platform router and all 12
+suite agents (incl. the webapp browser channel) from source, with the backing
+services in Docker. Production deployment (everything in Docker via
+`scripts/prod.sh`) is in the [README](./README.md#quickstart-production).
 
-## Quick start
+**Prerequisites:** Python 3.12+, Docker (compose v2), a Telegram bot token
+(from [@BotFather](https://t.me/BotFather)), and an LLM key (e.g. a
+`GEMINI_API_KEY`).
+
+## Quick start — router + full agent suite
 
 ```bash
-# 1. Postgres + Redis + .env + migrations.
+# 0. Install. `llm-gemini` pulls the google-genai SDK the ROUTER needs to call
+#    Gemini (suite agents call the LLM via the router, so they don't need it);
+#    `admin` mounts the /admin web UI (else /admin/login 404s); `webapp` adds
+#    the browser channel's FastAPI/Jinja2 stack.
+uv venv && source .venv/bin/activate
+uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
+
+# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
+#    SearXNG, and an S3 store (SeaweedFS) are opt-in profiles; none are needed
+#    to run. Redis only matters for cross-process correctness (e.g. driving one
+#    session from both the Telegram bot and the webapp) — see the footgun table.
+docker compose -f docker-compose.dev.yml up -d
+#    # extras: … --profile redis --profile search --profile s3 up -d
+
+# 2. Router — dev-up.sh generates ./.env (printing a bootstrap admin password)
+#    and migrates bp_router. Set your LLM key, then boot it (leave running).
 scripts/dev-up.sh
+$EDITOR .env                          # set GEMINI_API_KEY=...
+set -a && . ./.env && set +a
+python -m bp_router                   # serves http://127.0.0.1:8000
 
-# 2. Boot the router (separate shell).
-set -a && . ./.env && set +a && python -m bp_router
+# 3. Suite (second shell, venv active) — migrates bp_suite, mints each agent's
+#    invitation, launches all 12 agents, and applies the suite ACL. run-suite.sh
+#    sets an insecure dev WEBAPP_SESSION_SECRET; the web UI serves on :8002.
+set -a && . ./.env && set +a
+SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
 
-# 3. Smoke-check.
+# 4. Smoke-check the router.
 curl http://127.0.0.1:8000/healthz                  # → {"status":"ok"}
 curl -I http://127.0.0.1:8000/admin/login           # → HTTP/1.1 200 OK
+
+# 5. Message your bot on Telegram and send /register, then approve it at
+#    http://127.0.0.1:8000/admin/login (admin creds printed in step 2). For the
+#    browser channel: send /password to set a web password, then log in at
+#    http://127.0.0.1:8002 with your email + that password.
 ```
+
+For **router-only** work (no agents), stop after step 2 — `scripts/dev-up.sh`
+plus `python -m bp_router` is a complete router. The [manual
+setup](#manual-setup-no-dev-upsh) below installs just `.[router,admin,dev]`.
 
 The bootstrap admin's credentials print on `dev-up.sh`'s stdout
 (also persisted in `.env`). Default email is
