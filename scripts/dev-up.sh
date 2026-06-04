@@ -85,6 +85,7 @@ if [[ ! -f .env ]]; then
     JWT=$(openssl rand -base64 48 | tr -d '\n')
     SESS=$(openssl rand -base64 48 | tr -d '\n')
     ADMIN_PW=$(openssl rand -base64 12 | tr -d '\n=' | head -c 16)
+    MCP_SECRET=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
     cat > .env <<EOF
 ROUTER_DB_URL=postgresql://postgres:bp@127.0.0.1:5432/bp_router
 ROUTER_PUBLIC_URL=http://localhost:8000
@@ -92,6 +93,10 @@ ROUTER_JWT_SECRET=$JWT
 ROUTER_ADMIN_SESSION_SECRET=$SESS
 ROUTER_DEPLOYMENT_ENV=dev
 ROUTER_LOG_LEVEL=INFO
+# MCP bridge (service_mcp). The router seeds + re-arms this as the bridge's
+# refresh-token credential; run-suite.sh launches the bridge with the same
+# value. Comment out to not run the MCP bridge in dev.
+ROUTER_MCP_BRIDGE_SECRET=$MCP_SECRET
 # Redis is opt-in for dev. Without it the router uses a per-process fallback
 # and the suite uses an in-process session lock — fine for single-channel use.
 # Enable it (one container backs both) for cross-process correctness, e.g.

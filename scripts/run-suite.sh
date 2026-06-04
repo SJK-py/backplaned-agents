@@ -63,6 +63,9 @@ fail() { printf '\033[1;31m[run-suite]\033[0m %s\n' "$*" >&2; exit 1; }
 ADMIN_EMAIL=$(grep '^ROUTER_BOOTSTRAP_ADMIN_EMAIL=' .env | cut -d= -f2-)
 ADMIN_PASSWORD=$(grep '^ROUTER_BOOTSTRAP_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 [[ -n "$ADMIN_EMAIL" && -n "$ADMIN_PASSWORD" ]] || fail "bootstrap admin creds not in .env"
+# MCP bridge secret: prefer the exported env (sourced .env), else read it from
+# the file directly — so the bridge launches whether or not .env was sourced.
+MCP_BRIDGE_SECRET="${ROUTER_MCP_BRIDGE_SECRET:-$(grep '^ROUTER_MCP_BRIDGE_SECRET=' .env | cut -d= -f2- || true)}"
 [[ -n "${SUITE_TELEGRAM_BOT_TOKEN:-}" ]] || \
     log "WARNING: SUITE_TELEGRAM_BOT_TOKEN unset — the chatbot will connect but won't poll Telegram"
 
@@ -208,6 +211,25 @@ for entry in "${AGENTS[@]}"; do
 done
 
 log "suite running (${#PIDS[@]} agents)."
+
+# MCP bridge (optional) — connects admin-configured MCP servers and onboards one
+# agent per server. Runs from source like the agents, but authenticates as the
+# fixed `service_mcp` principal via the refresh token the router seeded from
+# ROUTER_MCP_BRIDGE_SECRET (so no per-process invitation). Skipped when that
+# secret is unset (dev-up.sh writes it) or SKIP_MCP_BRIDGE=1.
+if [[ "${SKIP_MCP_BRIDGE:-0}" != "1" && -n "$MCP_BRIDGE_SECRET" ]]; then
+    mcp_state="$BP_SUITE_STATE_ROOT/mcp_bridge"
+    mkdir -p "$mcp_state"
+    log "starting mcp_bridge (state=$mcp_state)"
+    BP_MCP_BRIDGE_ROUTER_URL="$WS_URL" \
+        BP_MCP_BRIDGE_ROUTER_ADMIN_URL="$ROUTER_URL" \
+        BP_MCP_BRIDGE_SERVICE_SECRET="$MCP_BRIDGE_SECRET" \
+        BP_MCP_BRIDGE_STATE_DIR="$mcp_state" \
+        "$PYTHON_BIN" -m bp_mcp_bridge &
+    PIDS+=("$!")
+elif [[ -z "$MCP_BRIDGE_SECRET" ]]; then
+    log "mcp_bridge: skipped (ROUTER_MCP_BRIDGE_SECRET unset in .env — add it to enable)"
+fi
 
 # Apply the suite ACL automatically (idempotent; skip with SKIP_ACL=1). Reuses
 # the same admin creds + router; replaces the old "remember to run load_acl"

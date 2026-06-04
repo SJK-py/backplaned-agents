@@ -36,6 +36,9 @@ python -m bp_router                   # serves http://127.0.0.1:8000
 # 3. Suite (second shell, venv active) — migrates bp_suite, mints each agent's
 #    invitation, launches all 12 agents, and applies the suite ACL. run-suite.sh
 #    sets an insecure dev WEBAPP_SESSION_SECRET; the web UI serves on :8002.
+#    It also starts the MCP bridge (python -m bp_mcp_bridge) when
+#    ROUTER_MCP_BRIDGE_SECRET is in .env (dev-up.sh writes it) — connects MCP
+#    servers you add in /admin/mcp-servers. Skip with SKIP_MCP_BRIDGE=1.
 set -a && . ./.env && set +a
 SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
 
