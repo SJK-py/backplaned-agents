@@ -60,66 +60,36 @@ Agents reach the router over WebSocket and the suite's own Postgres + per-user L
 
 ---
 
-## QuickStart
+## QuickStart (production)
 
-The system runs as a **router** (the Backplaned platform) plus a fleet of **suite agents**. The full reference is [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md); this is the happy path.
+A single launcher — [`scripts/prod.sh`](./scripts/prod.sh) — drives the whole production lifecycle on top of [`docker-compose.prod.yml`](./docker-compose.prod.yml): the router, all 12 suite agents, and the bundled dependencies (Postgres, Redis, SeaweedFS, and optionally SearXNG), behind a Caddy edge proxy. For **local development** (router + agents from source), see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
-**Prerequisites:** Python 3.12+, Docker (compose v2), a Telegram bot token (from [@BotFather](https://t.me/BotFather)), and an LLM key (e.g. a `GEMINI_API_KEY`).
-
-### Develop — router + agents from source, dependencies in Docker
+**Prerequisites:** Docker (compose v2) on the host, a hostname for the edge proxy (a real domain, a LAN name, or a bare IP — `localhost` also works), an LLM provider API key (Anthropic / Gemini / OpenAI), and a Telegram bot token (from [@BotFather](https://t.me/BotFather)).
 
 ```bash
-# 0. Install. `llm-gemini` pulls the google-genai SDK the router needs to
-#    call Gemini (suite agents call the LLM via the router, so they don't
-#    need it); `admin` mounts the /admin web UI (else /admin/login 404s);
-#    `webapp` adds the browser channel's FastAPI/Jinja2 stack.
-uv venv && source .venv/bin/activate
-uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
-
-# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
-#    SearXNG, and an S3 store are opt-in profiles (none required to run):
-#    docker compose -f docker-compose.dev.yml up -d
-#    # extras: … --profile redis --profile search --profile s3 up -d
-#    Redis: the router falls back to per-process state without it, and the
-#    suite uses an in-process session lock. Enable `--profile redis` + set
-#    ROUTER_REDIS_URL / SUITE_REDIS_URL only for cross-process correctness
-#    (e.g. driving one session from both the Telegram bot and the webapp).
-docker compose -f docker-compose.dev.yml up -d
-
-# 2. Router — generates ./.env (and prints a bootstrap admin password),
-#    migrates bp_router. Set your LLM key, then boot it.
-scripts/dev-up.sh
-$EDITOR .env                          # set GEMINI_API_KEY=...
-set -a && . ./.env && set +a
-python -m bp_router                   # serves http://127.0.0.1:8000 — leave running
-
-# 3. Suite — migrates bp_suite, mints each agent's invitation, launches all
-#    12 agents (incl. the webapp browser channel), and applies the suite ACL.
-#    Run in a second shell (venv active). run-suite.sh sets an insecure dev
-#    WEBAPP_SESSION_SECRET for you; the web UI serves on http://127.0.0.1:8002.
-set -a && . ./.env && set +a
-SUITE_TELEGRAM_BOT_TOKEN=<your-token> scripts/run-suite.sh
-
-# 4. Message your bot on Telegram and send /register, then approve it at
-#    http://127.0.0.1:8000/admin/login  (admin creds were printed in step 2).
-#    For the browser channel: send /password to the bot to set a web password,
-#    then log in at http://127.0.0.1:8002 with your email + that password.
-```
-
-### Production — everything in Docker
-
-```bash
-# Production launcher. First asks whether to build deploy/.env.prod (a
-# first deploy, or to change vars — prompts for the few things only you can
-# provide: domain, admin email/password, LLM key, Telegram token, search
-# backend; random-generates the rest). Then runs a compose action:
-# start / restart / stop (start & restart can rebuild images first). The
-# bundled-SearXNG `--profile search` flag is auto-added when configured.
-# Compose brings up schema migrations → a one-shot `bootstrap` (registers
-# invitations + applies the suite ACL once the router is healthy) → every
-# agent, in dependency order.
 scripts/prod.sh
 ```
+
+It runs interactively in two stages.
+
+**1 — Build `deploy/.env.prod`** (first deploy, or to change vars). Prompts for only the values you must provide and **random-generates the rest** (Postgres password, JWT / admin-session / metrics secrets, object-store keys, and one invitation token per agent):
+
+- **Edge host** — `localhost` (local self-signed TLS), a real domain (auto-TLS via Let's Encrypt; must resolve here with 80/443 open), a LAN name (Caddy internal CA), or a bare IP (the webapp moves to a separate HTTPS port). Also asks whether TLS is terminated **upstream** (Cloudflare Tunnel / external LB) so Caddy serves plain HTTP at the origin.
+- **LLM provider + key** — Anthropic, Gemini, OpenAI, or **Custom** (wire your own lite/balanced/pro presets via the admin UI or a `deploy/presets.custom.jsonc` overlay).
+- **Telegram bot token** and **web-search backend** (bundled SearXNG, or hosted Brave / Kagi by key).
+
+Re-run later and answer "no" to reuse the existing file — volume-baked secrets (Postgres password, S3 keys) are carried forward so a rebuild never breaks auth against a surviving volume.
+
+**2 — Run a compose action** against that env file:
+
+| Action | Effect |
+|---|---|
+| **start** | `up -d` (optionally `--build` to rebuild images from source first) |
+| **restart** | `up -d --force-recreate` (optionally `--build`) |
+| **stop** | `down` — keeps data volumes |
+| **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Redis, SeaweedFS, LanceDB, agent creds) for a clean slate |
+
+Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember.
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
@@ -127,6 +97,7 @@ Then message the bot on Telegram, send `/register`, and approve it as admin. The
 
 ## Learn more
 
+- [`DEVELOPMENT.md`](./DEVELOPMENT.md) — local development: run the router + full agent suite from source, smoke tests, the agent test-drive, and dev-mode footguns.
 - [`.env.example`](./.env.example) — every configurable environment variable (router / agent SDK / suite), grouped with defaults.
 - [`docs/agent-suite/overview.md`](./docs/agent-suite/overview.md) — the suite's architecture and design.
 - [`docs/agent-suite/`](./docs/agent-suite/) — per-area design docs: [agents](./docs/agent-suite/agents.md), [delegation](./docs/agent-suite/delegation.md), [sessions](./docs/agent-suite/sessions.md), [memory](./docs/agent-suite/memory.md), [data model](./docs/agent-suite/data-model.md), [cron](./docs/agent-suite/cron.md), [channel](./docs/agent-suite/channel.md), [ACL](./docs/agent-suite/acl.md).
