@@ -6,7 +6,7 @@
 #   --profile redis   Redis (else the router uses its per-process fallback
 #                     for JWT revocation + rate-limit quotas — fine single-worker)
 #   --profile search  SearXNG for the research agent's web search
-#   --profile s3      rustfs (S3) to exercise the non-local file store
+#   --profile s3      SeaweedFS (S3) to exercise the non-local file store
 # The router and the suite agents run from source on the host
 # (scripts/dev-up.sh boots the router; scripts/run-suite.sh boots the
 # agents) — this file is only the backing services.
@@ -80,20 +80,32 @@ services:
   # router's `local` file store (no extra service). Enable with
   # `--profile s3` to exercise the S3 backend, then point the router at it:
   #   ROUTER_FILE_STORE=s3
-  #   ROUTER_FILE_STORE_OPTIONS={"bucket":"bp-files","endpoint_url":"http://localhost:9000","region_name":"us-east-1","access_key_id":"devkey","secret_access_key":"devsecret"}
-  rustfs:
-    image: rustfs/rustfs:latest
-    container_name: bp-rustfs
+  #   ROUTER_FILE_STORE_OPTIONS={"bucket":"bp-files","endpoint_url":"http://localhost:8333","region_name":"us-east-1","access_key_id":"devkey","secret_access_key":"devsecret"}
+  # SeaweedFS — the same engine prod ships. (rustfs's beta multipart was
+  # unstable: create_multipart_upload succeeded but the immediate upload_part
+  # 403'd NoSuchUpload, so any upload bigger than one PUT failed.) `weed server
+  # -s3` runs the whole stack in one process; the S3 API listens on :8333.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.29
+    container_name: bp-seaweedfs
     profiles: ["s3"]
     restart: unless-stopped
-    environment:
-      RUSTFS_ACCESS_KEY: devkey
-      RUSTFS_SECRET_KEY: devsecret
+    # Dev creds (devkey/devsecret) match the ROUTER_FILE_STORE_OPTIONS above.
+    # SeaweedFS reads S3 identities from a JSON file, rendered here at boot.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/seaweedfs
+        cat > /etc/seaweedfs/s3.json <<'JSON'
+        {"identities":[{"name":"router","credentials":[{"accessKey":"devkey","secretKey":"devsecret"}],"actions":["Admin"]}]}
+        JSON
+        exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json
     ports:
-      - "9000:9000"
+      - "8333:8333"
     volumes:
-      - bp_rustfs_data:/data
+      - bp_seaweedfs_data:/data
 
 volumes:
   bp_pg_data:
-  bp_rustfs_data:
+  bp_seaweedfs_data:

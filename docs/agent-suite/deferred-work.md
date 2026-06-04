@@ -64,9 +64,10 @@
   purely additive.
   *Why:* **v2 / bounded-scope** — these rows are *never reloaded* (the loop
   holds the tool sequence in memory), so v1 correctness is unaffected; they
-  exist only for the webapp's activity render + audit trail, which lands
-  with the webapp (v1 is Telegram-only and uses verbose `ProgressFrame`s
-  for live activity).
+  exist only for a persistent activity render + audit trail. The live
+  channels (Telegram, KakaoTalk, webapp) all drive their step-by-step
+  activity from verbose `ProgressFrame`s — the webapp's live-progress chat
+  included — so these hidden rows stay purely additive.
 
 ## Memory
 
@@ -139,14 +140,6 @@
   channel (webapp). Still single-instance without further work: the
   chatbot's Telegram poll offset (one poller) and the per-worker in-memory
   caches. The cron scheduler is one loop per chatbot process.
-
-## Known unrelated platform test
-
-- `tests/test_docs_cleanup.py::test_acl_doc_pseudocode_includes_admin_service_branch`
-  fails in this environment (a **pre-existing** platform doc test —
-  `FileNotFoundError`, fails independently of the suite changes, confirmed
-  by stashing the suite work). Not a suite caveat; noted only so it isn't
-  mistaken for a regression.
 
 ## Resolved
 

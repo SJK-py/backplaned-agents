@@ -3,7 +3,7 @@
 # scripts/dev-up.sh — bring up the dev stack from a fresh clone.
 #
 # Steps:
-#   1. Start Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs opt-in).
+#   1. Start Postgres via docker-compose.dev.yml (Redis/SearXNG/SeaweedFS opt-in).
 #   2. Wait for Postgres healthcheck.
 #   3. Generate ./.env from .env.example with fresh secrets if it
 #      doesn't exist yet (idempotent — won't overwrite an existing one).
@@ -54,7 +54,7 @@ if [[ "${BP_SKIP_COMPOSE:-0}" != "1" ]]; then
         warn "docker not found; set BP_SKIP_COMPOSE=1 to use a host-managed Postgres+Redis"
         exit 1
     fi
-    log "starting Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs are opt-in profiles)"
+    log "starting Postgres via docker-compose.dev.yml (Redis/SearXNG/SeaweedFS are opt-in profiles)"
     docker compose -f docker-compose.dev.yml up -d
 else
     log "BP_SKIP_COMPOSE=1 — assuming Postgres+Redis are already running"
@@ -92,10 +92,14 @@ ROUTER_JWT_SECRET=$JWT
 ROUTER_ADMIN_SESSION_SECRET=$SESS
 ROUTER_DEPLOYMENT_ENV=dev
 ROUTER_LOG_LEVEL=INFO
-# Redis is opt-in for dev (single-worker uses the per-process fallback).
-# To enable: docker compose -f docker-compose.dev.yml --profile redis up -d
-# and uncomment the next line.
-# ROUTER_REDIS_URL=redis://localhost:6379/0
+# Redis is opt-in for dev. Without it the router uses a per-process fallback
+# and the suite uses an in-process session lock — fine for single-channel use.
+# Enable it (one container backs both) for cross-process correctness, e.g.
+# driving the SAME session from both the Telegram bot and the webapp:
+#   docker compose -f docker-compose.dev.yml --profile redis up -d
+# then uncomment both:
+# ROUTER_REDIS_URL=redis://localhost:6379/0    # router: JWT revocation + rate-limit
+# SUITE_REDIS_URL=redis://localhost:6379/1     # suite: distributed session lock
 # LLM provider key for the router's seeded presets (the suite's `default`
 # preset resolves env://GEMINI_API_KEY). Set this before booting the router.
 GEMINI_API_KEY=
