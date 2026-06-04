@@ -3876,7 +3876,7 @@ async def record_mcp_tools_refreshed(
             if not ok:
                 raise HTTPException(404, "mcp server not found")
             await queries.append_audit_event(
-                conn, actor_kind="admin", actor_id=principal.user_id,
+                conn, actor_kind="agent", actor_id=principal.user_id,
                 event="mcp_server.tools_refreshed",
                 target_kind="mcp_server", target_id=server_id,
                 payload={
