@@ -326,6 +326,11 @@ build_env() {
         echo "# --- Webapp (browser channel) secrets ---"
         echo "WEBAPP_SESSION_SECRET=$(gen 48)"
         echo
+        echo "# --- MCP bridge (service_mcp) — prod.sh auto-adds '--profile mcp' ---"
+        echo "# The router seeds this as the bridge's refresh-token credential; the"
+        echo "# mcp_bridge service presents the same value. Unset → bridge not run."
+        echo "MCP_BRIDGE_SECRET=$(keep_or_gen MCP_BRIDGE_SECRET 48)"
+        echo
         echo "# --- First-boot admin (idempotent seed) ---"
         echo "BOOTSTRAP_ADMIN_EMAIL=$ADMIN_EMAIL"
         echo "BOOTSTRAP_ADMIN_PASSWORD=$ADMIN_PW"
@@ -452,6 +457,7 @@ build_env() {
     fi
     [[ -z "$TELEGRAM" ]] && echo "  WARNING: SUITE_TELEGRAM_BOT_TOKEN is empty — the chatbot won't poll Telegram."
     [[ "$SEARXNG_URL" == "$BUNDLED_SEARXNG_URL" ]] && echo "  search: bundled SearXNG (compose 'search' profile)"
+    echo "  mcp bridge: enabled (compose 'mcp' profile) — configure servers in the admin UI"
     return 0  # don't let a false [[ ]] above become build_env's (set -e) exit
 }
 
@@ -529,11 +535,17 @@ if [[ ! -f "$OVERLAY" && -f "$OVERLAY.example" ]]; then
     echo "  seeded $OVERLAY (empty overlay; edit it to override/add presets)."
 fi
 
-# Resolve compose args once (base + auto search profile from the env file).
+# Resolve compose args once (base + auto profiles from the env file).
 CARGS=(-f "$COMPOSE_FILE" --env-file "$OUT")
 if [[ "$(env_searxng_url)" == "$BUNDLED_SEARXNG_URL" ]]; then
     CARGS+=(--profile search)
     echo "  (search profile auto-enabled: SUITE_SEARXNG_URL=$BUNDLED_SEARXNG_URL)"
+fi
+# Run the MCP bridge whenever its secret is configured (prod.sh always generates
+# it). Gated so a bare `docker compose up` without the secret won't start it.
+if [[ -n "$(env_val MCP_BRIDGE_SECRET)" ]]; then
+    CARGS+=(--profile mcp)
+    echo "  (mcp profile auto-enabled: MCP_BRIDGE_SECRET is set)"
 fi
 
 echo
