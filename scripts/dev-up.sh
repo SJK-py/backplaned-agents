@@ -3,7 +3,7 @@
 # scripts/dev-up.sh — bring up the dev stack from a fresh clone.
 #
 # Steps:
-#   1. Start Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs opt-in).
+#   1. Start Postgres via docker-compose.dev.yml (Redis/SearXNG/SeaweedFS opt-in).
 #   2. Wait for Postgres healthcheck.
 #   3. Generate ./.env from .env.example with fresh secrets if it
 #      doesn't exist yet (idempotent — won't overwrite an existing one).
@@ -54,7 +54,7 @@ if [[ "${BP_SKIP_COMPOSE:-0}" != "1" ]]; then
         warn "docker not found; set BP_SKIP_COMPOSE=1 to use a host-managed Postgres+Redis"
         exit 1
     fi
-    log "starting Postgres via docker-compose.dev.yml (Redis/SearXNG/rustfs are opt-in profiles)"
+    log "starting Postgres via docker-compose.dev.yml (Redis/SearXNG/SeaweedFS are opt-in profiles)"
     docker compose -f docker-compose.dev.yml up -d
 else
     log "BP_SKIP_COMPOSE=1 — assuming Postgres+Redis are already running"
