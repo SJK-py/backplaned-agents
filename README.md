@@ -19,7 +19,7 @@ Most agent frameworks make you hand-roll the plumbing: provider SDKs in every ag
 | **Typed task protocol + lifecycle** — a WebSocket frame protocol with admit, dispatch, retry, and an *exactly-one-terminal-result* guarantee. | Write each agent as a small `run_llm_loop` handler. No queues, no result plumbing. |
 | **First-class delegation** — handing off *reassigns the live task* (it keeps its id) and the new agent terminates it. | Let the orchestrator pass a whole conversation to `deep_reasoning` / `research` / `computer_use` and back, with no orchestration glue. |
 | **Provider-agnostic LLM service** — named presets over Gemini / Anthropic / OpenAI / local servers, with fallback chains, retries, token+cost accounting, embeddings, and SSRF-guarded endpoints. | Hold **no provider keys** in any agent. Agents call `ctx.llm` and name a tier (`pro`/`balanced`/`lite`/`embedding`); a user swaps Gemini↔Claude↔GPT from chat — no redeploy. |
-| **Router-managed file store** — per-user/per-session scope, content-addressed dedup, name binding, and multimodal `file_ref` resolution into LLM calls (S3/rustfs backend). | Share files between memory, the KB, and the sandbox **by name**, feed images/PDFs straight into the model, and never touch object-store credentials. |
+| **Router-managed file store** — per-user/per-session scope, content-addressed dedup, name binding, and multimodal `file_ref` resolution into LLM calls (S3-compatible backend — SeaweedFS in the bundled deploy). | Share files between memory, the KB, and the sandbox **by name**, feed images/PDFs straight into the model, and never touch object-store credentials. |
 | **Deny-by-default ACL firewall** — declarative `caller → callee` rules with tier gating. | Keep the untrusted sandbox reachable *only* via `computer_use`, recall reachable by assistants, etc. — policy, not code. |
 | **Multi-tenant identity** — agent JWTs, service principals, per-user tokens, and an invitation/onboarding flow. The end user's `user_id` is derived from the task, **never asserted by an agent**. | Be multi-user from the first message. Files, memory, sessions, and knowledge are siloed per user with *zero* per-agent enforcement code. |
 | **Live progress + observability** — `ProgressFrame` fan-out, tracing, metrics, structured logs, Redis-backed revocation/quota. | Stream step-by-step activity to the user in verbose mode (`Thinking… / [Tool] / [Result]`) for free. |
@@ -77,7 +77,7 @@ uv venv && source .venv/bin/activate
 uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
 
 # 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
-#    SearXNG, and rustfs(S3) are opt-in profiles (single-worker dev needs none):
+#    SearXNG, and an S3 store are opt-in profiles (single-worker dev needs none):
 #    docker compose -f docker-compose.dev.yml up -d
 #    # extras: … --profile redis --profile search --profile s3 up -d
 docker compose -f docker-compose.dev.yml up -d
