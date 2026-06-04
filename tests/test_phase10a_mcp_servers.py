@@ -521,7 +521,7 @@ def test_list_template_delete_uses_confirm() -> None:
     misclicks don't tear down all derived agents."""
     body = _list_html()
     assert "onsubmit=\"return confirm" in body
-    assert "tear down all derived per-tool agents" in body
+    assert "tear down its agent" in body
 
 
 def test_form_template_auth_fields_show_only_when_kind_not_none() -> None:

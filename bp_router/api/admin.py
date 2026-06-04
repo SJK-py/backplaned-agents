@@ -3655,9 +3655,10 @@ async def create_mcp_server(
     request: Request,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> McpServerView:
-    """Create an MCP server config. The `bp_mcp_bridge` process picks
-    it up and onboards the derived per-tool agents at runtime (when the
-    bridge is running — it isn't part of the default deployment yet)."""
+    """Create an MCP server config. The `bp_mcp_bridge` process picks it up and
+    onboards one agent (`mcp_<server_id>`, one mode per tool) at runtime, using
+    the short-TTL invitation stashed on the row here (the bridge can't
+    self-mint). Runs when the bridge is deployed."""
     req._check_auth_consistency()
     _check_mcp_url_ssrf(req.url, request)
     state = request.app.state.bp
