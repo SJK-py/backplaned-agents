@@ -538,7 +538,6 @@ class Agent:
         except TimeoutError as exc:
             raise AckTimeout(
                 "router did not ack AgentInfoUpdate within timeout",
-                task_id=None,
             ) from exc
         if not isinstance(ack, AckFrame) or not ack.accepted:
             reason = ack.reason if isinstance(ack, AckFrame) else "unknown"
