@@ -37,7 +37,7 @@
 
 <form method="post"
       action="{% if mode == 'new' %}/admin/mcp-servers/new{% else %}/admin/mcp-servers/{{ form.server_id }}/edit{% endif %}"
-      x-data="{ authKind: {{ form.auth_kind | tojson | forceescape }} }"
+      x-data="{ authKind: {{ form.auth_kind | tojson | forceescape }}, transport: {{ form.transport | tojson | forceescape }} }"
       class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
   {% include "_partials/csrf.html" %}
 
@@ -69,11 +69,11 @@
                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
   </div>
 
-  <div>
+  <div x-show="transport !== 'stdio'" x-cloak>
     <label for="url" class="block text-xs font-medium text-brand-700 mb-1">
       URL <span class="text-red-700">*</span>
     </label>
-    <input id="url" name="url" type="url" required
+    <input id="url" name="url" type="url" x-bind:required="transport !== 'stdio'"
            pattern="https?://.+"
            value="{{ form.url }}"
            placeholder="https://mcp.example.com/sse"
@@ -89,7 +89,7 @@
       <label for="transport" class="block text-xs font-medium text-brand-700 mb-1">
         Transport
       </label>
-      <select id="transport" name="transport"
+      <select id="transport" name="transport" x-model="transport"
               class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
                      focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
         {% for opt in transport_options %}
@@ -98,7 +98,7 @@
       </select>
     </div>
 
-    <div>
+    <div x-show="transport !== 'stdio'" x-cloak>
       <label for="auth_kind" class="block text-xs font-medium text-brand-700 mb-1">
         Auth kind
       </label>
@@ -112,7 +112,47 @@
     </div>
   </div>
 
-  <div x-show="authKind !== 'none'" x-cloak class="space-y-4">
+  <div x-show="transport === 'stdio'" x-cloak class="space-y-4 border-t border-brand-500/10 pt-3">
+    <div>
+      <label for="command" class="block text-xs font-medium text-brand-700 mb-1">
+        Command <span class="text-red-700">*</span>
+      </label>
+      <input id="command" name="command" type="text"
+             value="{{ form.command }}"
+             placeholder="uvx"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+      <p class="text-xs text-brand-500 mt-1">
+        Launcher executable. Must be allowlisted (default <code>uvx</code>). The
+        bridge runs it as a sandboxed subprocess (dropped uid, no-new-privs).
+      </p>
+    </div>
+    <div>
+      <label for="args" class="block text-xs font-medium text-brand-700 mb-1">
+        Args (one per line)
+      </label>
+      <textarea id="args" name="args" rows="2"
+                placeholder="minimax-mcp&#10;-t&#10;stdio"
+                class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                       focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">{{ form.args }}</textarea>
+    </div>
+    <div>
+      <label for="env_refs" class="block text-xs font-medium text-brand-700 mb-1">
+        Env refs (one <code>NAME=ref</code> per line)
+      </label>
+      <textarea id="env_refs" name="env_refs" rows="3"
+                placeholder="MINIMAX_API_KEY=env://MINIMAX_API_KEY&#10;MINIMAX_API_HOST=env://MINIMAX_API_HOST"
+                class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                       focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">{{ form.env_refs }}</textarea>
+      <p class="text-xs text-brand-500 mt-1">
+        The subprocess's scoped env. Values must be <code>env://VAR</code> /
+        <code>secret://…</code> (resolved from the bridge's env) — raw secrets
+        are refused. The child sees ONLY these + PATH/HOME/LANG.
+      </p>
+    </div>
+  </div>
+
+  <div x-show="transport !== 'stdio' && authKind !== 'none'" x-cloak class="space-y-4">
     <div>
       <label for="auth_value_ref" class="block text-xs font-medium text-brand-700 mb-1">
         Auth value reference <span class="text-red-700">*</span>
