@@ -580,7 +580,13 @@ services:
     user: "0:0"
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
-    cap_add: ["SETUID", "SETGID", "CHOWN"]
+    # SETUID/SETGID + CHOWN: drop each stdio child to its own uid + own its dir.
+    # KILL: root with cap_drop ALL can't signal a process it doesn't OWN (the
+    # dropped child) without it — so terminate()/kill() on shutdown would EPERM.
+    cap_add: ["SETUID", "SETGID", "CHOWN", "KILL"]
+    # No RLIMIT_AS (Python/uvx need lots of virtual memory); bound real memory
+    # here instead.
+    mem_limit: 1g
     # router-only: the `agents` net carries both the per-server agents' WS
     # connections and the bridge's admin HTTP calls (same as the channel agents'
     # control-plane traffic). stdio servers via `uvx` ALSO need egress to PyPI

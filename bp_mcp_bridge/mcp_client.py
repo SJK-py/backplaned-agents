@@ -803,7 +803,12 @@ class StdioSpawnConfig:
     uid: int | None = None  # drop to this uid (requires the bridge run as root)
     no_new_privs: bool = True
     rlimit_nproc: int = 256
-    rlimit_as_bytes: int = 1024 * 1024 * 1024  # 1 GiB address space
+    # RLIMIT_AS caps VIRTUAL address space, which Python/uvx reserve far more of
+    # than they use (allocator arenas, thread stacks, mmap'd deps) — a low cap
+    # makes the interpreter fail to even start. Default 0 (disabled); bound real
+    # memory with the container's mem_limit / cgroups instead. NPROC still guards
+    # against a fork bomb.
+    rlimit_as_bytes: int = 0
     rlimit_cpu_s: int = 0  # 0 = no CPU cap (MCP servers are long-lived daemons)
 
 
@@ -937,15 +942,19 @@ class StdioMcpClient:
         self._pending.clear()
         proc = self._proc
         if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
+            # Suppress PermissionError too: the bridge runs the child under a
+            # dropped uid, so signalling it needs CAP_KILL — which the container
+            # may lack. Don't let a failed terminate crash aclose; the child is
+            # reaped by the container on shutdown (and the reader saw EOF).
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     proc.kill()
                 with contextlib.suppress(Exception):
-                    await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
         self._proc = None
 
     # ------------------------------------------------------------------
