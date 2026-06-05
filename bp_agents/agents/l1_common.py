@@ -54,9 +54,11 @@ END_DELEGATION_TOOL = "end_delegation"
 END_DELEGATION_SPEC = ToolSpec(
     name=END_DELEGATION_TOOL,
     description=(
-        "Hand the conversation back to the main assistant. Call this when "
-        "the delegated task is complete or the user wants to do something "
-        "else. Provide a short summary of what was accomplished."
+        "Hand the conversation back to the main assistant. Call this when the "
+        "user's request falls outside your remit and the main assistant should "
+        "take over — NOT to report finished work (keep handling the "
+        "conversation while it stays on-topic). Provide a short summary of what "
+        "was done while delegated."
     ),
     parameters={
         "type": "object",
