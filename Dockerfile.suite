@@ -48,7 +48,10 @@ COPY --from=css-build /webapp/static/tailwind.css \
 # egress (bp_agents.agents.chatbot.kakao_files). The SDK + protocol come
 # with the package. No router/provider extras — agents reach the LLM
 # through the router's LlmService.
-RUN pip install ".[suite,webapp,kakaotalk]"
+# `uv` ships the `uvx` launcher the MCP bridge uses to run stdio MCP servers
+# (`uvx some-mcp`). It fetches the server package from PyPI on first run, so the
+# mcp_bridge container needs egress + a writable cache (HOME of the dropped uid).
+RUN pip install ".[suite,webapp,kakaotalk]" uv
 
 # Pre-create the mount points for the named volumes (AGENT_STATE_DIR=/state,
 # SUITE_LANCE_ROOT=/lancedb) OWNED BY the runtime uid. Docker seeds an empty
@@ -69,6 +72,14 @@ RUN mkdir -p /state /lancedb && chown 10002:10002 /state /lancedb
 # bash drops to — they can't even traverse the dir. The sandbox service sets
 # AGENT_STATE_DIR=/sandbox-state and mounts its volume here.
 RUN mkdir -p /sandbox-state && chmod 700 /sandbox-state
+
+# The mcp_bridge ALSO runs as root (it drops each stdio subprocess to a private
+# uid). With cap_drop: ALL it has no CAP_DAC_OVERRIDE, so its state dir must be
+# ROOT-OWNED for the bridge to persist service_token.json + per-server agent
+# creds. 0700 also hides those from the dropped stdio subprocesses (they get
+# their work dir under /tmp instead). The service sets
+# BP_MCP_BRIDGE_STATE_DIR=/mcp-state and mounts its volume here.
+RUN mkdir -p /mcp-state && chmod 700 /mcp-state
 
 USER bp
 

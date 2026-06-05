@@ -557,9 +557,31 @@ services:
       # The service_mcp refresh token — SAME value the router seeds as
       # ROUTER_MCP_BRIDGE_SECRET. The bridge rotates + persists it under /state.
       BP_MCP_BRIDGE_SERVICE_SECRET: ${MCP_BRIDGE_SECRET:?set MCP_BRIDGE_SECRET (prod.sh generates it)}
-      BP_MCP_BRIDGE_STATE_DIR: /state
-    volumes: [mcp_bridge_state:/state]
+      # Root-owned 0700 state dir (the bridge runs as root with no DAC_OVERRIDE;
+      # the 10002-owned /state would EACCES). Hides the service token + agent
+      # creds from the dropped stdio subprocesses.
+      BP_MCP_BRIDGE_STATE_DIR: /mcp-state
+      # stdio MCP servers: each `uvx <server>` subprocess is dropped to a
+      # per-server uid in this range, with a scoped env + no-new-privileges
+      # (mirrors the sandbox agent). Work dirs live under /tmp so the dropped
+      # uid can traverse to its own (chowned) dir; allowed launchers = uvx.
+      BP_MCP_BRIDGE_UID_BASE: "30000"
+      BP_MCP_BRIDGE_UID_MAX: "39999"
+      BP_MCP_BRIDGE_ALLOWED_LAUNCHERS: uvx
+      BP_MCP_BRIDGE_STDIO_WORK_ROOT: /tmp/bp-mcp-stdio
+    volumes: [mcp_bridge_state:/mcp-state]
+    # Runs as ROOT with the capability set reduced to ONLY the uid-drop needs
+    # (SETUID/SETGID to drop each stdio subprocess to its own uid, CHOWN to hand
+    # that uid its work dir) — same model as the sandbox agent. no-new-privileges
+    # blocks a dropped subprocess from regaining privilege via setuid binaries.
+    # The bridge process itself does nothing privileged beyond the drop.
+    user: "0:0"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["SETUID", "SETGID", "CHOWN"]
     # router-only: the `agents` net carries both the per-server agents' WS
     # connections and the bridge's admin HTTP calls (same as the channel agents'
-    # control-plane traffic). No db/redis/web access.
+    # control-plane traffic). stdio servers via `uvx` ALSO need egress to PyPI
+    # to fetch the server package — add an egress path (or pre-bake a uv cache)
+    # if you use stdio servers; SSE/HTTP servers don't need it.
     networks: [agents]
