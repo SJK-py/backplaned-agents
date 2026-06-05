@@ -58,3 +58,49 @@ def suite_acl_rules() -> list[dict[str, Any]]:
 def acl_replace_payload() -> dict[str, Any]:
     """Body for `PUT /v1/admin/acl/rules` (bulk replace)."""
     return {"rules": suite_acl_rules()}
+
+
+def suite_rule_names() -> set[str]:
+    """Names of the rules the suite OWNS. `merge_preserving_custom` refreshes
+    only these and leaves every other (admin-added) rule alone."""
+    return {name for *_rest, name in _RULES}
+
+
+def _rule_payload(r: dict[str, Any]) -> dict[str, Any]:
+    """Project a rule dict (suite payload or a router RuleView) onto the
+    `CreateRuleRequest` shape, dropping server-assigned `rule_id`/`ord`/
+    `created_at` (ord is reassigned by position on merge)."""
+    return {
+        "name": r.get("name"),
+        "description": r.get("description"),
+        "effect": r["effect"],
+        "user_level": r["user_level"],
+        "caller_pattern": r["caller_pattern"],
+        "callee_pattern": r["callee_pattern"],
+    }
+
+
+def merge_preserving_custom(existing: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the `PUT /v1/admin/acl/rules` body that REFRESHES the suite's own
+    rules while PRESERVING every other rule an admin added (e.g. MCP grants).
+
+    `existing` is the current rule list (router `RuleView` dicts). Rules whose
+    `name` is in `suite_rule_names()` are dropped and re-emitted from the
+    canonical suite set; all others are kept verbatim.
+
+    Custom rules are placed FIRST (lower `ord` = higher priority) so an admin's
+    `deny` isn't shadowed by one of the suite's allow-only rules; the suite set
+    follows in its canonical order. Ords are reassigned contiguously by
+    position (they must be unique). An empty `existing` (first boot) yields just
+    the suite set — same result as the old destructive replace."""
+    owned = suite_rule_names()
+    custom = sorted(
+        (r for r in existing if r.get("name") not in owned),
+        key=lambda r: r.get("ord", 0),
+    )
+    merged = [_rule_payload(r) for r in custom]
+    merged.extend(_rule_payload(s) for s in suite_acl_rules())
+    for i, r in enumerate(merged):
+        r["ord"] = i
+    return {"rules": merged}
+

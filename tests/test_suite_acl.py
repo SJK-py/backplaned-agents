@@ -90,3 +90,97 @@ def test_webapp_reaches_kb_and_memory_least_privilege() -> None:
         rules, caller_id="chatbot", caller_groups=["channel", "inbound"],
         caller_capabilities=_CHATBOT_CAPS, **_KB, user_level="tier0",
     ).allow
+
+
+# ---------------------------------------------------------------------------
+# Non-destructive merge — load_acl preserves admin-added rules across reboots
+# (regression: run-suite.sh re-applies the suite ACL on every boot, and a
+# destructive replace wiped custom MCP grants).
+# ---------------------------------------------------------------------------
+
+
+def test_merge_preserves_custom_rules() -> None:
+    from bp_agents.acl import merge_preserving_custom, suite_rule_names
+
+    # Simulate the router's current rules: the full suite set (as RuleView
+    # dicts) + two admin-added MCP grants.
+    existing = [
+        dict(r, rule_id=f"rule_{i}", created_at="t")
+        for i, r in enumerate(suite_acl_rules())
+    ]
+    existing += [
+        {
+            "rule_id": "rule_mcp1", "ord": 99, "name": "channel→mcp_minimax",
+            "description": "let the bot call minimax",
+            "effect": "allow", "user_level": "*",
+            "caller_pattern": "channel/*", "callee_pattern": "@mcp_minimax",
+        },
+        {
+            "rule_id": "rule_mcp2", "ord": 100, "name": "l0→mcp_minimax",
+            "description": None, "effect": "allow", "user_level": "*",
+            "caller_pattern": "l0/*", "callee_pattern": "@mcp_minimax",
+        },
+    ]
+
+    body = merge_preserving_custom(existing)
+    rules = body["rules"]
+    names = [r["name"] for r in rules]
+
+    # Both custom rules survive; the suite set is fully present.
+    assert "channel→mcp_minimax" in names
+    assert "l0→mcp_minimax" in names
+    assert suite_rule_names() <= set(names)
+    # No duplication of the suite rules (the existing copies were dropped +
+    # re-emitted, not stacked).
+    assert len(rules) == len(suite_acl_rules()) + 2
+
+    # Custom rules keep HIGHER priority (lower ord) than the suite allows.
+    custom_ords = [r["ord"] for r in rules if r["name"] in
+                   {"channel→mcp_minimax", "l0→mcp_minimax"}]
+    suite_ords = [r["ord"] for r in rules if r["name"] in suite_rule_names()]
+    assert max(custom_ords) < min(suite_ords)
+    # Ords are unique + dense (the router requires uniqueness).
+    ords = [r["ord"] for r in rules]
+    assert sorted(ords) == list(range(len(ords)))
+
+
+def test_merge_on_empty_equals_suite() -> None:
+    """First boot (no rules yet) — the merge is just the suite set, same as
+    the old destructive replace."""
+    from bp_agents.acl import merge_preserving_custom
+
+    body = merge_preserving_custom([])
+    assert [r["name"] for r in body["rules"]] == [
+        r["name"] for r in suite_acl_rules()
+    ]
+
+
+def test_merge_refreshes_suite_rules_not_stale_copy() -> None:
+    """A suite-owned rule in the DB is replaced by the current suite
+    definition, not preserved as a custom rule."""
+    from bp_agents.acl import merge_preserving_custom, suite_rule_names
+
+    a_suite_name = next(iter(suite_rule_names()))
+    existing = [{
+        "rule_id": "rule_stale", "ord": 0, "name": a_suite_name,
+        "description": "STALE", "effect": "deny", "user_level": "*",
+        "caller_pattern": "*/*", "callee_pattern": "*/*",
+    }]
+    body = merge_preserving_custom(existing)
+    # Exactly one rule with that name, and it carries the suite definition
+    # (effect allow), not the stale deny.
+    matches = [r for r in body["rules"] if r["name"] == a_suite_name]
+    assert len(matches) == 1
+    assert matches[0]["effect"] == "allow"
+
+
+def test_merged_rules_validate_against_router_model() -> None:
+    from bp_agents.acl import merge_preserving_custom
+
+    existing = [{
+        "rule_id": "rule_x", "ord": 5, "name": "custom",
+        "description": None, "effect": "deny", "user_level": "tier2",
+        "caller_pattern": "@evil", "callee_pattern": "l3/*",
+    }]
+    for r in merge_preserving_custom(existing)["rules"]:
+        CreateRuleRequest(**r)
