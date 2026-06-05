@@ -54,6 +54,7 @@ async def _main() -> None:
         router_url=config.router_url,
         state_dir=config.state_dir,
         poll_interval_s=config.poll_interval_s,
+        stdio_policy=config.stdio_policy,
     )
     try:
         await supervisor.run()

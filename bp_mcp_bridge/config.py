@@ -97,6 +97,42 @@ def _require_env(env: dict[str, str], key: str) -> str:
 
 
 @dataclass(frozen=True)
+class StdioPolicy:
+    """Process-wide hardening policy for stdio MCP subprocesses.
+
+    `uid_base`/`uid_max` define the range a per-server uid is assigned from;
+    0/0 (the default) means NO uid drop — rootless dev, where the bridge runs
+    as its own uid. In prod the bridge runs as root with CAP_SETUID/SETGID/CHOWN
+    + no-new-privileges and a non-trivial range, mirroring the sandbox agent.
+    `allowed_launchers` gates the `command` (re-checked from the router's list).
+    `work_root` parents each server's chowned working dir."""
+
+    uid_base: int = 0
+    uid_max: int = 0
+    allowed_launchers: tuple[str, ...] = ("uvx",)
+    work_root: Path = Path("/tmp/bp-mcp-stdio")  # noqa: S108
+
+    @classmethod
+    def from_env(cls, env: dict[str, str]) -> StdioPolicy:
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(env.get(key, str(default)))
+            except ValueError:
+                return default
+
+        launchers_raw = env.get("BP_MCP_BRIDGE_ALLOWED_LAUNCHERS", "uvx")
+        launchers = tuple(s.strip() for s in launchers_raw.split(",") if s.strip())
+        return cls(
+            uid_base=_int("BP_MCP_BRIDGE_UID_BASE", 0),
+            uid_max=_int("BP_MCP_BRIDGE_UID_MAX", 0),
+            allowed_launchers=launchers or ("uvx",),
+            work_root=Path(
+                env.get("BP_MCP_BRIDGE_STDIO_WORK_ROOT", "/tmp/bp-mcp-stdio")  # noqa: S108
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class SupervisorConfig:
     """Phase 10c top-level config — what one bridge PROCESS needs
     to know to connect to the router and start managing multiple
@@ -109,6 +145,7 @@ class SupervisorConfig:
     router_admin_url: str    # HTTP base URL for /v1/admin/...
     service_secret: str      # service_mcp refresh token (env secret), rotated
     state_dir: Path
+    stdio_policy: StdioPolicy = field(default_factory=StdioPolicy)
     poll_interval_s: float = 30.0
     metrics_port: int = 9464
     """Port for the Prometheus exposition endpoint. The default
@@ -147,6 +184,7 @@ class SupervisorConfig:
             state_dir=Path(
                 e.get("BP_MCP_BRIDGE_STATE_DIR", "/var/lib/bp_mcp_bridge")
             ),
+            stdio_policy=StdioPolicy.from_env(e),
             poll_interval_s=interval,
             metrics_port=metrics_port,
         )
