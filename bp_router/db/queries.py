@@ -2944,7 +2944,8 @@ _MCP_SELECT_COLS = (
     "auth_value_ref, auth_header_name, groups, expose_to_llm, "
     "tools_cache, refresh_requested_at, created_at, "
     "last_connected_at, created_by, "
-    "pending_invitation_token, pending_invitation_expires_at"
+    "pending_invitation_token, pending_invitation_expires_at, "
+    "capabilities, disabled_tools"
 )
 
 
@@ -2978,19 +2979,22 @@ async def insert_mcp_server(
     groups: list[str],
     expose_to_llm: bool,
     created_by: str | None,
+    capabilities: list[str] | None = None,
+    disabled_tools: list[str] | None = None,
 ) -> McpServerRow:
     row = await conn.fetchrow(
         f"""
         INSERT INTO mcp_servers
             (server_id, description, url, transport, auth_kind,
              auth_value_ref, auth_header_name, groups,
-             expose_to_llm, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             expose_to_llm, created_by, capabilities, disabled_tools)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         RETURNING {_MCP_SELECT_COLS}
         """,
         server_id, description, url, transport, auth_kind,
         auth_value_ref, auth_header_name, groups,
         expose_to_llm, created_by,
+        capabilities or [], disabled_tools or [],
     )
     assert row is not None
     return McpServerRow.model_validate(dict(row))
@@ -3008,6 +3012,8 @@ async def update_mcp_server(
     auth_header_name: str | None = None,
     groups: list[str] | None = None,
     expose_to_llm: bool | None = None,
+    capabilities: list[str] | None = None,
+    disabled_tools: list[str] | None = None,
 ) -> McpServerRow | None:
     """PATCH semantics — only non-None fields are written. The
     `auth_kind = 'none'` case requires the caller to ALSO null out
@@ -3041,6 +3047,12 @@ async def update_mcp_server(
     if expose_to_llm is not None:
         args.append(expose_to_llm)
         sets.append(f"expose_to_llm = ${len(args)}")
+    if capabilities is not None:
+        args.append(capabilities)
+        sets.append(f"capabilities = ${len(args)}")
+    if disabled_tools is not None:
+        args.append(disabled_tools)
+        sets.append(f"disabled_tools = ${len(args)}")
     if not sets:
         return await get_mcp_server(conn, server_id)
     row = await conn.fetchrow(

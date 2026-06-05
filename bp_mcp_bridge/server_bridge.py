@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +89,11 @@ class ServerBridgeRow:
     # by the bridge; NOT part of config_signature (a mint must not restart a
     # healthy bridge).
     pending_invitation_token: str | None = None
+    # Operator-set: extra agent capabilities (merged with the auto-derived
+    # set) + tool names the bridge must not expose. Both in config_signature
+    # (a change re-onboards with the new caps / mode set).
+    capabilities: list[str] = field(default_factory=list)
+    disabled_tools: list[str] = field(default_factory=list)
 
     @classmethod
     def from_admin_dict(cls, row: dict[str, Any]) -> ServerBridgeRow:
@@ -103,6 +108,8 @@ class ServerBridgeRow:
             expose_to_llm=bool(row.get("expose_to_llm", True)),
             refresh_requested_at=row.get("refresh_requested_at"),
             pending_invitation_token=row.get("pending_invitation_token"),
+            capabilities=list(row.get("capabilities") or []),
+            disabled_tools=list(row.get("disabled_tools") or []),
         )
 
     def config_signature(self) -> tuple:
@@ -117,6 +124,8 @@ class ServerBridgeRow:
             self.auth_header_name,
             tuple(self.groups),
             self.expose_to_llm,
+            tuple(self.capabilities),
+            tuple(self.disabled_tools),
         )
 
 
@@ -182,6 +191,15 @@ class ServerBridge:
         from any context (no async; just sets an asyncio.Event)."""
         self._refresh_event.set()
 
+    def _enabled_tools(
+        self, tools: list[ToolDefinition]
+    ) -> list[ToolDefinition]:
+        """The tools the bridge exposes as modes — the full list minus the
+        operator's `disabled_tools`. The full list is still reported to the
+        row's tools_cache so the admin UI can toggle every tool."""
+        disabled = set(self._row.disabled_tools)
+        return [t for t in tools if t.name not in disabled]
+
     async def run(self) -> None:
         """Initialise MCP, list tools, onboard the per-server agent,
         then run forever — watching for refresh signals and
@@ -239,7 +257,9 @@ class ServerBridge:
             # a healthy server with N tools and ZERO running agents
             # — every tool call routes to nothing and the admin UI
             # shows no problem.
-            await self._spawn_agent(tools)
+            # Onboard with only the ENABLED tools (modes/caps), but report the
+            # FULL list to the row so the admin UI can toggle every tool.
+            await self._spawn_agent(self._enabled_tools(tools))
             await self._record_tools_refreshed(tools)
             await self._race_refresh_against_agent()
         except asyncio.CancelledError:
@@ -400,7 +420,8 @@ class ServerBridge:
         assert self._mcp_client is not None
         assert self._agent is not None
         new_tools = await self._mcp_client.list_tools()
-        await self._apply_tools(new_tools)
+        # Apply only the enabled tools as modes; report the full list for the UI.
+        await self._apply_tools(self._enabled_tools(new_tools))
         await self._record_tools_refreshed(new_tools)
         logger.info(
             "mcp_server_bridge_reconciled",
@@ -481,7 +502,9 @@ class ServerBridge:
         assert self._agent is not None
         try:
             await self._agent.update_info(
-                capabilities=_build_capabilities(tools),
+                capabilities=_build_capabilities(
+                    tools, self._row.capabilities
+                ),
                 description=_server_description(
                     self._row.server_id, self._row.transport,
                 ),
@@ -640,6 +663,7 @@ class ServerBridge:
             auth_value=resolve_auth_value(self._row.auth_value_ref),
             auth_header_name=self._row.auth_header_name,
             groups=self._row.groups,
+            capabilities=self._row.capabilities,
             expose_to_llm=self._row.expose_to_llm,
             router_url=self._router_url,
             router_admin_url="",  # not used by build_server_agent

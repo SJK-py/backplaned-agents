@@ -34,6 +34,7 @@ class BridgeConfig:
     auth_value: str | None  # resolved secret, NOT a ref — env://VAR is resolved by the operator
     auth_header_name: str | None
     groups: list[str] = field(default_factory=list)
+    capabilities: list[str] = field(default_factory=list)
     expose_to_llm: bool = True
 
     # Bridge runtime config.

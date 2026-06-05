@@ -327,3 +327,7 @@ class McpServerRow(_Row):
     # bridge consumes to onboard `mcp_<server_id>`, cleared once it connects.
     pending_invitation_token: str | None = None
     pending_invitation_expires_at: datetime | None = None
+    # Admin-settable: extra agent capabilities (merged with the auto-derived
+    # mcp.bridge / mcp.tool.* set) + tool names the bridge must not expose.
+    capabilities: list[str] = []
+    disabled_tools: list[str] = []

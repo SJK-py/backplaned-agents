@@ -3426,6 +3426,8 @@ class McpServerCreate(BaseModel):
     auth_header_name: str | None = None
     groups: list[str] = Field(default_factory=list)
     expose_to_llm: bool = True
+    capabilities: list[str] = Field(default_factory=list)
+    disabled_tools: list[str] = Field(default_factory=list)
 
     @field_validator("server_id")
     @classmethod
@@ -3487,6 +3489,31 @@ class McpServerCreate(BaseModel):
                 )
         return v
 
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities_grammar(cls, v: list[str]) -> list[str]:
+        # Extra agent capabilities (merged with the auto-derived mcp.* set).
+        # Same dotted grammar the ACL/AgentInfo enforce, so they're usable as
+        # ACL callee patterns.
+        from bp_router.acl import CAPABILITY_PATTERN  # noqa: PLC0415
+        for c in v:
+            if not CAPABILITY_PATTERN.match(c):
+                raise ValueError(
+                    f"capability {c!r} must match "
+                    r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$ (e.g. mcp.minimax)"
+                )
+        return v
+
+    @field_validator("disabled_tools")
+    @classmethod
+    def _disabled_tools_shape(cls, v: list[str]) -> list[str]:
+        # MCP tool names the bridge must not expose. Names come from the
+        # server's tools/list; keep the check light (non-empty, bounded).
+        for t in v:
+            if not t or len(t) > 256:
+                raise ValueError("disabled tool names must be 1-256 chars")
+        return v
+
     def _check_auth_consistency(self) -> None:
         """Cross-field check: auth_kind drives which other fields are
         required / forbidden. Mirrors the DB CHECK constraint."""
@@ -3533,6 +3560,8 @@ class McpServerUpdate(BaseModel):
     auth_header_name: str | None = None
     groups: list[str] | None = None
     expose_to_llm: bool | None = None
+    capabilities: list[str] | None = None
+    disabled_tools: list[str] | None = None
 
     # Re-use the create-time field validators by name. Pydantic v2
     # applies validators per-field independently, so PATCH inherits
@@ -3549,6 +3578,12 @@ class McpServerUpdate(BaseModel):
     )
     _groups_grammar = field_validator("groups")(
         McpServerCreate._groups_grammar.__func__
+    )
+    _capabilities_grammar = field_validator("capabilities")(
+        McpServerCreate._capabilities_grammar.__func__
+    )
+    _disabled_tools_shape = field_validator("disabled_tools")(
+        McpServerCreate._disabled_tools_shape.__func__
     )
 
 
@@ -3574,6 +3609,9 @@ class McpServerView(BaseModel):
     # and service_mcp read this endpoint) but NOT rendered by the admin UI; an
     # admin can mint invitations anyway, so this is not a privilege leak.
     pending_invitation_token: str | None = None
+    # Admin-settable extras (read by the bridge + rendered in the UI).
+    capabilities: list[str] = []
+    disabled_tools: list[str] = []
 
 
 def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
@@ -3593,6 +3631,8 @@ def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
         last_connected_at=row.last_connected_at,
         created_by=row.created_by,
         pending_invitation_token=row.pending_invitation_token,
+        capabilities=list(row.capabilities or []),
+        disabled_tools=list(row.disabled_tools or []),
     )
 
 
@@ -3678,6 +3718,8 @@ async def create_mcp_server(
                     groups=req.groups,
                     expose_to_llm=req.expose_to_llm,
                     created_by=principal.user_id,
+                    capabilities=req.capabilities,
+                    disabled_tools=req.disabled_tools,
                 )
             except asyncpg.UniqueViolationError as exc:
                 raise HTTPException(
@@ -3763,6 +3805,8 @@ async def update_mcp_server(
                 ),
                 groups=req.groups,
                 expose_to_llm=req.expose_to_llm,
+                capabilities=req.capabilities,
+                disabled_tools=req.disabled_tools,
             )
             await queries.append_audit_event(
                 conn, actor_kind="admin", actor_id=principal.user_id,
@@ -3772,7 +3816,8 @@ async def update_mcp_server(
                     k: getattr(req, k)
                     for k in (
                         "description", "url", "transport", "auth_kind",
-                        "groups", "expose_to_llm",
+                        "groups", "expose_to_llm", "capabilities",
+                        "disabled_tools",
                     )
                     if getattr(req, k) is not None
                 },
