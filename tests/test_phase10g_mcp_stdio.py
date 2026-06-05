@@ -80,6 +80,37 @@ def test_stdio_client_surfaces_subprocess_exit(tmp_path: Path) -> None:
     asyncio.run(_drive())
 
 
+def test_stdio_aclose_survives_terminate_eperm() -> None:
+    """aclose must not crash when signalling the (dropped-uid) child fails with
+    EPERM — the container may lack CAP_KILL. Regression for the
+    mcp_server_bridge_aclose_error / PermissionError crash."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bp_mcp_bridge.mcp_client import StdioMcpClient, StdioSpawnConfig
+
+    async def _drive() -> None:
+        c = StdioMcpClient("python", ["-c", "pass"], spawn=StdioSpawnConfig())
+        proc = MagicMock()
+        proc.returncode = None
+        proc.terminate.side_effect = PermissionError(1, "Operation not permitted")
+        proc.kill.side_effect = PermissionError(1, "Operation not permitted")
+        proc.wait = AsyncMock(return_value=0)
+        c._proc = proc
+        await c.aclose()  # must not raise
+
+    asyncio.run(_drive())
+
+
+def test_stdio_rlimit_as_disabled_by_default() -> None:
+    """RLIMIT_AS caps virtual memory, which Python/uvx over-reserve — a low cap
+    kills the interpreter on start. Default off (0); bound real memory via the
+    container instead."""
+    from bp_mcp_bridge.mcp_client import StdioSpawnConfig
+
+    assert StdioSpawnConfig().rlimit_as_bytes == 0
+    assert StdioSpawnConfig().rlimit_nproc > 0  # fork-bomb guard stays on
+
+
 def test_build_mcp_client_dispatches_stdio() -> None:
     from bp_mcp_bridge.mcp_client import StdioMcpClient, build_mcp_client
 
