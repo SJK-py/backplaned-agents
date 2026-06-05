@@ -196,6 +196,10 @@ class ServerBridge:
         # so the Agent is built with the operator-pinned schemas.
         self._agent: Agent | None = None
         self._agent_task: asyncio.Task[None] | None = None
+        # Background re-broadcast of agent info, fired from the startup
+        # hook (see `_resync_info_on_connect`). Held so it isn't GC'd
+        # and can be cancelled on teardown.
+        self._resync_task: asyncio.Task[None] | None = None
         # The currently-published tool list. Kept so `_reconcile`
         # can skip the broadcast when nothing changed (a refresh
         # signal that finds no diff) and can rebuild capabilities
@@ -663,15 +667,32 @@ class ServerBridge:
         first tools/list_changed) but real on SSE servers that emit
         notifications during the bridge's cold start. This hook
         closes it idempotently: if no drift, the router applies the
-        same values it already has."""
+        same values it already has.
+
+        CRITICAL: `update_info` does a round-trip that needs the
+        dispatch loop READING the socket to deliver the router's ack —
+        but `on_startup` hooks run BEFORE `run_async` enters
+        `run_until`, so awaiting the ack inline here deadlocks until it
+        times out (30s) AND stalls the dispatch loop from starting that
+        whole time, so the agent can't service tool calls. Fire it as a
+        background task instead: the hook returns immediately, the loop
+        starts and reads the socket, and the resync's ack arrives."""
         if self._agent is None:
             return
+        self._resync_task = asyncio.create_task(
+            self._do_resync_info(self._agent),
+            name=f"mcp_resync_info:{self._row.server_id}",
+        )
+
+    async def _do_resync_info(self, agent: Agent) -> None:
         try:
-            await self._agent.update_info(
-                accepts_schema=dict(self._agent.info.accepts_schema or {}),
-                non_tool_modes=list(self._agent.info.non_tool_modes or []),
-                capabilities=list(self._agent.info.capabilities or []),
+            await agent.update_info(
+                accepts_schema=dict(agent.info.accepts_schema or {}),
+                non_tool_modes=list(agent.info.non_tool_modes or []),
+                capabilities=list(agent.info.capabilities or []),
             )
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             # Non-fatal — the agent is still connected. Operators
             # see the warning; the next reconcile will re-broadcast
@@ -689,6 +710,13 @@ class ServerBridge:
         """Cancel the per-server agent task. Called from `run()`'s
         finally block on shutdown / supervisor cancellation. Router's
         WS-disconnect path handles the catalog eviction."""
+        if self._resync_task is not None:
+            self._resync_task.cancel()
+            try:
+                await self._resync_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._resync_task = None
         if self._agent_task is None:
             return
         self._agent_task.cancel()
