@@ -311,8 +311,8 @@ class McpServerRow(_Row):
 
     server_id: str
     description: str
-    url: str
-    transport: str  # sse | streamable_http
+    url: str | None = None  # null for stdio
+    transport: str  # sse | streamable_http | stdio
     auth_kind: str  # none | bearer | header
     auth_value_ref: str | None = None  # env:// or secret:// ref; never raw
     auth_header_name: str | None = None  # required when auth_kind=header
@@ -331,3 +331,9 @@ class McpServerRow(_Row):
     # mcp.bridge / mcp.tool.* set) + tool names the bridge must not expose.
     capabilities: list[str] = []
     disabled_tools: list[str] = []
+    # stdio transport: the subprocess the bridge spawns. `env_refs` maps env var
+    # names to env://VAR / secret://… refs the bridge resolves at spawn (never
+    # raw secrets). All null/empty for url transports.
+    command: str | None = None
+    args: list[str] = []
+    env_refs: dict[str, str] = {}

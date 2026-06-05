@@ -32,6 +32,7 @@ from pathlib import Path
 
 from bp_mcp_bridge import metrics
 from bp_mcp_bridge.admin_client import AdminApiError, AdminClient
+from bp_mcp_bridge.config import StdioPolicy
 from bp_mcp_bridge.server_bridge import ServerBridge, ServerBridgeRow
 
 logger = logging.getLogger(__name__)
@@ -64,11 +65,13 @@ class Supervisor:
         router_url: str,
         state_dir: Path,
         poll_interval_s: float = 30.0,
+        stdio_policy: StdioPolicy | None = None,
     ) -> None:
         self._admin_client = admin_client
         self._router_url = router_url
         self._state_dir = state_dir
         self._poll_interval_s = poll_interval_s
+        self._stdio_policy = stdio_policy or StdioPolicy()
         self._active: dict[str, _ActiveEntry] = {}
 
     async def run(self) -> None:
@@ -198,6 +201,7 @@ class Supervisor:
             admin_client=self._admin_client,
             router_url=self._router_url,
             state_dir=self._state_dir,
+            stdio_policy=self._stdio_policy,
         )
         task = asyncio.create_task(
             bridge.run(),

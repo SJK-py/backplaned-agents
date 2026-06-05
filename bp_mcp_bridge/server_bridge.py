@@ -23,7 +23,10 @@ in-memory swap + one `AgentInfoUpdate` round-trip.
 from __future__ import annotations
 
 import asyncio
+import errno
+import hashlib
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,8 +34,11 @@ from typing import Any
 from bp_mcp_bridge import metrics
 from bp_mcp_bridge.admin_client import AdminClient
 from bp_mcp_bridge.auth_resolver import resolve_auth_value
+from bp_mcp_bridge.config import StdioPolicy
 from bp_mcp_bridge.mcp_client import (
     SseMcpClient,
+    StdioMcpClient,
+    StdioSpawnConfig,
     StreamableHttpMcpClient,
     ToolDefinition,
     build_mcp_client,
@@ -77,7 +83,7 @@ class ServerBridgeRow:
     handing it off."""
 
     server_id: str
-    url: str
+    url: str | None  # null for stdio
     transport: str
     auth_kind: str
     auth_value_ref: str | None
@@ -94,12 +100,16 @@ class ServerBridgeRow:
     # (a change re-onboards with the new caps / mode set).
     capabilities: list[str] = field(default_factory=list)
     disabled_tools: list[str] = field(default_factory=list)
+    # stdio transport: the subprocess + its scoped env refs.
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    env_refs: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_admin_dict(cls, row: dict[str, Any]) -> ServerBridgeRow:
         return cls(
             server_id=row["server_id"],
-            url=row["url"],
+            url=row.get("url"),
             transport=row["transport"],
             auth_kind=row["auth_kind"],
             auth_value_ref=row.get("auth_value_ref"),
@@ -110,6 +120,9 @@ class ServerBridgeRow:
             pending_invitation_token=row.get("pending_invitation_token"),
             capabilities=list(row.get("capabilities") or []),
             disabled_tools=list(row.get("disabled_tools") or []),
+            command=row.get("command"),
+            args=list(row.get("args") or []),
+            env_refs=dict(row.get("env_refs") or {}),
         )
 
     def config_signature(self) -> tuple:
@@ -126,6 +139,9 @@ class ServerBridgeRow:
             self.expose_to_llm,
             tuple(self.capabilities),
             tuple(self.disabled_tools),
+            self.command,
+            tuple(self.args),
+            tuple(sorted(self.env_refs.items())),
         )
 
 
@@ -163,14 +179,18 @@ class ServerBridge:
         admin_client: AdminClient,
         router_url: str,
         state_dir: Path,
+        stdio_policy: StdioPolicy | None = None,
     ) -> None:
         self._row = row
         self._admin_client = admin_client
         self._router_url = router_url
         self._state_dir = state_dir
-        # Either transport client; both expose the same surface
+        self._stdio_policy = stdio_policy or StdioPolicy()
+        # Any transport client; all expose the same surface
         # (initialize / list_tools / call_tool / aclose).
-        self._mcp_client: StreamableHttpMcpClient | SseMcpClient | None = None
+        self._mcp_client: (
+            StreamableHttpMcpClient | SseMcpClient | StdioMcpClient | None
+        ) = None
         # The single per-server backplane agent + its run_async task.
         # Both are populated by `run()` after the initial tools/list
         # so the Agent is built with the operator-pinned schemas.
@@ -200,6 +220,62 @@ class ServerBridge:
         disabled = set(self._row.disabled_tools)
         return [t for t in tools if t.name not in disabled]
 
+    def _stdio_uid(self) -> int | None:
+        """Per-server uid, deterministic from server_id within the policy
+        range. None disables the drop (rootless dev, or no range configured)."""
+        pol = self._stdio_policy
+        if pol.uid_base <= 0 or pol.uid_max <= pol.uid_base:
+            return None
+        span = pol.uid_max - pol.uid_base + 1
+        digest = hashlib.sha256(self._row.server_id.encode()).digest()
+        return pol.uid_base + (int.from_bytes(digest[:4], "big") % span)
+
+    def _build_stdio_spawn(self) -> StdioSpawnConfig:
+        """Assemble the hardened spawn for a stdio server: launcher allowlist
+        (defensive), a SCOPED env (minimal base + resolved env_refs only — never
+        the bridge's own secrets), a per-server uid, and a chowned work dir."""
+        command = self._row.command or ""
+        if command not in self._stdio_policy.allowed_launchers:
+            raise RuntimeError(
+                f"stdio launcher {command!r} not in the bridge allowlist "
+                f"{self._stdio_policy.allowed_launchers}"
+            )
+        uid = self._stdio_uid()
+        workdir = self._stdio_policy.work_root / self._row.server_id
+        workdir.mkdir(parents=True, exist_ok=True)
+        if uid is not None and os.geteuid() == 0:
+            try:
+                os.chown(workdir, uid, uid)
+            except OSError as exc:
+                # EINVAL (not EPERM) on a high uid is the user-namespace
+                # signature: under Docker userns-remap / rootless the container
+                # maps only a sub-range to uids 0..65535, so a uid OUTSIDE that
+                # is invalid (the old sandbox 100000 default hit this). Point
+                # BP_MCP_BRIDGE_UID_BASE/_MAX at a range your container maps.
+                if exc.errno == errno.EINVAL:
+                    raise RuntimeError(
+                        f"uid {uid} is not valid inside the container's user "
+                        "namespace — under userns-remap/rootless the container "
+                        "maps only a sub-range to uids 0..65535. Set "
+                        "BP_MCP_BRIDGE_UID_BASE/_MAX to a range it maps "
+                        "(the prod default 30000..39999 fits a 65536-wide map)"
+                    ) from exc
+                raise RuntimeError(
+                    f"could not chown stdio workdir {workdir} to uid {uid}: {exc}"
+                ) from exc
+        # The child's ENTIRE environment: a minimal base + the server's
+        # resolved env_refs. Nothing else from the bridge process leaks in.
+        env: dict[str, str] = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": str(workdir),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+        }
+        for name, ref in self._row.env_refs.items():
+            resolved = resolve_auth_value(ref)
+            if resolved is not None:
+                env[name] = resolved
+        return StdioSpawnConfig(env=env, cwd=str(workdir), uid=uid)
+
     async def run(self) -> None:
         """Initialise MCP, list tools, onboard the per-server agent,
         then run forever — watching for refresh signals and
@@ -223,6 +299,12 @@ class ServerBridge:
         # admin-driven refreshes. Streamable HTTP has no equivalent
         # push channel; only polling/admin work.
         on_tools_changed = self.trigger_refresh
+        # stdio: build the hardened spawn config (scoped env, uid, cwd) here so
+        # the security setup lives in the bridge, not the transport client.
+        stdio_spawn = (
+            self._build_stdio_spawn()
+            if self._row.transport == "stdio" else None
+        )
         self._mcp_client = build_mcp_client(
             self._row.transport,
             self._row.url,
@@ -231,6 +313,9 @@ class ServerBridge:
             auth_header_name=self._row.auth_header_name,
             on_tools_changed=on_tools_changed,
             server_id=self._row.server_id,
+            command=self._row.command,
+            args=self._row.args,
+            stdio_spawn=stdio_spawn,
         )
         metrics.bridge_starts_total.labels(
             server_id=self._row.server_id,

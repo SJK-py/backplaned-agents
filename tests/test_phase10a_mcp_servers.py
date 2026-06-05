@@ -206,6 +206,66 @@ def test_create_request_validates_capability_grammar() -> None:
         )
 
 
+def test_create_request_accepts_stdio() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api.admin import McpServerCreate
+
+    req = McpServerCreate(
+        server_id="minimax", transport="stdio", command="uvx",
+        args=["minimax-mcp"], env_refs={"MINIMAX_API_KEY": "env://MINIMAX_API_KEY"},
+    )
+    req._check_transport_consistency()
+    assert req.url is None and req.command == "uvx"
+    assert req.args == ["minimax-mcp"]
+
+
+def test_stdio_transport_consistency_requires_command_and_null_url() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api.admin import McpServerCreate
+
+    # stdio needs a command
+    with pytest.raises(ValueError, match="command is required"):
+        McpServerCreate(
+            server_id="srv", transport="stdio",
+        )._check_transport_consistency()
+    # stdio must not carry a url
+    with pytest.raises(ValueError, match="url must be null"):
+        McpServerCreate(
+            server_id="srv", transport="stdio", command="uvx",
+            url="https://x/sse",
+        )._check_transport_consistency()
+    # url transport must not carry a command
+    with pytest.raises(ValueError, match="command/args/env_refs apply only to stdio"):
+        McpServerCreate(
+            server_id="srv", transport="sse", url="https://x/sse", command="uvx",
+        )._check_transport_consistency()
+
+
+def test_env_refs_must_be_refs_not_raw_secrets() -> None:
+    pytest.importorskip("fastapi")
+    import pydantic
+
+    from bp_router.api.admin import McpServerCreate
+
+    with pytest.raises(pydantic.ValidationError):
+        McpServerCreate(
+            server_id="srv", transport="stdio", command="uvx",
+            env_refs={"K": "raw-secret-value"},  # not env://|secret://
+        )
+
+
+def test_launcher_allowlist_default_uvx_only() -> None:
+    pytest.importorskip("fastapi")
+    from fastapi import HTTPException
+
+    from bp_router.api.admin import _check_mcp_launcher
+
+    _check_mcp_launcher("uvx", None)  # default allowlist accepts uvx
+    with pytest.raises(HTTPException) as exc:
+        _check_mcp_launcher("bash", None)
+    assert exc.value.status_code == 400
+
+
 def test_create_request_validates_server_id_grammar() -> None:
     pytest.importorskip("fastapi")
     from pydantic import ValidationError
@@ -488,6 +548,36 @@ def test_parse_capabilities_helper_splits_comma_and_space() -> None:
     assert _parse_capabilities("mcp.minimax, mcp.media") == ["mcp.minimax", "mcp.media"]
     assert _parse_capabilities("mcp.a mcp.b mcp.a") == ["mcp.a", "mcp.b"]  # dedupe
     assert _parse_capabilities("") == []
+
+
+def test_parse_args_and_env_refs_helpers() -> None:
+    pytest.importorskip("fastapi")
+    from bp_admin.pages.mcp_servers import _parse_args, _parse_env_refs
+
+    assert _parse_args("minimax-mcp\n-t\nstdio\n") == ["minimax-mcp", "-t", "stdio"]
+    assert _parse_args("  \n\n") == []
+    assert _parse_env_refs(
+        "MINIMAX_API_KEY=env://MINIMAX_API_KEY\nHOST=secret://kv/host\nbad-line"
+    ) == {"MINIMAX_API_KEY": "env://MINIMAX_API_KEY", "HOST": "secret://kv/host"}
+
+
+def test_build_payload_shapes_stdio_vs_url() -> None:
+    pytest.importorskip("fastapi")
+    from bp_admin.pages.mcp_servers import _build_payload
+
+    stdio = _build_payload(
+        "minimax", "", "", "stdio", "none", "", "", "", "", True,
+        "uvx", "minimax-mcp", "K=env://K",
+    )
+    assert stdio["url"] is None and stdio["command"] == "uvx"
+    assert stdio["args"] == ["minimax-mcp"] and stdio["env_refs"] == {"K": "env://K"}
+
+    url = _build_payload(
+        "fs", "", "https://x/sse", "sse", "none", "", "", "", "", True,
+        "uvx", "ignored", "K=env://K",  # command/args/env_refs nulled for url
+    )
+    assert url["url"] == "https://x/sse" and url["command"] is None
+    assert url["args"] == [] and url["env_refs"] == {}
 
 
 def test_tool_names_helper_reads_tools_cache() -> None:

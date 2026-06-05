@@ -171,11 +171,33 @@ Auth: the bridge authenticates as a fixed `service_mcp` principal — a
 `level=service` user the **router** seeds + re-arms each boot from
 `ROUTER_MCP_BRIDGE_SECRET` (the same value the service presents as
 `BP_MCP_BRIDGE_SERVICE_SECRET`). It holds a refresh token (rotated + persisted to
-its `/state` volume), not an admin token, and **cannot mint invitations**: an
-admin action (create / **Reconnect**) stashes a short-TTL invitation on the
-server's row, which the bridge consumes to onboard. To run it elsewhere, point
-`BP_MCP_BRIDGE_ROUTER_URL` / `_ROUTER_ADMIN_URL` at the router and supply the
-secret. To NOT run it, leave `MCP_BRIDGE_SECRET` empty.
+its root-owned `/mcp-state` volume), not an admin token, and **cannot mint
+invitations**: an admin action (create / **Reconnect**) stashes a short-TTL
+invitation on the server's row, which the bridge consumes to onboard. To run it
+elsewhere, point `BP_MCP_BRIDGE_ROUTER_URL` / `_ROUTER_ADMIN_URL` at the router
+and supply the secret. To NOT run it, leave `MCP_BRIDGE_SECRET` empty.
+
+**Transports.** Each server's `transport` is one of:
+
+- `sse` / `streamable_http` — the bridge connects to a `url` (SSRF-guarded;
+  loopback/private allowed, metadata/link-local blocked). Auth via `auth_kind`
+  + an `env://` / `secret://` `auth_value_ref`.
+- `stdio` — the bridge spawns a local subprocess (`command` + `args`, e.g.
+  `uvx some-mcp`) and speaks MCP over its stdin/stdout. Per-server secrets ride
+  `env_refs` (`{ENV_NAME: "env://VAR"}`, resolved from the bridge's env).
+
+**stdio hardening.** A stdio `command` is third-party code run inside the bridge
+container, so it's locked down (mirrors the sandbox agent): the `command` must
+be in `BP_MCP_BRIDGE_ALLOWED_LAUNCHERS` (default `uvx`; the router enforces
+`ROUTER_MCP_ALLOWED_LAUNCHERS` too); each subprocess is **dropped to a per-server
+uid** (`BP_MCP_BRIDGE_UID_BASE.._MAX`) with **no-new-privileges** and rlimits,
+and sees **only** a scoped env (`PATH`/`HOME`/`LANG` + its own `env_refs` — never
+the bridge's secrets). This needs the container to run as root with
+`SETUID`/`SETGID`/`CHOWN` (the prod compose sets this). **Note:** `uvx` fetches
+the server package from PyPI on first run, so the `mcp_bridge` container needs
+egress to PyPI (the `agents` net is otherwise router-only) — add an egress path
+or pre-bake a uv cache if you use stdio servers. SSE/HTTP servers need none of
+this.
 
 ## Sandbox isolation (v1 caveat)
 

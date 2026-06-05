@@ -23,14 +23,23 @@ codebase without a transitive-dep cascade.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ctypes
 import json as _json
 import logging
-from dataclasses import dataclass
+import os
+import resource
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from bp_mcp_bridge import metrics
+
+# prctl(2) option to set PR_SET_NO_NEW_PRIVS — once set, execve can never grant
+# privileges (setuid/setgid binaries, file capabilities), so a dropped stdio
+# child can't climb back. Set in the forked child's preexec.
+_PR_SET_NO_NEW_PRIVS = 38
 
 logger = logging.getLogger(__name__)
 
@@ -784,16 +793,256 @@ class SseMcpClient:
 # ===========================================================================
 
 
+@dataclass
+class StdioSpawnConfig:
+    """Hardening knobs for a stdio MCP subprocess. The bridge fills these in
+    per server; the client applies them in the forked child's preexec."""
+
+    env: dict[str, str] = field(default_factory=dict)  # the ONLY env the child sees
+    cwd: str | None = None
+    uid: int | None = None  # drop to this uid (requires the bridge run as root)
+    no_new_privs: bool = True
+    rlimit_nproc: int = 256
+    rlimit_as_bytes: int = 1024 * 1024 * 1024  # 1 GiB address space
+    rlimit_cpu_s: int = 0  # 0 = no CPU cap (MCP servers are long-lived daemons)
+
+
+def _stdio_preexec(cfg: StdioSpawnConfig):  # noqa: ANN202
+    """Build the forked-child preexec: bound resources, set no-new-privs, and
+    drop to a per-server uid (when running as root). Mirrors the sandbox agent's
+    uid-drop. MUST NOT import at fork time (the import lock may be held) — all
+    modules used here are imported at module top."""
+    drop_uid = cfg.uid is not None and os.geteuid() == 0
+
+    def _set() -> None:
+        for res, limit in (
+            (resource.RLIMIT_NPROC, cfg.rlimit_nproc),
+            (resource.RLIMIT_AS, cfg.rlimit_as_bytes),
+            (resource.RLIMIT_CPU, cfg.rlimit_cpu_s),
+        ):
+            if not limit or limit <= 0:
+                continue
+            try:
+                _soft, hard = resource.getrlimit(res)
+                new = limit if hard == resource.RLIM_INFINITY else min(limit, hard)
+                resource.setrlimit(res, (new, new))
+            except (ValueError, OSError):
+                continue
+        if cfg.no_new_privs:
+            with contextlib.suppress(OSError):
+                ctypes.CDLL(None, use_errno=True).prctl(
+                    _PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0
+                )
+        if drop_uid:
+            # supplementary groups dropped BEFORE setgid/setuid (must run while
+            # privileged) so the child keeps none of root's groups.
+            os.setgroups([])
+            os.setgid(cfg.uid)  # type: ignore[arg-type]
+            os.setuid(cfg.uid)  # type: ignore[arg-type]
+
+    return _set
+
+
+class StdioMcpClient:
+    """JSON-RPC 2.0 over a subprocess's stdin/stdout (MCP stdio transport).
+
+    One client = one MCP server subprocess (e.g. `uvx some-mcp`). Messages are
+    newline-delimited JSON. The bridge supplies a `StdioSpawnConfig` carrying
+    the scoped env + uid-drop; the child sees ONLY that env (never the bridge's
+    secrets). `aclose()` terminates the subprocess."""
+
+    def __init__(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        spawn: StdioSpawnConfig,
+        on_tools_changed: callable[[], None] | None = None,
+        server_id: str = "unknown",
+        request_timeout_s: float = 60.0,
+    ) -> None:
+        self._command = command
+        self._args = list(args)
+        self._spawn = spawn
+        self._on_tools_changed = on_tools_changed
+        self._server_id = server_id
+        self._timeout_s = request_timeout_s
+        self._proc: asyncio.subprocess.Process | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._request_id = 0
+        self._initialized = False
+
+    async def initialize(self) -> dict[str, Any]:
+        self._proc = await asyncio.create_subprocess_exec(
+            self._command, *self._args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=dict(self._spawn.env),  # the child's ENTIRE environment
+            cwd=self._spawn.cwd,
+            preexec_fn=_stdio_preexec(self._spawn),
+            close_fds=True,
+        )
+        self._reader_task = asyncio.create_task(
+            self._read_loop(), name=f"mcp_stdio_read:{self._server_id}"
+        )
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(), name=f"mcp_stdio_stderr:{self._server_id}"
+        )
+        result = await self._call(
+            "initialize",
+            {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "bp_mcp_bridge", "version": "0.1.0"},
+            },
+        )
+        await self._notify("notifications/initialized", {})
+        self._initialized = True
+        return result
+
+    async def list_tools(self) -> list[ToolDefinition]:
+        if not self._initialized:
+            raise RuntimeError("initialize() must be called before list_tools()")
+        result = await self._call("tools/list", {})
+        return [
+            ToolDefinition(
+                name=t["name"],
+                description=t.get("description") or "",
+                input_schema=t.get("inputSchema") or {"type": "object"},
+            )
+            for t in (result.get("tools") or [])
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        if not self._initialized:
+            raise RuntimeError("initialize() must be called before call_tool()")
+        result = await self._call("tools/call", {"name": name, "arguments": arguments})
+        return ToolResult(
+            content=result.get("content") or [],
+            is_error=bool(result.get("isError")),
+        )
+
+    async def aclose(self) -> None:
+        for task in (self._reader_task, self._stderr_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+        self._proc = None
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    async def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if self._proc is None or self._proc.stdin is None:
+            raise McpError(-32603, "stdio subprocess not running")
+        self._request_id += 1
+        rid = self._request_id
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[rid] = fut
+        body = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+        try:
+            self._proc.stdin.write((_json.dumps(body) + "\n").encode("utf-8"))
+            await self._proc.stdin.drain()
+            data = await asyncio.wait_for(fut, timeout=self._timeout_s)
+        except TimeoutError as exc:
+            raise McpError(-32603, f"stdio request {method!r} timed out") from exc
+        finally:
+            self._pending.pop(rid, None)
+        if "error" in data:
+            err = data["error"]
+            raise McpError(
+                err.get("code", -32603), err.get("message", "unknown error"),
+                err.get("data"),
+            )
+        return data.get("result", {})
+
+    async def _notify(self, method: str, params: dict[str, Any]) -> None:
+        if self._proc is None or self._proc.stdin is None:
+            return
+        body = {"jsonrpc": "2.0", "method": method, "params": params}
+        self._proc.stdin.write((_json.dumps(body) + "\n").encode("utf-8"))
+        await self._proc.stdin.drain()
+
+    async def _read_loop(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        stdout = self._proc.stdout
+        while True:
+            line = await stdout.readline()
+            if not line:  # EOF — subprocess exited
+                self._fail_all_pending(McpError(-32603, "stdio subprocess closed"))
+                return
+            try:
+                msg = _json.loads(line)
+            except ValueError:
+                continue  # ignore non-JSON noise on stdout
+            rid = msg.get("id")
+            if rid is not None and ("result" in msg or "error" in msg):
+                fut = self._pending.get(rid)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+            elif msg.get("method") == "notifications/tools/list_changed":
+                if self._on_tools_changed is not None:
+                    with contextlib.suppress(Exception):
+                        self._on_tools_changed()
+            # server→client requests (id + method) are unsupported; ignore.
+
+    def _fail_all_pending(self, exc: Exception) -> None:
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
+        self._pending.clear()
+
+    async def _drain_stderr(self) -> None:
+        assert self._proc is not None and self._proc.stderr is not None
+        stderr = self._proc.stderr
+        while True:
+            line = await stderr.readline()
+            if not line:
+                return
+            logger.info(
+                "mcp_stdio_stderr",
+                extra={
+                    "event": "mcp_stdio_stderr",
+                    "bp.mcp_server_id": self._server_id,
+                    "line": line.decode("utf-8", "replace").rstrip(),
+                },
+            )
+
+
 def build_mcp_client(
     transport: str,
-    url: str,
+    url: str | None,
     *,
     auth_kind: str = "none",
     auth_value: str | None = None,
     auth_header_name: str | None = None,
     on_tools_changed: callable[[], None] | None = None,
     server_id: str = "unknown",
-) -> StreamableHttpMcpClient | SseMcpClient:
+    command: str | None = None,
+    args: list[str] | None = None,
+    stdio_spawn: StdioSpawnConfig | None = None,
+) -> StreamableHttpMcpClient | SseMcpClient | StdioMcpClient:
     """Pick the right MCP client based on the row's transport.
 
     Bridge code should call this rather than instantiating either
@@ -829,7 +1078,17 @@ def build_mcp_client(
             on_tools_changed=on_tools_changed,
             server_id=server_id,
         )
+    if transport == "stdio":
+        if not command:
+            raise ValueError("stdio transport requires a command")
+        return StdioMcpClient(
+            command,
+            args or [],
+            spawn=stdio_spawn or StdioSpawnConfig(),
+            on_tools_changed=on_tools_changed,
+            server_id=server_id,
+        )
     raise ValueError(
         f"unknown MCP transport {transport!r}; "
-        f"expected one of: streamable_http, sse"
+        f"expected one of: streamable_http, sse, stdio"
     )

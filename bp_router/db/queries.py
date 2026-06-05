@@ -2945,7 +2945,7 @@ _MCP_SELECT_COLS = (
     "tools_cache, refresh_requested_at, created_at, "
     "last_connected_at, created_by, "
     "pending_invitation_token, pending_invitation_expires_at, "
-    "capabilities, disabled_tools"
+    "capabilities, disabled_tools, command, args, env_refs"
 )
 
 
@@ -2971,7 +2971,7 @@ async def insert_mcp_server(
     *,
     server_id: str,
     description: str,
-    url: str,
+    url: str | None,
     transport: str,
     auth_kind: str,
     auth_value_ref: str | None,
@@ -2981,20 +2981,26 @@ async def insert_mcp_server(
     created_by: str | None,
     capabilities: list[str] | None = None,
     disabled_tools: list[str] | None = None,
+    command: str | None = None,
+    args: list[str] | None = None,
+    env_refs: dict[str, str] | None = None,
 ) -> McpServerRow:
     row = await conn.fetchrow(
         f"""
         INSERT INTO mcp_servers
             (server_id, description, url, transport, auth_kind,
              auth_value_ref, auth_header_name, groups,
-             expose_to_llm, created_by, capabilities, disabled_tools)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             expose_to_llm, created_by, capabilities, disabled_tools,
+             command, args, env_refs)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15)
         RETURNING {_MCP_SELECT_COLS}
         """,
         server_id, description, url, transport, auth_kind,
         auth_value_ref, auth_header_name, groups,
         expose_to_llm, created_by,
         capabilities or [], disabled_tools or [],
+        command, args or [], env_refs or {},  # jsonb codec: dict ↔ jsonb
     )
     assert row is not None
     return McpServerRow.model_validate(dict(row))
@@ -3014,45 +3020,64 @@ async def update_mcp_server(
     expose_to_llm: bool | None = None,
     capabilities: list[str] | None = None,
     disabled_tools: list[str] | None = None,
+    command: str | None = None,
+    args: list[str] | None = None,
+    env_refs: dict[str, str] | None = None,
+    set_stdio_fields: bool = False,
 ) -> McpServerRow | None:
     """PATCH semantics — only non-None fields are written. The
     `auth_kind = 'none'` case requires the caller to ALSO null out
     `auth_value_ref` and `auth_header_name`; otherwise the DB
     CHECK constraint refuses the row. The admin endpoint enforces
-    this app-side."""
+    this app-side. `set_stdio_fields` writes command/args/env_refs (and nulls
+    them for a non-stdio transport) — the transport-fields CHECK requires the
+    two shapes stay disjoint."""
     sets: list[str] = []
-    args: list[Any] = [server_id]
+    params: list[Any] = [server_id]
     if description is not None:
-        args.append(description)
-        sets.append(f"description = ${len(args)}")
-    if url is not None:
-        args.append(url)
-        sets.append(f"url = ${len(args)}")
+        params.append(description)
+        sets.append(f"description = ${len(params)}")
+    if url is not None and not set_stdio_fields:
+        params.append(url)
+        sets.append(f"url = ${len(params)}")
     if transport is not None:
-        args.append(transport)
-        sets.append(f"transport = ${len(args)}")
+        params.append(transport)
+        sets.append(f"transport = ${len(params)}")
     if auth_kind is not None:
-        args.append(auth_kind)
-        sets.append(f"auth_kind = ${len(args)}")
+        params.append(auth_kind)
+        sets.append(f"auth_kind = ${len(params)}")
         # When the caller sets auth_kind, ALSO write the
         # ref/header columns (callers pass through what they want;
         # `None` in Python becomes NULL in PostgreSQL).
-        args.append(auth_value_ref)
-        sets.append(f"auth_value_ref = ${len(args)}")
-        args.append(auth_header_name)
-        sets.append(f"auth_header_name = ${len(args)}")
+        params.append(auth_value_ref)
+        sets.append(f"auth_value_ref = ${len(params)}")
+        params.append(auth_header_name)
+        sets.append(f"auth_header_name = ${len(params)}")
     if groups is not None:
-        args.append(groups)
-        sets.append(f"groups = ${len(args)}")
+        params.append(groups)
+        sets.append(f"groups = ${len(params)}")
     if expose_to_llm is not None:
-        args.append(expose_to_llm)
-        sets.append(f"expose_to_llm = ${len(args)}")
+        params.append(expose_to_llm)
+        sets.append(f"expose_to_llm = ${len(params)}")
     if capabilities is not None:
-        args.append(capabilities)
-        sets.append(f"capabilities = ${len(args)}")
+        params.append(capabilities)
+        sets.append(f"capabilities = ${len(params)}")
     if disabled_tools is not None:
-        args.append(disabled_tools)
-        sets.append(f"disabled_tools = ${len(args)}")
+        params.append(disabled_tools)
+        sets.append(f"disabled_tools = ${len(params)}")
+    if set_stdio_fields:
+        # Write the whole transport shape together (the caller passes the
+        # effective transport's values — url set + command null for url
+        # transports, or url null + command/args/env_refs for stdio), so a
+        # transport switch nulls the other shape and the CHECK stays satisfied.
+        params.append(url)
+        sets.append(f"url = ${len(params)}")
+        params.append(command)
+        sets.append(f"command = ${len(params)}")
+        params.append(args or [])
+        sets.append(f"args = ${len(params)}")
+        params.append(env_refs or {})
+        sets.append(f"env_refs = ${len(params)}")
     if not sets:
         return await get_mcp_server(conn, server_id)
     row = await conn.fetchrow(
@@ -3062,7 +3087,7 @@ async def update_mcp_server(
         WHERE server_id = $1
         RETURNING {_MCP_SELECT_COLS}
         """,
-        *args,
+        *params,
     )
     return McpServerRow.model_validate(dict(row)) if row else None
 

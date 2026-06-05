@@ -37,8 +37,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-TRANSPORT_OPTIONS = ("sse", "streamable_http")
+TRANSPORT_OPTIONS = ("sse", "streamable_http", "stdio")
 AUTH_KIND_OPTIONS = ("none", "bearer", "header")
+
+
+def _parse_args(raw: str) -> list[str]:
+    """One CLI arg per line, stripped, blanks dropped (order preserved)."""
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
+def _parse_env_refs(raw: str) -> dict[str, str]:
+    """`NAME=ref` per line → dict. The router validates each ref is
+    env:// / secret://."""
+    out: dict[str, str] = {}
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        name, _, ref = line.partition("=")
+        out[name.strip()] = ref.strip()
+    return out
 
 
 def _parse_groups(raw: str) -> list[str]:
@@ -140,6 +158,9 @@ def _empty_form() -> dict[str, Any]:
         "groups": "",
         "capabilities": "",
         "expose_to_llm": True,
+        "command": "",
+        "args": "",
+        "env_refs": "",
     }
 
 
@@ -147,7 +168,7 @@ def _form_from_server(s: dict[str, Any]) -> dict[str, Any]:
     return {
         "server_id": s["server_id"],
         "description": s.get("description") or "",
-        "url": s["url"],
+        "url": s.get("url") or "",
         "transport": s["transport"],
         "auth_kind": s["auth_kind"],
         "auth_value_ref": s.get("auth_value_ref") or "",
@@ -155,6 +176,9 @@ def _form_from_server(s: dict[str, Any]) -> dict[str, Any]:
         "groups": ", ".join(s.get("groups") or []),
         "capabilities": ", ".join(s.get("capabilities") or []),
         "expose_to_llm": s.get("expose_to_llm", True),
+        "command": s.get("command") or "",
+        "args": "\n".join(s.get("args") or []),
+        "env_refs": "\n".join(f"{k}={v}" for k, v in (s.get("env_refs") or {}).items()),
     }
 
 
@@ -217,21 +241,29 @@ def _build_payload(
     groups: str,
     capabilities: str,
     expose_to_llm: bool,
+    command: str = "",
+    args: str = "",
+    env_refs: str = "",
 ) -> dict[str, Any]:
-    """Common form → payload builder. `auth_value_ref` /
-    `auth_header_name` are null-when-empty so the auth_kind=none
-    case sends them as null (the router CHECK requires it)."""
+    """Common form → payload builder. The two transport shapes are kept
+    disjoint (the router CHECK requires it): stdio gets command/args/env_refs +
+    null url/auth; url transports get url/auth + null command. Empty credential
+    refs become null."""
+    is_stdio = transport == "stdio"
     return {
         "server_id": server_id.strip(),
         "description": description.strip(),
-        "url": url.strip(),
+        "url": None if is_stdio else (url.strip() or None),
         "transport": transport,
-        "auth_kind": auth_kind,
-        "auth_value_ref": auth_value_ref.strip() or None,
-        "auth_header_name": auth_header_name.strip() or None,
+        "auth_kind": "none" if is_stdio else auth_kind,
+        "auth_value_ref": None if is_stdio else (auth_value_ref.strip() or None),
+        "auth_header_name": None if is_stdio else (auth_header_name.strip() or None),
         "groups": _parse_groups(groups),
         "capabilities": _parse_capabilities(capabilities),
         "expose_to_llm": expose_to_llm,
+        "command": (command.strip() or None) if is_stdio else None,
+        "args": _parse_args(args) if is_stdio else [],
+        "env_refs": _parse_env_refs(env_refs) if is_stdio else {},
     }
 
 
@@ -240,7 +272,7 @@ async def create_mcp_server(
     request: Request,
     server_id: str = Form(...),
     description: str = Form(""),
-    url: str = Form(...),
+    url: str = Form(""),  # required for url transports; absent for stdio
     transport: str = Form(...),
     auth_kind: str = Form("none"),
     auth_value_ref: str = Form(""),
@@ -248,12 +280,16 @@ async def create_mcp_server(
     groups: str = Form(""),
     capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
+    command: str = Form(""),
+    args: str = Form(""),
+    env_refs: str = Form(""),
 ) -> Response:
     templates = request.app.state.templates
     expose_bool = expose_to_llm in ("on", "true", "1")
     payload = _build_payload(
         server_id, description, url, transport, auth_kind,
         auth_value_ref, auth_header_name, groups, capabilities, expose_bool,
+        command, args, env_refs,
     )
     try:
         await upstream(request).admin_request(
@@ -270,7 +306,7 @@ async def create_mcp_server(
                 "form": {
                     "server_id": payload["server_id"],
                     "description": payload["description"],
-                    "url": payload["url"],
+                    "url": payload["url"] or "",
                     "transport": payload["transport"],
                     "auth_kind": payload["auth_kind"],
                     "auth_value_ref": payload["auth_value_ref"] or "",
@@ -278,6 +314,11 @@ async def create_mcp_server(
                     "groups": ", ".join(payload["groups"]),
                     "capabilities": ", ".join(payload["capabilities"]),
                     "expose_to_llm": payload["expose_to_llm"],
+                    "command": payload["command"] or "",
+                    "args": "\n".join(payload["args"]),
+                    "env_refs": "\n".join(
+                        f"{k}={v}" for k, v in payload["env_refs"].items()
+                    ),
                 },
                 "tools": [],
                 "disabled_tools": [],
@@ -297,7 +338,7 @@ async def update_mcp_server(
     request: Request,
     server_id: str,
     description: str = Form(""),
-    url: str = Form(...),
+    url: str = Form(""),
     transport: str = Form(...),
     auth_kind: str = Form("none"),
     auth_value_ref: str = Form(""),
@@ -305,32 +346,29 @@ async def update_mcp_server(
     groups: str = Form(""),
     capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
+    command: str = Form(""),
+    args: str = Form(""),
+    env_refs: str = Form(""),
     enabled_tool: list[str] = Form(default=[]),
     all_tools: str = Form(""),
 ) -> Response:
-    """PATCH the server. The form posts ALL fields back; we forward
-    only the ones that semantically apply (auth_kind=none gets
-    null auth_value_ref / auth_header_name)."""
+    """PATCH the server. The form posts ALL fields back; we shape the payload
+    for the chosen transport (stdio vs url) and forward it."""
     templates = request.app.state.templates
     expose_bool = expose_to_llm in ("on", "true", "1")
     # Per-tool toggle: the form submits the FULL tool list (hidden) + a checkbox
     # per ENABLED tool. The disabled set is the complement.
     all_names = [t for t in all_tools.split(",") if t]
     disabled_tools = [t for t in all_names if t not in set(enabled_tool)]
-    body: dict[str, Any] = {
-        "description": description.strip(),
-        "url": url.strip(),
-        "transport": transport,
-        "auth_kind": auth_kind,
-        # auth_kind drives the credential surface; the router's
-        # PATCH expects ref/header alongside any auth_kind change.
-        "auth_value_ref": auth_value_ref.strip() or None,
-        "auth_header_name": auth_header_name.strip() or None,
-        "groups": _parse_groups(groups),
-        "capabilities": _parse_capabilities(capabilities),
-        "expose_to_llm": expose_bool,
-        "disabled_tools": disabled_tools,
-    }
+    # Reuse the create-time shaper for the transport-disjoint fields, then add
+    # the PATCH-only bits.
+    body = _build_payload(
+        server_id, description, url, transport, auth_kind,
+        auth_value_ref, auth_header_name, groups, capabilities, expose_bool,
+        command, args, env_refs,
+    )
+    body.pop("server_id")
+    body["disabled_tools"] = disabled_tools
     try:
         await upstream(request).admin_request(
             "PATCH", f"/mcp-servers/{server_id}",
@@ -349,7 +387,7 @@ async def update_mcp_server(
                 "form": {
                     "server_id": server_id,
                     "description": body["description"],
-                    "url": body["url"],
+                    "url": body["url"] or "",
                     "transport": body["transport"],
                     "auth_kind": body["auth_kind"],
                     "auth_value_ref": body["auth_value_ref"] or "",
@@ -357,6 +395,11 @@ async def update_mcp_server(
                     "groups": ", ".join(body["groups"]),
                     "capabilities": ", ".join(body["capabilities"]),
                     "expose_to_llm": body["expose_to_llm"],
+                    "command": body["command"] or "",
+                    "args": "\n".join(body["args"]),
+                    "env_refs": "\n".join(
+                        f"{k}={v}" for k, v in body["env_refs"].items()
+                    ),
                 },
                 # Reconstruct the checkbox state from the submission so the
                 # admin's toggles survive the re-render.
