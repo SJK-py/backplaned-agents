@@ -91,8 +91,10 @@ class _Resp:
 
 
 class _FakeClient:
-    def __init__(self, *a, **k) -> None:
+    def __init__(self, *a, existing_rules=None, **k) -> None:
         self.calls: list[tuple] = []
+        # Rules the fake router already has (for the ACL merge GET).
+        self.existing_rules = existing_rules if existing_rules is not None else []
 
     async def __aenter__(self):
         return self
@@ -106,9 +108,19 @@ class _FakeClient:
             return _Resp(200, {"access_token": "tok"})
         return _Resp(201, {})
 
+    async def get(self, url, **kw):
+        self.calls.append(("GET", url, kw))
+        if url.endswith("/v1/admin/acl/rules"):
+            return _Resp(200, self.existing_rules)
+        return _Resp(200, {})
+
     async def put(self, url, **kw):
         self.calls.append(("PUT", url, kw))
-        return _Resp(200, [{}] * 17)
+        # Echo back the applied rule list so callers can count it.
+        rules = kw.get("json", {}).get("rules", []) if url.endswith(
+            "/v1/admin/acl/rules"
+        ) else []
+        return _Resp(200, rules)
 
 
 def test_bootstrap_registers_all_and_applies_acl(monkeypatch) -> None:
@@ -142,9 +154,49 @@ def test_bootstrap_registers_all_and_applies_acl(monkeypatch) -> None:
     # consumed within seconds, so a long-lived invitation is needless risk.
     assert bs._INVITATION_TTL_S == 600
     assert all(c[2]["json"]["expires_in_s"] == bs._INVITATION_TTL_S for c in invites)
-    # ACL applied once.
+    # ACL applied once, and read first (the merge GET) so it's non-destructive.
     puts = [c for c in calls if c[0] == "PUT"]
     assert len(puts) == 1 and puts[0][1].endswith("/v1/admin/acl/rules")
+    gets = [c for c in calls if c[0] == "GET" and c[1].endswith("/v1/admin/acl/rules")]
+    assert len(gets) == 1
+
+
+def test_bootstrap_acl_preserves_admin_rules(monkeypatch) -> None:
+    """Prod path regression: the `bootstrap` service re-applies the suite ACL
+    on every boot. It must MERGE — an admin-added rule (e.g. an MCP grant at
+    ord 25) survives instead of being wiped by the suite reset (ord 0..N)."""
+    from bp_agents.acl import suite_rule_names
+
+    monkeypatch.setenv("ROUTER_URL", "http://router:8000")
+    monkeypatch.setenv("ROUTER_BOOTSTRAP_ADMIN_EMAIL", "a@example.com")
+    monkeypatch.setenv("ROUTER_BOOTSTRAP_ADMIN_PASSWORD", "pw")
+    for _name, var, _prov in bs._ROSTER:
+        monkeypatch.setenv(var, "z" * 44)
+
+    admin_rule = {
+        "rule_id": "rule_admin", "ord": 25, "name": "channel→mcp_minimax",
+        "description": "admin-added MCP grant",
+        "effect": "allow", "user_level": "*",
+        "caller_pattern": "channel/*", "callee_pattern": "@mcp_minimax",
+    }
+    captured: dict = {}
+
+    def _factory(*a, **k):
+        captured["client"] = _FakeClient(existing_rules=[admin_rule])
+        return captured["client"]
+
+    monkeypatch.setattr(bs.httpx, "AsyncClient", _factory)
+    assert asyncio.run(bs._main()) == 0
+
+    put = next(c for c in captured["client"].calls if c[0] == "PUT")
+    applied = put[2]["json"]["rules"]
+    names = [r["name"] for r in applied]
+    assert "channel→mcp_minimax" in names               # preserved
+    assert suite_rule_names() <= set(names)              # suite still applied
+    # Admin rule kept HIGHER priority (lower ord) than the suite allows.
+    admin_ord = next(r["ord"] for r in applied if r["name"] == "channel→mcp_minimax")
+    suite_ords = [r["ord"] for r in applied if r["name"] in suite_rule_names()]
+    assert admin_ord < min(suite_ords)
 
 
 def test_bootstrap_sends_no_idempotency_key(monkeypatch) -> None:
