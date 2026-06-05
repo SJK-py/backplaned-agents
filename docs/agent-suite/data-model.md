@@ -141,4 +141,4 @@ No mode defines a bespoke `produces_schema`; all outputs validate as `AgentOutpu
 | router file store | any agent, for its own task scope (platform-gated) |
 | `suite_platform_mappings` | the admin approve-registration flow |
 
-**File model** ([overview §2.4](./overview.md)): the named store everywhere except the sandbox's container workspace. A gateway channel (no `ctx.files`) uses the **session-authed named-store endpoints** (`POST`/`GET /v1/files/names[/resolve]` — [`../design/router-managed-file-store.md` §6](../design/router-managed-file-store.md)) under its per-user session JWT; the sandbox bridges via `storage_to_workspace` / `workspace_to_storage`.
+**File model** ([overview §2.4](./overview.md)): the named store everywhere except the sandbox's container workspace. A gateway channel (no `ctx.files`) uses the **session-authed named-store endpoints** (`POST`/`GET /v1/files/names[/resolve]` — [`../design/router-managed-file-store.md` §6](../design/router-managed-file-store.md)) under its per-user session JWT; the sandbox bridges via `stash_to_workspace` / `workspace_to_stash`.

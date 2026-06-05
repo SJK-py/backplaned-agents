@@ -2,7 +2,7 @@
 
 `bash` runs a shell command in the user's workspace dir, capturing
 combined stdout/stderr; oversized output is saved to a file-store name
-instead of inlined. `storage_to_workspace` / `workspace_to_storage`
+instead of inlined. `stash_to_workspace` / `workspace_to_stash`
 bridge the named file store and the workspace filesystem.
 
 uid isolation: each user is assigned a distinct OS uid (allocated +
@@ -41,11 +41,11 @@ class Bash(BaseModel):
     command: str
 
 
-class StorageToWorkspace(BaseModel):
+class StashToWorkspace(BaseModel):
     name: str
 
 
-class WorkspaceToStorage(BaseModel):
+class WorkspaceToStash(BaseModel):
     path: str
 
 
@@ -56,8 +56,8 @@ agent = Agent(
             "The user's isolated, PERSISTENT sandbox workspace — a single "
             "directory that bash runs in and that keeps its files across "
             "calls. Run shell commands (bash), pull a stash file in "
-            "(storage_to_workspace) where bash can use it by bare filename, "
-            "and push a produced file back out (workspace_to_storage). Fetched "
+            "(stash_to_workspace) where bash can use it by bare filename, "
+            "and push a produced file back out (workspace_to_stash). Fetched "
             "and created files all live together in bash's working directory; "
             "run `ls` to see them."
         ),
@@ -307,7 +307,7 @@ async def run_bash(
     description="Run a bash command in the user's persistent sandbox "
     "workspace. Every call starts in the SAME working directory — the "
     "workspace root — and files persist across calls, so a file you fetched "
-    "with storage_to_workspace, or wrote in an earlier command, is right there "
+    "with stash_to_workspace, or wrote in an earlier command, is right there "
     "in `.` (run `ls` to see them). Relative paths resolve against the "
     "workspace; you don't know or need its absolute path. Returns combined "
     "stdout+stderr (a successful command may print nothing).",
@@ -317,15 +317,15 @@ async def bash(ctx: TaskContext, payload: Bash) -> AgentOutput:
 
 
 @agent.handler(
-    mode="storage_to_workspace",
+    mode="stash_to_workspace",
     description="Copy a stash file (by name) into the sandbox workspace so "
     "bash can operate on it. The file lands at the TOP of the workspace, which "
     "is exactly bash's working directory — so afterwards `bash` can reference "
     "it by its bare filename (e.g. `python example.py` or `cat ./example.py`), "
     "no path needed.",
 )
-async def storage_to_workspace(
-    ctx: TaskContext, payload: StorageToWorkspace
+async def stash_to_workspace(
+    ctx: TaskContext, payload: StashToWorkspace
 ) -> AgentOutput:
     workspace = _workspace(_settings, ctx.user_id)
     uid = _user_uid(ctx)
@@ -346,14 +346,14 @@ async def storage_to_workspace(
 
 
 @agent.handler(
-    mode="workspace_to_storage",
+    mode="workspace_to_stash",
     description="Save a file from the sandbox workspace back to the stash so "
     "it can be delivered or reused, returning its stash name. Pass the path as "
     "bash would see it — a workspace-relative path like 'out.csv' or "
     "'results/report.pdf' (the same cwd bash runs in).",
 )
-async def workspace_to_storage(
-    ctx: TaskContext, payload: WorkspaceToStorage
+async def workspace_to_stash(
+    ctx: TaskContext, payload: WorkspaceToStash
 ) -> AgentOutput:
     workspace = _workspace(_settings, ctx.user_id)
     path = _resolve_in_workspace(workspace, payload.path)

@@ -137,7 +137,7 @@ long sessions summarize.
   `web_search`, `html_fetch`→`md_converter.webpage`, `web_download`);
   deep_reasoning's in-process `plan_mode`.
 - **sandbox** (heaviest): per-user Debian container workspace, `bash`,
-  `storage_to_workspace` / `workspace_to_storage`. The container/uid model is
+  `stash_to_workspace` / `workspace_to_stash`. The container/uid model is
   the main risk here.
 - **Delegation lifecycle** ([delegation.md](./delegation.md)): hand-off
   (`delegate` + `delegate_prompt` seed row), channel `delegated_to`

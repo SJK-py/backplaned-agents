@@ -102,7 +102,7 @@ def test_sandbox_bash_empty_output_explains_success(tmp_path) -> None:
     asyncio.run(_drive())
 
 
-def test_storage_to_workspace_tells_model_the_relative_path(tmp_path) -> None:
+def test_stash_to_workspace_tells_model_the_relative_path(tmp_path) -> None:
     # The return must point the model at the cwd-relative name, since bash runs
     # in the workspace where the file lands.
     import importlib
@@ -121,12 +121,12 @@ def test_storage_to_workspace_tells_model_the_relative_path(tmp_path) -> None:
                 return Path(src)
         ctx = _Ctx(files=_Files())
         settings = SuiteSettings(sandbox_root=str(tmp_path / "ws"))
-        # storage_to_workspace reads module-level _settings; patch it.
+        # stash_to_workspace reads module-level _settings; patch it.
         orig = sb._settings
         sb._settings = settings
         try:
-            out = await sb.storage_to_workspace(
-                ctx, sb.StorageToWorkspace(name="example.py")
+            out = await sb.stash_to_workspace(
+                ctx, sb.StashToWorkspace(name="example.py")
             )
         finally:
             sb._settings = orig
@@ -171,13 +171,13 @@ def test_workspace_io_works_when_dir_is_uid_owned() -> None:
         _ensure_workspace(ws, uid)
         assert os.stat(ws).st_uid == uid
 
-        # storage_to_workspace's write path: root can't write here directly,
+        # stash_to_workspace's write path: root can't write here directly,
         # but the helper drops to the uid and succeeds.
         _write_bytes_as_uid(ws / "sample.py", b"print(1)\n", uid)
         assert (ws / "sample.py").exists()
         assert os.stat(ws / "sample.py").st_uid == uid
 
-        # workspace_to_storage's read path round-trips the bytes back.
+        # workspace_to_stash's read path round-trips the bytes back.
         assert _read_bytes_as_uid(ws / "sample.py", uid) == b"print(1)\n"
     finally:
         shutil.rmtree(root, ignore_errors=True)

@@ -188,8 +188,8 @@ Containerized Debian workspace, one per user (`/home/{user_id}/`, with `uv` pre-
 | Mode | Payload (structured) |
 | --- | --- |
 | `bash` | `command` — execute; oversized stdout saved to a file-store name |
-| `storage_to_workspace` | `name` — fetch a stash file into the workspace |
-| `workspace_to_storage` | `path` — save a workspace file to the stash (returns its name) |
+| `stash_to_workspace` | `name` — fetch a stash file into the workspace |
+| `workspace_to_stash` | `path` — save a workspace file to the stash (returns its name) |
 
 `non_tool_modes`: `[]`.
 
