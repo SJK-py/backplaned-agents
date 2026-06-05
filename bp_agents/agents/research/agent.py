@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.agents.research.web import make_web_tools
-from bp_agents.common import LocalToolset, make_current_time_tool
+from bp_agents.common import (
+    FILE_DELIVERY_NOTE,
+    LocalToolset,
+    make_current_time_tool,
+)
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
@@ -47,7 +51,9 @@ You specialise in web + document research: find, read, and synthesise \
 information for the user, and store genuinely useful material in the \
 knowledge base.
 
-{_SEARCH_DISCIPLINE}\
+{_SEARCH_DISCIPLINE}
+
+{FILE_DELIVERY_NOTE}\
 """
 
 

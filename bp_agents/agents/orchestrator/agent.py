@@ -343,8 +343,10 @@ async def run_orchestrator_end_delegation(
     summary = payload.get("delegation_summary", "")
     reason = payload.get("exit_reason", "")
     user_prompt = payload.get("user_prompt")
-    # Files the specialist queued via send_file before handing back — delivered
-    # as if the orchestrator had called send_file itself.
+    # Safeguard files: a specialist that produced a file before handing back
+    # (rare — end_delegation is a hand-off, not a result report) passes them
+    # here so they aren't dropped; delivered as if the orchestrator had called
+    # send_file itself.
     handback_files = payload.get("files") or []
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
     async with pool.acquire() as conn:

@@ -15,6 +15,20 @@ if TYPE_CHECKING:
     from bp_agents.db.models import UserConfigRow
 
 
+# Reusable file-delivery instruction for delegated turns. File tools are an
+# agent-by-agent capability (NOT part of the shared delegation harness), so an
+# agent that should hand the user files composes this into its OWN
+# delegation_system. computer_use writes its own variant (it juggles a separate
+# sandbox workspace alongside the shared stash).
+FILE_DELIVERY_NOTE = """\
+Files live in a shared stash. To hand the user an actual file, call \
+`send_file` with its stash name and write your reply in the same turn — it is \
+delivered as an attachment with that reply (a file is never sent on its own). \
+A stash file name you're given can be `read_file`'d or passed to another \
+agent — the stash is shared, so the name is enough.\
+"""
+
+
 def user_config_note(cfg: UserConfigRow) -> str:
     """Render the per-user context block injected into system prompts:
     name, timezone, language preference, and the user's custom note.

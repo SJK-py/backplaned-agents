@@ -21,7 +21,11 @@ from bp_agents.common.output import (
     text_output,
 )
 from bp_agents.common.progress import LoopProgress, emit_loop_progress
-from bp_agents.common.prompts import compose_system_prompt, user_config_note
+from bp_agents.common.prompts import (
+    FILE_DELIVERY_NOTE,
+    compose_system_prompt,
+    user_config_note,
+)
 from bp_agents.common.tools import (
     LocalTool,
     LocalToolset,
@@ -34,6 +38,7 @@ __all__ = [
     "LocalTool",
     "LocalToolset",
     "LoopProgress",
+    "FILE_DELIVERY_NOTE",
     "compose_system_prompt",
     "emit_loop_progress",
     "estimate_context_tokens",

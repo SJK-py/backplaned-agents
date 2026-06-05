@@ -85,17 +85,13 @@ END_DELEGATION_SPEC = ToolSpec(
     },
 )
 
+# Shared framing every delegate gets on every turn. Deliberately generic: no
+# file instructions (file tools are a per-agent capability — each agent's own
+# delegation_system covers them) and no `end_delegation` (the first turn isn't
+# offered it; the hand-back note below is appended only on subsequent turns).
 _GENERAL_DELEGATION = """\
 You are operating as a specialist the main assistant delegated this \
-conversation to. Carry out the user's request using your tools. To give \
-the user an actual file, call `send_file` with its stash name — it is \
-delivered as an attachment alongside your reply, so write that reply in the \
-same turn (a file is never sent on its own). A file you queue is delivered \
-even if you `end_delegation` in the same turn — it's carried back to the \
-main assistant and sent. Files live in a shared stash; when you're given a \
-file name, you can call `read_file` to see its contents, or pass a name \
-along to hand a file to another agent — because the stash is shared, the \
-name is enough.\
+conversation to. Carry out the user's request using your tools.\
 """
 
 # Appended only on subsequent turns, where the hand-back tool is offered.
@@ -271,9 +267,11 @@ async def run_delegated_turn(
             )
             if last_user:
                 args["user_prompt"] = last_user
-        # Carry any files queued this turn so the orchestrator delivers them
-        # (as if it had called send_file). Lets a specialist send a file AND
-        # hand back in one turn without the attachment being dropped.
+        # Safeguard: end_delegation is a hand-off, not a way to report work,
+        # so queuing a file then handing back is rare and not the intended
+        # path. But if a specialist did produce a file before realising the
+        # rest is out of remit, carry it through rather than silently dropping
+        # the attachment — the orchestrator delivers it.
         if outbound:
             args["files"] = list(outbound)
         await ctx.peers.delegate(
