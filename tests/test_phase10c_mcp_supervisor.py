@@ -199,6 +199,54 @@ def test_server_bridge_row_from_admin_dict_decodes_minimal() -> None:
     assert row.groups == []
     assert row.expose_to_llm is True
     assert row.refresh_requested_at is None
+    assert row.capabilities == []
+    assert row.disabled_tools == []
+
+
+def test_server_bridge_row_decodes_capabilities_and_disabled_tools() -> None:
+    from bp_mcp_bridge.server_bridge import ServerBridgeRow
+
+    row = ServerBridgeRow.from_admin_dict({
+        "server_id": "minimax", "url": "https://x/sse", "transport": "sse",
+        "auth_kind": "none",
+        "capabilities": ["mcp.minimax"],
+        "disabled_tools": ["play_audio"],
+    })
+    assert row.capabilities == ["mcp.minimax"]
+    assert row.disabled_tools == ["play_audio"]
+    # Both participate in the restart signature.
+    sig = str(row.config_signature())
+    assert "mcp.minimax" in sig and "play_audio" in sig
+
+
+def test_build_capabilities_appends_operator_extras() -> None:
+    from bp_mcp_bridge.mcp_client import ToolDefinition
+    from bp_mcp_bridge.tool_agent import _build_capabilities
+
+    tools = [ToolDefinition(name="text_to_audio", description="", input_schema={})]
+    caps = _build_capabilities(tools, ["mcp.minimax"])
+    assert caps == ["mcp.bridge", "mcp.tool.text_to_audio", "mcp.minimax"]
+    # De-duped: an extra that collides with an auto cap isn't repeated.
+    assert _build_capabilities(tools, ["mcp.bridge"]).count("mcp.bridge") == 1
+
+
+def test_enabled_tools_filters_disabled(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from bp_mcp_bridge.mcp_client import ToolDefinition
+    from bp_mcp_bridge.server_bridge import ServerBridge, ServerBridgeRow
+
+    row = ServerBridgeRow.from_admin_dict({
+        "server_id": "minimax", "url": "https://x/sse", "transport": "sse",
+        "auth_kind": "none", "disabled_tools": ["play_audio"],
+    })
+    bridge = ServerBridge(
+        row, admin_client=object(), router_url="ws://r/", state_dir=tmp_path,
+    )
+    tools = [
+        ToolDefinition(name="text_to_audio", description="", input_schema={}),
+        ToolDefinition(name="play_audio", description="", input_schema={}),
+    ]
+    enabled = [t.name for t in bridge._enabled_tools(tools)]
+    assert enabled == ["text_to_audio"]
 
 
 def test_server_bridge_row_config_signature_excludes_refresh_field() -> None:

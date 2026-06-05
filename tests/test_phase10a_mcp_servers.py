@@ -176,6 +176,34 @@ def test_create_request_accepts_minimal_payload() -> None:
     )
     assert req.auth_kind == "none"
     assert req.expose_to_llm is True
+    assert req.capabilities == []
+    assert req.disabled_tools == []
+
+
+def test_create_request_accepts_capabilities_and_disabled_tools() -> None:
+    pytest.importorskip("fastapi")
+    from bp_router.api.admin import McpServerCreate
+
+    req = McpServerCreate(
+        server_id="minimax", url="https://x/sse", transport="sse",
+        capabilities=["mcp.minimax", "mcp.media"],
+        disabled_tools=["play_audio"],
+    )
+    assert req.capabilities == ["mcp.minimax", "mcp.media"]
+    assert req.disabled_tools == ["play_audio"]
+
+
+def test_create_request_validates_capability_grammar() -> None:
+    pytest.importorskip("fastapi")
+    import pydantic
+
+    from bp_router.api.admin import McpServerCreate
+
+    with pytest.raises(pydantic.ValidationError):
+        McpServerCreate(
+            server_id="x", url="https://x/sse", transport="sse",
+            capabilities=["Not A Capability"],  # spaces/caps → rejected
+        )
 
 
 def test_create_request_validates_server_id_grammar() -> None:
@@ -451,6 +479,26 @@ def test_parse_groups_helper_dedupes_and_preserves_order() -> None:
     assert _parse_groups("a, b, a, c") == ["a", "b", "c"]  # dedupe
     assert _parse_groups(" a , b , ") == ["a", "b"]
     assert _parse_groups("") == []
+
+
+def test_parse_capabilities_helper_splits_comma_and_space() -> None:
+    pytest.importorskip("fastapi")
+    from bp_admin.pages.mcp_servers import _parse_capabilities
+
+    assert _parse_capabilities("mcp.minimax, mcp.media") == ["mcp.minimax", "mcp.media"]
+    assert _parse_capabilities("mcp.a mcp.b mcp.a") == ["mcp.a", "mcp.b"]  # dedupe
+    assert _parse_capabilities("") == []
+
+
+def test_tool_names_helper_reads_tools_cache() -> None:
+    pytest.importorskip("fastapi")
+    from bp_admin.pages.mcp_servers import _tool_names
+
+    server = {"tools_cache": {"tools": [
+        {"name": "text_to_audio"}, {"name": "play_audio"}, {"no_name": 1},
+    ]}}
+    assert _tool_names(server) == ["text_to_audio", "play_audio"]
+    assert _tool_names({}) == []  # not yet connected
 
 
 def test_tools_count_helper_handles_missing_cache() -> None:
