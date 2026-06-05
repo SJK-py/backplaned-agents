@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_TRANSPORTS = ("streamable_http", "sse")
+_TRANSPORTS = ("streamable_http", "sse", "stdio")
 _AUTH_KINDS = ("none", "bearer", "header")
 
 

@@ -90,6 +90,20 @@ def test_config_rejects_unknown_transport() -> None:
         )
 
 
+def test_config_accepts_stdio_transport() -> None:
+    """stdio is a first-class transport (PR #182). BridgeConfig's validation
+    must accept it — _to_bridge_config builds a stdio BridgeConfig (url=None)
+    for the agent description, and a stale allowlist crashed the bridge with
+    'transport must be one of ...; got stdio'."""
+    from bp_mcp_bridge.config import BridgeConfig
+
+    cfg = BridgeConfig(
+        server_id="minimax", url=None, transport="stdio",
+        auth_kind="none", auth_value=None, auth_header_name=None,
+    )
+    assert cfg.transport == "stdio"
+
+
 def test_config_rejects_auth_kind_without_value() -> None:
     """Mirrors the DB CHECK constraint — auth_kind=bearer requires
     auth_value to be set."""
