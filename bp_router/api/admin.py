@@ -2957,6 +2957,29 @@ def _check_mcp_url_ssrf(url: str, request: Request | None) -> None:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _check_mcp_launcher(command: str, request: Request | None) -> None:
+    """A stdio MCP server's `command` is run as a subprocess by the bridge —
+    a code-execution surface. Restrict it to an operator-controlled allowlist
+    of launchers (default `uvx`; widen via ROUTER_MCP_ALLOWED_LAUNCHERS). The
+    bridge re-checks the same allowlist at spawn."""
+    allowed = ["uvx"]
+    if request is not None:
+        state = getattr(request.app.state, "bp", None)
+        settings = getattr(state, "settings", None) if state else None
+        configured = getattr(settings, "mcp_allowed_launchers", None) if settings else None
+        if configured:
+            allowed = list(configured)
+    if command not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"command {command!r} is not an allowed stdio launcher "
+                f"(allowed: {', '.join(allowed)}); widen via "
+                "ROUTER_MCP_ALLOWED_LAUNCHERS"
+            ),
+        )
+
+
 def _validate_preset_payload(*, name: str | None = None, **fields) -> None:
     """Per-field format / range checks. Cross-field invariants live in
     helpers like `_check_provider_base_url_consistency` so the patch
@@ -3406,8 +3429,10 @@ async def delete_llm_preset(
 
 _MCP_SERVER_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 _MCP_AUTH_VALUE_REF_RE = re.compile(r"^(env|secret)://.+$")
-_MCP_TRANSPORTS = ("sse", "streamable_http")
+_MCP_TRANSPORTS = ("sse", "streamable_http", "stdio")
+_MCP_URL_TRANSPORTS = ("sse", "streamable_http")
 _MCP_AUTH_KINDS = ("none", "bearer", "header")
+_MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class McpServerCreate(BaseModel):
@@ -3419,7 +3444,7 @@ class McpServerCreate(BaseModel):
 
     server_id: str
     description: str = ""
-    url: str
+    url: str | None = None  # required for url transports; null for stdio
     transport: str
     auth_kind: str = "none"
     auth_value_ref: str | None = None
@@ -3428,6 +3453,10 @@ class McpServerCreate(BaseModel):
     expose_to_llm: bool = True
     capabilities: list[str] = Field(default_factory=list)
     disabled_tools: list[str] = Field(default_factory=list)
+    # stdio transport: the subprocess + its scoped env refs.
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env_refs: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("server_id")
     @classmethod
@@ -3442,7 +3471,9 @@ class McpServerCreate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _url_scheme(cls, v: str) -> str:
+    def _url_scheme(cls, v: str | None) -> str | None:
+        if v is None or v == "":
+            return None  # stdio has no url
         lower = v.lower()
         if not (lower.startswith("http://") or lower.startswith("https://")):
             raise ValueError(
@@ -3514,6 +3545,46 @@ class McpServerCreate(BaseModel):
                 raise ValueError("disabled tool names must be 1-256 chars")
         return v
 
+    @field_validator("env_refs")
+    @classmethod
+    def _env_refs_shape(cls, v: dict[str, str]) -> dict[str, str]:
+        # stdio: ENV_NAME → env://VAR / secret://… — never raw secrets (same
+        # rule as auth_value_ref; the bridge resolves these from its own env).
+        for name, ref in v.items():
+            if not _MCP_ENV_NAME_RE.match(name):
+                raise ValueError(
+                    f"env var name {name!r} must match ^[A-Za-z_][A-Za-z0-9_]*$"
+                )
+            if not _MCP_AUTH_VALUE_REF_RE.match(ref):
+                raise ValueError(
+                    f"env_refs[{name!r}] must use env:// or secret:// — raw "
+                    "secrets in the database are refused"
+                )
+        return v
+
+    def _check_transport_consistency(self) -> None:
+        """Cross-field check tying the transport to its required fields.
+        Mirrors the DB transport-fields CHECK. The launcher allowlist is
+        checked in the endpoint (it needs settings)."""
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError("command is required when transport='stdio'")
+            if self.url is not None:
+                raise ValueError("url must be null when transport='stdio'")
+            if self.auth_kind != "none":
+                raise ValueError(
+                    "auth_kind must be 'none' for stdio (no HTTP auth; pass "
+                    "server secrets via env_refs instead)"
+                )
+        else:  # url transports
+            if not self.url:
+                raise ValueError(f"url is required when transport={self.transport!r}")
+            if self.command is not None:
+                raise ValueError(
+                    f"command/args/env_refs apply only to stdio, not "
+                    f"transport={self.transport!r}"
+                )
+
     def _check_auth_consistency(self) -> None:
         """Cross-field check: auth_kind drives which other fields are
         required / forbidden. Mirrors the DB CHECK constraint."""
@@ -3562,6 +3633,9 @@ class McpServerUpdate(BaseModel):
     expose_to_llm: bool | None = None
     capabilities: list[str] | None = None
     disabled_tools: list[str] | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env_refs: dict[str, str] | None = None
 
     # Re-use the create-time field validators by name. Pydantic v2
     # applies validators per-field independently, so PATCH inherits
@@ -3585,6 +3659,9 @@ class McpServerUpdate(BaseModel):
     _disabled_tools_shape = field_validator("disabled_tools")(
         McpServerCreate._disabled_tools_shape.__func__
     )
+    _env_refs_shape = field_validator("env_refs")(
+        McpServerCreate._env_refs_shape.__func__
+    )
 
 
 class McpServerView(BaseModel):
@@ -3593,7 +3670,7 @@ class McpServerView(BaseModel):
 
     server_id: str
     description: str
-    url: str
+    url: str | None = None
     transport: str
     auth_kind: str
     auth_value_ref: str | None = None
@@ -3612,6 +3689,10 @@ class McpServerView(BaseModel):
     # Admin-settable extras (read by the bridge + rendered in the UI).
     capabilities: list[str] = []
     disabled_tools: list[str] = []
+    # stdio transport.
+    command: str | None = None
+    args: list[str] = []
+    env_refs: dict[str, str] = {}
 
 
 def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
@@ -3633,6 +3714,9 @@ def _mcp_row_to_view(row) -> McpServerView:  # type: ignore[no-untyped-def]
         pending_invitation_token=row.pending_invitation_token,
         capabilities=list(row.capabilities or []),
         disabled_tools=list(row.disabled_tools or []),
+        command=row.command,
+        args=list(row.args or []),
+        env_refs=dict(row.env_refs or {}),
     )
 
 
@@ -3700,7 +3784,11 @@ async def create_mcp_server(
     the short-TTL invitation stashed on the row here (the bridge can't
     self-mint). Runs when the bridge is deployed."""
     req._check_auth_consistency()
-    _check_mcp_url_ssrf(req.url, request)
+    req._check_transport_consistency()
+    if req.transport == "stdio":
+        _check_mcp_launcher(req.command, request)  # type: ignore[arg-type]
+    else:
+        _check_mcp_url_ssrf(req.url, request)  # type: ignore[arg-type]
     state = request.app.state.bp
     import asyncpg  # noqa: PLC0415
     async with state.db_pool.acquire() as conn:
@@ -3720,6 +3808,9 @@ async def create_mcp_server(
                     created_by=principal.user_id,
                     capabilities=req.capabilities,
                     disabled_tools=req.disabled_tools,
+                    command=req.command,
+                    args=req.args,
+                    env_refs=req.env_refs,
                 )
             except asyncpg.UniqueViolationError as exc:
                 raise HTTPException(
@@ -3773,11 +3864,17 @@ async def update_mcp_server(
             req.auth_header_name if req.auth_kind is not None
             else existing.auth_header_name
         )
+        eff_transport = req.transport or existing.transport
+        eff_command = req.command if req.command is not None else existing.command
+        eff_args = req.args if req.args is not None else list(existing.args)
+        eff_env_refs = (
+            req.env_refs if req.env_refs is not None else dict(existing.env_refs)
+        )
         synthetic = McpServerCreate(
             server_id=existing.server_id,
             description=req.description or existing.description,
             url=req.url or existing.url,
-            transport=req.transport or existing.transport,
+            transport=eff_transport,
             auth_kind=merged_kind,
             auth_value_ref=merged_ref,
             auth_header_name=merged_header,
@@ -3786,15 +3883,24 @@ async def update_mcp_server(
                 req.expose_to_llm if req.expose_to_llm is not None
                 else existing.expose_to_llm
             ),
+            command=eff_command,
+            args=eff_args,
+            env_refs=eff_env_refs,
         )
         synthetic._check_auth_consistency()
-        _check_mcp_url_ssrf(synthetic.url, request)
+        synthetic._check_transport_consistency()
+        if synthetic.transport == "stdio":
+            _check_mcp_launcher(synthetic.command, request)  # type: ignore[arg-type]
+        else:
+            _check_mcp_url_ssrf(synthetic.url, request)  # type: ignore[arg-type]
 
         async with conn.transaction():
             row = await queries.update_mcp_server(
                 conn, server_id,
                 description=req.description,
-                url=req.url,
+                # Write the effective transport shape together so a switch
+                # nulls the other side (the synthetic already validated it).
+                url=synthetic.url,
                 transport=req.transport,
                 auth_kind=req.auth_kind,
                 auth_value_ref=(
@@ -3807,6 +3913,10 @@ async def update_mcp_server(
                 expose_to_llm=req.expose_to_llm,
                 capabilities=req.capabilities,
                 disabled_tools=req.disabled_tools,
+                command=synthetic.command,
+                args=synthetic.args,
+                env_refs=synthetic.env_refs,
+                set_stdio_fields=True,
             )
             await queries.append_audit_event(
                 conn, actor_kind="admin", actor_id=principal.user_id,

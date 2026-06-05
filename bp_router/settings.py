@@ -367,6 +367,12 @@ class Settings(BaseSettings):
     the URL's hostname; IP literals must be repeated literally.
     Example: `gateway.internal,llm-proxy.svc.cluster.local`."""
 
+    mcp_allowed_launchers: list[str] = ["uvx"]
+    """Allowlist of launcher executables a `stdio` MCP server's `command` may
+    use (`ROUTER_MCP_ALLOWED_LAUNCHERS`, JSON array). Default: `uvx` only. The
+    bridge enforces the same allowlist at spawn time
+    (`BP_MCP_BRIDGE_ALLOWED_LAUNCHERS`); keep them in sync."""
+
     # ------------------------------------------------------------------
     # Quota enforcement
     # ------------------------------------------------------------------
