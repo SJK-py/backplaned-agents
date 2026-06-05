@@ -10,7 +10,8 @@ _PASSWORD, or BOOTSTRAP_ADMIN_*), then:
      accepts a caller-supplied `token`). The chatbot's is flagged
      `provisions_service_user=true`. Idempotent: a token already registered
      (201 idempotent / 409) is treated as success.
-  2. **Applies** the suite ACL (`bp_agents.acl`) via `PUT /v1/admin/acl/rules`.
+  2. **Applies** the suite ACL (`bp_agents.acl`) via `PUT /v1/admin/acl/rules`,
+     MERGING so admin-added rules (e.g. MCP grants) survive each boot.
 
 Pure-Python (httpx) so it runs in the slim suite image with no curl. Wired
 as the compose `bootstrap` one-shot (depends on the router being healthy;
@@ -27,7 +28,7 @@ import sys
 
 import httpx
 
-from bp_agents.acl import acl_replace_payload
+from bp_agents.acl import merge_preserving_custom, suite_acl_rules
 from bp_agents.load_acl import _env
 
 # Invitation TTL (seconds). The suite mints a FRESH single-use token per agent
@@ -113,12 +114,24 @@ async def _main() -> int:
                 resp.raise_for_status()
         print(f"registered {registered} invitation(s)")
 
-        # 2. Apply the suite ACL.
+        # 2. Apply the suite ACL — NON-DESTRUCTIVELY. Read the current rules
+        # first and merge: refresh only the suite-owned rules, preserve every
+        # other rule an admin added (e.g. MCP grants). This runs on every prod
+        # boot (the `bootstrap` compose service), so a destructive replace
+        # would wipe admin customisations each restart.
+        current = await client.get(
+            f"{router}/v1/admin/acl/rules", headers=headers
+        )
+        current.raise_for_status()
         acl = await client.put(
-            f"{router}/v1/admin/acl/rules", headers=headers, json=acl_replace_payload()
+            f"{router}/v1/admin/acl/rules",
+            headers=headers,
+            json=merge_preserving_custom(current.json()),
         )
         acl.raise_for_status()
-        print(f"applied {len(acl.json())} ACL rules")
+        applied = len(acl.json())
+        preserved = applied - len(suite_acl_rules())
+        print(f"applied {applied} ACL rules ({preserved} admin rule(s) preserved)")
     return 0
 
 
