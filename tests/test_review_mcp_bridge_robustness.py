@@ -231,7 +231,7 @@ def test_run_records_tools_after_spawn_agent() -> None:
     from bp_mcp_bridge import server_bridge
 
     src = inspect.getsource(server_bridge.ServerBridge.run)
-    spawn_idx = src.index("self._spawn_agent(tools)")
+    spawn_idx = src.index("self._spawn_agent(self._enabled_tools(tools))")
     record_idx = src.index("self._record_tools_refreshed(tools)")
     assert spawn_idx < record_idx, (
         "run() must onboard the per-server agent (_spawn_agent) "

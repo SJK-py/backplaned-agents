@@ -277,18 +277,23 @@ def make_tool_handler(
     return handler
 
 
-def _build_capabilities(tools: list[ToolDefinition]) -> list[str]:
-    """The per-server agent's capability list. `mcp.bridge` is the
-    coarse marker (every bridged agent has it); per-tool
-    `mcp.tool.<seg>` capabilities surface each tool individually so
-    capability-pattern ACL rules (`mcp.tool.*`,
-    `mcp.tool.search_*`) keep working unchanged from the per-tool
-    agent era. De-duplicated and order-stable (insertion order of
-    `tools`)."""
+def _build_capabilities(
+    tools: list[ToolDefinition], extra: list[str] | None = None
+) -> list[str]:
+    """The per-server agent's capability list. `mcp.bridge` is the coarse
+    marker (every bridged agent has it); per-tool `mcp.tool.<seg>` capabilities
+    surface each tool. NB: ACL is agent-granular, so these gate the WHOLE
+    agent, not a single tool. `extra` appends operator-set capabilities (the
+    server's `capabilities` column) for agent-level ACL targeting, like
+    `groups`. De-duplicated and order-stable."""
     caps: list[str] = ["mcp.bridge"]
     seen: set[str] = {"mcp.bridge"}
     for t in tools:
         cap = f"mcp.tool.{_capability_segment(t.name)}"
+        if cap not in seen:
+            caps.append(cap)
+            seen.add(cap)
+    for cap in extra or []:
         if cap not in seen:
             caps.append(cap)
             seen.add(cap)
@@ -333,7 +338,7 @@ def build_server_agent(
         agent_id=agent_id,
         description=_server_description(config.server_id, config.transport),
         groups=list(config.groups),
-        capabilities=_build_capabilities(tools),
+        capabilities=_build_capabilities(tools, config.capabilities),
         # Operator-pinned: explicit `{mode: schema}` map. Pinning at
         # construction protects against `_republish_schemas` (the
         # decorator's auto-derive) from wiping the upstream schemas
