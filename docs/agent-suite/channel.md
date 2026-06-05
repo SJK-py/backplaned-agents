@@ -97,7 +97,7 @@ The channel is a **gateway, not a task handler**, so it has no `ctx.files` (that
 
 - **Inbound:** download the Telegram upload → `POST /v1/files?session_id=…` (stores the blob, scoped to the user's session) → `POST /v1/files/names` to bind it to a name in the **session scope** → append the `(incumbent=T, hidden=T)` "user-attached file saved as `{name}`" history row *before* dispatching the message ([sessions.md](./sessions.md)). The message payload stays `{prompt}`; the orchestrator discovers the files from that row / `ctx.files.list()`.
 - **Outbound:** files an agent produced arrive as **names** on `result.output.files`; the channel resolves each via `GET /v1/files/names/resolve` (→ `file_id` + a fetch key) and pulls the bytes from `GET /v1/files/{file_id}`, then sends them (`send_named_file`, shared by the message path and the cron scheduler). A user-facing agent populates `output.files` by calling its **`send_file(name)`** tool — the orchestrator (`message` / `cron_message`), an l1 in a delegated turn, and the F1 fallback all carry it. Files are sent only when explicitly named this way; scratch files an agent writes to the stash are not auto-delivered.
-- Only the **sandbox** uses a filesystem workspace, bridged to the named store via `storage_to_workspace` / `workspace_to_storage` ([agents.md](./agents.md)).
+- Only the **sandbox** uses a filesystem workspace, bridged to the named store via `stash_to_workspace` / `workspace_to_stash` ([agents.md](./agents.md)).
 
 ## 8. History ownership
 

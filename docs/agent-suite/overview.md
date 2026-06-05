@@ -67,7 +67,7 @@ The message-dispatching agents (chatbot, webapp) own the session queue **and** a
 
 ### 2.4 File model — named store, with one workspace exception
 
-Files use the **router-managed named store** (`ctx.files`, name-addressed, per-user, S3-backed, fed to the LLM *by reference*) everywhere **except the sandbox**, which keeps a container filesystem workspace bridged via `storage_to_workspace` / `workspace_to_storage`. Two boundary cases:
+Files use the **router-managed named store** (`ctx.files`, name-addressed, per-user, S3-backed, fed to the LLM *by reference*) everywhere **except the sandbox**, which keeps a container filesystem workspace bridged via `stash_to_workspace` / `workspace_to_stash`. Two boundary cases:
 
 - **Channel inbound/outbound:** the channel is a gateway with no `ctx.files` (that API is handler-bound to a task's active executor, which the channel — a spawner — never is). It uses the **session-authed named-store HTTP endpoints** (`POST /v1/files/names` to bind, `GET /v1/files/names[/resolve]` to list/resolve — [`../design/router-managed-file-store.md` §6](../design/router-managed-file-store.md)) under its per-user session JWT, with the *same* dedup / scope / quota as the agent frames. See [channel.md §7](./channel.md).
 - **Sandbox:** code execution needs a real filesystem, so the sandbox owns a per-user container workspace and bridges files in/out by name.
