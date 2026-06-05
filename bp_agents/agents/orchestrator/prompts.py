@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from bp_agents.common.prompts import FILE_DELIVERY_NOTE, INCOMING_FILE_NOTE
+from bp_agents.common.prompts import (
+    FILE_DELIVERY_NOTE,
+    INCOMING_FILE_NOTE,
+    SUBAGENT_FILE_NOTE,
+)
 
 GENERAL_INSTRUCTION = f"""\
 You are a helpful, friendly personal assistant. You hold an ongoing \
@@ -35,6 +39,23 @@ the user should receive the file itself.
 - {INCOMING_FILE_NOTE} Some files are meant only to be passed on (e.g. code, \
 or a document for the knowledge base) — hand the name to the right specialist \
 instead of reading it into this conversation.\
+"""
+
+# The orchestrator's TOOL face (run_orchestrator_subagent). It is NOT the
+# user-facing assistant here: no ongoing conversation, no hand_off / specialist
+# routing, no send_file — its reply goes back to the calling agent. So it gets
+# its own lean base rather than reusing GENERAL_INSTRUCTION. compose_subagent_
+# system appends the shared _SUBAGENT_ROLE + the caller's context/instruction.
+SUBAGENT_INSTRUCTION = f"""\
+You are a capable, careful general assistant. Carry out the task below \
+end-to-end with your tools and produce a complete, well-structured result.
+
+- Be concise and direct; answer exactly what was asked.
+- Your input carries no timestamps — call the `current_time` tool when you \
+need the current date or time rather than guessing.
+- If you don't know something, say so plainly rather than inventing an answer.
+
+{SUBAGENT_FILE_NOTE}\
 """
 
 CRON_INSTRUCTION = """\

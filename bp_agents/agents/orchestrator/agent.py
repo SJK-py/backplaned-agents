@@ -19,7 +19,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from bp_agents.agents.l1_common import compose_subagent_system
-from bp_agents.agents.orchestrator.prompts import CRON_INSTRUCTION, GENERAL_INSTRUCTION
+from bp_agents.agents.orchestrator.prompts import (
+    CRON_INSTRUCTION,
+    GENERAL_INSTRUCTION,
+    SUBAGENT_INSTRUCTION,
+)
 from bp_agents.common import (
     LocalToolset,
     compose_system_prompt,
@@ -317,7 +321,7 @@ async def run_orchestrator_subagent(
     messages = [
         Message(
             role="system",
-            content=compose_subagent_system(GENERAL_INSTRUCTION, payload),
+            content=compose_subagent_system(SUBAGENT_INSTRUCTION, payload),
         ),
         Message(role="user", content=payload.prompt),
     ]

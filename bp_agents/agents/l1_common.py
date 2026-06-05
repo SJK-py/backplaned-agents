@@ -218,19 +218,21 @@ async def run_delegated_turn(
         )
         info = await queries.get_session_info(conn, ctx.session_id)
 
-    # Shared harness framing. Subsequent turns add the hand-back note and —
-    # for file-capable agents, since the user can attach files directly to the
-    # delegate then — the incoming-file mechanic. (The first turn is seeded by
-    # the orchestrator's hand-off, so the user can't attach to the delegate
-    # yet.) Agent-specific file delivery lives in `config.delegation_system`.
+    # System prompt = shared harness framing + the agent's own instruction +
+    # (subsequent turns, file-capable agents only) the incoming-file mechanic.
+    # INCOMING_FILE_NOTE goes AFTER delegation_system so it sits next to that
+    # agent's own file-delivery guidance — all file handling reads as one
+    # block. The incoming note is subsequent-turns-only: the first turn is
+    # seeded by the orchestrator's hand-off, so the user can't attach to the
+    # delegate yet. _HANDBACK_NOTE likewise only when end_delegation is offered.
     parts = [_GENERAL_DELEGATION]
     if not first_turn:
         parts.append(_HANDBACK_NOTE)
-        if config.file_tools:
-            parts.append(INCOMING_FILE_NOTE)
-    guidance = "\n\n".join(parts)
+    parts.append(config.delegation_system)
+    if not first_turn and config.file_tools:
+        parts.append(INCOMING_FILE_NOTE)
     system = compose_system_prompt(
-        f"{guidance}\n\n{config.delegation_system}",
+        "\n\n".join(parts),
         config_note=user_config_note(cfg) if cfg else "",
         summary=info.delegate_summary if info else None,
     )
