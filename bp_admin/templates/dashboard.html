@@ -24,6 +24,25 @@
   {% endfor %}
 </section>
 
+<section class="mt-8">
+  <div class="mb-3 flex items-baseline justify-between">
+    <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">
+      Router metrics
+    </h2>
+    <span class="text-xs text-brand-500/80">
+      cumulative since router start · refreshes every 30s
+    </span>
+  </div>
+  <div hx-get="/admin/metrics-cards"
+       hx-trigger="load, every 30s"
+       hx-swap="innerHTML">
+    <div class="px-5 py-6 text-sm text-brand-500/80 text-center
+                bg-white border border-brand-500/10 rounded-md shadow-sm">
+      Loading metrics…
+    </div>
+  </div>
+</section>
+
 <section class="mt-8 bg-white border border-brand-500/10 rounded-md shadow-sm overflow-hidden">
   <div class="px-5 py-3 border-b border-brand-500/10 flex items-baseline justify-between">
     <h2 class="text-sm font-semibold text-brand-700 uppercase tracking-wide">

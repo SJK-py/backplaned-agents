@@ -69,6 +69,7 @@ def fallback_metrics(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[st
         "llm_fallback_used_total",
         "llm_fallback_skipped_tier_total",
         "llm_tier_gate_denied_total",
+        "llm_errors_total",
     ):
         setattr(
             fake_metrics, counter_name, _RecordingCounter(counter_name, recorder)
@@ -249,6 +250,46 @@ def test_chain_exhausted_increments_chain_exhausted_total(
     assert exhausted == [{"root_preset": "a"}]
     # Nothing succeeded so no fallback_used.
     assert _outcomes_for(fallback_metrics, "llm_fallback_used_total") == []
+
+
+# ---------------------------------------------------------------------------
+# llm_errors_total — one record per FAILED attempt, by provider + code
+# ---------------------------------------------------------------------------
+
+
+def test_failed_attempts_record_llm_errors(
+    fallback_metrics: list[tuple[str, dict[str, str], float]],
+) -> None:
+    """Every failed adapter call increments `llm_errors_total` with the
+    preset's provider and the classified error code — independent of the
+    fallback/retry bookkeeping. Here a→b both fail once → two records."""
+    from tests.conftest import make_llm_service, make_preset, wire_stub_adapter
+
+    svc = make_llm_service()
+    a = make_preset("a", fallback_preset="b")  # provider defaults to gemini
+    b = make_preset("b")
+    svc._register_preset_for_test(a)
+    svc._register_preset_for_test(b)
+    stub_a = wire_stub_adapter(svc, a).push(RuntimeError("a"))
+    stub_b = wire_stub_adapter(svc, b).push(RuntimeError("b"))
+
+    async def _attempt(preset):  # type: ignore[no-untyped-def]
+        return (stub_a, await stub_a.generate()) if preset.name == "a" \
+            else (stub_b, await stub_b.generate())
+
+    from bp_router.llm.retry_classification import LlmUpstreamError
+
+    with pytest.raises(LlmUpstreamError):
+        asyncio.run(svc._call_with_fallback(
+            preset_name="a", user_level="admin", attempt=_attempt,
+        ))
+
+    errors = _outcomes_for(fallback_metrics, "llm_errors_total")
+    # Stub adapters carry no `_classify`, so the default hint → internal_error.
+    assert errors == [
+        {"provider": "gemini", "error_code": "internal_error"},
+        {"provider": "gemini", "error_code": "internal_error"},
+    ]
 
 
 # ---------------------------------------------------------------------------

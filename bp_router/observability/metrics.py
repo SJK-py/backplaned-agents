@@ -190,6 +190,19 @@ llm_cost_microusd_total = Counter(
     ["model"],
     registry=REGISTRY,
 )
+# LLM upstream call FAILURES, by configured provider and classified error
+# code (e.g. upstream_unavailable / upstream_timeout / upstream_rate_limited).
+# Incremented on every failed adapter call — each retry/fallback hop that
+# raised — so it captures upstream errors even when a later retry or fallback
+# recovered the request. Distinct from `llm_calls_total`, which only counts
+# SUCCESSFUL responses. Bounded cardinality: provider set is small, error_code
+# is the fixed `ErrorCode` enumeration.
+llm_errors_total = Counter(
+    "router_llm_errors_total",
+    "LLM upstream call failures by provider and classified error code.",
+    ["provider", "error_code"],
+    registry=REGISTRY,
+)
 
 
 # Fallback chain — observability for the retry/fallback machinery.
@@ -360,6 +373,66 @@ def configure_metrics() -> None:
 def render_exposition() -> bytes:
     """Render the Prometheus text exposition for the /metrics endpoint."""
     return generate_latest(REGISTRY)
+
+
+def snapshot_summary() -> dict[str, object]:
+    """A curated, JSON-friendly snapshot of operationally-useful metrics,
+    read straight from the in-process registry.
+
+    Powers the admin dashboard's at-a-glance cards via
+    `GET /v1/admin/metrics/summary`. Counters are CUMULATIVE since process
+    start (they reset on router restart) and the registry is per-replica, so
+    this is a health snapshot, not a substitute for Prometheus time-series.
+    """
+    # Flatten every sample into name -> [(labels, value)]. Counter value
+    # samples are `<name>_total`; gauges keep their own name. We skip the
+    # `_created`/histogram-internal samples by only reading the names we name
+    # explicitly below.
+    raw: dict[str, list[tuple[dict[str, str], float]]] = {}
+    for fam in REGISTRY.collect():
+        for s in fam.samples:
+            raw.setdefault(s.name, []).append((dict(s.labels), s.value))
+
+    def total(name: str) -> float:
+        return sum(v for _, v in raw.get(name, []))
+
+    def by_label(name: str, key: str) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for labels, v in raw.get(name, []):
+            out[labels.get(key, "")] = out.get(labels.get(key, ""), 0.0) + v
+        return out
+
+    def gauge(name: str) -> float | None:
+        rows = raw.get(name)
+        return rows[0][1] if rows else None
+
+    return {
+        "llm": {
+            "calls_total": total("router_llm_calls_total"),
+            "calls_by_status": by_label("router_llm_calls_total", "status"),
+            "calls_by_provider": by_label("router_llm_calls_total", "provider"),
+            "errors_total": total("router_llm_errors_total"),
+            "errors_by_code": by_label("router_llm_errors_total", "error_code"),
+            "errors_by_provider": by_label("router_llm_errors_total", "provider"),
+            "fallback_chain_exhausted_total": total(
+                "router_llm_fallback_chain_exhausted_total"
+            ),
+            "fallback_used_total": total("router_llm_fallback_used_total"),
+            "tokens_in": by_label("router_llm_tokens_total", "direction").get("in", 0.0),
+            "tokens_out": by_label("router_llm_tokens_total", "direction").get(
+                "out", 0.0
+            ),
+            "cost_microusd": total("router_llm_cost_microusd_total"),
+        },
+        "tasks": {
+            "active": total("router_task_active_count"),
+            "active_by_state": by_label("router_task_active_count", "state"),
+        },
+        "infra": {
+            "redis_health": gauge("router_redis_health"),
+            "ws_connected_agents": gauge("router_ws_connected_agents_count"),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

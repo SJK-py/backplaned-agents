@@ -315,14 +315,16 @@ class Settings(BaseSettings):
 
     access_log_quiet_paths: list[str] = [
         "/healthz", "/metrics", "/v1/admin/serviced-sessions",
-        "/v1/admin/mcp-servers",
+        "/v1/admin/mcp-servers", "/v1/admin/metrics",
     ]
     """Path prefixes whose *successful* (`<400`) GET access-log lines are
     suppressed, so routine health/poll traffic (e.g. the channel's
-    serviced-sessions approval poll, or the admin UI's MCP-servers refresh
-    poll) doesn't flood `uvicorn.access`. Matched by prefix, so
-    `/v1/admin/mcp-servers` also covers the per-server detail GET. Errors on
-    these paths still log. Set to `[]` to log everything."""
+    serviced-sessions approval poll, the admin UI's MCP-servers refresh poll,
+    or the admin dashboard's metrics-summary auto-refresh) doesn't flood
+    `uvicorn.access`. Matched by prefix, so `/v1/admin/mcp-servers` also covers
+    the per-server detail GET and `/v1/admin/metrics` covers
+    `/v1/admin/metrics/summary`. Errors on these paths still log. Set to `[]`
+    to log everything."""
 
     deployment_env: Literal["dev", "staging", "prod"] = "dev"
 
