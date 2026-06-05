@@ -477,7 +477,7 @@ def test_create_handler_sends_null_credentials_when_empty() -> None:
         server_id="x", description="", url="https://x/",
         transport="sse", auth_kind="none",
         auth_value_ref="", auth_header_name="",
-        groups="", expose_to_llm=True,
+        groups="", capabilities="", expose_to_llm=True,
     )
     assert payload["auth_value_ref"] is None
     assert payload["auth_header_name"] is None

@@ -54,6 +54,29 @@ def _parse_groups(raw: str) -> list[str]:
     return out
 
 
+def _parse_capabilities(raw: str) -> list[str]:
+    """Comma/space-separated capability list, stripped + deduped, order-stable.
+    The router validates each against the dotted capability grammar."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in raw.replace(",", " ").split():
+        if tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
+
+
+def _tool_names(server: dict[str, Any]) -> list[str]:
+    """Tool names from the server's `tools_cache` (the full upstream list), for
+    rendering the per-tool enable/disable checkboxes. Empty before first
+    connect."""
+    cache = server.get("tools_cache") or {}
+    tools = cache.get("tools") if isinstance(cache, dict) else None
+    if not isinstance(tools, list):
+        return []
+    return [t["name"] for t in tools if isinstance(t, dict) and t.get("name")]
+
+
 def _tools_count(server: dict[str, Any]) -> int | None:
     """Pull a tools count out of `tools_cache` when present.
 
@@ -115,6 +138,7 @@ def _empty_form() -> dict[str, Any]:
         "auth_value_ref": "",
         "auth_header_name": "",
         "groups": "",
+        "capabilities": "",
         "expose_to_llm": True,
     }
 
@@ -129,6 +153,7 @@ def _form_from_server(s: dict[str, Any]) -> dict[str, Any]:
         "auth_value_ref": s.get("auth_value_ref") or "",
         "auth_header_name": s.get("auth_header_name") or "",
         "groups": ", ".join(s.get("groups") or []),
+        "capabilities": ", ".join(s.get("capabilities") or []),
         "expose_to_llm": s.get("expose_to_llm", True),
     }
 
@@ -143,6 +168,8 @@ async def new_mcp_server_form(request: Request) -> HTMLResponse:
             "active_section": "mcp_servers",
             "mode": "new",
             "form": _empty_form(),
+            "tools": [],          # none until the bridge connects
+            "disabled_tools": [],
             "transport_options": TRANSPORT_OPTIONS,
             "auth_kind_options": AUTH_KIND_OPTIONS,
             "error": None,
@@ -170,6 +197,8 @@ async def edit_mcp_server_form(request: Request, server_id: str) -> HTMLResponse
             "mode": "edit",
             "server": server,
             "form": _form_from_server(server),
+            "tools": _tool_names(server),
+            "disabled_tools": server.get("disabled_tools") or [],
             "transport_options": TRANSPORT_OPTIONS,
             "auth_kind_options": AUTH_KIND_OPTIONS,
             "error": None,
@@ -186,6 +215,7 @@ def _build_payload(
     auth_value_ref: str,
     auth_header_name: str,
     groups: str,
+    capabilities: str,
     expose_to_llm: bool,
 ) -> dict[str, Any]:
     """Common form → payload builder. `auth_value_ref` /
@@ -200,6 +230,7 @@ def _build_payload(
         "auth_value_ref": auth_value_ref.strip() or None,
         "auth_header_name": auth_header_name.strip() or None,
         "groups": _parse_groups(groups),
+        "capabilities": _parse_capabilities(capabilities),
         "expose_to_llm": expose_to_llm,
     }
 
@@ -215,13 +246,14 @@ async def create_mcp_server(
     auth_value_ref: str = Form(""),
     auth_header_name: str = Form(""),
     groups: str = Form(""),
+    capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
 ) -> Response:
     templates = request.app.state.templates
     expose_bool = expose_to_llm in ("on", "true", "1")
     payload = _build_payload(
         server_id, description, url, transport, auth_kind,
-        auth_value_ref, auth_header_name, groups, expose_bool,
+        auth_value_ref, auth_header_name, groups, capabilities, expose_bool,
     )
     try:
         await upstream(request).admin_request(
@@ -244,8 +276,11 @@ async def create_mcp_server(
                     "auth_value_ref": payload["auth_value_ref"] or "",
                     "auth_header_name": payload["auth_header_name"] or "",
                     "groups": ", ".join(payload["groups"]),
+                    "capabilities": ", ".join(payload["capabilities"]),
                     "expose_to_llm": payload["expose_to_llm"],
                 },
+                "tools": [],
+                "disabled_tools": [],
                 "transport_options": TRANSPORT_OPTIONS,
                 "auth_kind_options": AUTH_KIND_OPTIONS,
                 "error": detail_message(exc),
@@ -268,13 +303,20 @@ async def update_mcp_server(
     auth_value_ref: str = Form(""),
     auth_header_name: str = Form(""),
     groups: str = Form(""),
+    capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
+    enabled_tool: list[str] = Form(default=[]),
+    all_tools: str = Form(""),
 ) -> Response:
     """PATCH the server. The form posts ALL fields back; we forward
     only the ones that semantically apply (auth_kind=none gets
     null auth_value_ref / auth_header_name)."""
     templates = request.app.state.templates
     expose_bool = expose_to_llm in ("on", "true", "1")
+    # Per-tool toggle: the form submits the FULL tool list (hidden) + a checkbox
+    # per ENABLED tool. The disabled set is the complement.
+    all_names = [t for t in all_tools.split(",") if t]
+    disabled_tools = [t for t in all_names if t not in set(enabled_tool)]
     body: dict[str, Any] = {
         "description": description.strip(),
         "url": url.strip(),
@@ -285,7 +327,9 @@ async def update_mcp_server(
         "auth_value_ref": auth_value_ref.strip() or None,
         "auth_header_name": auth_header_name.strip() or None,
         "groups": _parse_groups(groups),
+        "capabilities": _parse_capabilities(capabilities),
         "expose_to_llm": expose_bool,
+        "disabled_tools": disabled_tools,
     }
     try:
         await upstream(request).admin_request(
@@ -311,8 +355,13 @@ async def update_mcp_server(
                     "auth_value_ref": body["auth_value_ref"] or "",
                     "auth_header_name": body["auth_header_name"] or "",
                     "groups": ", ".join(body["groups"]),
+                    "capabilities": ", ".join(body["capabilities"]),
                     "expose_to_llm": body["expose_to_llm"],
                 },
+                # Reconstruct the checkbox state from the submission so the
+                # admin's toggles survive the re-render.
+                "tools": all_names,
+                "disabled_tools": disabled_tools,
                 "transport_options": TRANSPORT_OPTIONS,
                 "auth_kind_options": AUTH_KIND_OPTIONS,
                 "error": detail_message(exc),
