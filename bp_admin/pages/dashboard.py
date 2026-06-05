@@ -159,7 +159,6 @@ def _metric_cards(summary: dict | None) -> list[dict[str, Any]]:
     calls = int(llm.get("calls_total", 0) or 0)
     tokens_in = int(llm.get("tokens_in", 0) or 0)
     tokens_out = int(llm.get("tokens_out", 0) or 0)
-    cost_usd = (llm.get("cost_microusd", 0) or 0) / 1_000_000
     redis = infra.get("redis_health")
 
     return [
@@ -185,12 +184,6 @@ def _metric_cards(summary: dict | None) -> list[dict[str, Any]]:
             "label": "Tokens",
             "value": _human(tokens_in + tokens_out),
             "sub": f"{_human(tokens_in)} in / {_human(tokens_out)} out",
-            "tone": None,
-        },
-        {
-            "label": "LLM cost",
-            "value": f"${cost_usd:,.2f}",
-            "sub": "since router start",
             "tone": None,
         },
         {

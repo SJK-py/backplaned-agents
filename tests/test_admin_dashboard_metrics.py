@@ -53,7 +53,9 @@ def test_metric_cards_values_and_alert_tone() -> None:
 
     assert _card(cards, "LLM calls (ok)")["value"] == "1.5k"
     assert _card(cards, "Tokens")["value"] == "1.5k"  # 1200 + 340
-    assert _card(cards, "LLM cost")["value"] == "$1.50"
+    # The "LLM cost" card is intentionally absent — cost_microusd is never
+    # populated by any adapter, so it would always read $0.00.
+    assert not any(c["label"] == "LLM cost" for c in cards)
     assert _card(cards, "Active tasks")["value"] == 2
     assert _card(cards, "Redis")["value"] == "OK"
 
