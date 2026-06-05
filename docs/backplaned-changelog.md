@@ -18,6 +18,69 @@
 
 ---
 
+## 2026-06-05
+
+> The MCP bridge runtime itself ships as a NEW package (`bp_mcp_bridge`) and is
+> not tracked here. These are the **platform** (`bp_router` / `bp_admin`)
+> modifications the bridge required.
+
+### Added — `service_mcp` bridge identity + admin-minted MCP onboarding
+
+- **What:** the router seeds a fixed `service_mcp` (`level=service`) principal
+  for the MCP bridge. `ROUTER_MCP_BRIDGE_SECRET` (new `Settings` field) is armed
+  as its refresh token on every startup by `app._bootstrap_mcp_bridge_user`
+  (idempotent, recovery-safe), so the bridge authenticates via the normal
+  service-token refresh — no admin JWT. New `queries.arm_refresh_token` (upsert
+  that resets a fixed-hash token to unused), `principals.MCP_BRIDGE_USER_ID`,
+  and two guards in `security/jwt.py`: `require_mcp_bridge` (exact id+level) and
+  `require_admin_or_mcp_bridge`.
+- **What:** the MCP server endpoints in `api/admin.py` are re-gated — reads are
+  admin-OR-bridge, `tools-refreshed` is bridge-only, the rest stay admin. The
+  bridge **cannot mint invitations**; instead `create` / `refresh-tools` mint a
+  short-TTL `service` invitation and stash it on the row (new
+  `mcp_servers.pending_invitation_token` / `_expires_at`, **migration 0002**),
+  which the bridge consumes to onboard `mcp_<server>` and the router clears on
+  `tools-refreshed`.
+- **Why:** make the bridge runnable as a long-lived daemon without holding a
+  15-minute admin JWT, and keep invitation-minting (the crown-jewel capability)
+  off the standing service credential.
+
+### Added — per-server capabilities + per-tool disable on MCP servers
+
+- **What:** `mcp_servers` gains `capabilities` and `disabled_tools` (**migration
+  0003**); `McpServerCreate/Update` accept + validate them (capabilities against
+  the dotted `CAPABILITY_PATTERN`), `_mcp_row_to_view` and the queries carry
+  them. The admin UI (`bp_admin/pages/mcp_servers.py` + templates) adds a
+  Capabilities input and a per-tool enable/disable checkbox grid, plus the
+  **Reconnect** action and corrected "one agent per server, one mode per tool"
+  wording.
+- **Why:** agent-granular ACL targeting (capabilities, like `groups`) and an
+  on/off toggle per tool. (Per-*tool* tier control is intentionally not added —
+  the ACL has no mode dimension, so a capability gates the whole agent.)
+
+### Added — stdio MCP transport config
+
+- **What:** `mcp_servers.transport` gains `stdio`; `url` becomes nullable and
+  `command` / `args` / `env_refs` (jsonb `ENV_NAME → env://|secret://`) are
+  added, with a transport-fields CHECK keeping the url and stdio shapes disjoint
+  (**migration 0004**). `McpServerCreate/Update` gain
+  `_check_transport_consistency` + an `env_refs` validator; new
+  `ROUTER_MCP_ALLOWED_LAUNCHERS` setting (default `["uvx"]`) enforced by
+  `api/admin.py::_check_mcp_launcher`. The admin form reveals stdio fields per
+  transport.
+- **Why:** let the bridge run local `uvx <server>` MCP servers (validated +
+  launcher-allowlisted at the boundary; the bridge re-checks and sandboxes at
+  spawn).
+
+### Fixed — stale MCP admin-UI / docstring messaging
+
+- **What:** corrected the `bp_admin` MCP pages + `bp_router/api/admin.py`
+  docstrings that claimed the bridge "ships separately / isn't built" and
+  described "per-tool agents" — now: one agent per server, one mode per tool,
+  consumed by the `bp_mcp_bridge` runtime.
+
+---
+
 ## 2026-06-03
 
 ### Added — downscale inlined LLM images (longer-side pixel cap)
