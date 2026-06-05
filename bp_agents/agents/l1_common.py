@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from bp_agents.common import (
+    INCOMING_FILE_NOTE,
     LocalToolset,
     compose_system_prompt,
     estimate_context_tokens,
@@ -217,7 +218,17 @@ async def run_delegated_turn(
         )
         info = await queries.get_session_info(conn, ctx.session_id)
 
-    guidance = _GENERAL_DELEGATION if first_turn else _GENERAL_DELEGATION + _HANDBACK_NOTE
+    # Shared harness framing. Subsequent turns add the hand-back note and —
+    # for file-capable agents, since the user can attach files directly to the
+    # delegate then — the incoming-file mechanic. (The first turn is seeded by
+    # the orchestrator's hand-off, so the user can't attach to the delegate
+    # yet.) Agent-specific file delivery lives in `config.delegation_system`.
+    parts = [_GENERAL_DELEGATION]
+    if not first_turn:
+        parts.append(_HANDBACK_NOTE)
+        if config.file_tools:
+            parts.append(INCOMING_FILE_NOTE)
+    guidance = "\n\n".join(parts)
     system = compose_system_prompt(
         f"{guidance}\n\n{config.delegation_system}",
         config_note=user_config_note(cfg) if cfg else "",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bp_agents.common.prompts import FILE_DELIVERY_NOTE
+from bp_agents.common.prompts import FILE_DELIVERY_NOTE, INCOMING_FILE_NOTE
 
 GENERAL_INSTRUCTION = f"""\
 You are a helpful, friendly personal assistant. You hold an ongoing \
@@ -32,11 +32,8 @@ earlier); don't recall reflexively.
 ## Files
 - {FILE_DELIVERY_NOTE} Don't paste large file contents into the message when \
 the user should receive the file itself.
-- When the user sends a file it is saved to the shared stash and you'll see a \
-note like `user-attached file saved as <name>`; the file genuinely arrived. \
-Call `read_file` with that name when you need its contents. You don't have to \
-read every file: some are meant only to be passed on (e.g. code, or a \
-document for the knowledge base), so hand the name to the right specialist \
+- {INCOMING_FILE_NOTE} Some files are meant only to be passed on (e.g. code, \
+or a document for the knowledge base) — hand the name to the right specialist \
 instead of reading it into this conversation.\
 """
 
