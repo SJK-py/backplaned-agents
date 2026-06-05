@@ -28,6 +28,17 @@ A stash file name you're given can be `read_file`'d or passed to another \
 agent — the stash is shared, so the name is enough.\
 """
 
+# Companion to FILE_DELIVERY_NOTE for the SUBAGENT face. A subagent's reply
+# goes to the CALLING agent, not the user, and it has no `send_file` — so it
+# returns a file by NAME for the caller to deliver. File-capable agents compose
+# this into their own subagent_system. (computer_use writes its own variant
+# that names the sandbox-workspace → shared-stash copy.)
+SUBAGENT_FILE_NOTE = """\
+To return a file, write it to the shared stash with `write_file` and include \
+its name in your reply — the stash is shared, so the caller can deliver or use \
+it by name. You can't send files to the user yourself.\
+"""
+
 
 def user_config_note(cfg: UserConfigRow) -> str:
     """Render the per-user context block injected into system prompts:

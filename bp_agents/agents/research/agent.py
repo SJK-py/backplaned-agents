@@ -9,6 +9,7 @@ from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagen
 from bp_agents.agents.research.web import make_web_tools
 from bp_agents.common import (
     FILE_DELIVERY_NOTE,
+    SUBAGENT_FILE_NOTE,
     LocalToolset,
     make_current_time_tool,
 )
@@ -44,7 +45,9 @@ _SUBAGENT_SYSTEM = f"""\
 You are a research specialist. You can search + fetch the web and use the \
 knowledge base (call_knowledge_base_*) to store and recall documents.
 
-{_SEARCH_DISCIPLINE}\
+{_SEARCH_DISCIPLINE}
+
+{SUBAGENT_FILE_NOTE}\
 """
 _DELEGATION_SYSTEM = f"""\
 You specialise in web + document research: find, read, and synthesise \

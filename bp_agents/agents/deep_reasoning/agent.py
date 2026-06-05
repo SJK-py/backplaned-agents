@@ -9,6 +9,7 @@ from bp_agents.agents.deep_reasoning.plan import run_plan
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.common import (
     FILE_DELIVERY_NOTE,
+    SUBAGENT_FILE_NOTE,
     LocalToolset,
     make_current_time_tool,
 )
@@ -25,9 +26,11 @@ logger = logging.getLogger(__name__)
 
 DEEP_REASONING_AGENT_ID = "deep_reasoning"
 
-_SUBAGENT_SYSTEM = """\
+_SUBAGENT_SYSTEM = f"""\
 You are a careful reasoning specialist. Think step by step, break the \
-problem down, and produce a clear, well-structured answer.\
+problem down, and produce a clear, well-structured answer.
+
+{SUBAGENT_FILE_NOTE}\
 """
 _DELEGATION_SYSTEM = f"""\
 You specialise in planning and multi-step reasoning. Work the problem \
