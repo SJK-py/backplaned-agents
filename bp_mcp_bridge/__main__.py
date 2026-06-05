@@ -29,6 +29,15 @@ def _configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stderr,
     )
+    # httpx logs an INFO line per request; the supervisor polls
+    # /v1/admin/mcp-servers every poll_interval_s (30s default) plus the
+    # auth refreshes, which floods the log with routine 200s. Quiet it to
+    # WARNING so real errors still surface — overridable via
+    # BP_MCP_BRIDGE_HTTPX_LOG_LEVEL for debugging.
+    httpx_level = os.environ.get(
+        "BP_MCP_BRIDGE_HTTPX_LOG_LEVEL", "WARNING",
+    ).upper()
+    logging.getLogger("httpx").setLevel(httpx_level)
 
 
 def _ensure_state_dir(state_dir: Path) -> None:
