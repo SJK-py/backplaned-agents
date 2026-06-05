@@ -101,8 +101,8 @@ async def _shutdown() -> None:
 
 @agent.handler(
     mode="subagent",
-    description="Research a question end-to-end (web search, page fetch, "
-    "knowledge-base retrieval) and return a sourced Markdown answer.",
+    description="Search and fetch sources from the web and knowledge-base. "
+    "Return a sourced Markdown answer or files for given task.",
 )
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
