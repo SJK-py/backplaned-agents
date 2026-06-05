@@ -175,10 +175,9 @@ def make_send_file_tool(outbound: list[str]) -> LocalTool:
         if name not in outbound:
             outbound.append(name)
         return (
-            f"OK — '{name}' is queued and will be delivered ONLY with your "
-            "final text reply. You have NOT answered the user yet: write your "
-            "normal final message now (do not stop here, and do not end the "
-            "delegation, until you have). A file is never sent on its own."
+            f"OK — '{name}' is queued and will be delivered alongside your "
+            "reply. Write your normal final message now — a file is never "
+            "sent on its own."
         )
 
     return LocalTool(
@@ -191,10 +190,8 @@ def make_send_file_tool(outbound: list[str]) -> LocalTool:
                 "to you. Use this whenever the user should receive an actual "
                 "file (a document, export, image, etc.), not just text about "
                 "it. IMPORTANT: this only QUEUES the file — it is delivered "
-                "only with your final answer, so after calling it you must "
-                "still write your normal text reply. Calling send_file and then "
-                "stopping (or ending the delegation) with no final message "
-                "sends nothing."
+                "with your final answer, so after calling it still write your "
+                "normal text reply. A file is never sent on its own."
             ),
             parameters={
                 "type": "object",

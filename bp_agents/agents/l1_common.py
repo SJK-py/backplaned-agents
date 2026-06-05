@@ -72,8 +72,10 @@ END_DELEGATION_SPEC = ToolSpec(
             "user_prompt": {
                 "type": "string",
                 "description": (
-                    "Optional: a follow-up request to pass to the main "
-                    "assistant to act on immediately."
+                    "Optional. A specific follow-up request for the main "
+                    "assistant. If omitted, the user's current message is "
+                    "forwarded automatically — so you usually don't need to "
+                    "set this."
                 ),
             },
         },
@@ -85,12 +87,13 @@ _GENERAL_DELEGATION = """\
 You are operating as a specialist the main assistant delegated this \
 conversation to. Carry out the user's request using your tools. To give \
 the user an actual file, call `send_file` with its stash name — it is \
-delivered as an attachment alongside your reply. `send_file` only QUEUES \
-the file: you must still write your text reply in the same turn, not \
-`end_delegation`. A file is never sent on its own. Files live in a shared \
-stash; when you're given a file name, you can call `read_file` to see its \
-contents, or pass a name along to hand a file to another agent — because \
-the stash is shared, the name is enough.\
+delivered as an attachment alongside your reply, so write that reply in the \
+same turn (a file is never sent on its own). A file you queue is delivered \
+even if you `end_delegation` in the same turn — it's carried back to the \
+main assistant and sent. Files live in a shared stash; when you're given a \
+file name, you can call `read_file` to see its contents, or pass a name \
+along to hand a file to another agent — because the stash is shared, the \
+name is enough.\
 """
 
 # Appended only on subsequent turns, where the hand-back tool is offered.
@@ -254,8 +257,25 @@ async def run_delegated_turn(
         # Hand back: delegate the task to the orchestrator. The router
         # drops THIS agent's (now non-active) Result; the orchestrator's
         # end_delegation produces the terminal Result.
+        args = dict(end_call.args or {})
+        # end_delegation fires when the user's current message falls OUTSIDE
+        # this specialist's remit — so that message is unanswered. Forward it
+        # as `user_prompt` so the orchestrator actually answers it; without a
+        # prompt its hand-back handler returns an empty Result and the user
+        # sees "(no response)". A prompt the model deliberately set wins.
+        if not (args.get("user_prompt") or "").strip():
+            last_user = next(
+                (r.message for r in reversed(rows) if r.role == "user"), None
+            )
+            if last_user:
+                args["user_prompt"] = last_user
+        # Carry any files queued this turn so the orchestrator delivers them
+        # (as if it had called send_file). Lets a specialist send a file AND
+        # hand back in one turn without the attachment being dropped.
+        if outbound:
+            args["files"] = list(outbound)
         await ctx.peers.delegate(
-            ORCHESTRATOR_AGENT_ID, dict(end_call.args or {}), mode="end_delegation"
+            ORCHESTRATOR_AGENT_ID, args, mode="end_delegation"
         )
         return AgentOutput()
 

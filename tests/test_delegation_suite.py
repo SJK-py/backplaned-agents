@@ -404,6 +404,181 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_l1_end_delegation_auto_forwards_user_message(suite_db_url: str) -> None:
+    """end_delegation fires for out-of-remit messages, so the user's current
+    message is unanswered. The l1 forwards it as `user_prompt` automatically so
+    the orchestrator answers it instead of returning "(no response)"."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="user", message="## Delegated task\nthink",
+                )
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="assistant", message="reasoned",
+                )
+                # The current (out-of-remit) user message that triggered the turn.
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="user", message="what's the weather in Paris?",
+                )
+            cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
+            peers = _StubPeers()
+            ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
+                id="c1", name="end_delegation",
+                args={"delegation_summary": "done reasoning", "exit_reason": "off-topic"},
+            )])]), peers)
+            await run_delegated_turn(
+                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=False,
+            )
+            assert len(peers.delegations) == 1
+            _dest, payload, _mode = peers.delegations[0]
+            assert payload["user_prompt"] == "what's the weather in Paris?"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_l1_end_delegation_explicit_user_prompt_wins(suite_db_url: str) -> None:
+    """A `user_prompt` the model deliberately set is NOT overwritten by the
+    auto-forward fallback."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="user", message="actual user message",
+                )
+            cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
+            peers = _StubPeers()
+            ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
+                id="c1", name="end_delegation",
+                args={"delegation_summary": "s", "exit_reason": "r",
+                      "user_prompt": "please book a flight"},
+            )])]), peers)
+            await run_delegated_turn(
+                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=False,
+            )
+            _dest, payload, _mode = peers.delegations[0]
+            assert payload["user_prompt"] == "please book a flight"
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_l1_end_delegation_carries_queued_file(suite_db_url: str) -> None:
+    """A file queued via send_file in the same turn as end_delegation rides
+    through to the orchestrator on the payload — no longer dropped."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id=_L1,
+                    role="user", message="make me a chart",
+                )
+            cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
+            peers = _StubPeers()
+            # Round 1: queue the file; round 2: hand back.
+            ctx = _Ctx(
+                _StubLlm([
+                    LlmResponse(text="", tool_calls=[ToolCall(
+                        id="c1", name="send_file", args={"name": "chart.png"},
+                    )]),
+                    LlmResponse(text="", tool_calls=[ToolCall(
+                        id="c2", name="end_delegation",
+                        args={"delegation_summary": "made it", "exit_reason": "handing back"},
+                    )]),
+                ]),
+                peers,
+                files=_StubFiles(session=["chart.png"]),
+            )
+            await run_delegated_turn(
+                ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
+                first_turn=False,
+            )
+            _dest, payload, _mode = peers.delegations[0]
+            assert payload["files"] == ["chart.png"]
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_orchestrator_end_delegation_delivers_handback_files(suite_db_url: str) -> None:
+    """With no follow-up prompt, the orchestrator still delivers files the
+    specialist queued before handing back (as if it called send_file)."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="user", message="do the thing",
+                )
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
+                )
+            ctx = _Ctx(_StubLlm([]), _StubPeers(), delegating=_L1)
+            out = await run_orchestrator_end_delegation(
+                ctx,
+                {"delegation_summary": "made it", "exit_reason": "done",
+                 "files": ["chart.png"]},
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            assert out.files == ["chart.png"]
+            assert out.content  # safeguard supplies an accompanying line
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_orchestrator_end_delegation_merges_files_with_followup(suite_db_url: str) -> None:
+    """When the hand-back carries BOTH a follow-up prompt and files, the
+    orchestrator answers the prompt AND delivers the files."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _reset(pool)
+            async with pool.acquire() as conn:
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="user", message="earlier", )
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="orchestrator",
+                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
+                )
+            # The orchestrator's loop answers inline (no hand_off).
+            ctx = _Ctx(_StubLlm([LlmResponse(text="Here you go.")]),
+                       _StubPeers(), delegating=_L1)
+            out = await run_orchestrator_end_delegation(
+                ctx,
+                {"delegation_summary": "s", "exit_reason": "r",
+                 "user_prompt": "and send me the chart", "files": ["chart.png"]},
+                pool=pool, settings=_settings(suite_db_url),
+            )
+            assert out.content == "Here you go."
+            assert "chart.png" in out.files
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
 def _result(agent_id: str, status: TaskStatus = TaskStatus.SUCCEEDED) -> ResultFrame:
     return ResultFrame(
         agent_id=agent_id, trace_id="0" * 32, span_id="0" * 16,

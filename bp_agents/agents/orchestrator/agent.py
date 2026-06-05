@@ -343,6 +343,9 @@ async def run_orchestrator_end_delegation(
     summary = payload.get("delegation_summary", "")
     reason = payload.get("exit_reason", "")
     user_prompt = payload.get("user_prompt")
+    # Files the specialist queued via send_file before handing back — delivered
+    # as if the orchestrator had called send_file itself.
+    handback_files = payload.get("files") or []
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
     async with pool.acquire() as conn:
         # The recap is `user`-role (hidden): the specialist's results return as
@@ -369,10 +372,20 @@ async def run_orchestrator_end_delegation(
                 conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
                 role="user", message=user_prompt,
             )
-        return await run_orchestrator_message(
+        out = await run_orchestrator_message(
             ctx, MessagePayload(prompt=user_prompt), pool=pool, settings=settings
         )
-    return text_output("")
+        # Merge the handed-back files with whatever the orchestrator produced
+        # (de-duped, order-stable) so the specialist's attachment still reaches
+        # the user. If the orchestrator re-delegated, its Result is dropped by
+        # the router anyway — the merge is harmless.
+        if handback_files:
+            merged = list(dict.fromkeys([*out.files, *handback_files]))
+            out = out.model_copy(update={"files": merged})
+        return out
+    # No follow-up prompt — still deliver any handed-back files. text_output's
+    # safeguard supplies a one-line accompaniment when content is empty.
+    return text_output("", files=list(handback_files))
 
 
 @agent.handler(

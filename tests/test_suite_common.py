@@ -659,10 +659,11 @@ def test_send_file_records_existing_name() -> None:
                                                     args={"name": "report.pdf"}))
     )
     assert outbound == ["report.pdf"]
-    # The tool result reinforces: queued, delivered only with a final reply,
-    # don't stop / end the delegation without writing one.
+    # The tool result reinforces: queued + delivered alongside the reply, so the
+    # model still writes a final message. (It no longer forbids end_delegation —
+    # a queued file now rides through the hand-back.)
     assert "queued" in msg.content
-    assert "final text reply" in msg.content
+    assert "alongside your reply" in msg.content
 
 
 def test_send_file_dedups_and_validates_persist_prefix() -> None:
