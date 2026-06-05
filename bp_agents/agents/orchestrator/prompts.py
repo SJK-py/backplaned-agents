@@ -48,7 +48,9 @@ instead of reading it into this conversation.\
 # system appends the shared _SUBAGENT_ROLE + the caller's context/instruction.
 SUBAGENT_INSTRUCTION = f"""\
 You are a capable, careful general assistant. Carry out the task below \
-end-to-end with your tools and produce a complete, well-structured result.
+end-to-end with your tools and produce a complete, well-structured result. \
+You can route work to the specialist agents available to you by calling \
+`call_<agent>` tool rather than attempting everything yourself.
 
 - Be concise and direct; answer exactly what was asked.
 - Your input carries no timestamps — call the `current_time` tool when you \
