@@ -1,0 +1,22 @@
+{% if metrics_failed %}
+  <div class="px-5 py-6 text-sm text-brand-500/80 text-center
+              bg-white border border-brand-500/10 rounded-md shadow-sm">
+    Metrics are unreachable right now.
+  </div>
+{% else %}
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+    {% for c in metric_cards %}
+      <div class="block bg-white rounded-md p-5 shadow-sm border
+                  {% if c.tone == 'alert' %}border-red-300{% else %}border-brand-500/10{% endif %}">
+        <div class="text-xs uppercase tracking-wide text-brand-500">{{ c.label }}</div>
+        <div class="mt-2 text-3xl font-semibold
+                    {% if c.tone == 'alert' %}text-red-600{% else %}text-brand-900{% endif %}">
+          {{ c.value }}
+        </div>
+        {% if c.sub %}
+          <div class="mt-1 text-xs text-brand-500/80">{{ c.sub }}</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}

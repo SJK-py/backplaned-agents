@@ -3745,6 +3745,30 @@ async def _mint_mcp_pending_invitation(
     )
 
 
+class MetricsSummary(BaseModel):
+    """Curated snapshot of router metrics for the admin dashboard.
+
+    Cumulative counters are since process start (reset on restart) and the
+    registry is per-replica — a health snapshot, not a time-series.
+    """
+
+    llm: dict[str, Any]
+    tasks: dict[str, Any]
+    infra: dict[str, Any]
+
+
+@router.get("/metrics/summary", response_model=MetricsSummary)
+async def metrics_summary(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> MetricsSummary:
+    """Read the in-process Prometheus registry and return a curated JSON
+    snapshot. Polled by the admin dashboard's auto-refreshing cards."""
+    from bp_router.observability.metrics import snapshot_summary  # noqa: PLC0415
+
+    return MetricsSummary(**snapshot_summary())
+
+
 @router.get("/mcp-servers", response_model=list[McpServerView])
 async def list_mcp_servers(
     request: Request,

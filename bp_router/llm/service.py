@@ -896,6 +896,14 @@ class LlmService:
                     hint = safe_classify(adapter_for_classify, exc)
                     last_error = exc
                     last_hint = hint
+                    # Record the upstream failure by provider + classified
+                    # code. Per failed attempt, so retries/fallbacks that
+                    # later succeed still register the underlying error.
+                    self._inc_metric(
+                        "llm_errors_total",
+                        provider=preset.provider,
+                        error_code=str(hint.code),
+                    )
                     is_last_for_this_preset = (
                         attempt_idx == attempts_for_this_preset - 1
                     )
@@ -1026,6 +1034,11 @@ class LlmService:
                 return
             except Exception as exc:  # noqa: BLE001
                 hint = safe_classify(adapter, exc)
+                self._inc_metric(
+                    "llm_errors_total",
+                    provider=preset.provider,
+                    error_code=str(hint.code),
+                )
                 attempts_remaining = attempt_idx < max_retries
                 # Reuse the protocol-side constant rather than a
                 # hardcoded literal — keeps the streaming retry boundary
