@@ -184,7 +184,9 @@ and supply the secret. To NOT run it, leave `MCP_BRIDGE_SECRET` empty.
   + an `env://` / `secret://` `auth_value_ref`.
 - `stdio` — the bridge spawns a local subprocess (`command` + `args`, e.g.
   `uvx some-mcp`) and speaks MCP over its stdin/stdout. Per-server secrets ride
-  `env_refs` (`{ENV_NAME: "env://VAR"}`, resolved from the bridge's env).
+  `env_refs` (`{ENV_NAME: value}`): an `env://VAR` / `secret://…` value is
+  resolved from the bridge's env, any other value is an inline literal stored
+  as-is (like a preset's inline `api_key` vs `api_key_ref`).
 
 **stdio hardening.** A stdio `command` is third-party code run inside the bridge
 container, so it's locked down (mirrors the sandbox agent): the `command` must

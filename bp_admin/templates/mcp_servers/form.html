@@ -145,9 +145,10 @@
                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">{{ form.env_refs }}</textarea>
       <p class="text-xs text-brand-500 mt-1">
-        The subprocess's scoped env. Values must be <code>env://VAR</code> /
-        <code>secret://…</code> (resolved from the bridge's env) — raw secrets
-        are refused. The child sees ONLY these + PATH/HOME/LANG.
+        The subprocess's scoped env. A value of <code>env://VAR</code> /
+        <code>secret://…</code> is resolved from the bridge's env; any other
+        value is an inline literal (stored as-is, like a preset's inline key).
+        The child sees ONLY these + PATH/HOME/LANG.
       </p>
     </div>
   </div>
