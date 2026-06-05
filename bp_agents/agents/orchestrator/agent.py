@@ -19,7 +19,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from bp_agents.agents.l1_common import compose_subagent_system
-from bp_agents.agents.orchestrator.prompts import CRON_INSTRUCTION, GENERAL_INSTRUCTION
+from bp_agents.agents.orchestrator.prompts import (
+    CRON_INSTRUCTION,
+    GENERAL_INSTRUCTION,
+    SUBAGENT_INSTRUCTION,
+)
 from bp_agents.common import (
     LocalToolset,
     compose_system_prompt,
@@ -317,7 +321,7 @@ async def run_orchestrator_subagent(
     messages = [
         Message(
             role="system",
-            content=compose_subagent_system(GENERAL_INSTRUCTION, payload),
+            content=compose_subagent_system(SUBAGENT_INSTRUCTION, payload),
         ),
         Message(role="user", content=payload.prompt),
     ]
@@ -343,8 +347,10 @@ async def run_orchestrator_end_delegation(
     summary = payload.get("delegation_summary", "")
     reason = payload.get("exit_reason", "")
     user_prompt = payload.get("user_prompt")
-    # Files the specialist queued via send_file before handing back — delivered
-    # as if the orchestrator had called send_file itself.
+    # Safeguard files: a specialist that produced a file before handing back
+    # (rare — end_delegation is a hand-off, not a result report) passes them
+    # here so they aren't dropped; delivered as if the orchestrator had called
+    # send_file itself.
     handback_files = payload.get("files") or []
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
     async with pool.acquire() as conn:

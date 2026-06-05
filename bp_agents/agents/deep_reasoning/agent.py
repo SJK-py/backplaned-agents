@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 
 from bp_agents.agents.deep_reasoning.plan import run_plan
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
-from bp_agents.common import LocalToolset, make_current_time_tool
+from bp_agents.common import (
+    FILE_DELIVERY_NOTE,
+    SUBAGENT_FILE_NOTE,
+    LocalToolset,
+    make_current_time_tool,
+)
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
@@ -21,17 +26,21 @@ logger = logging.getLogger(__name__)
 
 DEEP_REASONING_AGENT_ID = "deep_reasoning"
 
-_SUBAGENT_SYSTEM = """\
+_SUBAGENT_SYSTEM = f"""\
 You are a careful reasoning specialist. Think step by step, break the \
-problem down, and produce a clear, well-structured answer.\
+problem down, and produce a clear, well-structured answer.
+
+{SUBAGENT_FILE_NOTE}\
 """
-_DELEGATION_SYSTEM = """\
+_DELEGATION_SYSTEM = f"""\
 You specialise in planning and multi-step reasoning. Work the problem \
 methodically with the user. For a genuinely multi-step task — one that \
 needs several distinct sub-tasks carried out and combined — call \
 `plan_mode` with the objective (and optional initial steps) to build and \
 execute an explicit plan. For anything you can answer in one pass, just \
-answer directly.\
+answer directly.
+
+{FILE_DELIVERY_NOTE}\
 """
 
 PLAN_MODE_TOOL = "plan_mode"

@@ -20,14 +20,33 @@ logger = logging.getLogger(__name__)
 
 COMPUTER_USE_AGENT_ID = "computer_use"
 
-_SUBAGENT_SYSTEM = """\
+_FILE_BRIDGE = """\
+The sandbox WORKSPACE and the shared file STASH are separate places. Bridge \
+between them: `storage_to_workspace` fetches a stash file (by name) into the \
+workspace so bash can use it by bare filename; `workspace_to_storage` saves a \
+workspace file (by its bash-relative path) back to the stash and returns its \
+name; and `read_file` reads a stash file's contents directly.\
+"""
+
+_SUBAGENT_SYSTEM = f"""\
 You handle coding and computer tasks. You have a sandbox you drive via \
 the `call_sandbox` tool (bash + file workspace bridges). Run commands to \
-inspect, edit, build, and test; report concrete results.\
+inspect, edit, build, and test; report concrete results.
+
+{_FILE_BRIDGE} Only the stash is visible to the caller, so to return a file \
+`workspace_to_storage` it into the stash and include its reference in your \
+reply (`<name>`, or `persist/<name>` for the persistent stash); the caller \
+can then deliver or use it by reference. You can't send files to the user \
+yourself.\
 """
-_DELEGATION_SYSTEM = """\
+_DELEGATION_SYSTEM = f"""\
 You are the coding/computer specialist. Use the sandbox to get the user's \
-task done end-to-end.\
+task done end-to-end.
+
+{_FILE_BRIDGE} Only the stash is visible to the user, and `send_file` delivers \
+from it — so to hand the user a file produced in the sandbox, \
+`workspace_to_storage` it into the stash, then `send_file` that name and write \
+your reply in the same turn (a file is never sent on its own).\
 """
 
 
