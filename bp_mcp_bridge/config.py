@@ -104,8 +104,11 @@ class StdioPolicy:
     0/0 (the default) means NO uid drop — rootless dev, where the bridge runs
     as its own uid. In prod the bridge runs as root with CAP_SETUID/SETGID/CHOWN
     + no-new-privileges and a non-trivial range, mirroring the sandbox agent.
-    `allowed_launchers` gates the `command` (re-checked from the router's list).
-    `work_root` parents each server's chowned working dir."""
+    The range MUST stay inside 0..65535: under Docker userns-remap / rootless
+    the container maps only a sub-range, so a uid above that fails chown with
+    EINVAL (the bug that moved the sandbox default off 100000). `allowed_launchers`
+    gates the `command` (re-checked from the router's list). `work_root` parents
+    each server's chowned working dir."""
 
     uid_base: int = 0
     uid_max: int = 0

@@ -23,6 +23,7 @@ in-memory swap + one `AgentInfoUpdate` round-trip.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -246,6 +247,19 @@ class ServerBridge:
             try:
                 os.chown(workdir, uid, uid)
             except OSError as exc:
+                # EINVAL (not EPERM) on a high uid is the user-namespace
+                # signature: under Docker userns-remap / rootless the container
+                # maps only a sub-range to uids 0..65535, so a uid OUTSIDE that
+                # is invalid (the old sandbox 100000 default hit this). Point
+                # BP_MCP_BRIDGE_UID_BASE/_MAX at a range your container maps.
+                if exc.errno == errno.EINVAL:
+                    raise RuntimeError(
+                        f"uid {uid} is not valid inside the container's user "
+                        "namespace — under userns-remap/rootless the container "
+                        "maps only a sub-range to uids 0..65535. Set "
+                        "BP_MCP_BRIDGE_UID_BASE/_MAX to a range it maps "
+                        "(the prod default 30000..39999 fits a 65536-wide map)"
+                    ) from exc
                 raise RuntimeError(
                     f"could not chown stdio workdir {workdir} to uid {uid}: {exc}"
                 ) from exc

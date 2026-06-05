@@ -565,6 +565,8 @@ services:
       # per-server uid in this range, with a scoped env + no-new-privileges
       # (mirrors the sandbox agent). Work dirs live under /tmp so the dropped
       # uid can traverse to its own (chowned) dir; allowed launchers = uvx.
+      # Range MUST stay inside 0..65535 — under Docker userns-remap/rootless the
+      # container maps only a sub-range, so a higher uid fails chown (EINVAL).
       BP_MCP_BRIDGE_UID_BASE: "30000"
       BP_MCP_BRIDGE_UID_MAX: "39999"
       BP_MCP_BRIDGE_ALLOWED_LAUNCHERS: uvx

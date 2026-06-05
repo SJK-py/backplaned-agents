@@ -174,6 +174,19 @@ def test_stdio_uid_is_deterministic_in_range(tmp_path: Path) -> None:
     assert b2._stdio_uid() is None
 
 
+def test_stdio_chown_distinguishes_einval_namespace_error():
+    """Source pin: a chown EINVAL (uid outside the container's user-namespace
+    range — the sandbox's old-100000-default bug) yields actionable guidance,
+    not a generic error. The uid range must stay inside 0..65535."""
+    import inspect
+
+    from bp_mcp_bridge.server_bridge import ServerBridge
+
+    src = inspect.getsource(ServerBridge._build_stdio_spawn)
+    assert "errno.EINVAL" in src
+    assert "0..65535" in src
+
+
 def test_stdio_preexec_builds_no_new_privs_and_drop():
     """Source pin: the preexec sets PR_SET_NO_NEW_PRIVS and drops uid (only
     when running as root) — the hardening can't silently regress."""
