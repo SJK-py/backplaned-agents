@@ -121,7 +121,10 @@ def test_stdio_spawn_scopes_env_and_rejects_disallowed_launcher(tmp_path: Path) 
     row = ServerBridgeRow.from_admin_dict({
         "server_id": "minimax", "transport": "stdio", "auth_kind": "none",
         "command": "uvx", "args": ["minimax-mcp"],
-        "env_refs": {"MINIMAX_API_KEY": "env://BP_TEST_MCP_SECRET_VALUE"},
+        "env_refs": {
+            "MINIMAX_API_KEY": "env://BP_TEST_MCP_SECRET_VALUE",  # ref → resolved
+            "INLINE_KEY": "sk-inline-literal",                    # bare → as-is
+        },
     })
     pol = StdioPolicy(
         uid_base=0, uid_max=0, allowed_launchers=("uvx",), work_root=tmp_path,
@@ -131,10 +134,11 @@ def test_stdio_spawn_scopes_env_and_rejects_disallowed_launcher(tmp_path: Path) 
         state_dir=tmp_path, stdio_policy=pol,
     )
     spawn = bridge._build_stdio_spawn()
-    # Only the scoped env: PATH/HOME/LANG + the resolved ref. NOT the bridge's
-    # other env (e.g. an unrelated secret var).
+    # Only the scoped env: PATH/HOME/LANG + the env_refs (refs resolved, inline
+    # literals as-is). NOT the bridge's other env (e.g. an unrelated secret).
     assert spawn.env["MINIMAX_API_KEY"] == "leak-me"
-    assert set(spawn.env) == {"PATH", "HOME", "LANG", "MINIMAX_API_KEY"}
+    assert spawn.env["INLINE_KEY"] == "sk-inline-literal"
+    assert set(spawn.env) == {"PATH", "HOME", "LANG", "MINIMAX_API_KEY", "INLINE_KEY"}
     assert "BP_MCP_BRIDGE_SERVICE_SECRET" not in spawn.env
 
     bad = ServerBridgeRow.from_admin_dict({

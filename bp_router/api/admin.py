@@ -3548,18 +3548,17 @@ class McpServerCreate(BaseModel):
     @field_validator("env_refs")
     @classmethod
     def _env_refs_shape(cls, v: dict[str, str]) -> dict[str, str]:
-        # stdio: ENV_NAME → env://VAR / secret://… — never raw secrets (same
-        # rule as auth_value_ref; the bridge resolves these from its own env).
-        for name, ref in v.items():
+        # stdio: ENV_NAME → a value passed to the subprocess. A value using the
+        # env:// / secret:// scheme is RESOLVED from the bridge's env; any other
+        # value is an inline literal (like a preset's inline `api_key` vs
+        # `api_key_ref`). Only the env var NAME is constrained.
+        for name, value in v.items():
             if not _MCP_ENV_NAME_RE.match(name):
                 raise ValueError(
                     f"env var name {name!r} must match ^[A-Za-z_][A-Za-z0-9_]*$"
                 )
-            if not _MCP_AUTH_VALUE_REF_RE.match(ref):
-                raise ValueError(
-                    f"env_refs[{name!r}] must use env:// or secret:// — raw "
-                    "secrets in the database are refused"
-                )
+            if value == "":
+                raise ValueError(f"env_refs[{name!r}] must not be empty")
         return v
 
     def _check_transport_consistency(self) -> None:

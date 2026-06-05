@@ -270,10 +270,15 @@ class ServerBridge:
             "HOME": str(workdir),
             "LANG": os.environ.get("LANG", "C.UTF-8"),
         }
-        for name, ref in self._row.env_refs.items():
-            resolved = resolve_auth_value(ref)
-            if resolved is not None:
-                env[name] = resolved
+        for name, value in self._row.env_refs.items():
+            # env:// / secret:// → resolve from the bridge's env; anything else
+            # is an inline literal (like a preset's inline api_key).
+            if value.startswith(("env://", "secret://")):
+                resolved = resolve_auth_value(value)
+                if resolved is not None:
+                    env[name] = resolved
+            else:
+                env[name] = value
         return StdioSpawnConfig(env=env, cwd=str(workdir), uid=uid)
 
     async def run(self) -> None:

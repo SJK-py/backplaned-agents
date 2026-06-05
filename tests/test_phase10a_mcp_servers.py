@@ -241,16 +241,31 @@ def test_stdio_transport_consistency_requires_command_and_null_url() -> None:
         )._check_transport_consistency()
 
 
-def test_env_refs_must_be_refs_not_raw_secrets() -> None:
+def test_env_refs_accept_refs_and_inline_literals() -> None:
     pytest.importorskip("fastapi")
     import pydantic
 
     from bp_router.api.admin import McpServerCreate
 
+    # Both a ref and an inline literal are accepted (like a preset's inline
+    # api_key vs api_key_ref).
+    req = McpServerCreate(
+        server_id="srv", transport="stdio", command="uvx",
+        env_refs={"REFD": "env://MINIMAX_API_KEY", "INLINE": "raw-secret-value"},
+    )
+    assert req.env_refs == {
+        "REFD": "env://MINIMAX_API_KEY", "INLINE": "raw-secret-value",
+    }
+    # The env var NAME is still validated; an empty value is rejected.
     with pytest.raises(pydantic.ValidationError):
         McpServerCreate(
             server_id="srv", transport="stdio", command="uvx",
-            env_refs={"K": "raw-secret-value"},  # not env://|secret://
+            env_refs={"bad name": "x"},
+        )
+    with pytest.raises(pydantic.ValidationError):
+        McpServerCreate(
+            server_id="srv", transport="stdio", command="uvx",
+            env_refs={"K": ""},
         )
 
 
