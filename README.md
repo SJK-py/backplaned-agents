@@ -73,7 +73,7 @@ Re-run later and answer "no" to reuse the existing file — volume-baked secrets
 | **stop** | `down` — keeps data volumes |
 | **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Redis, SeaweedFS, LanceDB, agent creds) for a clean slate |
 
-Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember.
+Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
