@@ -484,6 +484,7 @@ class UserView(BaseModel):
     created_at: datetime
     suspended_at: datetime | None = None
     deleted_at: datetime | None = None
+    purged_at: datetime | None = None
     serviced_by: list[str] = []
 
 
@@ -495,6 +496,7 @@ def _user_to_view(row) -> UserView:  # type: ignore[no-untyped-def]
         auth_kind=row.auth_kind,
         created_at=row.created_at,
         deleted_at=row.deleted_at,
+        purged_at=row.purged_at,
         serviced_by=list(row.serviced_by or []),
         suspended_at=row.suspended_at,
     )
@@ -1076,10 +1078,19 @@ async def revoke_user_refresh_tokens(
 async def delete_user(
     target_user_id: str,
     request: Request,
+    purge: bool = False,
     principal: SessionPrincipal = Depends(require_admin),
 ) -> None:
     """Soft-delete a user. Terminal — distinct from suspend, which
     is reversible.
+
+    With `?purge=true`, **permanently erase** the user instead: the
+    soft-delete cascade PLUS hard-deletion of all router content
+    (sessions/tasks/files), PII scrub (`email`/`auth_secret_hash` → NULL),
+    and a `purged_at` stamp. The tombstone row is kept (FK integrity +
+    append-only audit chain); the suite store + per-user LanceDB are erased
+    separately by the suite reconcile loop, which keys off `purged_at`.
+    Audited as `user.purged` (vs `user.deleted`). Idempotent.
 
     Pipeline (inside one transaction):
       1. `users.deleted_at = now()` if NULL. Idempotent: a second
@@ -1108,22 +1119,32 @@ async def delete_user(
     state = request.app.state.bp
     async with state.db_pool.acquire() as conn:
         async with conn.transaction():
-            result = await queries.soft_delete_user(conn, target_user_id)
-            if result is None:
-                raise HTTPException(404, "user not found")
-            if result["was_already_deleted"]:
-                # Idempotent — return 204 without a second audit row.
-                return
-            await queries.append_audit_event(
-                conn, actor_kind="admin", actor_id=principal.user_id,
-                event="user.deleted",
-                target_kind="user", target_id=target_user_id,
-                payload={
-                    "refresh_tokens_deleted": result["refresh_tokens_deleted"],
-                    "reset_tokens_deleted": result["reset_tokens_deleted"],
-                    "serviced_by_sweep_count": result["serviced_by_sweep_count"],
-                },
-            )
+            if purge:
+                # purge_user runs the soft-delete cascade + content purge and
+                # appends its own `user.purged` audit (or no-ops if already
+                # purged). Nothing more to audit here.
+                presult = await queries.purge_user(
+                    conn, target_user_id, actor_id=principal.user_id
+                )
+                if presult is None:
+                    raise HTTPException(404, "user not found")
+            else:
+                result = await queries.soft_delete_user(conn, target_user_id)
+                if result is None:
+                    raise HTTPException(404, "user not found")
+                if result["was_already_deleted"]:
+                    # Idempotent — return 204 without a second audit row.
+                    return
+                await queries.append_audit_event(
+                    conn, actor_kind="admin", actor_id=principal.user_id,
+                    event="user.deleted",
+                    target_kind="user", target_id=target_user_id,
+                    payload={
+                        "refresh_tokens_deleted": result["refresh_tokens_deleted"],
+                        "reset_tokens_deleted": result["reset_tokens_deleted"],
+                        "serviced_by_sweep_count": result["serviced_by_sweep_count"],
+                    },
+                )
     # Drop the cached level so LLM tier-gates (and the
     # `_principal_from_request` cache short-circuit) refuse the user
     # immediately, not after the 10-min TTL. Outside the DB
@@ -1235,6 +1256,36 @@ async def filter_existing_sessions(
             req.session_ids,
         )
     return FilterExistingSessionsResponse(existing=[r["session_id"] for r in rows])
+
+
+class FilterPurgedUsersRequest(BaseModel):
+    user_ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class FilterPurgedUsersResponse(BaseModel):
+    purged: list[str]
+
+
+@router.post("/users/filter-purged", response_model=FilterPurgedUsersResponse)
+async def filter_purged_users(
+    request: Request,
+    req: FilterPurgedUsersRequest,
+    principal: SessionPrincipal = Depends(require_service),
+) -> FilterPurgedUsersResponse:
+    """Return the subset of `user_ids` that have been permanently purged
+    (`purged_at IS NOT NULL`). Lets a suite gateway find users whose router
+    data is gone so it can erase their suite-store rows + per-user LanceDB —
+    without any cross-user delete authority on the router. Read-only."""
+    if not req.user_ids:
+        return FilterPurgedUsersResponse(purged=[])
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id FROM users "
+            "WHERE user_id = ANY($1::text[]) AND purged_at IS NOT NULL",
+            req.user_ids,
+        )
+    return FilterPurgedUsersResponse(purged=[r["user_id"] for r in rows])
 
 
 # ---------------------------------------------------------------------------

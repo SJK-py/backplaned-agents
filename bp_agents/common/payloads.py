@@ -65,6 +65,15 @@ class MemManualAdd(BaseModel):
     kind: str = "personal_info"
 
 
+class PurgeUserData(BaseModel):
+    """memory `purge_user_data` — erase a user's entire per-user LanceDB
+    (memory + KB share the dir). `user_id` is the TARGET to erase, carried in
+    the payload because the task runs as the calling service principal, not as
+    the (already-deleted) target user."""
+
+    user_id: str
+
+
 # -- webapp Knowledge base page (tool:false management modes) ---------------
 
 

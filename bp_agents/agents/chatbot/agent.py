@@ -144,7 +144,8 @@ async def _startup() -> None:
         # rows for sessions the router's closed-session GC has hard-deleted.
         _session_gc_task = asyncio.create_task(
             session_gc_loop(
-                credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
+                credentials=_credentials, pool=_pool, settings=_settings,
+                stop=_stop, dispatcher=agent,
             )
         )
 

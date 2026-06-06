@@ -201,6 +201,20 @@ egress to PyPI (the `agents` net is otherwise router-only) — add an egress pat
 or pre-bake a uv cache if you use stdio servers. SSE/HTTP servers need none of
 this.
 
+## Data retention & user erasure
+
+Closed sessions and permanently-deleted users are reaped by background
+reconcile loops, not at the click. A **permanent user purge** (admin UI
+"Permanently erase user…", or `DELETE /v1/admin/users/{id}?purge=true`)
+hard-deletes the router store + scrubs PII synchronously, then the chatbot's
+reconcile loop erases the suite store and — by spawning a `purge_user_data`
+task on the **memory** agent — the per-user LanceDB (memory + KB share the
+volume). So **the memory agent must be running for vector-store erasure to
+complete**: while it's down, a purged user's LanceDB stays pending and the
+chatbot retries on its next sweep (default daily, `SUITE_SESSION_GC_INTERVAL_S`).
+Nothing is half-erased — the suite rows are dropped only after the LanceDB
+erase succeeds.
+
 ## Sandbox isolation (v1 caveat)
 
 v1 uses the **shared-container / per-uid** model: the sandbox runs bash

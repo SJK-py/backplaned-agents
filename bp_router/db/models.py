@@ -42,6 +42,12 @@ class UserRow(_Row):
     # row stays in the table so `actor_id` / `user_id` FK
     # references from audit and task history don't dangle.
     deleted_at: datetime | None = None
+    # Permanent-erasure marker (GDPR). Set by `purge_user` AFTER `deleted_at`:
+    # the user's content is hard-deleted, PII (`email`/`auth_secret_hash`) is
+    # scrubbed, and this stamp is the durable signal the suite reconcile loop
+    # keys off to erase the user's suite rows + per-user LanceDB. The tombstone
+    # row itself is kept for FK integrity + the append-only audit chain.
+    purged_at: datetime | None = None
     # F8: list of service-principal user_ids authorised to mint
     # credentials (refresh tokens, password-reset tokens) on this
     # user's behalf. Each entry MUST point at a user with

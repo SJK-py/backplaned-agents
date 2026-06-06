@@ -1464,6 +1464,85 @@ async def soft_delete_user(
     }
 
 
+async def purge_user(
+    conn: asyncpg.Connection, user_id: str, *, actor_id: str | None
+) -> dict[str, Any] | None:
+    """Permanent delete (GDPR erasure), router side. Runs INSIDE a caller
+    transaction. Returns per-step counts, or None if the user doesn't exist.
+
+      1. `soft_delete_user` cascade (deleted_at, tokens, serviced_by sweep,
+         file-expiry cap) — idempotent.
+      2. Hard-delete every session via `purge_session` (tasks, task events,
+         file-name directory; `files` detached for the reclaim sweep).
+      3. Free the rest of the user's named files: drop ALL `file_names` (incl.
+         `persist/`) and force `files.expires_at = now()` so the blob GC reaps
+         the bytes on its next pass.
+      4. **Scrub PII** on the kept tombstone row: `email` / `auth_secret_hash`
+         → NULL (frees the UNIQUE email; login becomes impossible) and stamp
+         `purged_at`. The row stays for FK integrity + the append-only audit
+         chain; `user_id` is deliberately retained.
+      5. Append a `user.purged` audit event (retains `target_id = user_id`).
+
+    The suite store (conversation history, config) and per-user LanceDB are
+    erased separately by the suite reconcile loop, which keys off `purged_at`.
+    """
+    existing = await conn.fetchrow(
+        "SELECT purged_at FROM users WHERE user_id = $1", user_id
+    )
+    if existing is None:
+        return None
+    if existing["purged_at"] is not None:
+        # Idempotent — already erased; don't re-audit or re-scan.
+        return {"was_already_purged": True}
+
+    base = await soft_delete_user(conn, user_id)
+    if base is None:  # pragma: no cover — re-checked above
+        return None
+
+    scope = Scope.user(conn, user_id)
+    session_rows = await conn.fetch(
+        "SELECT session_id FROM sessions WHERE user_id = $1", user_id
+    )
+    sessions_purged = 0
+    for r in session_rows:
+        # Cancel/close is moot here — the account is being erased; tasks are
+        # deleted wholesale by purge_session.
+        if await scope.purge_session(r["session_id"]):
+            sessions_purged += 1
+
+    names_status = await conn.execute(
+        "DELETE FROM file_names WHERE user_id = $1", user_id
+    )
+    await conn.execute(
+        "UPDATE files SET expires_at = now() WHERE user_id = $1", user_id
+    )
+    await conn.execute(
+        "UPDATE users SET email = NULL, auth_secret_hash = NULL, "
+        "purged_at = now() WHERE user_id = $1",
+        user_id,
+    )
+    try:
+        file_names_deleted = int(names_status.rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        file_names_deleted = 0
+
+    result = {
+        **base,
+        "sessions_purged": sessions_purged,
+        "file_names_deleted": file_names_deleted,
+    }
+    await append_audit_event(
+        conn,
+        actor_kind="user",
+        actor_id=actor_id,
+        event="user.purged",
+        target_kind="user",
+        target_id=user_id,
+        payload=result,
+    )
+    return result
+
+
 async def get_agent(
     conn: asyncpg.Connection, agent_id: str
 ) -> AgentRow | None:
