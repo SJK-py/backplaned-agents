@@ -3,7 +3,7 @@
 [![CI](https://github.com/SJK-py/backplaned-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/SJK-py/backplaned-agents/actions/workflows/ci.yml)
 
 <p align="center">
-  <img src="docs/assets/overview.png" alt="Backplaned-Agents overview — the Backplaned platform (typed task protocol, first-class delegation, provider-agnostic LLM service, router-managed file store, deny-by-default ACL firewall, multi-tenant identity, live observability, MCP servers, admin web UI) and the multi-user assistant suite (orchestrator + deep_reasoning / research / computer_use specialists, knowledge base, conversational sessions, scheduled tasks, MCP servers) across Telegram / KakaoTalk / web app, plus the Docker production-deployment flow." width="960">
+  <img src="docs/assets/overview.jpg" alt="Backplaned-Agents overview — the Backplaned platform (typed task protocol, first-class delegation, provider-agnostic LLM service, router-managed file store, deny-by-default ACL firewall, multi-tenant identity, live observability, MCP servers, admin web UI) and the multi-user assistant suite (orchestrator + deep_reasoning / research / computer_use specialists, knowledge base, conversational sessions, scheduled tasks, MCP servers) across Telegram / KakaoTalk / web app, plus the Docker production-deployment flow." width="960">
 </p>
 
 **A multi-user personal-assistant suite — a single orchestrator that reasons, researches, runs code, and remembers — built on the [Backplaned](./docs/overview.md) agent platform.**
