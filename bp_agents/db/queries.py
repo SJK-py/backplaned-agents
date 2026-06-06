@@ -79,6 +79,23 @@ async def list_session_info_for_user(
     return [SessionInfoRow.model_validate(dict(r)) for r in rows]
 
 
+async def list_old_session_ids(
+    conn: asyncpg.Connection, *, before: datetime, limit: int
+) -> list[str]:
+    """Session ids whose `session_info` was created before `before`, oldest
+    first. A cheap pre-filter for the suite session-GC reconcile: a session
+    closed past the retention window must have been created before it, so this
+    bounds the set before the router existence check decides which to reap.
+    Global (all users) — the GC is a deployment-wide maintenance sweep."""
+    rows = await conn.fetch(
+        "SELECT session_id FROM session_info WHERE created_at < $1 "
+        "ORDER BY created_at ASC LIMIT $2",
+        before,
+        limit,
+    )
+    return [r["session_id"] for r in rows]
+
+
 async def create_session_info(
     conn: asyncpg.Connection,
     *,

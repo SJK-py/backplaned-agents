@@ -215,6 +215,15 @@ class SuiteSettings(BaseSettings):
     """Period of the background GC sweep over per-user fact graphs (the
     decay path keeps surfaced facts alive, so a daily sweep suffices)."""
 
+    session_gc_retention_days: int = Field(default=90, ge=0)
+    """Suite-side conversation-history retention. The reconcile sweep purges
+    `session_history`/`session_info`/`cron_jobs` for sessions the router has
+    already hard-deleted (its closed-session GC, keyed on the SAME default).
+    Only sessions older than this (by `created_at`) are even considered, so a
+    live session is never probed. 0 disables the suite reaper."""
+    session_gc_interval_s: float = Field(default=86_400.0, gt=0)
+    """Period of the suite session-GC reconcile sweep (daily by default)."""
+
     # ------------------------------------------------------------------
     # sandbox (shared container, per-uid / per-user workspace)
     # ------------------------------------------------------------------

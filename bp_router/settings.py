@@ -305,6 +305,14 @@ class Settings(BaseSettings):
     3 hops. The hard cap (128) protects the `LIMIT` on the cycle-
     detection query in `Scope.list_delegation_destinations`."""
 
+    closed_session_retention_days: int = 90
+    """How long a **closed** session is kept before the background
+    `session_gc_loop` hard-deletes it and its router-side data (tasks, task
+    events, file-name directory; `files` rows are detached for the reclaim
+    sweep). 0 disables closed-session GC. The suite store (conversation
+    history) is reaped separately by the suite's reconcile loop, which only
+    purges sessions this GC has already removed."""
+
     # ------------------------------------------------------------------
     # Observability
     # ------------------------------------------------------------------
