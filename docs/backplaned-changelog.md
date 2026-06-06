@@ -18,6 +18,70 @@
 
 ---
 
+## 2026-06-06
+
+> Platform (`bp_router` / `bp_admin`) surface of suite work whose executor
+> halves live in `bp_agents` (not tracked here): the closed-session /
+> permanent-user GC reapers and the admin metrics panel.
+
+### Added — permanent user purge (GDPR erasure)
+
+- **What:** `DELETE /v1/admin/users/{id}` gains `?purge=true`, routing to new
+  `queries.purge_user`: the `soft_delete_user` cascade + hard-delete of all
+  router-side content (every session via `purge_session`, all `file_names`,
+  forced file expiry), a PII scrub (`users.email` / `auth_secret_hash` → NULL),
+  and a `users.purged_at` stamp (**migration 0005**; `UserRow` + `UserView`
+  carry the field). The row is kept as a tombstone — 8 `ON UPDATE CASCADE` FKs
+  + the append-only audit chain forbid a clean `DELETE` — and the purge is
+  audited as `user.purged`, retaining `user_id`. Idempotent (re-purge is a
+  no-op). New `POST /v1/admin/users/filter-purged` (`require_service`) returns
+  which of a batch of user_ids are purged.
+- **What (`bp_admin`):** the user detail page gains a danger-zone
+  "Permanently erase user…" action with a type-`ERASE`-to-confirm guard (shown
+  only when not already purged) and a "purged" badge.
+- **Why:** right-to-erasure. The suite store + per-user LanceDB are erased by a
+  suite-side reconcile loop keyed off `purged_at` (suite code, not tracked here)
+  — so the router holds the marker + the read-only `filter-purged` probe, never
+  a cross-store delete from the suite.
+
+### Added — closed-session GC + session-existence probe
+
+- **What:** `tasks.session_gc_loop` also hard-deletes sessions closed past
+  `closed_session_retention_days` (new `Settings` field, default 90) with no
+  live tasks, one transaction per session via `purge_session` (new
+  `_gc_closed_sessions`; audited `session.purged`). New
+  `POST /v1/admin/sessions/filter-existing` (`require_service`) returns which
+  session_ids still exist.
+- **Why:** bound the unbounded growth of closed sessions, and let the suite
+  reconcile its own per-session rows for sessions the router has already
+  removed — without holding any cross-user delete authority on the router.
+
+### Added — LLM upstream-error metric + admin metrics panel
+
+- **What:** new `router_llm_errors_total{provider, error_code}` counter,
+  incremented at the LLM failure boundary (`llm/service.py`) on every failed
+  adapter call (unary `_call_with_fallback` + stream-setup). New
+  `observability/metrics.snapshot_summary()` (curated JSON read of the
+  in-process registry) behind `GET /v1/admin/metrics/summary` (`require_admin`).
+  `bp_admin`'s dashboard renders an auto-refreshing "Router metrics" panel
+  (LLM errors, chain-exhaustion, calls, tokens, active tasks, redis health).
+- **Why:** `router_llm_calls_total` only counts successful responses, so
+  upstream errors were only inferable from the fallback counters; this names
+  them directly and surfaces them at a glance. (`router_llm_cost_microusd_total`
+  is left as plumbing — no adapter populates `cost_microusd`, so the dashboard
+  deliberately has no cost card.)
+
+### Changed — quiet routine admin polls in the access log
+
+- **What:** `/v1/admin/mcp-servers` and `/v1/admin/metrics` are added to the
+  default `access_log_quiet_paths` (`Settings`), so the admin UI's ~30s polls'
+  successful GETs are dropped by `_AccessLogQuietFilter` (errors still log;
+  prefix-matched, so the per-server detail GET and `/metrics/summary` are
+  covered).
+- **Why:** stop routine poll traffic flooding `uvicorn.access`.
+
+---
+
 ## 2026-06-05
 
 > The MCP bridge runtime itself ships as a NEW package (`bp_mcp_bridge`) and is
