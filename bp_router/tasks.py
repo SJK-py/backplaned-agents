@@ -1973,19 +1973,82 @@ async def session_gc_loop(
     interval_s: float = 3_600.0,
     retention_days: int = 30,
 ) -> None:
-    """Drop ephemeral admin-test sessions older than `retention_days`
-    that have no remaining tasks. Conservative — never touches user
-    sessions or sessions whose tasks are still around."""
+    """Background session GC. Two sweeps per cycle:
+
+      1. Ephemeral **admin-test** sessions older than `retention_days` with
+         no remaining tasks (a cheap raw delete — they carry no FK dependents).
+      2. **Closed user sessions** past `settings.closed_session_retention_days`
+         with no live tasks — hard-deleted via `purge_session` (tasks, task
+         events, file-name directory; `files` detached for the reclaim sweep).
+         The suite store is reaped separately by the suite reconcile loop.
+
+    Conservative throughout — never touches an open session or one whose tasks
+    are still in flight."""
+    closed_retention_days = state.settings.closed_session_retention_days  # type: ignore[attr-defined]
     while True:
         try:
             await asyncio.sleep(interval_s)
             await _gc_admin_test_sessions(state, retention_days=retention_days)
+            if closed_retention_days > 0:
+                await _gc_closed_sessions(
+                    state, retention_days=closed_retention_days
+                )
         except asyncio.CancelledError:
             return
         except Exception:  # noqa: BLE001
             logger.exception(
                 "session_gc_failed", extra={"event": "session_gc_failed"}
             )
+
+
+async def _gc_closed_sessions(
+    state: AppState, *, retention_days: int, batch: int = 200
+) -> int:
+    """Hard-delete sessions closed longer than `retention_days` that have no
+    live tasks, one transaction per session via `purge_session` (so files
+    detach + audit is appended). Batched so a backlog drains over several
+    cycles rather than one giant transaction."""
+    pool = state.db_pool  # type: ignore[attr-defined]
+    cutoff = _now() - timedelta(days=retention_days)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.session_id, s.user_id
+            FROM sessions s
+            WHERE s.closed_at IS NOT NULL
+              AND s.closed_at < $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM tasks t
+                  WHERE t.session_id = s.session_id
+                    AND t.state IN ('QUEUED', 'RUNNING', 'WAITING_CHILDREN')
+              )
+            ORDER BY s.closed_at
+            LIMIT $2
+            """,
+            cutoff,
+            batch,
+        )
+    purged = 0
+    for r in rows:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                scope = queries.Scope.user(conn, r["user_id"])
+                if await scope.purge_session(r["session_id"]):
+                    await queries.append_audit_event(
+                        conn,
+                        actor_kind="system",
+                        actor_id="session_gc",
+                        event="session.purged",
+                        target_kind="session",
+                        target_id=r["session_id"],
+                    )
+                    purged += 1
+    if purged:
+        logger.info(
+            "closed_sessions_gc",
+            extra={"event": "closed_sessions_gc", "purged": purged},
+        )
+    return purged
 
 
 async def _gc_admin_test_sessions(

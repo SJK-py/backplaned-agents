@@ -1200,6 +1200,43 @@ async def serviced_sessions(
     return out
 
 
+class FilterExistingSessionsRequest(BaseModel):
+    session_ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class FilterExistingSessionsResponse(BaseModel):
+    existing: list[str]
+
+
+@router.post(
+    "/sessions/filter-existing", response_model=FilterExistingSessionsResponse
+)
+async def filter_existing_sessions(
+    request: Request,
+    req: FilterExistingSessionsRequest,
+    principal: SessionPrincipal = Depends(require_service),
+) -> FilterExistingSessionsResponse:
+    """Return the subset of `session_ids` that STILL EXIST in `sessions`.
+
+    Lets a suite gateway reap its own session-scoped rows (conversation
+    history) for sessions the router has already hard-deleted via the
+    closed-session GC — without holding any cross-user purge authority. It
+    only ever deletes its OWN store, and only for sessions the router no
+    longer has. Existence is **global** (not serviced-scoped): the caller
+    supplies ids it already owns, and a serviced-scoped check would mis-report
+    a non-serviced user's live session as gone and wrongly trigger a
+    suite-side purge."""
+    if not req.session_ids:
+        return FilterExistingSessionsResponse(existing=[])
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT session_id FROM sessions WHERE session_id = ANY($1::text[])",
+            req.session_ids,
+        )
+    return FilterExistingSessionsResponse(existing=[r["session_id"] for r in rows])
+
+
 # ---------------------------------------------------------------------------
 # F7: pending user registrations — admin approve/reject queue
 # ---------------------------------------------------------------------------

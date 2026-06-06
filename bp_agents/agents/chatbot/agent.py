@@ -28,6 +28,7 @@ from bp_agents.agents.chatbot.kakao_consumer import kakao_consume_loop
 from bp_agents.agents.chatbot.kakao_files import R2FileEgress
 from bp_agents.agents.chatbot.kakao_gateway import KakaoGateway
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
+from bp_agents.agents.chatbot.session_gc import session_gc_loop
 from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
@@ -71,6 +72,7 @@ _telegram: HttpTelegramClient | None = None
 _credentials: HttpChannelCredentials | None = None
 _poll_task: asyncio.Task | None = None
 _approval_task: asyncio.Task | None = None
+_session_gc_task: asyncio.Task | None = None
 _cron_task: asyncio.Task | None = None
 _kakao: HttpKakaoClient | None = None
 _kakao_gateway: KakaoGateway | None = None
@@ -120,7 +122,7 @@ def _http_url() -> str:
 
 @agent.on_startup
 async def _startup() -> None:
-    global _pool, _redis, _telegram, _credentials, _poll_task, _approval_task  # noqa: PLW0603
+    global _pool, _redis, _telegram, _credentials, _poll_task, _approval_task, _session_gc_task  # noqa: PLW0603
     _pool = await open_pool(_settings)
     # Suite Redis (optional): when set, the per-session lock is distributed,
     # so a second channel instance (webapp) can serialize turns with this one.
@@ -135,6 +137,13 @@ async def _startup() -> None:
         )
         _approval_task = asyncio.create_task(
             approval_poll_loop(
+                credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
+            )
+        )
+        # Deployment-wide maintenance (not channel-specific): reap suite-side
+        # rows for sessions the router's closed-session GC has hard-deleted.
+        _session_gc_task = asyncio.create_task(
+            session_gc_loop(
                 credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
             )
         )
@@ -225,7 +234,8 @@ async def _startup() -> None:
 async def _shutdown() -> None:
     _stop.set()
     for t in (
-        _poll_task, _approval_task, _cron_task, _kakao_task, _kakao_approval_task
+        _poll_task, _approval_task, _session_gc_task, _cron_task,
+        _kakao_task, _kakao_approval_task
     ):
         if t is not None:
             t.cancel()

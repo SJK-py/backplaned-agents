@@ -52,6 +52,10 @@ class ChannelCredentials(Protocol):
         self, *, channel: str | None = None, since: datetime | None = None
     ) -> list[ServicedSession]: ...
 
+    async def filter_existing_sessions(
+        self, session_ids: list[str]
+    ) -> set[str]: ...
+
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None
     ) -> str: ...
@@ -245,6 +249,23 @@ class HttpChannelCredentials:
             )
             for r in resp.json()
         ]
+
+    async def filter_existing_sessions(
+        self, session_ids: list[str]
+    ) -> set[str]:
+        """Return the subset of `session_ids` the router still has (global
+        existence check). Used by the suite session-GC reconcile to find
+        sessions the router purged so it can reap their suite-side rows."""
+        if not session_ids:
+            return set()
+        token = await self._service_token()
+        resp = await self._client.post(
+            f"{self._http_url}/v1/admin/sessions/filter-existing",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"session_ids": session_ids},
+        )
+        resp.raise_for_status()
+        return set(resp.json()["existing"])
 
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None
