@@ -36,27 +36,11 @@ A roster of cooperating agents and the conversation machinery around them:
 - **Knowledge base** — per-user documents with hybrid retrieval, semantic chunking, any-file ingest (via `md_converter`), and LLM-generated metadata.
 - **Conversational sessions** — full history per `(session, agent)` thread with **rolling summarization** so context stays bounded without losing the thread.
 - **Scheduled tasks** — DST-aware **cron** reminders and jobs that run on your behalf and ping you when they matter.
+- **MCP servers** — connect external **[Model Context Protocol](https://modelcontextprotocol.io)** servers from the admin UI, and their tools become first-class, **ACL-gated** tools the orchestrator and specialists can call — extending the assistant with third-party capabilities (GitHub, databases, SaaS APIs, …) without writing or redeploying agent code. A supervisor projects each server to one backplane agent (one mode per tool) and reconciles live as the server's tool list changes. See [`docs/design/mcp-bridge-per-server-mode-per-tool.md`](./docs/design/mcp-bridge-per-server-mode-per-tool.md).
 - **Channels** — **Telegram** (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose), **KakaoTalk** (the same commands, via an egress-only pull consumer behind a tiny Cloudflare Worker relay — see [`docs/design/kakao-channel.md`](./docs/design/kakao-channel.md)), and a **web app** (browser channel: login, session management, live-progress chat, settings/cron, file stash).
 - **Helpers** — `config` (change settings in natural language), `history_summarizer`, `md_converter`.
 
 Every task runs as the end user, so all of the above is isolated per person.
-
-## How it fits together
-
-```
-Telegram ─┐                           ┌──────────  Backplaned router  ───────────┐
-KakaoTalk ─┼▶ chatbot (gateway)       │   task lifecycle · delegation · ACL ·    │
- (relay+Q) │   │  injects the turn as │   file store · LLM service · identity    │
-           │   │  a task for the user ┼─▶                                        │
-           ▼   ▼                      └──────────────────────────────────────────┘
-         orchestrator ──delegate──▶ deep_reasoning / research / computer_use
-              │   │                                  │
-              │   └─call──▶ memory · knowledge_base · md_converter
-              ▼                                      ▼
-        rolling summary                        sandbox (bash)
-```
-
-Agents reach the router over WebSocket and the suite's own Postgres + per-user LanceDB directly; the LLM and the file store are always the router's. See [`docs/agent-suite/overview.md`](./docs/agent-suite/overview.md) for the full picture.
 
 ---
 
@@ -89,7 +73,7 @@ Re-run later and answer "no" to reuse the existing file — volume-baked secrets
 | **stop** | `down` — keeps data volumes |
 | **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Redis, SeaweedFS, LanceDB, agent creds) for a clean slate |
 
-Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember.
+Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
