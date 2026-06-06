@@ -79,6 +79,49 @@ async def list_session_info_for_user(
     return [SessionInfoRow.model_validate(dict(r)) for r in rows]
 
 
+async def purge_user_suite_data(
+    conn: asyncpg.Connection, user_id: str
+) -> dict[str, int]:
+    """Erase ALL of a user's suite-side rows on a permanent user purge — the
+    router hard-deletes its own store + scrubs PII, but doesn't reach
+    `bp_suite`. Deletes (FK-free tables, so order is only about resolving
+    `session_history` by the user's sessions before `session_info` goes):
+    `session_history`, `cron_executions`, `cron_jobs`,
+    `suite_platform_mappings`, `session_info`, `user_config`. Run inside a
+    transaction. Returns per-table delete counts. Caller MUST have confirmed
+    (via the router) that the user is purged."""
+    counts: dict[str, int] = {}
+    # session_history has no user_id — resolve via the user's sessions first.
+    status = await conn.execute(
+        "DELETE FROM session_history WHERE session_id IN "
+        "(SELECT session_id FROM session_info WHERE user_id = $1)",
+        user_id,
+    )
+    counts["session_history"] = int(status.rsplit(" ", 1)[-1]) if status else 0
+    for table in (
+        "cron_executions", "cron_jobs", "suite_platform_mappings",
+        "session_info", "user_config",
+    ):
+        status = await conn.execute(
+            f"DELETE FROM {table} WHERE user_id = $1", user_id  # noqa: S608
+        )
+        counts[table] = int(status.rsplit(" ", 1)[-1]) if status else 0
+    return counts
+
+
+async def list_user_config_ids(
+    conn: asyncpg.Connection, *, limit: int
+) -> list[str]:
+    """All user ids the suite holds config for, capped. The user-purge
+    reconcile enumerates these, asks the router which are purged, and erases
+    those. `user_config` is the canonical per-user row; session-scoped rows are
+    additionally covered by the session-GC reconcile."""
+    rows = await conn.fetch(
+        "SELECT user_id FROM user_config ORDER BY user_id LIMIT $1", limit
+    )
+    return [r["user_id"] for r in rows]
+
+
 async def list_old_session_ids(
     conn: asyncpg.Connection, *, before: datetime, limit: int
 ) -> list[str]:

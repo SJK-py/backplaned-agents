@@ -56,6 +56,8 @@ class ChannelCredentials(Protocol):
         self, session_ids: list[str]
     ) -> set[str]: ...
 
+    async def filter_purged_users(self, user_ids: list[str]) -> set[str]: ...
+
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None
     ) -> str: ...
@@ -266,6 +268,20 @@ class HttpChannelCredentials:
         )
         resp.raise_for_status()
         return set(resp.json()["existing"])
+
+    async def filter_purged_users(self, user_ids: list[str]) -> set[str]:
+        """Return the subset of `user_ids` the router has permanently purged.
+        Used by the user-purge reconcile to erase their suite-side rows."""
+        if not user_ids:
+            return set()
+        token = await self._service_token()
+        resp = await self._client.post(
+            f"{self._http_url}/v1/admin/users/filter-purged",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"user_ids": user_ids},
+        )
+        resp.raise_for_status()
+        return set(resp.json()["purged"])
 
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None

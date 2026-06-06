@@ -66,6 +66,40 @@ async def reconcile_closed_sessions(
     return reaped
 
 
+async def reconcile_purged_users(
+    pool: asyncpg.Pool,
+    credentials: ChannelCredentials,
+    *,
+    batch: int = 500,
+) -> int:
+    """One user-purge reconcile pass. Returns the number of users erased
+    suite-side.
+
+    Lists up to `batch` users the suite holds config for, asks the router
+    which are permanently purged, and erases their suite rows
+    (`purge_user_suite_data`). Self-healing and idempotent; holds no router
+    delete authority. (Per-user LanceDB is erased by the memory/KB agents,
+    which own that volume.)
+    """
+    async with pool.acquire() as conn:
+        ids = await queries.list_user_config_ids(conn, limit=batch)
+    if not ids:
+        return 0
+    purged = await credentials.filter_purged_users(ids)
+    erased = 0
+    for uid in purged:
+        async with pool.acquire() as conn, conn.transaction():
+            await queries.purge_user_suite_data(conn, uid)
+        erased += 1
+    if erased:
+        logger.info(
+            "suite_user_gc",
+            extra={"event": "suite_user_gc", "erased": erased,
+                   "considered": len(ids)},
+        )
+    return erased
+
+
 async def session_gc_loop(
     *,
     credentials: ChannelCredentials,
@@ -74,8 +108,9 @@ async def session_gc_loop(
     stop: asyncio.Event,
     interval_s: float | None = None,
 ) -> None:
-    """Periodically reconcile suite-side session data against the router.
-    No-op (returns immediately) when `session_gc_retention_days` is 0."""
+    """Periodically reconcile suite-side data against the router: closed
+    sessions (history) AND permanently purged users (config + remaining
+    rows). No-op (returns immediately) when `session_gc_retention_days` is 0."""
     retention = settings.session_gc_retention_days
     if retention <= 0:
         return
@@ -85,6 +120,7 @@ async def session_gc_loop(
             await reconcile_closed_sessions(
                 pool, credentials, retention_days=retention
             )
+            await reconcile_purged_users(pool, credentials)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "suite_session_gc_failed",
