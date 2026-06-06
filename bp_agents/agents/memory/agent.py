@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -32,6 +33,7 @@ from bp_agents.common.payloads import (
     MemList,
     MemManualAdd,
     MemRetrieve,
+    PurgeUserData,
 )
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -41,6 +43,7 @@ from bp_agents.lance.memory import MemoryStore
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, Message, TaskContext
+from bp_sdk.errors import PermissionDeniedError
 
 if TYPE_CHECKING:
     import asyncpg
@@ -138,7 +141,7 @@ agent = Agent(
             "learned about the user across conversations."
         ),
         groups=["l3"],
-        capabilities=["memory.add", "memory.retrieval"],
+        capabilities=["memory.add", "memory.retrieval", "memory.purge"],
     ),
 )
 
@@ -156,6 +159,23 @@ def _user_lock(user_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _user_locks[user_id] = lock
     return lock
+
+
+def _require_service_caller(ctx: TaskContext) -> None:
+    """Guard for the cross-user `purge_user_data` mode — defence-in-depth on
+    top of the firewall ACL. The mode erases ARBITRARY users' data (the target
+    rides in the payload, not `ctx.user_id`), so refuse unless the task runs as
+    a service principal. `memory_purge_allowed_principal`, when set, pins it to
+    one exact service user_id for maximum restriction."""
+    if ctx.user_level != "service":
+        raise PermissionDeniedError(
+            "purge_user_data requires a service principal"
+        )
+    pinned = _settings.memory_purge_allowed_principal
+    if pinned and ctx.user_id != pinned:
+        raise PermissionDeniedError(
+            "purge_user_data caller is not the allowed service principal"
+        )
 
 
 @agent.on_startup
@@ -651,6 +671,30 @@ async def list_mode(ctx: TaskContext, payload: MemList) -> AgentOutput:
 async def delete_mode(ctx: TaskContext, payload: MemDelete) -> AgentOutput:
     async with _user_lock(ctx.user_id):
         return await run_memory_delete(ctx, payload, settings=_settings)
+
+
+@agent.handler(
+    mode="purge_user_data", tool=False,
+    description="Erase a user's entire per-user LanceDB (memory + KB share the "
+    "dir). Privileged maintenance: service-principal only; the target user_id "
+    "is in the payload.",
+)
+async def purge_user_data_mode(
+    ctx: TaskContext, payload: PurgeUserData
+) -> AgentOutput:
+    _require_service_caller(ctx)
+    target = payload.user_id
+    # Lock the TARGET (not ctx.user_id) against any concurrent GC sweep.
+    async with _user_lock(target):
+        path = user_db_path(_settings.lance_root, target)
+        if path.exists():
+            await asyncio.to_thread(shutil.rmtree, path)
+            logger.info(
+                "memory_purged",
+                extra={"event": "memory_purged", "bp.user_id": target},
+            )
+    # Idempotent: a missing dir is success (already erased / never existed).
+    return text_output(json.dumps({"purged": target}))
 
 
 @agent.handler(

@@ -24,6 +24,10 @@ _RULES: list[tuple[str, str, str, str, str]] = [
     # Memory
     ("allow", "*", "*/assistant.*", "l3/memory.retrieval", "assistant recall"),
     ("allow", "*", "channel/*", "l3/memory.add", "channel post-turn add + webapp Memory page"),
+    # Permanent user-purge: the chatbot's service principal erases a purged
+    # user's per-user LanceDB (memory + KB share the dir). `service`-only at
+    # the firewall; the memory handler re-checks the caller (defence in depth).
+    ("allow", "service", "channel/*", "l3/memory.purge", "chatbot → memory user-purge (service only)"),
     # (Knowledge base: the webapp reaches it via its own `database.*`
     # capability through the `*/database.* -> l3/database.*` rule below — no
     # broad channel grant, so the chatbot can't reach the KB.)

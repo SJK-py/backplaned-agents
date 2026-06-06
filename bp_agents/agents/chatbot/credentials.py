@@ -13,6 +13,8 @@ a minted PER-USER access token.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,6 +24,16 @@ import httpx
 
 from bp_sdk.onboarding import persist_service_token
 from bp_sdk.settings import AgentConfig
+
+
+def _jwt_sub(token: str) -> str:
+    """Read the `sub` (user_id) claim from a JWT WITHOUT verifying — used only
+    to self-identify this channel's own service principal from its own access
+    token, never to authorize anything."""
+    payload_b64 = token.split(".")[1]
+    payload_b64 += "=" * (-len(payload_b64) % 4)  # restore base64url padding
+    claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    return str(claims["sub"])
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +69,8 @@ class ChannelCredentials(Protocol):
     ) -> set[str]: ...
 
     async def filter_purged_users(self, user_ids: list[str]) -> set[str]: ...
+
+    async def open_maintenance_session(self) -> tuple[str, str]: ...
 
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None
@@ -282,6 +296,22 @@ class HttpChannelCredentials:
         )
         resp.raise_for_status()
         return set(resp.json()["purged"])
+
+    async def open_maintenance_session(self) -> tuple[str, str]:
+        """Open a session owned by THIS service principal and return
+        `(service_user_id, session_id)`. The anchor `spawn_root_for_user`
+        requires for service-level maintenance tasks (admit re-validates an
+        open owned session). The service principal's own user_id is the `sub`
+        claim of its access token."""
+        token = await self._service_token()
+        svc_user_id = _jwt_sub(token)
+        resp = await self._client.post(
+            f"{self._http_url}/v1/sessions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"metadata": {"kind": "channel_maintenance"}},
+        )
+        resp.raise_for_status()
+        return svc_user_id, resp.json()["session_id"]
 
     async def open_session(
         self, *, user_id: str, metadata: dict[str, Any] | None = None

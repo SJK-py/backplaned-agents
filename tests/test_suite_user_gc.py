@@ -6,11 +6,17 @@ Gated on `suite_db_url`. (Per-user LanceDB is erased by the memory/KB agents.)
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
-from bp_agents.agents.chatbot.session_gc import reconcile_purged_users
+from bp_agents.agents.chatbot.session_gc import (
+    make_lance_purger,
+    reconcile_purged_users,
+)
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
+from bp_protocol.types import TaskStatus
+from bp_sdk.peers import SpawnRejected
 
 
 class _StubCredentials:
@@ -98,13 +104,102 @@ def test_reconcile_reaps_only_router_purged_users(suite_db_url: str) -> None:
             await _seed_user(pool, "usr_live", "ses_l")
 
             creds = _StubCredentials(purged={"usr_purged"})
-            erased = await reconcile_purged_users(pool, creds)
+            erased = await reconcile_purged_users(
+                pool, creds, purge_lance=_ok_lance,
+            )
             assert erased == 1
             assert set(creds.probed) == {"usr_purged", "usr_live"}
 
             # Purged user's suite data gone; live user's intact.
             assert all(v == 0 for v in (await _counts(pool, "usr_purged", "ses_p")).values())
             assert all(v == 1 for v in (await _counts(pool, "usr_live", "ses_l")).values())
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+class _StubDispatcher:
+    """Mimics Agent.spawn_root_for_user + await_root_result."""
+
+    def __init__(self, *, status=TaskStatus.SUCCEEDED, reject: bool = False) -> None:
+        self._status = status
+        self._reject = reject
+        self.spawns: list[dict] = []
+
+    async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode):
+        if self._reject:
+            raise SpawnRejected("session closed", reason="session_closed")
+        self.spawns.append({
+            "dest": dest, "payload": payload, "user_id": user_id,
+            "session_id": session_id, "mode": mode,
+        })
+        return f"tsk_{len(self.spawns)}"
+
+    async def await_root_result(self, task_id, *, timeout_s=None):
+        return SimpleNamespace(status=self._status)
+
+
+class _StubCreds:
+    def __init__(self) -> None:
+        self.opened = 0
+
+    async def open_maintenance_session(self):
+        self.opened += 1
+        return ("usr_svc", "ses_maint")
+
+
+def test_lance_purger_spawns_memory_task_as_service_principal() -> None:
+    disp = _StubDispatcher(status=TaskStatus.SUCCEEDED)
+    purge = make_lance_purger(disp, _StubCreds())
+    assert asyncio.run(purge("usr_target")) is True
+    s = disp.spawns[0]
+    assert s["dest"] == "memory" and s["mode"] == "purge_user_data"
+    assert s["payload"] == {"user_id": "usr_target"}      # TARGET in payload
+    assert s["user_id"] == "usr_svc" and s["session_id"] == "ses_maint"
+
+
+def test_lance_purger_false_on_failed_result() -> None:
+    disp = _StubDispatcher(status=TaskStatus.FAILED)
+    purge = make_lance_purger(disp, _StubCreds())
+    assert asyncio.run(purge("usr_target")) is False
+
+
+def test_lance_purger_resets_session_on_spawn_reject() -> None:
+    creds = _StubCreds()
+    disp = _StubDispatcher(reject=True)
+    purge = make_lance_purger(disp, creds)
+    assert asyncio.run(purge("usr_target")) is False
+    # Rejection drops the cached anchor → a fresh open on the next attempt.
+    assert asyncio.run(purge("usr_target")) is False
+    assert creds.opened == 2
+
+
+async def _ok_lance(_uid: str) -> bool:
+    return True
+
+
+async def _fail_lance(_uid: str) -> bool:
+    return False
+
+
+def test_reconcile_skips_suite_purge_when_lance_fails(suite_db_url: str) -> None:
+    """Retry-safety: if the LanceDB erase fails, the suite rows are NOT dropped
+    (the user stays in user_config so the next sweep retries)."""
+    async def _drive() -> None:
+        pool = await open_pool(_settings(suite_db_url))
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(_truncate_sql())
+            await _seed_user(pool, "usr_purged", "ses_p")
+            creds = _StubCredentials(purged={"usr_purged"})
+
+            erased = await reconcile_purged_users(
+                pool, creds, purge_lance=_fail_lance,
+            )
+            assert erased == 0
+            # Suite data untouched — retried next cycle.
+            assert all(v == 1 for v in (await _counts(pool, "usr_purged", "ses_p")).values())
         finally:
             await pool.close()
 

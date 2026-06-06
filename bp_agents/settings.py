@@ -224,6 +224,12 @@ class SuiteSettings(BaseSettings):
     session_gc_interval_s: float = Field(default=86_400.0, gt=0)
     """Period of the suite session-GC reconcile sweep (daily by default)."""
 
+    memory_purge_allowed_principal: str | None = None
+    """Optional hard pin for the memory agent's `purge_user_data` guard: when
+    set, only this exact service-principal user_id may invoke the cross-user
+    LanceDB erase (the baseline guard already requires `level=service`). Unset
+    → any service principal the ACL admits is accepted."""
+
     # ------------------------------------------------------------------
     # sandbox (shared container, per-uid / per-user workspace)
     # ------------------------------------------------------------------
