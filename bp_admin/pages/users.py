@@ -395,3 +395,27 @@ async def delete_user(request: Request, user_id: str) -> Response:
         f"/admin/users/{user_id}",
         "user deleted — refresh tokens revoked, serviced_by references swept",
     )
+
+
+@router.post("/{user_id}/purge", response_class=HTMLResponse)
+async def purge_user(request: Request, user_id: str) -> Response:
+    """Permanently erase the user (`DELETE …?purge=true`). Irreversible: hard-
+    deletes all content + scrubs PII, keeping only a tombstone row + the audit
+    record. Idempotent. The suite reconcile loop erases the suite store + (in a
+    follow-up) the per-user LanceDB."""
+    try:
+        await upstream(request).admin_request(
+            "DELETE",
+            f"/users/{user_id}",
+            access_token=access_token(request),
+            params={"purge": "true"},
+        )
+    except UpstreamError as exc:
+        return redirect_with_flash(
+            request, f"/admin/users/{user_id}", detail_message(exc)
+        )
+    return redirect_with_flash(
+        request,
+        f"/admin/users/{user_id}",
+        "user permanently erased — content + PII deleted; tombstone + audit kept",
+    )

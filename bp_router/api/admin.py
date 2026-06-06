@@ -484,6 +484,7 @@ class UserView(BaseModel):
     created_at: datetime
     suspended_at: datetime | None = None
     deleted_at: datetime | None = None
+    purged_at: datetime | None = None
     serviced_by: list[str] = []
 
 
@@ -495,6 +496,7 @@ def _user_to_view(row) -> UserView:  # type: ignore[no-untyped-def]
         auth_kind=row.auth_kind,
         created_at=row.created_at,
         deleted_at=row.deleted_at,
+        purged_at=row.purged_at,
         serviced_by=list(row.serviced_by or []),
         suspended_at=row.suspended_at,
     )
