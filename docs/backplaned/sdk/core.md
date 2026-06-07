@@ -509,6 +509,42 @@ typed errors, progress, cancellation, files, hooks), **caller_agent**
 **gemini_agent** (the full LLM surface + the tool loop above),
 **orchestration_agent** (data- vs control-plane modes).
 
+### 7.1 Root-task injection (gateways)
+
+`ctx.peers.spawn` is **handler-bound**: it always inherits
+`parent_task_id = ctx.task_id`, so it can only create *child* tasks of a
+running one. A **channel / gateway** agent has no surrounding task when a user
+message arrives — it must inject a **parentless root task carrying the END
+USER's** `(user_id, session_id)`, not its own service identity. Two `Agent`
+methods (not on `ctx`, since there is no `ctx`) do this over the agent's own
+WS connection:
+
+```python
+task_id = await agent.spawn_root_for_user(
+    destination_agent_id, payload, *, user_id, session_id,
+    mode=None, idempotency_key=None, deadline=None, ack_timeout_s=None,
+) -> str
+result = await agent.await_root_result(
+    task_id, *, timeout_s=None, on_progress=None,
+) -> ResultFrame
+```
+
+- The frame is **parentless**, so the router admits it on the root-task path
+  (lineage / spawn-depth checks are skipped) and evaluates the ACL at the
+  **session principal's** level (derived from `user_id`), not the gateway's
+  `service` level. The router re-validates that `(user_id, session_id)` is a
+  real, **open, owned** session.
+- **Admit/await split:** `spawn_root_for_user` returns the `task_id` as soon
+  as the router acks (before the possibly-long result), so the caller can
+  record it (e.g. to cancel later) and then `await_root_result`.
+- Raises `AckTimeout` (no ack), `SpawnRejected` (ACL / schema / quota /
+  unknown session or destination), and `ResultTimeout` from
+  `await_root_result`. `on_progress` drains `ProgressFrame`s as they arrive.
+- The same pair also serves **service-level maintenance** tasks: spawn as the
+  gateway's *own* service principal (its `user_id` + a session it opened) to
+  reach an ACL-gated `tool:false` mode on another agent, carrying the real
+  target in the payload — used e.g. to erase a purged user's per-user store.
+
 ## 8. Lifecycle
 
 ```
