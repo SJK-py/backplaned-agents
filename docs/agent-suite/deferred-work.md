@@ -6,7 +6,7 @@
 > leaner form than the design docs' full spec, or not yet wired, and is
 > safe to revisit later. Each entry states **why** it was deferred. This
 > is suite-scoped; platform-code modifications are tracked separately in
-> [`../backplaned-changelog.md`](../backplaned-changelog.md).
+> [`../backplaned-changelog.md`](../backplaned/changelog.md).
 >
 > Status legend: **deferred** (planned, not built) · **lean** (built, but
 > simpler than spec) · **unverified** (built, not yet exercised end-to-end).

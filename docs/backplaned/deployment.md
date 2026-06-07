@@ -5,9 +5,9 @@
 > the **agent suite** (chatbot, sandbox, orchestrator, …) lives in its
 > own repo. This doc is the cross-cutting topology and the **wire-up
 > contract** between the two. Concrete artifacts in this repo:
-> [`Dockerfile`](../Dockerfile), [`docker-compose.prod.yml`](../docker-compose.prod.yml),
-> [`deploy/Caddyfile`](../deploy/Caddyfile),
-> [`deploy/postgres-init/`](../deploy/postgres-init/).
+> [`Dockerfile`](../../Dockerfile), [`docker-compose.prod.yml`](../../docker-compose.prod.yml),
+> [`deploy/Caddyfile`](../../deploy/Caddyfile),
+> [`deploy/postgres-init/`](../../deploy/postgres-init).
 
 ## 1. Topology
 
@@ -31,13 +31,13 @@
 
 Two boundaries to keep straight:
 
-- **Two Postgres databases, one server** — `bp_router` (router: users/tasks/agents/files/acl/audit) and `bp_suite` (suite: session_info/session_history/user_config/cron/suite_platform_mappings). Different owners, different credentials. ([`agent-suite/data-model.md`](./agent-suite/data-model.md))
+- **Two Postgres databases, one server** — `bp_router` (router: users/tasks/agents/files/acl/audit) and `bp_suite` (suite: session_info/session_history/user_config/cron/suite_platform_mappings). Different owners, different credentials. ([`agent-suite/data-model.md`](../agent-suite/data-model.md))
 - **The router is the only holder of provider/S3/JWT secrets.** Agents call `ctx.llm` and the router's file endpoints; they never reach providers, S3, or the router DB directly.
 
 ## 2. Boxes
 
 ### Edge — `caddy`
-TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/SeaweedFS are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
+TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/SeaweedFS are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
 
 | Env var | Serves | Default |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (
 | `ROUTER_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | seed the first admin (idempotent) |
 | provider key secrets (e.g. `GEMINI_API_KEY`) | resolved by preset `api_key_ref` |
 
-LLM **presets** are rows in the router's `llm_presets` table, admin-managed via `/admin`; a preset's `api_key_ref` (e.g. `env://GEMINI_API_KEY`) resolves to the env secrets above. The table is auto-seeded on first boot from a commentable JSONC catalogue (`bp_router/llm/presets_catalog.jsonc`, or `ROUTER_LLM_PRESET_CATALOG_PATH` to replace it wholesale). To **add or override** a few presets without copying the whole built-in list, drop a `deploy/presets.custom.jsonc` (copy the `.example`; gitignored, mounted into the router): it's **merged over** the bundled catalogue at seed time and a custom entry **wins on a name collision** (so e.g. repointing `default` to a local Ollama model is one entry). All of this is **seed-time only** — once the table is populated, edit presets in `/admin`; the files don't retroactively change a seeded deployment. Build an image from this repo ([`Dockerfile`](../Dockerfile)).
+LLM **presets** are rows in the router's `llm_presets` table, admin-managed via `/admin`; a preset's `api_key_ref` (e.g. `env://GEMINI_API_KEY`) resolves to the env secrets above. The table is auto-seeded on first boot from a commentable JSONC catalogue (`bp_router/llm/presets_catalog.jsonc`, or `ROUTER_LLM_PRESET_CATALOG_PATH` to replace it wholesale). To **add or override** a few presets without copying the whole built-in list, drop a `deploy/presets.custom.jsonc` (copy the `.example`; gitignored, mounted into the router): it's **merged over** the bundled catalogue at seed time and a custom entry **wins on a name collision** (so e.g. repointing `default` to a local Ollama model is one entry). All of this is **seed-time only** — once the table is populated, edit presets in `/admin`; the files don't retroactively change a seeded deployment. Build an image from this repo ([`Dockerfile`](../../Dockerfile)).
 
 **Preset credentials — `api_key_ref` vs `api_key`.** A preset authenticates one of two ways, in the catalog/overlay or the admin form:
 
@@ -72,7 +72,7 @@ LLM **presets** are rows in the router's `llm_presets` table, admin-managed via 
 
 
 ### docker 2 — Postgres 16
-Hosts both `bp_router` and `bp_suite`. The router DB is migrated by this repo's alembic; the suite DB by the suite repo's migrations. Persistent volume + backups. Reachable by the router (router DB) and the suite session-manager/agents (suite DB) — **never by the sandbox**. The second DB is created on first init by [`deploy/postgres-init/`](../deploy/postgres-init/).
+Hosts both `bp_router` and `bp_suite`. The router DB is migrated by this repo's alembic; the suite DB by the suite repo's migrations. Persistent volume + backups. Reachable by the router (router DB) and the suite session-manager/agents (suite DB) — **never by the sandbox**. The second DB is created on first init by [`deploy/postgres-init/`](../../deploy/postgres-init).
 
 ### docker 3 — Redis 7
 Shared: router (revocation/rate-limits) + suite (the per-session FIFO queue when the channel is multi-worker; cron coordination). One instance.
@@ -81,7 +81,7 @@ Shared: router (revocation/rate-limits) + suite (the per-session FIFO queue when
 The router's blob backend (`file_store=s3`, `endpoint_url=http://seaweedfs:8333`). Persistent volume, **internal-only**. Downloads default to **router-proxy** mode (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`), which streams bytes through the router and keeps SeaweedFS off the public net. This is required for the bundled topology: every download consumer (agents, chatbot, webapp backend) is in-cluster and can't resolve the store host, so a presigned redirect to `seaweedfs:8333` would fail. Only switch to **302-presigned** (`ROUTER_FILE_DOWNLOAD_PRESIGNED=true`) if you front the store on a hostname download clients can actually reach and want to offload bytes from the router. Only the router holds the S3 keys. *(Replaced rustfs beta, whose multipart path was broken — `create_multipart_upload` succeeded but the immediate `upload_part` returned NoSuchUpload, failing any upload bigger than one PUT. SeaweedFS has reliable S3 multipart. Pin the tag + confirm flags against upstream; MinIO is a drop-in.)*
 
 ### docker 5 — chatbot (channel; webapp in v2)
-The gateway ([`agent-suite/channel.md`](./agent-suite/channel.md)). Bootstraps **two identities at onboarding** from a single invitation flagged `provisions_service_user`: its agent JWT *and* the `usr_service_{agent_id}` service refresh token ([`security.md` §3.2](./security.md)). Holds the Telegram bot token + suite-DB creds. Stateful (`state_dir` volume: credentials.json + Telegram offset); runs the cron scheduler (v1). Needs router WS + router HTTP (token mint, `/v1/files/names`) + suite DB + Redis + Telegram egress.
+The gateway ([`agent-suite/channel.md`](../agent-suite/channel.md)). Bootstraps **two identities at onboarding** from a single invitation flagged `provisions_service_user`: its agent JWT *and* the `usr_service_{agent_id}` service refresh token ([`security.md` §3.2](./security.md)). Holds the Telegram bot token + suite-DB creds. Stateful (`state_dir` volume: credentials.json + Telegram offset); runs the cron scheduler (v1). Needs router WS + router HTTP (token mint, `/v1/files/names`) + suite DB + Redis + Telegram egress.
 
 ### docker 6 — sandbox (untrusted code)
 The one box running untrusted user code — isolate hard: a sandboxed runtime (**gVisor/Kata**), `no-new-privileges`, seccomp, read-only rootfs + a writable per-user workspace, CPU/mem/pids limits, **no DB/Redis/S3/provider access**, egress off or tightly allowlisted. It reaches **only the router WS**. Files move via the router (`stash_to_workspace`/`workspace_to_stash`), never direct S3. Prefer **per-user/per-task ephemeral sub-containers** over one shared container (a single container shares a kernel across users).
@@ -169,7 +169,7 @@ The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443` (plus
 the optional webapp port below). It terminates TLS, proxies the two public
 hostnames, and transparently upgrades the agent WebSocket on `/v1/agent`. The
 router never terminates TLS; Postgres / Redis / SeaweedFS are never proxied. Two
-`${...}`-interpolated hostnames drive [`deploy/Caddyfile`](../deploy/Caddyfile),
+`${...}`-interpolated hostnames drive [`deploy/Caddyfile`](../../deploy/Caddyfile),
 set by `scripts/prod.sh` (or by hand in `deploy/.env.prod`):
 
 - **`PUBLIC_DOMAIN`** — router + admin UI (`/v1/*`, `/admin/*`, `/healthz`,

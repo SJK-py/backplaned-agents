@@ -1,6 +1,6 @@
 """bp_router.security.jwt — JWT issuance, verification, and FastAPI deps.
 
-See `docs/security.md` §3-5.
+See `docs/backplaned/security.md` §3-5.
 """
 
 from __future__ import annotations
@@ -606,7 +606,7 @@ async def is_jti_revoked(redis: Any, jti: str) -> bool:
     path with it. The downside is that a known-revoked JTI passes
     through during the outage. Operators see the degraded mode via
     the `router_redis_health` gauge / `router_redis_fallback_total`
-    counter (subsystem="jwt"); see `docs/security.md` for the
+    counter (subsystem="jwt"); see `docs/backplaned/security.md` for the
     fail-open vs fail-closed discussion.
 
     Replaces the previous "load every revoked jti into a set then

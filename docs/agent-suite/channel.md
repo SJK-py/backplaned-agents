@@ -33,7 +33,7 @@ chat_id ──(suite_platform_mappings)──▶ user_id + the chat's own sessio
 | Identity | Purpose |
 | --- | --- |
 | **Agent JWT** (handled by `bp_sdk`) | the channel-as-agent WS identity, for frame routing + task injection |
-| **Service principal** `usr_service_{agent_id}` | the channel's own `level=service` user, **provisioned at onboarding** — an invitation flagged `provisions_service_user` makes `/v1/onboard` create the user and return its refresh token on the `OnboardResponse`, which `bp_sdk` persists into `credentials.json` and rotates via `/v1/auth/refresh`. With its `serviced_by` rights it admin-mints per-user refresh tokens (`POST /v1/admin/users/{id}/refresh-tokens`) and password-reset tokens. See [`../security.md` §3.2](../security.md). |
+| **Service principal** `usr_service_{agent_id}` | the channel's own `level=service` user, **provisioned at onboarding** — an invitation flagged `provisions_service_user` makes `/v1/onboard` create the user and return its refresh token on the `OnboardResponse`, which `bp_sdk` persists into `credentials.json` and rotates via `/v1/auth/refresh`. With its `serviced_by` rights it admin-mints per-user refresh tokens (`POST /v1/admin/users/{id}/refresh-tokens`) and password-reset tokens. See [`../security.md` §3.2](../backplaned/security.md). |
 | **Per-user refresh chains** (a token cache) | one per mapped user, lazy, bootstrapped via the service-mint. Used for per-user **HTTP** ops (incl. file I/O, §7) |
 
 **Split of mechanisms:** task **injection** rides the **agent WS** (§4); session **lifecycle** (`/new` open-session, `/stop` cancel, `/password` mint) **and file I/O** (§7) ride the **per-user HTTP token**.

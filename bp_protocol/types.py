@@ -1,7 +1,7 @@
 """bp_protocol.types — Common Pydantic models shared by router and SDK.
 
 These models are protocol-stable: changes here are wire-breaking.
-See `docs/sdk/core.md` and `docs/sdk/services.md` for the
+See `docs/backplaned/sdk/core.md` and `docs/backplaned/sdk/services.md` for the
 agent-side API surface that consumes them.
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 AGENT_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
-"""Identifier grammar — see `docs/acl.md` §10."""
+"""Identifier grammar — see `docs/backplaned/acl.md` §10."""
 
 GROUP_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_:.\-]{0,63}$")
 CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
@@ -25,7 +25,7 @@ CAPABILITY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 
 
 class TaskState(StrEnum):
-    """Task state machine states. See `docs/router/state.md` §1."""
+    """Task state machine states. See `docs/backplaned/router/state.md` §1."""
 
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
@@ -75,7 +75,7 @@ class AgentInfo(BaseModel):
     """Identity an agent publishes to the router on registration.
 
     `groups` and `capabilities` are the only fields the ACL evaluator
-    matches against (`docs/acl.md`). `accepts_schema` /
+    matches against (`docs/backplaned/acl.md`). `accepts_schema` /
     `produces_schema` are JSON Schema fragments validated at the
     boundary before any handler runs.
 
@@ -91,7 +91,7 @@ class AgentInfo(BaseModel):
     """Human-readable, used in catalog entries."""
 
     groups: list[str] = Field(default_factory=list)
-    """Group memberships. See `docs/acl.md` §10 for the grammar."""
+    """Group memberships. See `docs/backplaned/acl.md` §10 for the grammar."""
 
     capabilities: list[str] = Field(default_factory=list)
     """Capabilities this agent provides. Dotted lowercase names."""
@@ -162,7 +162,7 @@ class AgentInfo(BaseModel):
     def _agent_id_grammar(cls, v: str) -> str:
         if not AGENT_ID_PATTERN.match(v):
             raise ValueError(
-                "agent_id must match [A-Za-z_][A-Za-z0-9_-]{0,63} — see docs/acl.md §10"
+                "agent_id must match [A-Za-z_][A-Za-z0-9_-]{0,63} — see docs/backplaned/acl.md §10"
             )
         return v
 
@@ -196,7 +196,7 @@ class AgentInfo(BaseModel):
         for g in v:
             if not GROUP_NAME_PATTERN.match(g):
                 raise ValueError(
-                    f"group {g!r} must match [a-z][a-z0-9_:.-]{{0,63}} — see docs/acl.md §10"
+                    f"group {g!r} must match [a-z][a-z0-9_:.-]{{0,63}} — see docs/backplaned/acl.md §10"
                 )
         return v
 
@@ -206,7 +206,7 @@ class AgentInfo(BaseModel):
         for c in v:
             if not CAPABILITY_PATTERN.match(c):
                 raise ValueError(
-                    f"capability {c!r} must match [a-z][a-z0-9_]*(.[a-z0-9_]+)+ — see docs/acl.md §10"
+                    f"capability {c!r} must match [a-z][a-z0-9_]*(.[a-z0-9_]+)+ — see docs/backplaned/acl.md §10"
                 )
         return v
 

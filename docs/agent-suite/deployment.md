@@ -4,7 +4,7 @@
 > channel + orchestrator + specialists)
 > on top of a Backplaned router. The router's own deployment (Postgres,
 > Redis, file store, edge proxy, secrets) is in
-> [`../deployment.md`](../deployment.md); this covers the **suite**
+> [`../backplaned/deployment.md`](../backplaned/deployment.md); this covers the **suite**
 > layer. `docker-compose.prod.yml` ships a complete reference topology.
 
 ## Topology

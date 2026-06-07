@@ -1,6 +1,6 @@
 """bp_sdk — Python SDK for writing agents against the bp_router.
 
-See `docs/sdk/core.md` and `docs/sdk/services.md`.
+See `docs/backplaned/sdk/core.md` and `docs/backplaned/sdk/services.md`.
 
 The expected agent surface is small:
 

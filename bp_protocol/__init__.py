@@ -3,15 +3,15 @@
 This package is the single source of truth for the wire protocol between
 router and agents. Both `bp_router` and `bp_sdk` depend on it.
 
-See `docs/router/protocol.md` for the protocol specification and
-`docs/overview.md` for the overall architecture.
+See `docs/backplaned/router/protocol.md` for the protocol specification and
+`docs/backplaned/overview.md` for the overall architecture.
 
 Public-API stability: the names listed in `__all__` are the stable
 public surface, covered by semver from 1.0 onward. The submodules
 (`bp_protocol.frames`, `bp_protocol.types`) are import-path only —
 the field set and validators may shift between minor releases as
 long as the wire-level semantics documented in
-`docs/router/protocol.md` are preserved.
+`docs/backplaned/router/protocol.md` are preserved.
 """
 
 from bp_protocol.frames import (

@@ -1623,7 +1623,7 @@ A realistic agent that uses the LLM service, the model-driven tool
 loop (the model calls peer agents), native provider options, and
 usage accounting. This is the digest; the **runnable, end-to-end**
 version — plus a streaming variant using `StreamAccumulator` — lives
-in [`examples/test_drive/gemini_agent.py`](../../examples/test_drive/gemini_agent.py)
+in [`examples/test_drive/gemini_agent.py`](../../../examples/test_drive/gemini_agent.py)
 and is the canonical reference. Build from that file, not this snippet.
 
 ```python

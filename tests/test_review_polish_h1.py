@@ -74,5 +74,5 @@ def test_preset_embedding_default_aligned() -> None:
 
 
 def test_observability_doc_drops_stale_metric() -> None:
-    doc = (_REPO / "docs/observability.md").read_text()
+    doc = (_REPO / "docs/backplaned/observability.md").read_text()
     assert "router_result_attachments_dropped_total" not in doc

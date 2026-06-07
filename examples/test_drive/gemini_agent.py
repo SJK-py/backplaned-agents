@@ -1,6 +1,6 @@
 """Test-drive: gemini agent — the full LLM-surface reference.
 
-A realistic LLM agent (cf. `docs/sdk/services.md` §8), made
+A realistic LLM agent (cf. `docs/backplaned/sdk/services.md` §8), made
 concrete:
 
   * Multi-turn tool-calling loop where the MODEL calls peer agents:

@@ -8,7 +8,7 @@ inlining them. Supported schemes:
   awssm://name              — AWS Secrets Manager (deferred import)
   gcpsm://projects/.../...  — GCP Secret Manager (deferred import)
 
-See `docs/security.md` §6.3.
+See `docs/backplaned/security.md` §6.3.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ The admin UI talks to the router's existing JSON API (`/v1/admin/*`,
 `/v1/auth/*`) over HTTP — never imports router internals. This keeps
 the boundary clean for a future split into a separate process.
 
-See `docs/sdk/...` (TBD) and `docs/admin-ui.md` (TBD) for the full
+See `docs/backplaned/sdk/...` (TBD) and `docs/backplaned/admin-ui.md` (TBD) for the full
 design once the implementation stabilises.
 """
 

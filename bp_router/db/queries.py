@@ -5,7 +5,7 @@ returned wrapper enforces `WHERE user_id = $1` on its method's queries.
 CI greps for `SELECT|UPDATE|DELETE` patterns in this module that are not
 behind `Scope` to catch invariant violations.
 
-See `docs/security.md` §8 for the data isolation rationale.
+See `docs/backplaned/security.md` §8 for the data isolation rationale.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def _like_escape(s: str) -> str:
 # existence). 64 is comfortably above any realistic spawn depth and
 # bounded enough that a malicious chain can't pin Postgres
 # work-mem trying to enumerate the loop. See
-# `docs/security.md` §8.
+# `docs/backplaned/security.md` §8.
 _MAX_TASK_TREE_DEPTH = 64
 
 
@@ -2417,7 +2417,7 @@ async def consume_invitation(
 
 
 # ---------------------------------------------------------------------------
-# ACL rule persistence — firewall-style rule list (see docs/acl.md)
+# ACL rule persistence — firewall-style rule list (see docs/backplaned/acl.md)
 # ---------------------------------------------------------------------------
 
 
@@ -2522,7 +2522,7 @@ async def replace_acl_rules(
     inserted in caller-list order. An admin submitting `[{ord:10,
     ...},{ord:5,...}]` saw the high-ord rule evaluated FIRST despite
     the lower `ord`, contradicting the "lower-ord wins" first-match
-    semantics documented in `docs/acl.md`. R4 second-pass review.
+    semantics documented in `docs/backplaned/acl.md`. R4 second-pass review.
 
     R6 third-pass review (HIGH): the function takes
     `pg_advisory_xact_lock(_ACL_REPLACE_LOCK_KEY)` at the top of the

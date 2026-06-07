@@ -96,7 +96,7 @@ async def onboard(req: OnboardRequest, request: Request) -> OnboardResponse:
             status_code=400,
             detail=(
                 "agent_id must match [A-Za-z_][A-Za-z0-9_-]{0,63} — "
-                "see docs/acl.md §10"
+                "see docs/backplaned/acl.md §10"
             ),
         )
 
