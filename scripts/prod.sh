@@ -79,7 +79,7 @@ build_env() {
     #     access; Caddy internal-CA TLS (browsers warn until you trust it).
     #   - a bare IP (e.g. 192.168.1.50) → no DNS for `app.<ip>`, so the webapp
     #     gets a PORT identity instead: WEBAPP_DOMAIN=<ip>:$WEBAPP_HTTPS_PORT.
-    # See docs/deployment.md "Edge / reverse proxy (Caddy)".
+    # See docs/backplaned/deployment.md "Edge / reverse proxy (Caddy)".
     echo
     echo "Edge / reverse proxy (Caddy) hostnames:"
     echo "  localhost                → this machine only (local self-signed TLS)"
@@ -292,7 +292,7 @@ build_env() {
         echo "# *.localhost / LAN name → Caddy internal-CA TLS; a public domain"
         echo "# resolving here → auto Let's Encrypt. A bare IP can't host"
         echo "# app.<ip>, so WEBAPP_DOMAIN gets a port (<ip>:WEBAPP_HTTPS_PORT),"
-        echo "# which compose publishes. See docs/deployment.md."
+        echo "# which compose publishes. See docs/backplaned/deployment.md."
         echo "PUBLIC_DOMAIN=$PUBLIC_DOMAIN"
         echo "WEBAPP_DOMAIN=$WEBAPP_DOMAIN"
         if [[ "$WEBAPP_HTTPS_PORT" != "443" ]]; then
@@ -428,7 +428,7 @@ build_env() {
             localhost|*.localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
                 echo "  NOTE: '$PUBLIC_DOMAIN' → Caddy serves internal-CA / self-signed TLS"
                 echo "        (browsers warn until you trust Caddy's root CA — see"
-                echo "        docs/deployment.md). A public domain resolving here gets"
+                echo "        docs/backplaned/deployment.md). A public domain resolving here gets"
                 echo "        automatic Let's Encrypt TLS instead." ;;
         esac
         if [[ -n "$EDGE_TLS" ]]; then

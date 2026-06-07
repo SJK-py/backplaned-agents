@@ -55,7 +55,7 @@ def test_old_shadowing_names_are_gone() -> None:
 
 def test_core_doc_uses_renamed_errors() -> None:
     doc = (
-        Path(__file__).parent.parent / "docs" / "sdk" / "core.md"
+        Path(__file__).parent.parent / "docs" / "backplaned" / "sdk" / "core.md"
     ).read_text()
     assert "class InputValidationError(HandlerError): status_code = 400" in doc
     assert "class PermissionDeniedError(HandlerError): status_code = 403" in doc
@@ -84,7 +84,7 @@ def test_handoff_note_absent_from_sdk_and_docs() -> None:
     root = Path(__file__).parent.parent
     peers_src = (root / "bp_sdk" / "peers.py").read_text()
     assert "handoff_note" not in peers_src
-    core_doc = (root / "docs" / "sdk" / "core.md").read_text()
+    core_doc = (root / "docs" / "backplaned" / "sdk" / "core.md").read_text()
     assert "handoff_note" not in core_doc
 
 

@@ -22,7 +22,7 @@ NOT "queue new frames for delivery". The latter would require
 durable persistence — out of scope; see `tasks.py` for the
 Result-frame path that already persists task state in the DB.
 
-See `docs/router/protocol.md` §3.
+See `docs/backplaned/router/protocol.md` §3.
 """
 
 from __future__ import annotations

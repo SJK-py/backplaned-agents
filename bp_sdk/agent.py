@@ -701,7 +701,7 @@ class Agent:
                 return await stream.result(timeout_s=timeout_s)
             # Verbose path: drain Progress frames as they arrive,
             # terminating when the terminal Result lands. The documented
-            # streaming idiom — see docs/sdk/core.md §7.
+            # streaming idiom — see docs/backplaned/sdk/core.md §7.
             async for pf in stream:
                 res = on_progress(pf)
                 if inspect.isawaitable(res):

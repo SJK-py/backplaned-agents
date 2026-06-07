@@ -1,7 +1,7 @@
 """bp_protocol.frames — Discriminated-union frame models for the WebSocket
 protocol between router and agents.
 
-See `docs/router/protocol.md` §2 for the full specification.
+See `docs/backplaned/router/protocol.md` §2 for the full specification.
 
 Every frame is a Pydantic model; validation happens at the router edge
 before any business logic runs. Callers should use `parse_frame()` to
@@ -89,7 +89,7 @@ _LLM_MAX_VECTORS = _LLM_MAX_EMBED_INPUTS
 
 
 class _FrameBase(BaseModel):
-    """Fields present on every frame (`docs/router/protocol.md` §2.1)."""
+    """Fields present on every frame (`docs/backplaned/router/protocol.md` §2.1)."""
 
     type: str
     protocol_version: str = "1"
@@ -834,7 +834,7 @@ def serialize_frame(frame: Frame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Error code catalog (`docs/router/protocol.md` §6)
+# Error code catalog (`docs/backplaned/router/protocol.md` §6)
 # ---------------------------------------------------------------------------
 
 

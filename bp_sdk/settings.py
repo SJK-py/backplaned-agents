@@ -102,7 +102,7 @@ class AgentConfig(BaseSettings):
     operator raises `max_payload_bytes`, this MUST be raised in
     lockstep (rule of thumb: `≥ 2 × max_payload_bytes`), together
     with the router-side ASGI `ws_max_size` and any L7 proxy / ALB
-    body-size limits — see `docs/sdk/core.md` §7."""
+    body-size limits — see `docs/backplaned/sdk/core.md` §7."""
 
     log_level: str = "INFO"
 

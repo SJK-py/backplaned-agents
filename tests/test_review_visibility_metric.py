@@ -1,7 +1,7 @@
 """Catalog-construction visibility probes emit
 `acl_decisions_total{decision="visibility"}`.
 
-R4 second-pass review (low) noted that `docs/acl.md §15`
+R4 second-pass review (low) noted that `docs/backplaned/acl.md §15`
 declared a `decision = visibility | permission` label on
 `acl_decisions_total`, but only the `permission` value was ever
 emitted — the catalog-construction visibility path

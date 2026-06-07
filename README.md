@@ -6,7 +6,7 @@
   <img src="docs/assets/overview.png" alt="Backplaned-Agents overview — the Backplaned platform (typed task protocol, first-class delegation, provider-agnostic LLM service, router-managed file store, deny-by-default ACL firewall, multi-tenant identity, live observability, MCP servers, admin web UI) and the multi-user assistant suite (orchestrator + deep_reasoning / research / computer_use specialists, knowledge base, conversational sessions, scheduled tasks, MCP servers) across Telegram / KakaoTalk / web app, plus the Docker production-deployment flow." width="960">
 </p>
 
-**A multi-user personal-assistant suite — a single orchestrator that reasons, researches, runs code, and remembers — built on the [Backplaned](./docs/overview.md) agent platform.**
+**A multi-user personal-assistant suite — a single orchestrator that reasons, researches, runs code, and remembers — built on the [Backplaned](./docs/backplaned/overview.md) agent platform.**
 
 Message it on Telegram and it answers: it pulls from your private knowledge base, recalls what it learned about you in past conversations, searches the web, runs code in a sandbox, and schedules reminders — delegating to specialist agents as needed, all under *your* identity. Every user gets their own isolated files, memory, sessions, and knowledge.
 
@@ -89,7 +89,7 @@ Then message the bot on Telegram, send `/register`, and approve it as admin. The
 - [`.env.example`](./.env.example) — every configurable environment variable (router / agent SDK / suite), grouped with defaults.
 - [`docs/agent-suite/overview.md`](./docs/agent-suite/overview.md) — the suite's architecture and design.
 - [`docs/agent-suite/`](./docs/agent-suite/) — per-area design docs: [agents](./docs/agent-suite/agents.md), [delegation](./docs/agent-suite/delegation.md), [sessions](./docs/agent-suite/sessions.md), [memory](./docs/agent-suite/memory.md), [data model](./docs/agent-suite/data-model.md), [cron](./docs/agent-suite/cron.md), [channel](./docs/agent-suite/channel.md), [ACL](./docs/agent-suite/acl.md).
-- [`docs/overview.md`](./docs/overview.md) — the Backplaned platform.
+- [`docs/backplaned/overview.md`](./docs/backplaned/overview.md) — the Backplaned platform.
 - [`docs/agent-suite/deferred-work.md`](./docs/agent-suite/deferred-work.md) — known caveats and intentional simplifications.
 
 ## License

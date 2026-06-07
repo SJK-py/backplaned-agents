@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 # ---------------------------------------------------------------------------
-# M9 — docs/acl.md user-level matching matches bp_router.acl
+# M9 — docs/backplaned/acl.md user-level matching matches bp_router.acl
 # ---------------------------------------------------------------------------
 
 

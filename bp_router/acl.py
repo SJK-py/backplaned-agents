@@ -6,7 +6,7 @@ Single ordered rule list. Each rule is a 4-tuple:
 
 First-match-wins, default deny, self-call always denied.
 
-See `docs/acl.md` for the full specification.
+See `docs/backplaned/acl.md` for the full specification.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Identifier grammars (mirror docs/acl.md §10)
+# Identifier grammars (mirror docs/backplaned/acl.md §10)
 # ---------------------------------------------------------------------------
 
 AGENT_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
@@ -43,7 +43,7 @@ USER_LEVEL_RULE_PATTERN = re.compile(r"^(\*|admin|service|tier[0-9]+)$")
 # beyond the whole-token `*`; leading globs (`*.x`), middle globs
 # (`x.*.y`), and double-stars (`x.**`) are deliberately rejected
 # to keep precedence semantics predictable. See
-# `docs/acl.md` for the rationale.
+# `docs/backplaned/acl.md` for the rationale.
 _CAPABILITY_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
 
 

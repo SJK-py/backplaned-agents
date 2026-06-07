@@ -9,7 +9,7 @@ ignored the `ord` on every input rule and renumbered them via
 
 saw rule A evaluated FIRST (ord=0 after renumber) despite
 specifying ord=10 — contradicting the documented "lower ord
-wins" first-match-wins semantics in docs/acl.md §4.
+wins" first-match-wins semantics in docs/backplaned/acl.md §4.
 
 R4 fix: sort by `ord` ascending before insert; dense-pack
 storage at consecutive 0..N-1 so the relative order matches

@@ -1,7 +1,7 @@
 """initial schema (consolidated v1 — pre-release)
 
 Creates the full set of tables defined in
-docs/router/storage.md §1.1: users, sessions, agents, tasks,
+docs/backplaned/router/storage.md §1.1: users, sessions, agents, tasks,
 task_events, files, acl_rules, audit_log, invitations,
 auth_refresh_tokens, llm_presets, plus pending_user_registrations,
 registration_attempts, password_reset_tokens and mcp_servers.
@@ -318,7 +318,7 @@ def upgrade() -> None:
     )
     op.execute("CREATE INDEX acl_rules_ord_idx ON acl_rules(ord)")
 
-    # Bootstrap rules — see docs/acl.md §13. Three rows in evaluation
+    # Bootstrap rules — see docs/backplaned/acl.md §13. Three rows in evaluation
     # order:
     #   ord 0  allow * admin/* -> admin/*    (admin agents may call admin agents)
     #   ord 1  deny  * */*     -> admin/*    (only admin agents may call admin agents)

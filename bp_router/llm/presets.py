@@ -60,7 +60,7 @@ class Preset:
     llama.cpp-server / Ollama OpenAI-mode — no official default to
     fall back to). Either way it is SSRF-validated at admin save
     time (`url_validation.validate_base_url`); see
-    `docs/sdk/services.md` §1.1.2.
+    `docs/backplaned/sdk/services.md` §1.1.2.
 
     `fallback_preset` is the next preset to try after `max_retries+1`
     attempts on this one all fail. None means "no fallback, surface

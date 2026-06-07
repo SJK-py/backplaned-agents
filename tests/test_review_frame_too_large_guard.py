@@ -141,7 +141,7 @@ def test_oversize_inline_media_raises_with_actionable_message() -> None:
         assert "base64 media part(s)" in msg
         assert "ctx.files.put()" in msg
         assert "attachments" in msg
-        assert "docs/sdk/core.md" in msg
+        assert "docs/backplaned/sdk/core.md" in msg
         # Reconnect-loop prevention: never entered the outbox.
         assert t._outbox.qsize() == 0
 
@@ -160,7 +160,7 @@ def test_oversize_without_media_gets_generic_guidance() -> None:
         assert "base64 media part(s)" not in msg
         # Still steers to attachments + the doc.
         assert "ctx.files.put()" in msg
-        assert "docs/sdk/core.md" in msg
+        assert "docs/backplaned/sdk/core.md" in msg
         assert t._outbox.qsize() == 0
 
     asyncio.run(_run())

@@ -1504,7 +1504,7 @@ async def reject_registration(
 
 
 # ---------------------------------------------------------------------------
-# ACL — firewall rule list (see docs/acl.md)
+# ACL — firewall rule list (see docs/backplaned/acl.md)
 # ---------------------------------------------------------------------------
 
 

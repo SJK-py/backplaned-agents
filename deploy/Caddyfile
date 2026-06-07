@@ -13,7 +13,7 @@
 # ROUTER_PUBLIC_URL and the Secure session cookie stay correct. With an
 # `http://` site address Caddy disables automatic HTTPS (no cert, no :80→:443
 # redirect) — exactly what an upstream terminator wants. See
-# docs/deployment.md "Edge / reverse proxy (Caddy)".
+# docs/backplaned/deployment.md "Edge / reverse proxy (Caddy)".
 #
 # EDGE_TLS is an optional tls-directive fragment injected verbatim into both
 # site blocks (empty by default → Caddy's automatic TLS: Let's Encrypt for a

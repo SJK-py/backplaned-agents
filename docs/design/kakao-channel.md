@@ -46,7 +46,7 @@ Three consequences drive the whole design:
      finish and deliver on the user's **next touch**.
   3. **Outbound images need a public URL.** The router's blob store is
      internal-only and downloads stream **through** the router
-     (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`, [deployment.md §6](../deployment.md)),
+     (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`, [deployment.md §6](../backplaned/deployment.md)),
      so there is no Kakao-reachable image URL to hand out. We host
      outbound images on a dedicated bucket (§8).
 
@@ -352,7 +352,7 @@ KakaoTalk you must give Kakao a `simpleImage.imageUrl` that **Kakao's
 servers fetch directly**. The router's store can't serve that: the blob
 backend is internal-only and downloads stream through the router under a
 self-authorizing fetch token (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`,
-[deployment.md §6](../deployment.md)). Handing that URL to Kakao would
+[deployment.md §6](../backplaned/deployment.md)). Handing that URL to Kakao would
 (a) only work in public-domain deploys, breaking LAN/bare-IP topologies,
 and (b) leak a router fetch token to Kakao's CDN cache. Instead the agent
 uploads the outbound image to an **R2 bucket** and hands Kakao a
@@ -493,7 +493,7 @@ The relay design exists to keep the **public surface valueless**:
   * The agent opens **zero** inbound ports; every call it makes is
     outbound (`pull`, `ack`, `post_callback`, `/v1/files`, R2). This
     preserves the suite's "agents never join the public net" posture
-    ([deployment.md §7](../deployment.md)).
+    ([deployment.md §7](../backplaned/deployment.md)).
   * `KAKAO_SKILL_SECRET` is compared in **constant time** at the edge.
 
 ## 13. Failure modes & idempotency

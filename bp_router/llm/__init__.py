@@ -5,7 +5,7 @@ Promoted from "embedded agent" to a router-side service so:
 - Quotas and budgets are enforced consistently across providers.
 - Telemetry (tokens, cost, latency) is uniform.
 
-See `docs/sdk/services.md` §1 for the agent-facing contract.
+See `docs/backplaned/sdk/services.md` §1 for the agent-facing contract.
 """
 
 from bp_router.llm.service import (

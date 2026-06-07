@@ -4,7 +4,7 @@ Maintains one socket to the router; reconnects with jittered exponential
 backoff. Hello/Welcome handshake on every (re)connect; offers
 resume_token where applicable.
 
-See `docs/router/protocol.md` §3 for the lifecycle.
+See `docs/backplaned/router/protocol.md` §3 for the lifecycle.
 """
 
 from __future__ import annotations
@@ -107,12 +107,12 @@ def _oversize_frame_message(
             f"raw) directly into the payload — large media must go "
             f"out-of-band instead: upload with ctx.files.put() and "
             f"pass the reference through the task's attachments. See "
-            f"docs/sdk/core.md (file attachments)."
+            f"docs/backplaned/sdk/core.md (file attachments)."
         )
     return (
         f"{base} Reduce the payload, or move large binary content to "
         f"file attachments (ctx.files.put()) rather than the inline "
-        f"payload. See docs/sdk/core.md."
+        f"payload. See docs/backplaned/sdk/core.md."
     )
 
 

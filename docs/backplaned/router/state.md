@@ -190,11 +190,14 @@ Default visibility is "owner only," with explicit sharing primitives
 ### 2.2 Session lifecycle
 
 Sessions are explicitly opened and closed via the router HTTP API
-(`POST /v1/sessions`, `DELETE /v1/sessions/{id}`). A session is a
+(`POST /v1/sessions`, `DELETE /v1/sessions/{id}`, and `POST
+/v1/sessions/{id}/reopen` to re-admit a closed one). A session is a
 container — closing one terminates any in-flight tasks tagged to it
 (transition to `CANCELLED` with reason `session_closed`) and stamps
-`closed_at`. The row is preserved indefinitely after close so audit
-history stays reachable.
+`closed_at`. The row is preserved after close so audit history stays
+reachable. `DELETE …?purge=true` also **hard-deletes** the session and its
+router-side data (tasks, task events, the file-name directory; `files` rows
+are detached for the reclaim sweep) — the webapp's "remove session".
 
 The Tier-0 orchestrator agent typically opens a session per
 user-conversation; specialised flows (e.g. a webhook-driven cron
@@ -216,12 +219,21 @@ or — for webhook / cron flows — have the scheduling infrastructure
 play the BFF role. A future `POST /v1/agent/sessions` with agent-JWT
 auth could close this gap; deferred until a real use case shows up.
 
-**Soft-close, no GC for user sessions.** User sessions never
-auto-expire and are never hard-deleted by the public API. A narrow
-GC loop (`tasks.session_gc_loop`, runs hourly) hard-deletes only
-admin-test sessions (`metadata->>'kind' = 'admin_test'`) older than
-`ROUTER_SESSION_GC_TEST_RETENTION_DAYS` (default 30) when no tasks
-still reference them. User sessions accrue indefinitely.
+**Session GC.** A background loop (`tasks.session_gc_loop`, hourly) runs two
+sweeps, both conservative — never touching an open session or one with live
+tasks:
+- **Closed user sessions** past `ROUTER_CLOSED_SESSION_RETENTION_DAYS`
+  (default 90) are hard-deleted via `purge_session` (same router-side reach as
+  `?purge=true`), audited `session.purged`. Set the retention to 0 to disable.
+  The suite's conversation history (a separate store the router can't reach) is
+  reaped by a suite-side reconcile loop that keys off these purges — see the
+  `filter-existing` admin probe.
+- **Ephemeral admin-test sessions** (`metadata->>'kind' = 'admin_test'`) older
+  than `ROUTER_SESSION_GC_TEST_RETENTION_DAYS` (default 30) with no remaining
+  tasks (a cheap raw delete — they carry no dependents).
+
+Closed sessions thus no longer accrue indefinitely; an open session is never
+GC'd, so a long-lived conversation is unaffected.
 
 **Invitation GC.** Invitations are single-use and short-lived (the
 agent suite mints a fresh one per agent on every launch — see

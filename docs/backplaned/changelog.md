@@ -3,7 +3,7 @@
 > This repository was created from the **Backplaned** template and vendors
 > the platform packages (`bp_protocol`, `bp_sdk`, `bp_router`, `bp_admin`)
 > plus their tests. Building the agent suite (`bp_agents`, see
-> [`agent-suite/`](./agent-suite/)) occasionally requires changing that
+> [`agent-suite/`](../agent-suite)) occasionally requires changing that
 > vendored platform code. **Every such change is logged here** so the
 > suite's footprint on the platform is explicit — for future re-sync with
 > an upstream Backplaned, for upstreaming a fix back, and for review.
@@ -575,7 +575,7 @@
   (`bp_sdk/testing.py`).
 - **Why:** `proxyfiles` was vestigial naming from the predecessor
   `ProxyFile` file model, which the router-managed file store
-  ([`docs/design/router-managed-file-store.md`](./design/router-managed-file-store.md))
+  ([`docs/design/router-managed-file-store.md`](../design/router-managed-file-store.md))
   replaced. The dead name was confusing in `.env.example` and the code.
 - **Shape:** **Behavior change (default only).** A `file_store=local`
   deployment that relied on the *implicit* default now reads/writes
@@ -693,8 +693,8 @@
   `external_id → user_id` resolution. So the channel could not populate
   `suite_platform_mappings` / `user_config` after approval. This endpoint
   closes that gap, matching the design's "use `serviced_by` rights"
-  intent ([`agent-suite/channel.md` §2](./agent-suite/channel.md),
-  [`agent-suite/overview.md` §2.1](./agent-suite/overview.md)).
+  intent ([`agent-suite/channel.md` §2](../agent-suite/channel.md),
+  [`agent-suite/overview.md` §2.1](../agent-suite/overview.md)).
 - **Shape:** **Additive** + **security-scoped** — `require_service` plus a
   `$1 = ANY(u.serviced_by)` filter, so a principal sees only its own
   serviced users' sessions, never the whole table. No existing surface
@@ -711,7 +711,7 @@
 - **Why:** The suite's channel/gateway agent must inject a user turn as a
   **parentless** task carrying the *end user's* `(user_id, session_id)`
   over its own WS (suite prerequisite **B1** — [`agent-suite/channel.md`
-  §4](./agent-suite/channel.md)). `peers.spawn` cannot do this: it is
+  §4](../agent-suite/channel.md)). `peers.spawn` cannot do this: it is
   handler-bound and always inherits `parent_task_id = ctx.task_id`.
 - **Shape:** Purely **additive** — no existing signature changed. Reuses
   existing tested machinery (the router's parentless-admit path, the

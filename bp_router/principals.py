@@ -7,7 +7,7 @@ Every user is classified by exactly one `level`:
     tierN         human user at tier N (0 = most privileged, N = least)
 
 Tier ordering matches the agent-tier convention used elsewhere in the
-codebase (see `docs/acl.md` §3.4): lower number = more privileged.
+codebase (see `docs/backplaned/acl.md` §3.4): lower number = more privileged.
 `require_tier(N)` admits any level whose tier index is ≤ N, so e.g.
 `require_tier(2)` accepts admin, service, tier0, tier1, tier2 and
 rejects tier3+.

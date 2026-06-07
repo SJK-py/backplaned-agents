@@ -9,7 +9,7 @@
 # Secrets: this skeleton reads ${VARS} from a `.env` file for brevity.
 # For real deploys use Docker/host secrets (never a committed .env), and
 # give each container ONLY the secrets it needs — see
-# docs/deployment.md (secret scoping). Do NOT commit real values.
+# docs/backplaned/deployment.md (secret scoping). Do NOT commit real values.
 
 name: backplaned
 

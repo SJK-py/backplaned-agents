@@ -5,7 +5,7 @@ channel that carries every other agent traffic. Streaming generates
 yield `LlmDelta` chunks; the iterator ends when the terminal
 `LlmResult` arrives.
 
-See `docs/sdk/services.md` §1.
+See `docs/backplaned/sdk/services.md` §1.
 """
 
 from __future__ import annotations
@@ -644,7 +644,7 @@ def image_part(
     spawn/delegate payload the SDK raises `FrameTooLargeError`
     before send. For large media, send it out-of-band instead:
     `ctx.files.put()` and pass the reference through the task's
-    attachments (see `docs/sdk/core.md`), or use a provider-native
+    attachments (see `docs/backplaned/sdk/core.md`), or use a provider-native
     upload (Gemini File API, Anthropic Files) and pass that
     reference part directly in `content`.
     """
@@ -733,7 +733,7 @@ def document_part(
     the WS frame; one riding a spawn/delegate payload over the
     router's `max_payload_bytes` cap raises `FrameTooLargeError`
     before send. Send large documents out-of-band via
-    `ctx.files.put()` attachments (see `docs/sdk/core.md`).
+    `ctx.files.put()` attachments (see `docs/backplaned/sdk/core.md`).
     """
     if isinstance(source, (str, os.PathLike)):
         path = Path(source)

@@ -44,7 +44,7 @@ Running more than one router worker today causes, concretely:
   "Single-worker dev fallback"). With Redis set, revocation is shared.
 - **Quota counters drift.** In-memory rate-limit buckets are per-process;
   without the shared Redis counter the same user gets N× the limit across
-  N workers (see [`design/quota-enforcement.md`](./design/quota-enforcement.md)).
+  N workers (see [`design/quota-enforcement.md`](../design/quota-enforcement.md)).
 
 The intended multi-worker path (sticky WS routing by `agent_id`, the
 socket registry in Redis, pending-ack futures staying process-local) is
@@ -67,9 +67,9 @@ are **not** the same thing; the table is the precise map:
 | Cron double-fire safety | — (DB) | ✅ | ✅ atomic DB claim |
 
 The suite per-session lock detail lives in
-[`agent-suite/sessions.md §4`](./agent-suite/sessions.md); memory in
-[`agent-suite/memory.md`](./agent-suite/memory.md); cron in
-[`agent-suite/cron.md`](./agent-suite/cron.md).
+[`agent-suite/sessions.md §4`](../agent-suite/sessions.md); memory in
+[`agent-suite/memory.md`](../agent-suite/memory.md); cron in
+[`agent-suite/cron.md`](../agent-suite/cron.md).
 
 ### 1.3 Per-service scaling
 
