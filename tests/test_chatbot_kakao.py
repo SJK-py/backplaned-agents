@@ -26,6 +26,7 @@ from bp_agents.agents.chatbot.agent import _kakao_configured
 from bp_agents.agents.chatbot.kakao_client import (
     HttpKakaoClient,
     KakaoJob,
+    _file_links_card,
     chunk_for_kakao,
 )
 from bp_agents.agents.chatbot.kakao_consumer import kakao_consume_loop
@@ -79,10 +80,10 @@ async def _set_ready(reg, chat, text, images="") -> None:
 
 class _RecordingClient:
     """Captures post_callback so the gateway's delivery can be asserted.
-    posts are (callback_url, text, quick_replies, images)."""
+    posts are (callback_url, text, quick_replies, images, files)."""
 
     def __init__(self) -> None:
-        self.posts: list[tuple[str, str, object, object]] = []
+        self.posts: list[tuple[str, str, object, object, object]] = []
         self.inbound_bytes: bytes = b""
 
     async def pull(self, *, batch_size, visibility_timeout_s):
@@ -91,8 +92,10 @@ class _RecordingClient:
     async def ack(self, lease_ids):
         return None
 
-    async def post_callback(self, callback_url, text, *, quick_replies=None, images=None):
-        self.posts.append((callback_url, text, quick_replies, images))
+    async def post_callback(
+        self, callback_url, text, *, quick_replies=None, images=None, files=None
+    ):
+        self.posts.append((callback_url, text, quick_replies, images, files))
 
     async def fetch_inbound_image(self, url):
         return self.inbound_bytes
@@ -203,6 +206,72 @@ def test_post_callback_shape_and_no_cf_token_leak() -> None:
     ]
 
 
+def test_post_callback_renders_download_links_as_listcard() -> None:
+    """`files` render as one tappable listCard of webLink rows — quickReplies
+    can't carry a url, so the card is the only download affordance."""
+    captured: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    async def _drive() -> None:
+        c = HttpKakaoClient(_settings())
+        c._callback_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await c.post_callback(
+            "https://cb.kakao/x",
+            "여기요",
+            files=[("전체 답변", "https://r2/x.md"), ("report.pdf", "https://r2/r.pdf")],
+        )
+        await c.aclose()
+
+    asyncio.run(_drive())
+    outs = captured["body"]["template"]["outputs"]
+    assert {"simpleText": {"text": "여기요"}} in outs
+    cards = [o["listCard"] for o in outs if "listCard" in o]
+    assert len(cards) == 1
+    assert [it["link"]["web"] for it in cards[0]["items"]] == [
+        "https://r2/x.md",
+        "https://r2/r.pdf",
+    ]
+    assert len(outs) <= 3  # within Kakao's per-template output cap
+
+
+def test_post_callback_prioritises_card_over_surplus_image() -> None:
+    """With the output cap full, the download card survives and a surplus image
+    is the casualty — an offloaded long answer must never be the one dropped."""
+    captured: dict = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    async def _drive() -> None:
+        c = HttpKakaoClient(_settings())
+        c._callback_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await c.post_callback(
+            "https://cb.kakao/x",
+            "preview",
+            images=[("u1", "a"), ("u2", "b"), ("u3", "c")],
+            files=[("전체 답변", "https://r2/x.md")],
+        )
+        await c.aclose()
+
+    asyncio.run(_drive())
+    outs = captured["body"]["template"]["outputs"]
+    assert len(outs) == 3  # capped
+    assert sum("listCard" in o for o in outs) == 1  # card survived
+    assert sum("simpleImage" in o for o in outs) < 3  # a surplus image dropped
+
+
+def test_file_links_card_caps_items_and_clips_titles() -> None:
+    card = _file_links_card([(f"file-{i}.txt", f"https://r2/{i}") for i in range(8)])
+    items = card["listCard"]["items"]
+    assert len(items) == 5  # Kakao caps a listCard at 5 items
+    clipped = _file_links_card([("z" * 80, "https://r2/z")])["listCard"]["items"][0]
+    assert len(clipped["title"]) <= 32 and clipped["link"]["web"] == "https://r2/z"
+
+
 def test_chunk_for_kakao_splits_and_truncates() -> None:
     assert chunk_for_kakao("short", limit=100, max_bubbles=3) == ["short"]
     # 250 chars fit in three ≤100 bubbles with no loss.
@@ -234,9 +303,25 @@ def test_registry_dedupe_and_park_lifecycle() -> None:
 
         assert await reg.store_ready_unless_stopped("c", "the answer") is True
         assert (await reg.get_turn("c"))["state"] == "ready"
-        assert await reg.take_ready("c") == ("the answer", "")
+        assert await reg.take_ready("c") == ("the answer", "", "")
         assert await reg.take_ready("c") is None  # cleared on take
         assert await reg.get_turn("c") is None
+
+    asyncio.run(_drive())
+
+
+def test_registry_parks_and_returns_images_and_files() -> None:
+    """A parked answer round-trips its outbound image + download-link JSON, so a
+    deadline-exceeded turn's attachments survive to the next-touch delivery."""
+    async def _drive() -> None:
+        reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+        await reg.try_begin("c")
+        images = '[["https://r2/img", "pic"]]'
+        files = '[["전체 답변", "https://r2/x.md"]]'
+        assert await reg.store_ready_unless_stopped("c", "ans", images, files) is True
+        assert await reg.take_ready("c") == ("ans", images, files)
+
+    asyncio.run(_drive())
 
 
 def test_registry_store_ready_unless_stopped_respects_stop_and_clear() -> None:
@@ -274,7 +359,7 @@ def test_check_delivers_ready_result() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance="/check"))
-        assert client.posts == [("https://cb.kakao/x", "parked answer", None, None)]
+        assert client.posts == [("https://cb.kakao/x", "parked answer", None, None, None)]
         assert await reg.get_turn("kc1") is None  # cleared
 
     asyncio.run(_drive())
@@ -287,7 +372,7 @@ def test_check_while_pending_reports_still_working() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance="/check"))
-        url, text, qr, imgs = client.posts[0]
+        url, text, qr, imgs, files = client.posts[0]
         assert text == kg._STILL_WORKING_TEXT
         assert qr == [(CHECK_LABEL, "/check"), (STOP_LABEL, "/stop")]
 
@@ -339,7 +424,7 @@ def test_check_while_pending_appends_last_progress() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance="/check"))
-        _url, text, _qr, _imgs = client.posts[0]
+        _url, text, _qr, _imgs, _files = client.posts[0]
         assert kg._STILL_WORKING_TEXT in text
         assert text.endswith("(research 에이전트를 호출하여 처리 중이에요.)")
 
@@ -361,7 +446,7 @@ def test_stop_cancels_pending_turn() -> None:
         gw = _poll_gateway(client, reg, credentials=creds)
         await gw.handle_job(_job(utterance="/stop"))
         assert creds.cancelled == [("usr", "tsk1")]
-        assert client.posts == [("https://cb.kakao/x", kg._STOPPED_TEXT, None, None)]
+        assert client.posts == [("https://cb.kakao/x", kg._STOPPED_TEXT, None, None, None)]
         assert (await reg.get_turn("kc1")).get("stopped") == "1"
 
     asyncio.run(_drive())
@@ -373,7 +458,7 @@ def test_stop_with_nothing_running() -> None:
         client = _RecordingClient()
         gw = _poll_gateway(client, reg)
         await gw.handle_job(_job(utterance="/stop"))
-        assert client.posts == [("https://cb.kakao/x", kg._NOTHING_RUNNING_TEXT, None, None)]
+        assert client.posts == [("https://cb.kakao/x", kg._NOTHING_RUNNING_TEXT, None, None, None)]
 
     asyncio.run(_drive())
 
@@ -491,7 +576,7 @@ def test_turn_delivers_in_time(suite_db_url: str) -> None:
             await gw.handle_job(_job(utterance="hello?"))
 
             # delivered on the callback, no buttons, no parked state left
-            assert client.posts == [("https://cb.kakao/x", "hi back", None, None)]
+            assert client.posts == [("https://cb.kakao/x", "hi back", None, None, None)]
             assert await reg.get_turn("kc1") is None
             async with pool.acquire() as conn:
                 rows = await queries.reload_incumbent(
@@ -519,7 +604,7 @@ def test_bare_confirm_word_is_a_normal_message(suite_db_url: str) -> None:
             await gw.handle_job(_job(utterance="확인"))
 
             # A turn ran and delivered the reply — not the idle poll response.
-            assert client.posts == [("https://cb.kakao/x", "네", None, None)]
+            assert client.posts == [("https://cb.kakao/x", "네", None, None, None)]
             async with pool.acquire() as conn:
                 rows = await queries.reload_incumbent(
                     conn, session_id="ses_k", agent_id="orchestrator"
@@ -545,7 +630,7 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
 
             await gw.handle_job(_job(utterance="do something slow"))
             # first callback is the "still working" status + buttons
-            url, text, qr, imgs = client.posts[0]
+            url, text, qr, imgs, files = client.posts[0]
             assert text == kg._WORKING_TEXT
             assert qr == [(CHECK_LABEL, "/check"), (STOP_LABEL, "/stop")]
 
@@ -558,7 +643,7 @@ def test_turn_overruns_then_parks_for_next_touch(suite_db_url: str) -> None:
             # next touch ([확인]) delivers the parked answer on a fresh callback
             client.posts.clear()
             await gw.handle_job(_job(msg_id="m2", utterance="/check"))
-            assert client.posts == [("https://cb.kakao/x", "slow answer", None, None)]
+            assert client.posts == [("https://cb.kakao/x", "slow answer", None, None, None)]
             assert await reg.get_turn("kc1") is None
         finally:
             await pool.close()
@@ -617,7 +702,7 @@ def test_turn_progress_recorded_and_shown_on_check(suite_db_url: str) -> None:
             # [확인] while pending → the status carries the progress line.
             client.posts.clear()
             await gw.handle_job(_job(msg_id="m2", utterance="/check"))
-            _url, text, _qr, _imgs = client.posts[0]
+            _url, text, _qr, _imgs, _files = client.posts[0]
             assert "(research 에이전트를 호출하여 처리 중이에요.)" in text
 
             # Let the background turn finish so loop teardown is clean.
@@ -663,10 +748,14 @@ class _FakeCreds:
 class _FakeEgress:
     def __init__(self, url="https://r2.example/signed.png") -> None:
         self.url = url
-        self.puts: list[tuple[str, str]] = []
+        # (content_type, key, ttl_s) per upload, so a test can assert the
+        # long download TTL is used for links and the short one for images.
+        self.puts: list[tuple[str, str, object]] = []
 
-    async def put_file(self, data, *, content_type, key):
-        self.puts.append((content_type, key))
+    download_ttl_s = 86_400
+
+    async def put_file(self, data, *, content_type, key, ttl_s=None):
+        self.puts.append((content_type, key, ttl_s))
         return self.url
 
 
@@ -816,10 +905,13 @@ def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
             )
             await gw.handle_job(_job(utterance="make a chart"))
 
-            url, text, qr, imgs = client.posts[-1]
+            url, text, qr, imgs, files = client.posts[-1]
             assert text == "here is your chart"
             assert imgs == [("https://r2.example/chart.png", "chart.png")]
+            assert not files  # an image inlines as a bubble, not a download card
+            # inline image → short TTL (Kakao fetches it on receipt)
             assert egress.puts and egress.puts[0][0] == "image/png"
+            assert egress.puts[0][2] is None
         finally:
             await pool.close()
 
@@ -827,8 +919,9 @@ def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
 
 
 def test_outbound_nonimage_file_delivered_as_link(suite_db_url: str) -> None:
-    """A produced non-image file rides as a presigned download link in the
-    reply text (Kakao can't inline documents); no image bubble."""
+    """A produced non-image file rides as a tappable download link in a
+    listCard (Kakao can't inline documents): no image bubble, long-TTL url,
+    and the reply text stays clean."""
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
@@ -844,14 +937,49 @@ def test_outbound_nonimage_file_delivered_as_link(suite_db_url: str) -> None:
             )
             await gw.handle_job(_job(utterance="보고서 만들어줘"))
 
-            _url, text, _qr, imgs = client.posts[-1]
+            _url, text, _qr, imgs, files = client.posts[-1]
             assert "여기 보고서예요" in text
-            assert kg._FILE_LINKS_INTRO in text
-            assert "report.pdf" in text
-            assert "https://r2.example/report.pdf" in text
-            assert imgs is None  # a document → link in text, not an image bubble
-            # uploaded under its detected (non-image) content type
+            assert files == [("report.pdf", "https://r2.example/report.pdf")]
+            assert "https://r2.example/report.pdf" not in text  # link is in the card
+            assert imgs is None  # a document → download link, not an image bubble
+            # uploaded under its detected (non-image) content type, with the long
+            # download TTL (a user taps it later, not Kakao's servers on receipt)
             assert egress.puts and egress.puts[0][0] == "application/pdf"
+            assert egress.puts[0][2] == egress.download_ttl_s
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_long_answer_offloaded_to_download_link(suite_db_url: str) -> None:
+    """An answer past the 3-bubble budget is offloaded to a Markdown download
+    (long TTL) surfaced as a '전체 답변' link, with a short preview bubble —
+    rather than truncating the tail away."""
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            client = _RecordingClient()
+            reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            egress = _FakeEgress("https://r2.example/answer.md")
+            long_answer = "가" * 5000  # >> 3×1000-char budget
+            disp = _FakeDispatcher(reply=long_answer)
+            gw = KakaoGateway(
+                dispatcher=disp, pool=pool, client=client, registry=reg,
+                settings=_settings(), credentials=_FakeCreds(), egress=egress,
+                redis=None,
+            )
+            await gw.handle_job(_job(utterance="긴 답 주세요"))
+
+            _url, text, _qr, _imgs, files = client.posts[-1]
+            assert files == [(kg._FULL_ANSWER_LABEL, "https://r2.example/answer.md")]
+            assert kg._OVERFLOW_NOTICE in text  # preview points at the link
+            assert len(text) <= _settings().kakao_msg_char_limit  # one bubble
+            # full answer offloaded as Markdown, with the long download TTL
+            ct, _key, ttl = egress.puts[-1]
+            assert ct.startswith("text/markdown")
+            assert ttl == egress.download_ttl_s
         finally:
             await pool.close()
 
@@ -1198,12 +1326,14 @@ def test_in_time_delivery_failure_parks_for_next_touch(suite_db_url: str) -> Non
             super().__init__()
             self.calls = 0
 
-        async def post_callback(self, url, text, *, quick_replies=None, images=None):
+        async def post_callback(
+            self, url, text, *, quick_replies=None, images=None, files=None
+        ):
             self.calls += 1
             if self.calls == 1:  # the in-time delivery POST fails (Kakao 5xx)
                 raise RuntimeError("kakao 5xx")
             await super().post_callback(
-                url, text, quick_replies=quick_replies, images=images
+                url, text, quick_replies=quick_replies, images=images, files=files
             )
 
     async def _drive() -> None:
