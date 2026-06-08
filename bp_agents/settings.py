@@ -164,12 +164,13 @@ class SuiteSettings(BaseSettings):
     """Lifetime of a presigned outbound-image url handed to Kakao. Short by
     design — Kakao's servers fetch an inline image almost immediately."""
 
-    kakao_r2_download_url_ttl_s: int = Field(default=86_400, ge=1)  # 24h
+    kakao_r2_download_url_ttl_s: int = Field(default=3600, ge=1)  # 1h
     """Lifetime of a presigned *download* url surfaced as a tappable link
-    (attachments + an over-long answer offloaded to a file). Much longer than
-    the image TTL because a *user* taps these — possibly minutes or hours after
-    the reply — not Kakao's servers on receipt. Capability-only (the url is
-    unguessable); keep it modest so a forwarded link doesn't outlive its use."""
+    (attachments + an over-long answer offloaded to a file). Longer than the
+    image TTL because a *user* taps these — typically within minutes of the
+    reply — not Kakao's servers on receipt. An hour comfortably covers normal
+    use. Capability-only (the url is unguessable); kept modest so a forwarded
+    link doesn't outlive its use."""
 
     # ------------------------------------------------------------------
     # deep_reasoning plan_mode ([agents.md] deep_reasoning)

@@ -752,7 +752,7 @@ class _FakeEgress:
         # long download TTL is used for links and the short one for images.
         self.puts: list[tuple[str, str, object]] = []
 
-    download_ttl_s = 86_400
+    download_ttl_s = 3600
 
     async def put_file(self, data, *, content_type, key, ttl_s=None):
         self.puts.append((content_type, key, ttl_s))

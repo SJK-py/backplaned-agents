@@ -383,7 +383,7 @@ router.
     servers on receipt → the short `kakao_r2_url_ttl_s` (default 600 s). A
     **download link** (a non-image attachment, or an offloaded long answer)
     is tapped by a *user*, possibly much later → the long
-    `kakao_r2_download_url_ttl_s` (default 24 h). Both are unguessable
+    `kakao_r2_download_url_ttl_s` (default 1 h). Both are unguessable
     capability urls; keep the download TTL modest so a forwarded link doesn't
     outlive its use.
   * Scope stays narrow: **outbound files only** (images + download links).
