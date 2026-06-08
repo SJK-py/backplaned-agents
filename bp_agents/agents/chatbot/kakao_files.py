@@ -73,6 +73,7 @@ class R2FileEgress:
         self._access_key = settings.kakao_r2_access_key_id
         self._secret_key = settings.kakao_r2_secret_access_key.get_secret_value()
         self._ttl = settings.kakao_r2_url_ttl_s
+        self._download_ttl = settings.kakao_r2_download_url_ttl_s
         self._session: Any = None
 
     @staticmethod
@@ -118,10 +119,18 @@ class R2FileEgress:
             "s3", endpoint_url=self._endpoint, config=self._botocore_config()
         )
 
-    async def put_file(self, data: bytes, *, content_type: str, key: str) -> str:
-        """Upload `data` (any type) and return a short-TTL presigned GET url.
-        Images are rendered inline by Kakao; other files are surfaced as a
-        download link (the URL expires with the configured TTL)."""
+    @property
+    def download_ttl_s(self) -> int:
+        """Presigned-url lifetime for user-tapped download links (longer than
+        the inline-image `_ttl`, which Kakao fetches on receipt)."""
+        return self._download_ttl
+
+    async def put_file(
+        self, data: bytes, *, content_type: str, key: str, ttl_s: int | None = None
+    ) -> str:
+        """Upload `data` (any type) and return a presigned GET url. `ttl_s`
+        defaults to the short inline-image TTL; pass `download_ttl_s` for a
+        link a *user* taps later (an attachment or an offloaded long answer)."""
         async with self._client() as s3:
             await s3.put_object(
                 Bucket=self._bucket, Key=key, Body=data, ContentType=content_type
@@ -130,5 +139,5 @@ class R2FileEgress:
             return await s3.generate_presigned_url(
                 ClientMethod="get_object",
                 Params={"Bucket": self._bucket, "Key": key},
-                ExpiresIn=self._ttl,
+                ExpiresIn=ttl_s or self._ttl,
             )

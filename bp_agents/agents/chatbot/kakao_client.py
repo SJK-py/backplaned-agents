@@ -66,10 +66,32 @@ def _coerce_body(raw: Any) -> dict[str, Any]:
 
 # A Kakao callback template renders at most a few outputs; cap how many an
 # over-long reply is split into (the tail is truncated) and the total
-# outputs (text bubbles + images) in one template.
+# outputs (text bubbles + images + one download card) in one template.
 _MAX_CALLBACK_OUTPUTS = 3
 _TRUNCATED_SUFFIX = "…(생략됨)"
 _ALT_TEXT_MAX = 50  # Kakao simpleImage altText cap
+
+# Download links (attachments + an offloaded long answer) ride a single
+# `listCard` output — each item a tappable row that opens a presigned url
+# (quickReplies can't carry a url; only `message`/`block` actions). Kakao caps
+# a listCard at 5 items; titles render on ~2 short lines, so labels are clipped.
+_FILE_CARD_HEADER = "📎 첨부 파일"
+_MAX_LIST_CARD_ITEMS = 5
+_LIST_ITEM_TITLE_MAX = 32
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
+
+
+def _file_links_card(files: list[tuple[str, str]]) -> dict[str, Any]:
+    """A `listCard` whose items open presigned download urls on tap."""
+    items = [
+        {"title": _clip(label, _LIST_ITEM_TITLE_MAX), "link": {"web": url}}
+        for label, url in files[:_MAX_LIST_CARD_ITEMS]
+    ]
+    return {"listCard": {"header": {"title": _FILE_CARD_HEADER}, "items": items}}
 
 # Cap on an inbound image fetched from the (Kakao-provided) url.
 _INBOUND_IMAGE_CAP = 10 * 1024 * 1024
@@ -131,6 +153,7 @@ class KakaoClient(Protocol):
         *,
         quick_replies: list[tuple[str, str]] | None = None,
         images: list[tuple[str, str]] | None = None,
+        files: list[tuple[str, str]] | None = None,
     ) -> None: ...
 
     async def fetch_inbound_image(self, url: str) -> bytes: ...
@@ -207,17 +230,25 @@ class HttpKakaoClient:
         *,
         quick_replies: list[tuple[str, str]] | None = None,
         images: list[tuple[str, str]] | None = None,
+        files: list[tuple[str, str]] | None = None,
     ) -> None:
-        """Deliver `text` (and optional images) on a Kakao callback url as
-        simpleText + simpleImage outputs, optionally with quick-reply
-        buttons (label, messageText). Total outputs are capped at Kakao's
-        limit, reserving room for images when present."""
+        """Deliver `text` (+ optional images and download links) on a Kakao
+        callback url as simpleText / simpleImage / listCard outputs, optionally
+        with quick-reply buttons (label, messageText). `files` are
+        `(label, url)` download links rendered as one tappable `listCard`.
+
+        Total outputs are capped at Kakao's limit (`_MAX_CALLBACK_OUTPUTS`),
+        prioritising the download card over a surplus image so an offloaded
+        long answer is never the output that gets dropped."""
         images = images or []
-        text_budget = (
-            max(1, _MAX_CALLBACK_OUTPUTS - len(images))
-            if images
-            else _MAX_CALLBACK_OUTPUTS
-        )
+        files = files or []
+        n_card = 1 if files else 0
+        # Slots for everything (≤ _MAX_CALLBACK_OUTPUTS); reserve one for the
+        # card, the rest for images, text gets the remainder — but text always
+        # keeps ≥1 bubble when it has content, even if a surplus image is
+        # dropped (the image loop below caps the total).
+        text_budget = _MAX_CALLBACK_OUTPUTS - len(images) - n_card
+        text_budget = max(1, text_budget) if text else max(0, text_budget)
         outputs: list[dict[str, Any]] = (
             [
                 {"simpleText": {"text": chunk}}
@@ -225,9 +256,11 @@ class HttpKakaoClient:
                     text, limit=self._char_limit, max_bubbles=text_budget
                 )
             ]
-            if text
+            if text and text_budget
             else []
         )
+        if files:  # one listCard; reserved above, so it always fits
+            outputs.append(_file_links_card(files))
         for url, alt in images:
             if len(outputs) >= _MAX_CALLBACK_OUTPUTS:
                 break

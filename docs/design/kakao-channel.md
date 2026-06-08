@@ -272,9 +272,25 @@ class KakaoGateway:
 
 `KakaoClient` (`bp_agents/agents/chatbot/kakao_client.py`) is the
 transport: `pull` / `ack` (§5), `post_callback(url, text|payload)`, the
-Kakao response builders (`simpleText`, `simpleImage`, `quickReplies` for
-the `[Check]`/`[Stop]` buttons), and `fetch_inbound_image` (§8). No
+Kakao response builders (`simpleText`, `simpleImage`, a `listCard` of
+webLink rows for **download links**, and `quickReplies` for the
+`[Check]`/`[Stop]` buttons), and `fetch_inbound_image` (§8). No
 server — symmetric with `HttpTelegramClient` but outbound-only.
+
+A `post_callback` template renders **≤3 outputs** total (a Kakao cap), and
+each `simpleText` over **500 chars** is collapsed behind a 「전체보기」
+button (1,000 is the hard cap). So a turn's reply (one `agent_tag`-prefixed
+bubble) shares the budget with image bubbles and **one** download `listCard`.
+Two things keep a long answer or attachments from being silently truncated at
+that cap:
+  * **Download links, not text.** Produced non-image files (and an offloaded
+    answer) ride as tappable rows in a single `listCard` — `quickReplies`
+    can't carry a url (only `message`/`block` actions), so a card is the only
+    button that opens one.
+  * **Overflow → file.** When the reply itself exceeds the bubble budget, the
+    gateway offloads the full text to a Markdown file on R2 and surfaces it as
+    a `전체 답변` download row, replacing the dropped tail with a short preview
+    bubble that points at the link (`_maybe_offload_overflow`).
 
 ## 7. The deadline state machine
 
@@ -355,16 +371,23 @@ self-authorizing fetch token (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`,
 [deployment.md §6](../backplaned/deployment.md)). Handing that URL to Kakao would
 (a) only work in public-domain deploys, breaking LAN/bare-IP topologies,
 and (b) leak a router fetch token to Kakao's CDN cache. Instead the agent
-uploads the outbound image to an **R2 bucket** and hands Kakao a
-**short-TTL presigned GET** — a public surface fully decoupled from the
+uploads the outbound file to an **R2 bucket** and hands Kakao (or the
+user) a **presigned GET** — a public surface fully decoupled from the
 router.
 
-  * `bp_agents/agents/chatbot/kakao_files.py` — `R2FileEgress.put(bytes,
-    content_type) -> presigned_url`, built on **`aioboto3`** (the
-    **`storage-s3` extra already declares `aioboto3>=14.0`** — no new
-    dependency, only new config).
-  * Scope is intentionally narrow: **outbound images only**. Everything
-    else (inbound, internal files) stays on the router store.
+  * `bp_agents/agents/chatbot/kakao_files.py` — `R2FileEgress.put_file(bytes,
+    *, content_type, key, ttl_s=None) -> presigned_url`, built on
+    **`aioboto3`** (the **`storage-s3` extra already declares
+    `aioboto3>=14.0`** — no new dependency, only new config).
+  * **Two TTLs by audience.** An inline `simpleImage` is fetched by Kakao's
+    servers on receipt → the short `kakao_r2_url_ttl_s` (default 600 s). A
+    **download link** (a non-image attachment, or an offloaded long answer)
+    is tapped by a *user*, possibly much later → the long
+    `kakao_r2_download_url_ttl_s` (default 1 h). Both are unguessable
+    capability urls; keep the download TTL modest so a forwarded link doesn't
+    outlive its use.
+  * Scope stays narrow: **outbound files only** (images + download links).
+    Everything else (inbound, internal files) stays on the router store.
 
 ## 9. Identity & registration
 

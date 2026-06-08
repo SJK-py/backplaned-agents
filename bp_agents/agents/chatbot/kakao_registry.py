@@ -13,7 +13,8 @@ Keyed by `chat_id`:
 
   * `kakao:turn:{chat_id}` — a hash: `state` (`pending`|`ready`),
     `user_id`, `task_id` (the router task, for `[중지]` cancel), `result`
-    (the parked answer once ready), `stopped` (`1` after a `[중지]`),
+    (the parked answer once ready), `images` / `files` (parked outbound
+    image + download-link JSON), `stopped` (`1` after a `[중지]`),
     `progress` (the latest tool-progress line, shown in the "still working"
     status).
   * `kakao:seen:{msg_id}` — a short-lived flag deduping the queue's
@@ -114,7 +115,7 @@ class KakaoTaskRegistry:
             await pipe.execute()
 
     async def store_ready_unless_stopped(
-        self, chat_id: str, result: str, images: str = ""
+        self, chat_id: str, result: str, images: str = "", files: str = ""
     ) -> bool:
         """Park a completed turn's answer for the next touch — but ONLY if the
         turn still exists and wasn't `/stop`'d. Atomic via WATCH/MULTI so a
@@ -135,7 +136,13 @@ class KakaoTaskRegistry:
                     return False
                 pipe.multi()
                 pipe.hset(
-                    key, mapping={"state": "ready", "result": result, "images": images}
+                    key,
+                    mapping={
+                        "state": "ready",
+                        "result": result,
+                        "images": images,
+                        "files": files,
+                    },
                 )
                 pipe.hdel(key, "task_id")
                 pipe.expire(key, self._ttl)
@@ -144,10 +151,10 @@ class KakaoTaskRegistry:
             except WatchError:
                 return False
 
-    async def take_ready(self, chat_id: str) -> tuple[str, str] | None:
-        """Atomically pop a parked answer `(text, images_json)` if one is
-        ready, else None. WATCH/MULTI so two concurrent next-touch deliveries
-        can't both pop the same answer (double-deliver)."""
+    async def take_ready(self, chat_id: str) -> tuple[str, str, str] | None:
+        """Atomically pop a parked answer `(text, images_json, files_json)` if
+        one is ready, else None. WATCH/MULTI so two concurrent next-touch
+        deliveries can't both pop the same answer (double-deliver)."""
         try:
             from redis.exceptions import WatchError  # noqa: PLC0415
         except Exception:  # pragma: no cover
@@ -163,7 +170,11 @@ class KakaoTaskRegistry:
                 pipe.multi()
                 pipe.delete(key)
                 await pipe.execute()
-                return data.get("result", ""), data.get("images", "")
+                return (
+                    data.get("result", ""),
+                    data.get("images", ""),
+                    data.get("files", ""),
+                )
             except WatchError:
                 return None
 

@@ -28,10 +28,10 @@ import json
 import logging
 import mimetypes
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from bp_agents.agents.chatbot.kakao_client import KakaoClient
+from bp_agents.agents.chatbot.kakao_client import _MAX_CALLBACK_OUTPUTS, KakaoClient
 from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
 from bp_agents.channel import ChannelCore, agent_tag, progress_producer
@@ -55,11 +55,15 @@ if TYPE_CHECKING:
 
 @dataclass
 class TurnReply:
-    """A computed turn's user-facing output: the reply text and any outbound
-    images (presigned url, alt) to render as Kakao simpleImage bubbles."""
+    """A computed turn's user-facing output: the reply text, any outbound
+    images (presigned url, alt) shown as Kakao simpleImage bubbles, and any
+    download links `(label, url)` shown as a tappable listCard — attachments
+    the agent produced plus, when the answer is too long for the bubble budget,
+    the full answer offloaded to a file."""
 
     text: str
     images: list[tuple[str, str]]
+    files: list[tuple[str, str]] = field(default_factory=list)
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +96,14 @@ _NOTHING_RUNNING_TEXT = "지금 진행 중인 작업이 없어요."
 _DISPATCH_FAILED_TEXT = "😥 죄송해요, 처리 중 문제가 생겼어요. 다시 시도해 주세요."
 _NO_RESPONSE_TEXT = "(응답 없음)"
 _PROGRESS_FALLBACK_TEXT = "처리 중이에요."
-# Header for non-image produced files — Kakao can't inline documents, so they
-# ride as presigned download links in the reply text (short-lived URLs).
-_FILE_LINKS_INTRO = "📎 첨부 파일이에요 (링크는 곧 만료돼요):"
+
+# Produced files (and an over-long answer) can't be inlined, so they ride as
+# tappable download links in a listCard (see `post_callback`). When the answer
+# itself overruns the bubble budget, the full text is offloaded to a Markdown
+# file and surfaced under this label, with a short preview in the bubble.
+_FULL_ANSWER_LABEL = "📄 전체 답변 (full answer)"
+_OVERFLOW_NOTICE = "답변이 길어 전체 내용은 아래 ‘전체 답변’ 링크에 담았어요. 👇"
+_OVERFLOW_FILENAME = "answer.md"
 
 
 def _format_progress(lp: dict, producer: str | None) -> str:
@@ -209,6 +218,7 @@ class KakaoGateway:
         self._pool = pool
         self._deadline = settings.kakao_callback_deadline_s
         self._callback_ttl = settings.kakao_callback_ttl_s
+        self._char_limit = settings.kakao_msg_char_limit
         self._core = ChannelCore(
             dispatcher=dispatcher,
             pool=pool,
@@ -280,21 +290,26 @@ class KakaoGateway:
         return [(CHECK_LABEL, _CHECK_CMD), (STOP_LABEL, _STOP_CMD)]
 
     @staticmethod
-    def _decode_images(images_json: str) -> list[tuple[str, str]]:
-        if not images_json:
+    def _decode_links(raw: str) -> list[tuple[str, str]]:
+        """Decode a parked list of `(str, str)` pairs (image (url, alt) or
+        download (label, url)); a corrupt blob degrades to none, logged."""
+        if not raw:
             return []
         try:
-            return [(u, a) for u, a in json.loads(images_json)]
+            return [(a, b) for a, b in json.loads(raw)]
         except Exception:  # noqa: BLE001
             logger.warning(
-                "kakao_parked_images_corrupt",
-                extra={"event": "kakao_parked_images_corrupt"},
+                "kakao_parked_links_corrupt",
+                extra={"event": "kakao_parked_links_corrupt"},
             )
             return []
 
     async def _deliver(self, callback_url: str, reply: TurnReply) -> None:
         await self._client.post_callback(
-            callback_url, reply.text, images=reply.images or None
+            callback_url,
+            reply.text,
+            images=reply.images or None,
+            files=reply.files or None,
         )
 
     async def _deliver_ready(self, chat_id: str, callback_url: str) -> bool:
@@ -302,9 +317,12 @@ class KakaoGateway:
         raw = await self._registry.take_ready(chat_id)
         if raw is None:
             return False
-        text, images_json = raw
+        text, images_json, files_json = raw
         await self._client.post_callback(
-            callback_url, text, images=self._decode_images(images_json) or None
+            callback_url,
+            text,
+            images=self._decode_links(images_json) or None,
+            files=self._decode_links(files_json) or None,
         )
         return True
 
@@ -413,7 +431,10 @@ class KakaoGateway:
                     "kakao_deliver_failed", extra={"event": "kakao_deliver_failed"}
                 )
                 await self._registry.store_ready_unless_stopped(
-                    chat_id, reply.text, json.dumps(reply.images)
+                    chat_id,
+                    reply.text,
+                    json.dumps(reply.images),
+                    json.dumps(reply.files),
                 )
                 return
             await self._registry.clear(chat_id)
@@ -461,7 +482,7 @@ class KakaoGateway:
         # landing now must win — store_ready_unless_stopped returns False and
         # we drop the stale answer instead of resurrecting an abandoned turn.
         parked = await self._registry.store_ready_unless_stopped(
-            chat_id, reply.text, json.dumps(reply.images)
+            chat_id, reply.text, json.dumps(reply.images), json.dumps(reply.files)
         )
         if not parked:
             await self._registry.clear(chat_id)  # stopped/cleared → leave clean
@@ -510,20 +531,23 @@ class KakaoGateway:
 
             reply = (result.output.content if result.output else "") or ""
             out_names = list(result.output.files) if result.output else []
-            images, files = await self._upload_outbound(user_id, session_id, out_names)
+            images, file_links = await self._upload_outbound(
+                user_id, session_id, out_names
+            )
             reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else ""
-            if files:
-                links = "\n".join(f"• {fn}\n{url}" for fn, url in files)
-                block = f"{_FILE_LINKS_INTRO}\n{links}"
-                reply_text = f"{reply_text}\n\n{block}" if reply_text else block
-            if not reply_text:
+            # Offload an over-long answer to a download link rather than letting
+            # `post_callback` truncate its tail at the 3-bubble callback cap.
+            reply_text, file_links = await self._maybe_offload_overflow(
+                session_id, reply_text, images, file_links
+            )
+            if not reply_text and not file_links:
                 reply_text = _NO_RESPONSE_TEXT
             context_tokens = await self._core.after_result(session_id, dest, result)
             await self._core.maybe_summarize(session_id, dest, context_tokens)
 
         self._core.fire_memory_add(user_id, session_id, text, reply)
         self._core.fire_name_session(user_id, session_id, text)
-        return TurnReply(reply_text, images)
+        return TurnReply(reply_text, images, file_links)
 
     @staticmethod
     async def _reply_only(coro: Any) -> TurnReply:
@@ -610,11 +634,17 @@ class KakaoGateway:
                     user_id=user_id, file_id=file_id
                 )
                 mime = detect_image_mime(data, name)
+                is_image = mime.startswith("image/")
+                # Inline images are fetched immediately by Kakao (short TTL);
+                # download links are tapped by a user later (long TTL).
                 url = await self._egress.put_file(
-                    data, content_type=mime, key=egress_key(session_id, name)
+                    data,
+                    content_type=mime,
+                    key=egress_key(session_id, name),
+                    ttl_s=None if is_image else self._egress.download_ttl_s,
                 )
                 short = name.rsplit("/", 1)[-1]
-                if mime.startswith("image/"):
+                if is_image:
                     images.append((url, short))
                 else:
                     files.append((short, url))
@@ -624,6 +654,49 @@ class KakaoGateway:
                     extra={"event": "kakao_outbound_file_failed"},
                 )
         return images, files
+
+    async def _maybe_offload_overflow(
+        self,
+        session_id: str,
+        reply_text: str,
+        images: list[tuple[str, str]],
+        file_links: list[tuple[str, str]],
+    ) -> tuple[str, list[tuple[str, str]]]:
+        """If `reply_text` won't fit the callback's text-bubble budget without
+        truncation, upload the full answer as a Markdown download and return a
+        short preview + the link prepended to `file_links`. Otherwise return the
+        text unchanged. A no-op when egress isn't configured (the client then
+        truncates the tail, as before)."""
+        # Bubbles available for text = total cap minus image outputs minus the
+        # one listCard slot a download card already (or would) occupy. Mirror
+        # `post_callback`'s reservation so the two agree on what "fits".
+        n_card = 1 if file_links else 0
+        avail = _MAX_CALLBACK_OUTPUTS - len(images) - n_card
+        if not reply_text or (avail >= 1 and len(reply_text) <= avail * self._char_limit):
+            return reply_text, file_links
+        if self._egress is None:
+            return reply_text, file_links  # can't offload — client truncates
+        try:
+            url = await self._egress.put_file(
+                reply_text.encode("utf-8"),
+                content_type="text/markdown; charset=utf-8",
+                key=egress_key(session_id, _OVERFLOW_FILENAME),
+                ttl_s=self._egress.download_ttl_s,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kakao_overflow_offload_failed",
+                extra={"event": "kakao_overflow_offload_failed"},
+            )
+            return reply_text, file_links  # fall back to truncation
+        preview = self._preview(reply_text)
+        return preview, [(_FULL_ANSWER_LABEL, url), *file_links]
+
+    def _preview(self, text: str) -> str:
+        """A single-bubble head of an offloaded answer + a pointer to the link."""
+        room = max(0, self._char_limit - len(_OVERFLOW_NOTICE) - 2)
+        head = text[:room].rstrip()
+        return f"{head}\n\n{_OVERFLOW_NOTICE}" if head else _OVERFLOW_NOTICE
 
     # -- identity + commands --------------------------------------------
 
