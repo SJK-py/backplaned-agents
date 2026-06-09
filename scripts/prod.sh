@@ -26,6 +26,11 @@ OUT="${OUT:-deploy/.env.prod}"
 COMPOSE_FILE="docker-compose.prod.yml"
 BUNDLED_SEARXNG_URL="http://searxng:8080"
 DEFAULT_WEBAPP_HTTPS_PORT="8443"   # webapp's port identity for bare-IP LAN
+# build_env always (re)generates the Caddyfile here and points
+# CADDYFILE_HOST_PATH (compose's caddy bind mount) at it — one code path for all
+# edge modes. The committed deploy/Caddyfile stays the localhost default for a
+# bare `docker compose up` without prod.sh. Gitignored (see .gitignore).
+CADDYFILE_GENERATED="./deploy/Caddyfile.generated"
 
 # Set to 1 once invitation tokens have been minted in THIS invocation (by
 # build_env). start/restart then skip their own refresh so tokens are
@@ -69,72 +74,77 @@ yesish() { [[ "${1,,}" =~ ^(y|yes)$ ]]; }
 # ---------------------------------------------------------------------------
 build_env() {
     echo "Generating $OUT — answer a few prompts; the rest is auto-generated."
-    # Edge / reverse proxy (Caddy). PUBLIC_DOMAIN is the router + admin host;
-    # WEBAPP_DOMAIN is the browser-channel host (separate IDENTITY because the
-    # webapp serves from / and would collide with the router's /admin).
-    #   - 'localhost'  → local box only, Caddy serves a local self-signed cert.
-    #   - a real domain that resolves to this host → Caddy auto-provisions a
-    #     public Let's Encrypt cert (ports 80/443 must be reachable).
-    #   - a LAN name (e.g. bp.lan, with `app.bp.lan` resolvable too) → LAN
-    #     access; Caddy internal-CA TLS (browsers warn until you trust it).
-    #   - a bare IP (e.g. 192.168.1.50) → no DNS for `app.<ip>`, so the webapp
-    #     gets a PORT identity instead: WEBAPP_DOMAIN=<ip>:$WEBAPP_HTTPS_PORT.
+    # Edge / reverse proxy (Caddy). The stack can be reached by a DOMAIN identity
+    # (router + admin on PUBLIC_DOMAIN; browser channel on WEBAPP_DOMAIN — a
+    # separate host because the webapp serves from / and would collide with the
+    # router's /admin), by a bare-IP identity (LAN, no DNS), or BOTH at once.
+    # prod.sh GENERATES the Caddyfile from the answers (CADDYFILE_GENERATED) —
+    # serving two identities at once is why it's generated, not env-templated.
     # See docs/backplaned/deployment.md "Edge / reverse proxy (Caddy)".
     echo
-    echo "Edge / reverse proxy (Caddy) hostnames:"
-    echo "  localhost                → this machine only (local self-signed TLS)"
-    echo "  a public domain          → auto-TLS via Let's Encrypt (must resolve here, 80/443 open)"
-    echo "  a LAN name (bp.lan)      → LAN access; Caddy internal-CA TLS (browser trust needed)"
-    echo "  a bare IP (192.168.x.x)  → LAN access; webapp moves to a separate HTTPS port"
-    echo "  (TLS upstream? a later prompt switches Caddy to plain HTTP at the origin.)"
-    ask PUBLIC_DOMAIN "Public domain — router + admin UI host" "localhost"
-    # Webapp identity. A bare IP can't host `app.<ip>` (no DNS), so default it
-    # to a PORT on the same IP; anything else gets the `app.` subdomain.
-    local IS_BARE_IP=0
-    if [[ "$PUBLIC_DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        IS_BARE_IP=1
-        WEBAPP_HTTPS_PORT="$DEFAULT_WEBAPP_HTTPS_PORT"
-        ask WEBAPP_DOMAIN "Webapp (browser channel) host:port" "${PUBLIC_DOMAIN}:${WEBAPP_HTTPS_PORT}"
-    else
+    echo "Edge / reverse proxy (Caddy) — how is this stack reached?"
+    echo "  1) Domain only       — a hostname: public domain, LAN name, or localhost"
+    echo "  2) Bare IP only      — a LAN IP (e.g. 192.168.1.50); https via internal CA"
+    echo "  3) Domain + bare IP  — both at once (e.g. a public domain via Cloudflare"
+    echo "                         Tunnel AND direct LAN access by IP)"
+    ask EDGE_MODE_CHOICE "Choose 1-3" "1"
+    case "${EDGE_MODE_CHOICE,,}" in
+        1|domain|"") EDGE_MODE=domain ;;
+        2|ip)        EDGE_MODE=ip ;;
+        3|both)      EDGE_MODE=both ;;
+        *) echo "invalid edge mode: $EDGE_MODE_CHOICE" >&2; exit 1 ;;
+    esac
+
+    # Per-identity vars (empty for the identity this mode omits). PUBLIC_IP is
+    # ALWAYS https (Caddy internal CA); only a DOMAIN can be served over http
+    # (TLS terminated upstream).
+    PUBLIC_DOMAIN=""; WEBAPP_DOMAIN=""; EDGE_SCHEME=https
+    PUBLIC_IP=""; WEBAPP_HTTPS_PORT=""
+
+    if [[ "$EDGE_MODE" == "domain" || "$EDGE_MODE" == "both" ]]; then
+        echo
+        echo "Domain identity (router + admin UI host, then the browser-channel host):"
+        echo "  localhost            → this machine only (Caddy internal-CA / self-signed TLS)"
+        echo "  a public domain      → auto-TLS via Let's Encrypt (must resolve here, 80/443 open)"
+        echo "  a LAN name (bp.lan)  → LAN access; Caddy internal-CA TLS (browser trust needed)"
+        ask PUBLIC_DOMAIN "Public domain — router + admin UI host" "localhost"
         ask WEBAPP_DOMAIN "Webapp (browser channel) host" "app.${PUBLIC_DOMAIN}"
+        # Edge scheme. Default: Caddy terminates TLS (https). Answer y when TLS
+        # is handled UPSTREAM — Cloudflare Tunnel, external LB, ngrok — so Caddy
+        # serves plain HTTP at the origin (automatic HTTPS off). The PUBLIC
+        # scheme stays https, so secrets/cookies are unaffected.
+        echo
+        echo "Is TLS terminated UPSTREAM for the domain (Cloudflare Tunnel / external LB)?"
+        echo "If yes, Caddy serves plain HTTP at the origin instead of provisioning certs."
+        ask UPSTREAM_TLS "TLS terminated upstream? [y/N]" "n"
+        if yesish "$UPSTREAM_TLS"; then EDGE_SCHEME=http; else EDGE_SCHEME=https; fi
     fi
-    # If the webapp identity carries a non-443 port, publish that port.
-    WEBAPP_HTTPS_PORT="$(printf '%s' "$WEBAPP_DOMAIN" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')"
-    WEBAPP_HTTPS_PORT="${WEBAPP_HTTPS_PORT:-443}"
 
-    # Edge scheme. Default: Caddy terminates TLS (https). Answer y when TLS is
-    # handled UPSTREAM — Cloudflare Tunnel, an external load balancer, ngrok —
-    # so Caddy serves plain HTTP at the origin (automatic HTTPS off). The
-    # public scheme stays https, so secrets/cookies are unaffected.
-    echo
-    echo "Is TLS terminated UPSTREAM (Cloudflare Tunnel / external LB)? If yes,"
-    echo "Caddy serves plain HTTP at the origin instead of provisioning certs."
-    ask UPSTREAM_TLS "TLS terminated upstream? [y/N]" "n"
-    if yesish "$UPSTREAM_TLS"; then EDGE_SCHEME=http; else EDGE_SCHEME=https; fi
+    if [[ "$EDGE_MODE" == "ip" || "$EDGE_MODE" == "both" ]]; then
+        # A bare IP can't host app.<ip> (no DNS), so the webapp gets its OWN
+        # https PORT on the same IP instead of a host. Always https: Caddy's
+        # internal CA issues the IP cert (Let's Encrypt refuses IP literals) and
+        # render-caddyfile.sh adds the global default_sni the no-SNI IP client
+        # needs (see that script's header / docs §9).
+        echo
+        echo "Bare-IP identity (LAN access, no DNS — always https via Caddy's internal CA):"
+        echo "  router + admin UI answer on https://<ip>; the webapp gets its own"
+        echo "  https port (no DNS for app.<ip>) at https://<ip>:<port>."
+        ask PUBLIC_IP "Bare IP (e.g. 192.168.1.50)" ""
+        [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "invalid IPv4 address: $PUBLIC_IP" >&2; exit 1; }
+        ask WEBAPP_HTTPS_PORT "Webapp HTTPS port (separate from the router's 443)" "$DEFAULT_WEBAPP_HTTPS_PORT"
+        [[ "$WEBAPP_HTTPS_PORT" =~ ^[0-9]+$ && "$WEBAPP_HTTPS_PORT" != "443" ]] \
+            || { echo "webapp HTTPS port must be numeric and != 443: $WEBAPP_HTTPS_PORT" >&2; exit 1; }
+    fi
 
-    # Bare-IP https needs two Caddy nudges (both no-ops for a domain/localhost):
-    #
-    # EDGE_TLS="tls internal" — pin the internal CA. A PUBLIC IP otherwise
-    #   "qualifies" for a public cert, so Caddy asks Let's Encrypt, which REFUSES
-    #   to issue for a bare IP, leaving :443 certless. (A private IP already
-    #   auto-uses the internal CA, so this is belt-and-suspenders there.)
-    #
-    # EDGE_GLOBAL="default_sni <ip>" — name the cert to serve when the client
-    #   sends NO SNI. A browser hitting https://<ip> never sends SNI (it only
-    #   carries hostnames, not IP literals), and behind Docker's port publishing
-    #   the local address Caddy sees is the CONTAINER IP, not the cert's IP SAN —
-    #   so without default_sni Caddy can't match a cert and aborts the handshake
-    #   with `tls: internal error` (→ browser ERR_SSL_PROTOCOL_ERROR). This is
-    #   THE fix for the "https on a bare IP just SSL-errors" symptom.
-    #
-    # Both injected into deploy/Caddyfile (EDGE_TLS per-site, EDGE_GLOBAL into
-    # the global-options block). Empty otherwise: a real domain keeps auto
-    # Let's Encrypt + SNI routing; EDGE_SCHEME=http (TLS upstream) serves plain
-    # HTTP with no cert at all.
-    local EDGE_TLS="" EDGE_GLOBAL=""
-    if [[ "$EDGE_SCHEME" == "https" && $IS_BARE_IP -eq 1 ]]; then
-        EDGE_TLS="tls internal"
-        EDGE_GLOBAL="default_sni $PUBLIC_DOMAIN"
+    # ROUTER_PUBLIC_URL — the canonical PUBLIC origin (always https, even when
+    # the domain is served over http behind an upstream terminator). The domain
+    # is canonical when present (domain/both); the IP otherwise.
+    if [[ -n "$PUBLIC_DOMAIN" ]]; then
+        ROUTER_PUBLIC_URL="https://$PUBLIC_DOMAIN"
+    else
+        ROUTER_PUBLIC_URL="https://$PUBLIC_IP"
     fi
 
     ask ADMIN_EMAIL "Bootstrap admin email" "admin@example.com"
@@ -287,31 +297,31 @@ build_env() {
         echo "# Compose interpolation vars for docker-compose.prod.yml. KEEP SECRET."
         echo
         echo "# --- Edge / reverse proxy (Caddy) ---"
-        echo "# PUBLIC_DOMAIN: router + admin UI host. WEBAPP_DOMAIN: browser"
-        echo "# channel host (separate — webapp serves from /). 'localhost' or a"
-        echo "# *.localhost / LAN name → Caddy internal-CA TLS; a public domain"
-        echo "# resolving here → auto Let's Encrypt. A bare IP can't host"
-        echo "# app.<ip>, so WEBAPP_DOMAIN gets a port (<ip>:WEBAPP_HTTPS_PORT),"
-        echo "# which compose publishes. See docs/backplaned/deployment.md."
-        echo "PUBLIC_DOMAIN=$PUBLIC_DOMAIN"
-        echo "WEBAPP_DOMAIN=$WEBAPP_DOMAIN"
-        if [[ "$WEBAPP_HTTPS_PORT" != "443" ]]; then
+        echo "# The Caddyfile is GENERATED for EDGE_MODE=$EDGE_MODE by"
+        echo "# scripts/render-caddyfile.sh and written to CADDYFILE_HOST_PATH"
+        echo "# (compose's caddy service bind-mounts it). Re-run scripts/prod.sh to"
+        echo "# change the edge. domain → router+admin on PUBLIC_DOMAIN, browser"
+        echo "# channel on WEBAPP_DOMAIN; ip → both on a bare IP (https, internal"
+        echo "# CA), webapp on its own WEBAPP_HTTPS_PORT; both → serve both at once."
+        echo "# See docs/backplaned/deployment.md."
+        echo "EDGE_MODE=$EDGE_MODE"
+        echo "CADDYFILE_HOST_PATH=$CADDYFILE_GENERATED"
+        if [[ -n "$PUBLIC_DOMAIN" ]]; then
+            echo "PUBLIC_DOMAIN=$PUBLIC_DOMAIN"
+            echo "WEBAPP_DOMAIN=$WEBAPP_DOMAIN"
+            if [[ "$EDGE_SCHEME" != "https" ]]; then
+                echo "# TLS terminated upstream — Caddy serves plain HTTP at the origin."
+                echo "EDGE_SCHEME=$EDGE_SCHEME"
+            fi
+        fi
+        if [[ -n "$PUBLIC_IP" ]]; then
+            echo "# Bare-IP identity — always https via Caddy's internal CA. The"
+            echo "# webapp gets its own published port (no DNS for app.<ip>)."
+            echo "PUBLIC_IP=$PUBLIC_IP"
             echo "WEBAPP_HTTPS_PORT=$WEBAPP_HTTPS_PORT"
         fi
-        if [[ "$EDGE_SCHEME" != "https" ]]; then
-            echo "# TLS terminated upstream — Caddy serves plain HTTP at the origin."
-            echo "EDGE_SCHEME=$EDGE_SCHEME"
-        fi
-        if [[ -n "$EDGE_TLS" ]]; then
-            echo "# Bare-IP https (see deploy/Caddyfile). EDGE_TLS pins Caddy's"
-            echo "# internal CA — Let's Encrypt won't issue for an IP, so the"
-            echo "# default issuer leaves :443 certless. EDGE_GLOBAL sets default_sni:"
-            echo "# a client hitting https://<ip> sends no SNI, and behind Docker NAT"
-            echo "# Caddy can't match a cert without it → tls handshake 'internal"
-            echo "# error' (browser ERR_SSL_PROTOCOL_ERROR)."
-            echo "EDGE_TLS=$EDGE_TLS"
-            echo "EDGE_GLOBAL=$EDGE_GLOBAL"
-        fi
+        echo "# Canonical PUBLIC origin (always https; the domain wins when present)."
+        echo "ROUTER_PUBLIC_URL=$ROUTER_PUBLIC_URL"
         echo
         echo "# --- Postgres (router + suite DBs share this server; suite connects as postgres) ---"
         echo "PG_USER=postgres"
@@ -400,6 +410,12 @@ build_env() {
         [[ -n "$KAGI_KEY" ]] && echo "SUITE_KAGI_API_KEY=$KAGI_KEY"
     } > "$OUT"
     chmod 600 "$OUT"
+    # Always (re)generate the Caddyfile for this mode — one code path; the env's
+    # CADDYFILE_HOST_PATH (written above) points compose's caddy mount here. The
+    # committed deploy/Caddyfile remains the localhost default for a bare compose.
+    EDGE_MODE="$EDGE_MODE" PUBLIC_DOMAIN="$PUBLIC_DOMAIN" WEBAPP_DOMAIN="$WEBAPP_DOMAIN" \
+        EDGE_SCHEME="$EDGE_SCHEME" PUBLIC_IP="$PUBLIC_IP" WEBAPP_HTTPS_PORT="$WEBAPP_HTTPS_PORT" \
+        scripts/render-caddyfile.sh > "$CADDYFILE_GENERATED"
     # Invitation tokens are the ONE thing not written above: they're single-use
     # and minted fresh on every start/restart by refresh_invitations(), which is
     # the single source. Seed them once here too, so a build-then-stop/exit (no
@@ -407,12 +423,16 @@ build_env() {
     refresh_invitations
 
     echo
-    echo "Wrote $OUT (chmod 600)."
-    echo "  edge: admin/router=$EDGE_SCHEME://$PUBLIC_DOMAIN  webapp=$EDGE_SCHEME://$WEBAPP_DOMAIN"
-    [[ "$WEBAPP_HTTPS_PORT" != "443" ]] && \
-        echo "        (webapp on a separate port $WEBAPP_HTTPS_PORT — compose publishes it; open it on any firewall)"
-    if [[ "$EDGE_SCHEME" == "http" ]]; then
-        echo "        (Caddy serves plain HTTP — TLS is terminated upstream; clients still use https)"
+    echo "Wrote $OUT (chmod 600); generated $CADDYFILE_GENERATED (EDGE_MODE=$EDGE_MODE)."
+    if [[ -n "$PUBLIC_DOMAIN" ]]; then
+        echo "  edge [domain]: admin/router=$EDGE_SCHEME://$PUBLIC_DOMAIN  webapp=$EDGE_SCHEME://$WEBAPP_DOMAIN"
+        [[ "$EDGE_SCHEME" == "http" ]] && \
+            echo "        (domain: Caddy serves plain HTTP — TLS terminated upstream; clients still use https)"
+    fi
+    if [[ -n "$PUBLIC_IP" ]]; then
+        echo "  edge [bare IP]: admin/router=https://$PUBLIC_IP  webapp=https://$PUBLIC_IP:$WEBAPP_HTTPS_PORT"
+        echo "        (https via Caddy's internal CA + default_sni — browsers warn until you trust"
+        echo "         Caddy's root CA; the webapp port $WEBAPP_HTTPS_PORT is published — open it on any firewall)"
     fi
     echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
     [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"
@@ -422,24 +442,16 @@ build_env() {
         echo "        surviving data volumes; a fresh value would fail auth. Use"
         echo "        'reset' to wipe volumes AND mint new ones together.)"
     fi
-    # Internal-CA TLS warning only applies when CADDY is the TLS terminator.
-    if [[ "$EDGE_SCHEME" == "https" ]]; then
+    # Internal-CA TLS warning for a localhost/LAN DOMAIN served by Caddy (a public
+    # domain over http means TLS is upstream, so no Caddy cert at all).
+    if [[ -n "$PUBLIC_DOMAIN" && "$EDGE_SCHEME" == "https" ]]; then
         case "$PUBLIC_DOMAIN" in
             localhost|*.localhost|127.*|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
-                echo "  NOTE: '$PUBLIC_DOMAIN' → Caddy serves internal-CA / self-signed TLS"
+                echo "  NOTE: domain '$PUBLIC_DOMAIN' → Caddy serves internal-CA / self-signed TLS"
                 echo "        (browsers warn until you trust Caddy's root CA — see"
                 echo "        docs/backplaned/deployment.md). A public domain resolving here gets"
                 echo "        automatic Let's Encrypt TLS instead." ;;
         esac
-        if [[ -n "$EDGE_TLS" ]]; then
-            echo "  NOTE: bare IP '$PUBLIC_DOMAIN' over https → pinned Caddy's internal"
-            echo "        CA + default_sni (EDGE_TLS / EDGE_GLOBAL). default_sni is what"
-            echo "        lets the handshake succeed: an IP client sends no SNI, and"
-            echo "        Caddy can't match a cert behind Docker NAT without it (the"
-            echo "        'SSL protocol error' symptom). Browsers still warn on the"
-            echo "        self-signed cert until you trust Caddy's root CA — for"
-            echo "        warning-free TLS use a domain/LAN name that resolves here."
-        fi
     fi
     if [[ "$PROVIDER" == "custom" ]]; then
         echo "  NOTE: custom — tiers point at presets: lite=$PRESET_LITE"

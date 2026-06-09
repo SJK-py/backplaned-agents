@@ -41,10 +41,14 @@ TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI 
 
 | Env var | Serves | Default |
 | --- | --- | --- |
-| `PUBLIC_DOMAIN` | router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
-| `WEBAPP_DOMAIN` | the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
-| `WEBAPP_HTTPS_PORT` | extra published port for the webapp under a **bare-IP** deploy (`WEBAPP_DOMAIN=<ip>:<port>`) | `8443` |
-| `EDGE_SCHEME` | scheme Caddy serves; set `http` when **TLS is terminated upstream** (Cloudflare Tunnel / LB) — see [§9](#9-edge--reverse-proxy-caddy) | `https` |
+| `EDGE_MODE` | how the stack is reached: `domain` \| `ip` \| `both` — `prod.sh` **generates the Caddyfile** for it (see [§9](#9-edge--reverse-proxy-caddy)) | `domain` |
+| `PUBLIC_DOMAIN` | (domain/both) router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
+| `WEBAPP_DOMAIN` | (domain/both) the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
+| `EDGE_SCHEME` | (domain/both) scheme Caddy serves; set `http` when **TLS is terminated upstream** (Cloudflare Tunnel / LB) — see [§9](#9-edge--reverse-proxy-caddy) | `https` |
+| `PUBLIC_IP` | (ip/both) bare-IP identity — router + admin on `https://<ip>`, **always** Caddy internal-CA TLS | — |
+| `WEBAPP_HTTPS_PORT` | (ip/both) the webapp's **own** published https port on the IP (no DNS for `app.<ip>`) | `8443` |
+| `ROUTER_PUBLIC_URL` | canonical public origin (always https); the domain when present, else the IP | `https://${PUBLIC_DOMAIN}` |
+| `CADDYFILE_HOST_PATH` | bind-mount source for Caddy's config — `prod.sh` sets it to the generated file | `./deploy/Caddyfile` |
 
 The webapp gets its **own** identity (hostname, or a port for a bare IP) because it serves from `/`, which would collide with the router's `/admin` on the same host.
 
@@ -166,40 +170,61 @@ the ranked backlog of work to lift each ceiling. In short:
 ## 9. Edge / reverse proxy (Caddy)
 
 The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443` (plus
-the optional webapp port below). It terminates TLS, proxies the two public
+the optional webapp port below). It terminates TLS, proxies the public
 hostnames, and transparently upgrades the agent WebSocket on `/v1/agent`. The
-router never terminates TLS; Postgres / Redis / SeaweedFS are never proxied. Two
-`${...}`-interpolated hostnames drive [`deploy/Caddyfile`](../../deploy/Caddyfile),
-set by `scripts/prod.sh` (or by hand in `deploy/.env.prod`):
+router never terminates TLS; Postgres / Redis / SeaweedFS are never proxied.
 
-- **`PUBLIC_DOMAIN`** — router + admin UI (`/v1/*`, `/admin/*`, `/healthz`,
-  `/readyz`, `/metrics`, `/docs`; bare `/` redirects to `/admin/login`).
-  Also flows into `ROUTER_PUBLIC_URL=https://$PUBLIC_DOMAIN`.
-- **`WEBAPP_DOMAIN`** — the browser channel (defaults to
-  `app.${PUBLIC_DOMAIN}`). The webapp needs its **own identity** because it
-  serves from `/`, which would collide with the router's `/admin` — Caddy
-  routes the two by `Host` header on the shared `:443`.
+**The Caddyfile is generated.** `scripts/prod.sh` asks how the stack is reached
+(**`EDGE_MODE`**) and runs [`scripts/render-caddyfile.sh`](../../scripts/render-caddyfile.sh)
+to write `deploy/Caddyfile.generated`, pointing `CADDYFILE_HOST_PATH` (the
+`caddy` bind mount) at it. The committed
+[`deploy/Caddyfile`](../../deploy/Caddyfile) is the **localhost default** used
+only for a bare `docker compose up` without `prod.sh`. Generating (rather than
+env-templating one static file) is what lets a single deploy serve **two
+identities at once** — a domain *and* a bare IP — each with the right TLS.
 
-> **Two identities, one `:443`.** Caddy virtual-hosts both sites on `:443` and
-> picks the backend from the request's `Host` header — so each needs a
-> *distinct* name. With a **hostname** that's free (`bp.example.com` +
-> `app.bp.example.com`). With a **bare IP** there's no `app.<ip>` to resolve,
-> so the webapp instead takes a **port identity** on the same IP
-> (`WEBAPP_DOMAIN=<ip>:8443`) — `prod.sh` defaults to this automatically for
-> an IP, and the `caddy` service publishes `WEBAPP_HTTPS_PORT` (default
-> `8443`). The webapp can't be path-mounted under the router (it has no
-> mount-prefix support), so a second name or a second port is the only option.
+`EDGE_MODE`:
+
+- **`domain`** (default) — a hostname identity:
+  - **`PUBLIC_DOMAIN`** — router + admin UI (`/v1/*`, `/admin/*`, `/healthz`,
+    `/readyz`, `/metrics`, `/docs`; bare `/` redirects to `/admin/login`).
+  - **`WEBAPP_DOMAIN`** — the browser channel (defaults to `app.${PUBLIC_DOMAIN}`).
+    Its **own identity** because it serves from `/`, which would collide with the
+    router's `/admin` — Caddy routes the two by `Host` header on the shared `:443`.
+  - **`EDGE_SCHEME`** — `https` (Caddy terminates TLS) or `http` (TLS upstream).
+- **`ip`** — a bare-IP identity (LAN, no DNS): router + admin on `https://<ip>`,
+  webapp on its own port `https://<ip>:${WEBAPP_HTTPS_PORT}` (default `8443`).
+  **Always https** via Caddy's internal CA (see the bare-IP row below).
+- **`both`** — serve the domain **and** the bare IP simultaneously (e.g. a public
+  domain via a Cloudflare Tunnel *and* direct LAN access by IP). All of the above
+  vars apply; `ROUTER_PUBLIC_URL` (the canonical public origin) is the **domain**.
+
+`ROUTER_PUBLIC_URL` is always `https://…` (the domain when present, else the IP)
+even when `EDGE_SCHEME=http`, since the *public* scheme stays HTTPS.
+
+> **Two identities, one `:443`.** Caddy virtual-hosts every site on `:443` and
+> routes by SNI / `Host` header — so each needs a *distinct* name. With a
+> **hostname** that's free (`bp.example.com` + `app.bp.example.com`). With a
+> **bare IP** there's no `app.<ip>` to resolve, so the webapp takes a **port
+> identity** on the same IP (`https://<ip>:8443`) and the `caddy` service
+> publishes `WEBAPP_HTTPS_PORT` (default `8443`). In **`both`** mode the domain
+> router and the IP router *share* `:443` — Caddy serves the Let's Encrypt /
+> domain cert by SNI and the IP's internal-CA cert when the client sends no SNI
+> (the global `default_sni <ip>`). The webapp can't be path-mounted under the
+> router (no mount-prefix support), so a second name or a second port is the
+> only option.
 
 ### Choosing the hostnames — access modes
 
 Caddy decides how to provision TLS **from the site address itself**:
 
-| You want | `PUBLIC_DOMAIN` / `WEBAPP_DOMAIN` | TLS Caddy uses | Reachable from |
+| You want | `EDGE_MODE` + identity | TLS Caddy uses | Reachable from |
 | --- | --- | --- | --- |
-| **Local only** (single box, a trial) | `localhost` / `app.localhost` (the defaults) | local auto-self-signed (trusted by the host's browsers via Caddy's local CA) | this machine only — `https://localhost`, `https://app.localhost` |
-| **LAN — by hostname** (preferred) | a LAN-resolvable name **and** its `app.` sub, e.g. `bp.lan` / `app.bp.lan` | Caddy's **internal CA** (not public names → no ACME) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
-| **LAN — by bare IP** | `192.168.1.50` / `192.168.1.50:8443` (the IP default) | Caddy's **internal CA** | any LAN device — router at `https://<ip>`, **webapp at `https://<ip>:8443`** (open that port on any firewall) |
-| **Public** (internet) | a real domain whose DNS points here, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
+| **Local only** (single box, a trial) | `domain`; `localhost` / `app.localhost` (the defaults) | local auto-self-signed (trusted by the host's browsers via Caddy's local CA) | this machine only — `https://localhost`, `https://app.localhost` |
+| **LAN — by hostname** (preferred) | `domain`; a LAN-resolvable name **and** its `app.` sub, e.g. `bp.lan` / `app.bp.lan` | Caddy's **internal CA** (not public names → no ACME) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
+| **LAN — by bare IP** | `ip`; `PUBLIC_IP=192.168.1.50`, `WEBAPP_HTTPS_PORT=8443` | Caddy's **internal CA** | any LAN device — router at `https://<ip>`, **webapp at `https://<ip>:8443`** (open that port on any firewall) |
+| **Public** (internet) | `domain`; a real domain whose DNS points here, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
+| **Public domain + LAN IP** | `both`; the domain pair **and** `PUBLIC_IP` (often with `EDGE_SCHEME=http` for a tunnel) | per-identity (domain: ACME/upstream; IP: internal CA) | both at once — see [Serving HTTP at the origin](#serving-http-at-the-origin-tls-terminated-upstream) |
 
 Notes:
 
@@ -211,11 +236,14 @@ Notes:
   router, an mDNS `*.local` name, or a per-client `hosts`-file entry (e.g.
   `192.168.1.50  bp.lan app.bp.lan`). Then both sites share `:443` (no extra
   port) and you only deal with the one internal-CA warning.
-- **LAN by bare IP:** when you can't add DNS, set `PUBLIC_DOMAIN=<ip>` and
-  `prod.sh` defaults `WEBAPP_DOMAIN=<ip>:8443` (overridable via
-  `WEBAPP_HTTPS_PORT`). The `caddy` service publishes that port; **open it on
-  the host firewall** so LAN clients can reach `https://<ip>:8443`. The router
-  stays on `https://<ip>`.
+- **LAN by bare IP:** when you can't add DNS, choose `EDGE_MODE=ip` and set
+  `PUBLIC_IP=<ip>`; the webapp gets `https://<ip>:${WEBAPP_HTTPS_PORT}` (default
+  `8443`). The `caddy` service publishes that port; **open it on the host
+  firewall** so LAN clients can reach it. The router stays on `https://<ip>`.
+  A bare IP is **always https** via the internal CA — the generated Caddyfile
+  pins `tls internal` (Let's Encrypt won't issue for an IP literal) and adds a
+  global `default_sni <ip>` (an IP client sends no SNI, and behind Docker NAT
+  Caddy can't otherwise match a cert → handshake `tls: internal error`).
 - **Public mode prerequisites:** the domain's DNS A/AAAA record must point at
   this host, and inbound **`:80` and `:443` must be reachable** (Caddy needs
   `:80` for the ACME challenge and the HTTP→HTTPS redirect). Behind NAT,
@@ -231,9 +259,11 @@ Notes:
   `WEBAPP_DOMAIN` for users plus a LAN-only `PUBLIC_DOMAIN` to keep `/admin`
   off the internet. Edit `deploy/.env.prod` and re-run `scripts/prod.sh`
   (→ restart) to apply.
-- **Editing routing** (extra paths, headers, a third host) is a
-  `deploy/Caddyfile` change; it's bind-mounted read-only, so a `restart`
-  reloads it.
+- **Editing routing** (extra paths, headers, a third host): the served file is
+  `deploy/Caddyfile.generated` (gitignored). Re-run `scripts/prod.sh` to
+  regenerate it after changing `EDGE_MODE`/identities, or hand-edit it (and add
+  the directive to `scripts/render-caddyfile.sh` so it survives the next
+  regenerate). It's bind-mounted read-only, so a `restart` reloads it.
 
 ### Serving HTTP at the origin (TLS terminated upstream)
 
@@ -269,3 +299,42 @@ on a private network) is HTTP.
 > (`WEBAPP_DEPLOYMENT_ENV=staging`) to relax the guard and set
 > `ROUTER_PUBLIC_URL=http://…` — losing the prod hardening. Use the
 > upstream-TLS path instead; it keeps everything https-correct.
+
+#### Example: public domain via Cloudflare Tunnel **and** LAN by IP (`EDGE_MODE=both`)
+
+A common shape: reach the stack publicly through a Cloudflare Tunnel (TLS
+terminated at Cloudflare, so the origin is plain HTTP) **and** directly on the
+LAN by IP (https, internal CA). Pick `EDGE_MODE=both` in `prod.sh`, answer the
+domain prompts with **TLS terminated upstream = y** (`EDGE_SCHEME=http`), and
+give the bare IP. The resulting `deploy/.env.prod`:
+
+```ini
+EDGE_MODE=both
+PUBLIC_DOMAIN=bp.example.com
+WEBAPP_DOMAIN=app.example.com
+EDGE_SCHEME=http                 # origin is plain HTTP; the tunnel does TLS
+PUBLIC_IP=192.168.1.50
+WEBAPP_HTTPS_PORT=8443
+ROUTER_PUBLIC_URL=https://bp.example.com
+```
+
+The generated Caddyfile serves the two domains on **`http://`** (the tunnel
+connects to `caddy:80`) and the IP on **`https://`** with the internal CA. Point
+`cloudflared` at Caddy's HTTP port — the router and webapp need **separate
+hostnames** (distinct `Host` headers), so give each its own ingress rule:
+
+```yaml
+# ~/.cloudflared/config.yml (tunnel side)
+ingress:
+  - hostname: bp.example.com        # router + admin UI
+    service: http://caddy:80
+  - hostname: app.example.com       # webapp (browser channel)
+    service: http://caddy:80
+  - service: http_status:404
+```
+
+LAN clients reach `https://192.168.1.50` (router/admin) and
+`https://192.168.1.50:8443` (webapp) directly — trust Caddy's root CA to clear
+the warning. Public clients use `https://bp.example.com` / `https://app.example.com`
+with Cloudflare's cert. The Secure session cookie stays valid on every path
+(all are HTTPS to the browser).
