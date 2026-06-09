@@ -83,6 +83,10 @@
         {% else %}
           <div class="mb-2"></div>
         {% endif %}
+        <a href="/admin/account/password"
+           class="mb-1 block text-brand-50/80 hover:text-white underline underline-offset-2">
+          Change password
+        </a>
         <form action="/admin/logout" method="post">
           {% include "_partials/csrf.html" %}
           <button type="submit"

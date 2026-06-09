@@ -24,6 +24,7 @@ from bp_admin.auth import make_auth_middleware
 from bp_admin.config import AdminConfig
 from bp_admin.csrf import make_csrf_middleware
 from bp_admin.pages import (
+    account,
     acl,
     agents,
     audit,
@@ -176,6 +177,7 @@ def create_app(config: AdminConfig | None = None) -> FastAPI:
 
     # Routers.
     app.include_router(auth_pages.router)
+    app.include_router(account.router, prefix="/account")
     app.include_router(dashboard.router)
     app.include_router(users.router, prefix="/users")
     app.include_router(agents.router, prefix="/agents")

@@ -60,8 +60,23 @@ def _preset_fields_for_template(
     return out
 
 
+# Messages for a failed `POST /change-password` (auth_pages), keyed by the
+# code it puts on the redirect — never reflect the router's raw error text.
+_PW_ERRORS = {
+    "mismatch": "The new password and its confirmation don’t match.",
+    "weak": "Choose a new password of at least 8 characters.",
+    "current": "Your current password is incorrect.",
+    "same": "The new password must differ from your current one.",
+    "conflict": "This account can’t use a password login.",
+    "ratelimited": "Too many attempts — please wait a moment and try again.",
+    "failed": "Couldn’t change your password. Please try again.",
+}
+
+
 @router.get("/config", response_class=HTMLResponse)
-async def config_view(request: Request, saved: int = 0) -> HTMLResponse:
+async def config_view(
+    request: Request, saved: int = 0, pw_error: str | None = None
+) -> HTMLResponse:
     pool = request.app.state.pool
     user_id = session_user_id(request)
     if pool is None or not user_id:
@@ -74,6 +89,7 @@ async def config_view(request: Request, saved: int = 0) -> HTMLResponse:
         "config/form.html",
         {"cfg": cfg, "saved": bool(saved), "error": None,
          "active_section": "config",
+         "pw_error": _PW_ERRORS.get(pw_error or ""),
          "preset_fields": _preset_fields_for_template(cfg, preset_choices)},
     )
 
@@ -110,7 +126,7 @@ async def config_save(request: Request) -> HTMLResponse:
             request,
             "config/form.html",
             {"cfg": cfg, "saved": False, "error": "; ".join(errors),
-             "active_section": "config",
+             "active_section": "config", "pw_error": None,
              "preset_fields": _preset_fields_for_template(cfg, preset_choices)},
             status_code=400,
         )

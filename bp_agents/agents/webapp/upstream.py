@@ -81,6 +81,21 @@ class UpstreamClient:
             json={"token": token, "new_password": new_password},
         )
 
+    async def change_password(
+        self, *, access_token: str, current_password: str, new_password: str
+    ) -> None:
+        """Change the logged-in user's own password (`POST
+        /v1/auth/change-password`): confirms `current_password`, then sets
+        `new_password`. The router revokes the caller's tokens on success, so
+        the caller must re-login afterwards. Returns 204 (no body)."""
+        await self.request(
+            "POST", "/v1/auth/change-password", access_token=access_token,
+            json={
+                "current_password": current_password,
+                "new_password": new_password,
+            },
+        )
+
     async def logout(
         self, *, access_token: str, refresh_token: str | None = None
     ) -> None:

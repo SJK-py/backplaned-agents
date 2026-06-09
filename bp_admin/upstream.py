@@ -86,6 +86,21 @@ class UpstreamClient:
             "POST", "/v1/auth/logout", access_token=access_token, json=body
         )
 
+    async def change_password(
+        self, *, access_token: str, current_password: str, new_password: str
+    ) -> None:
+        """Change the logged-in admin's own password (`POST
+        /v1/auth/change-password`): confirms `current_password`, then sets
+        `new_password`. The router revokes the caller's tokens on success, so
+        the BFF session must be dropped + re-login afterwards. Returns 204."""
+        await self.request(
+            "POST", "/v1/auth/change-password", access_token=access_token,
+            json={
+                "current_password": current_password,
+                "new_password": new_password,
+            },
+        )
+
     # ------------------------------------------------------------------
     # Admin endpoints — thin wrapper that prepends `/v1/admin` and
     # attaches the bearer token. Page handlers call this directly with

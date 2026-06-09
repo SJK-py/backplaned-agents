@@ -67,7 +67,9 @@ def _safe_next(request: Request, raw: str | None) -> str:
 
 
 @router.get("/login", response_class=HTMLResponse)
-async def login_form(request: Request, error: str | None = None) -> HTMLResponse:
+async def login_form(
+    request: Request, error: str | None = None, changed: str | None = None
+) -> HTMLResponse:
     from bp_admin.asgi_utils import root_path as _root_path  # noqa: PLC0415
 
     if is_authenticated(request):
@@ -81,6 +83,9 @@ async def login_form(request: Request, error: str | None = None) -> HTMLResponse
         {
             "error": error,
             "next": request.query_params.get("next", ""),
+            # Shown after a successful in-session password change (which
+            # revokes the old session — the admin must sign in again).
+            "changed_ok": changed == "1",
         },
     )
 
