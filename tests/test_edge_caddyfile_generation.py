@@ -31,6 +31,7 @@ def _render(**env: str) -> str:
         env={"PATH": "/usr/bin:/bin", **env},
         capture_output=True,
         text=True,
+        check=False,
     )
     assert res.returncode == 0, f"render failed ({res.returncode}): {res.stderr}"
     return res.stdout
@@ -43,6 +44,7 @@ def _render_fail(**env: str) -> str:
         env={"PATH": "/usr/bin:/bin", **env},
         capture_output=True,
         text=True,
+        check=False,
     )
     assert res.returncode != 0, f"expected failure, got stdout:\n{res.stdout}"
     return res.stderr
