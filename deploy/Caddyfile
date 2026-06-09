@@ -2,6 +2,13 @@
 # fronting the router (HTTP API + admin UI) and the webapp (browser channel).
 # Replace the site addresses with your domains; Caddy auto-provisions TLS.
 #
+# NOTE: this committed file is the LOCALHOST DEFAULT, used for a bare
+# `docker compose up` WITHOUT scripts/prod.sh. When prod.sh builds the env it
+# GENERATES deploy/Caddyfile.generated (scripts/render-caddyfile.sh) for the
+# chosen EDGE_MODE (domain | ip | both) and points CADDYFILE_HOST_PATH at it —
+# that generated file, not this one, is what a prod deploy serves. The
+# `{$VAR:default}` placeholders below only matter for the bare-compose fallback.
+#
 # The router does NOT terminate TLS itself; everything public goes
 # through here. Postgres / Redis / rustfs are never proxied (internal
 # networks only).
