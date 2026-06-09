@@ -13,6 +13,11 @@
       Password set — sign in below.
     </div>
   {% endif %}
+  {% if changed_ok %}
+    <div class="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+      Password changed — please sign in with your new password.
+    </div>
+  {% endif %}
 
   <!-- Sign in -->
   <form method="post" action="/login" x-show="mode === 'login'"

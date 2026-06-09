@@ -8,6 +8,12 @@
     <p class="mt-2 text-sm text-brand-500">Sign in with your admin account.</p>
   </div>
 
+  {% if changed_ok %}
+    <div class="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+      Password changed — please sign in with your new password.
+    </div>
+  {% endif %}
+
   <form method="post" action="/admin/login"
         class="space-y-4 bg-white shadow-sm border border-brand-500/10 rounded-md p-6">
     {% if error %}

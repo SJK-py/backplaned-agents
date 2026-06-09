@@ -53,6 +53,7 @@ async def login_form(
     error: str | None = None,
     reset: str | None = None,
     reset_error: str | None = None,
+    changed: str | None = None,
 ) -> HTMLResponse:
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
@@ -69,6 +70,9 @@ async def login_form(
             # Open the set-password form when redeeming failed, so the error
             # shows next to it.
             "show_reset": reset_msg is not None,
+            # Shown after a successful in-session password change (which
+            # revokes the old session — the user must sign in again).
+            "changed_ok": changed == "1",
         },
     )
 
@@ -125,6 +129,48 @@ async def set_password_submit(
         )
         return RedirectResponse(url=f"/login?reset_error={code}", status_code=303)
     return RedirectResponse(url="/login?reset=1", status_code=303)
+
+
+@router.post("/change-password")
+async def change_password_submit(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> RedirectResponse:
+    """Change the logged-in user's own password (current → new). On success the
+    router revokes this session's tokens, so we clear the local session and send
+    the user to re-login; failures bounce back to Settings with a code. The
+    `/config` page renders the matching message."""
+    access = request.session.get("access_token")
+    if not access:  # session lapsed mid-form
+        return RedirectResponse(url="/login", status_code=303)
+    if new_password != confirm_password:
+        return RedirectResponse(url="/config?pw_error=mismatch", status_code=303)
+    if len(new_password) < 8:
+        return RedirectResponse(url="/config?pw_error=weak", status_code=303)
+    upstream = request.app.state.upstream
+    try:
+        await upstream.change_password(
+            access_token=access,
+            current_password=current_password,
+            new_password=new_password,
+        )
+    except UpstreamError as exc:
+        code = {
+            401: "current", 400: "same", 409: "conflict",
+            422: "weak", 429: "ratelimited",
+        }.get(exc.status_code, "failed")
+        logger.info(
+            "webapp_change_password_failed",
+            extra={"event": "webapp_change_password_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url=f"/config?pw_error={code}", status_code=303)
+    # Router has revoked this session's tokens — drop the local session so the
+    # user re-authenticates with the new password.
+    clear_session(request)
+    return RedirectResponse(url="/login?changed=1", status_code=303)
 
 
 @router.post("/logout")
