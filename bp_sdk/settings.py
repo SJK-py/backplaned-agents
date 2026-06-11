@@ -62,6 +62,17 @@ class AgentConfig(BaseSettings):
     reconnect_initial_backoff_s: float = 0.5
     reconnect_max_backoff_s: float = 30.0
 
+    reonboard_max_attempts: int = Field(default=3, ge=1)
+    """Bound on CONSECUTIVE re-onboard attempts after the router rejects the
+    agent's credential (WS close 4001 `auth_failed`, or 4003
+    `agent_reprovision` / `agent_reset`). On such a close the transport drops
+    the rejected token and re-onboards with `invitation_token`; the counter
+    resets on the next successful handshake. The cap stops a non-recoverable
+    agent — no invitation, evicted, or a spent single-use invitation — from
+    hot-looping the onboard endpoint. One successful re-onboard fixes the
+    common case (a rotated `ROUTER_JWT_SECRET`), so this only governs the
+    genuinely-stuck tail."""
+
     # ------------------------------------------------------------------
     # Tunables previously hard-coded in the SDK. Slow-network or
     # high-churn deployments can override these without forking the SDK.

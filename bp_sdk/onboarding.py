@@ -175,6 +175,44 @@ async def onboard_or_resume(info: AgentInfo, config: AgentConfig) -> None:
     )
 
 
+async def reonboard_with_invitation(info: AgentInfo, config: AgentConfig) -> bool:
+    """Drop a router-rejected credential and re-onboard with the invitation.
+
+    Called by the WS transport when the router closes on CREDENTIAL grounds —
+    4001 `auth_failed` (e.g. a `ROUTER_JWT_SECRET` rotated out from under the
+    persisted token) or 4003 `agent_reprovision` / `agent_reset`. The agent
+    can't tell a stale-signature token from a good one locally (it has no
+    secret), so `onboard_or_resume` would happily RESUME the dead token; this
+    deletes `credentials.json` first so the next onboard goes through the
+    invitation instead.
+
+    Returns True iff a fresh `auth_token` was obtained. Returns False — without
+    raising — when re-onboard is impossible (no `invitation_token`). A terminal
+    onboard (409 evicted, or 403 for a spent single-use invitation) raises out
+    of `_post_onboard_with_retry`; the caller treats any raise as "not
+    recovered" and backs off, so a genuinely-stuck agent can't hot-loop.
+    """
+    if not config.invitation_token:
+        logger.warning(
+            "reonboard_no_invitation",
+            extra={"event": "reonboard_no_invitation", "bp.agent_id": info.agent_id},
+        )
+        return False
+    # Purge the rejected token so onboard_or_resume can't resume it. The
+    # invitation is the only trust anchor from here.
+    creds_path = _credentials_path(config)
+    try:
+        creds_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning(
+            "credentials_purge_failed",
+            extra={"event": "credentials_purge_failed", "bp.agent_id": info.agent_id},
+        )
+    config.auth_token = None
+    await onboard_or_resume(info, config)
+    return config.auth_token is not None
+
+
 async def _post_onboard_with_retry(
     *,
     base: str,
