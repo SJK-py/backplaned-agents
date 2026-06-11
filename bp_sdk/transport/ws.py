@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from bp_protocol import PROTOCOL_VERSION
 from bp_protocol.frames import (
+    ErrorCode,
     ErrorFrame,
     Frame,
     HelloFrame,
@@ -49,6 +50,50 @@ _MEDIA_SCAN_MAX_DEPTH = 16
 # just enqueued) before the pump is cancelled. A wedged socket
 # can't stall shutdown past this.
 _CLOSE_DRAIN_TIMEOUT_S = 5.0
+
+# Router WS closes that mean "your CREDENTIAL is no longer valid — drop it and
+# re-onboard with your invitation." 4001 `auth_failed` is the handshake
+# rejection (e.g. ROUTER_JWT_SECRET rotated under the persisted token); 4003
+# `agent_reprovision` / `agent_reset` are admin resets to `pending` + a fresh
+# invitation. The OTHER 4003 reasons are deliberately EXCLUDED — `agent_evicted`
+# is terminal (re-onboard would 409), `agent_suspended` is an intentional stop
+# (re-onboarding would defeat it), `superseded` means a newer socket won (the
+# token is fine). 4002 (heartbeat/outbox) and 4029 (rate-limit) are transient:
+# a plain reconnect with the SAME token is correct. Mirrors bp_router/ws_hub.py.
+_AUTH_FAILED_CLOSE_CODE = 4001
+_ADMIN_RESET_CLOSE_CODE = 4003
+_REONBOARD_4003_REASONS = frozenset({"agent_reprovision", "agent_reset"})
+
+
+class _CredentialRejected(Exception):
+    """The router rejected/closed the socket on credential grounds — the
+    transport should purge the rejected token and re-onboard (see
+    `_REONBOARD_4003_REASONS` / `_AUTH_FAILED_CLOSE_CODE`)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _credential_rejection_reason(exc: BaseException) -> str | None:
+    """Return the close reason if `exc` is a router WS close that warrants a
+    re-onboard (4001, or 4003 with a reset reason); else None.
+
+    Reads the close code/reason off a `websockets` ConnectionClosed without
+    importing it: newer versions expose `.code`/`.reason`, older nest them
+    under `.rcvd` (the received Close frame)."""
+    code = getattr(exc, "code", None)
+    reason = getattr(exc, "reason", None)
+    if code is None:
+        rcvd = getattr(exc, "rcvd", None)
+        if rcvd is not None:
+            code = getattr(rcvd, "code", None)
+            reason = getattr(rcvd, "reason", None)
+    if code == _AUTH_FAILED_CLOSE_CODE:
+        return reason or "auth_failed"
+    if code == _ADMIN_RESET_CLOSE_CODE and reason in _REONBOARD_4003_REASONS:
+        return reason
+    return None
 
 
 def _scan_inline_media(node: object, depth: int = 0) -> tuple[int, int]:
@@ -137,6 +182,10 @@ class WebSocketTransport:
         self._resume_token: str | None = None
         self._loop_tasks: list[asyncio.Task] = []
         self._ws: object | None = None
+        # Consecutive re-onboard attempts since the last successful handshake
+        # (bounded by config.reonboard_max_attempts; reset in _run_one_connection
+        # once connected). See _maybe_reonboard.
+        self._reonboard_attempts = 0
 
     @classmethod
     async def connect(
@@ -253,6 +302,20 @@ class WebSocketTransport:
                 backoff = self.config.reconnect_initial_backoff_s
             except asyncio.CancelledError:
                 return
+            except _CredentialRejected as exc:
+                # The router rejected our token on credential grounds. Drop it
+                # and re-onboard with the configured invitation before the next
+                # reconnect; on success, reconnect immediately with the fresh
+                # token (no backoff). If re-onboard is impossible/exhausted,
+                # fall through to the normal backoff so a stuck agent doesn't
+                # spin (and eventually surfaces as a permanent transport death).
+                logger.warning(
+                    "ws_credential_rejected",
+                    extra={"event": "ws_credential_rejected", "reason": exc.reason},
+                )
+                if await self._maybe_reonboard():
+                    backoff = self.config.reconnect_initial_backoff_s
+                    continue
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ws_connection_failed",
@@ -299,6 +362,9 @@ class WebSocketTransport:
 
             self._welcome = welcome
             self._resume_token = welcome.session_id
+            # Handshake succeeded — the current token is good; clear the
+            # re-onboard budget so a future rejection gets a fresh allowance.
+            self._reonboard_attempts = 0
             self._connected.set()
 
             recv_task = asyncio.create_task(self._recv_pump(ws))
@@ -323,6 +389,47 @@ class WebSocketTransport:
                 self._connected.clear()
                 self._ws = None
 
+    async def _maybe_reonboard(self) -> bool:
+        """Purge the rejected credential and re-onboard with the invitation.
+
+        Returns True iff a fresh `auth_token` was obtained (caller reconnects
+        immediately). Bounded by `config.reonboard_max_attempts` CONSECUTIVE
+        attempts (reset on the next successful handshake) so an agent that can't
+        recover — no invitation, evicted, or a spent single-use invitation —
+        can't hot-loop the onboard endpoint."""
+        from bp_sdk.onboarding import reonboard_with_invitation  # noqa: PLC0415
+
+        if not self.config.invitation_token:
+            return False
+        if self._reonboard_attempts >= self.config.reonboard_max_attempts:
+            logger.error(
+                "ws_reonboard_giving_up",
+                extra={
+                    "event": "ws_reonboard_giving_up",
+                    "attempts": self._reonboard_attempts,
+                },
+            )
+            return False
+        self._reonboard_attempts += 1
+        try:
+            ok = await reonboard_with_invitation(self.info, self.config)
+        except Exception as exc:  # noqa: BLE001
+            # Terminal onboard (409 evicted / 403 spent invitation) or a
+            # transient onboard failure — both surface here. Don't reconnect on
+            # the (now purged) token; back off and let the supervisor retry,
+            # bounded by the attempt cap above.
+            logger.warning(
+                "ws_reonboard_failed",
+                extra={"event": "ws_reonboard_failed", "error": repr(exc)},
+            )
+            return False
+        if ok:
+            logger.info(
+                "ws_reonboard_succeeded",
+                extra={"event": "ws_reonboard_succeeded"},
+            )
+        return ok
+
     async def _do_hello(self, ws) -> WelcomeFrame:  # type: ignore[no-untyped-def]
         if not self.config.auth_token:
             raise RuntimeError(
@@ -340,10 +447,23 @@ class WebSocketTransport:
             resume_token=self._resume_token,
         )
         await ws.send(serialize_frame(hello))
-        raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            # The router may close (no ErrorFrame) instead of replying — if that
+            # close is a credential rejection (4001), surface it as such so the
+            # supervisor re-onboards rather than retrying the dead token.
+            reason = _credential_rejection_reason(exc)
+            if reason is not None:
+                raise _CredentialRejected(reason) from exc
+            raise
         frame = parse_frame(raw)
 
         if isinstance(frame, ErrorFrame):
+            # Auth rejection (signature/revoked/sub-mismatch) → re-onboard.
+            # The router sends this ErrorFrame just before closing 4001.
+            if frame.code == ErrorCode.AUTH_FAILED:
+                raise _CredentialRejected("auth_failed")
             raise RuntimeError(f"router rejected Hello: {frame.code}: {frame.message}")
         if not isinstance(frame, WelcomeFrame):
             raise RuntimeError(f"expected Welcome, got {frame.type}")
@@ -362,16 +482,26 @@ class WebSocketTransport:
         return frame
 
     async def _recv_pump(self, ws) -> None:  # type: ignore[no-untyped-def]
-        async for raw in ws:
-            try:
-                frame = parse_frame(raw)
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "frame_parse_failed",
-                    extra={"event": "frame_parse_failed"},
-                )
-                continue
-            await self._inbox.put(frame)
+        try:
+            async for raw in ws:
+                try:
+                    frame = parse_frame(raw)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "frame_parse_failed",
+                        extra={"event": "frame_parse_failed"},
+                    )
+                    continue
+                await self._inbox.put(frame)
+        except Exception as exc:  # noqa: BLE001
+            # An admin reset to `pending` + fresh invitation (4003
+            # agent_reprovision / agent_reset) closes the LIVE socket here.
+            # Reclassify it so the supervisor re-onboards; every other close
+            # (transient drop, superseded, evict, suspend) propagates unchanged.
+            reason = _credential_rejection_reason(exc)
+            if reason is not None:
+                raise _CredentialRejected(reason) from exc
+            raise
 
     async def _send_pump(self, ws) -> None:  # type: ignore[no-untyped-def]
         while True:

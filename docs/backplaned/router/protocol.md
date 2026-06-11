@@ -463,7 +463,23 @@ full outbox is functionally an unresponsive peer.
 Close-code summary: **1002** (bad/oversized-after-decode first frame,
 protocol-version mismatch), **1009** (Hello/payload too large),
 **4001** (auth failed), **4002** (heartbeat_timeout / outbox_full),
-**4003** (superseded), **4029** (handshake rate-limited).
+**4003** (admin lifecycle: `superseded`, `agent_reprovision`, `agent_reset`,
+`agent_suspended`, `agent_evicted` — distinguished by `reason`), **4029**
+(handshake rate-limited).
+
+**Client self-heal on credential invalidation.** When the router rejects the
+agent's token on credential grounds — **4001** `auth_failed` at the handshake,
+or **4003** `agent_reprovision` / `agent_reset` on a live socket — the SDK
+transport DROPS the persisted token (`credentials.json`) and re-onboards with
+its `invitation_token` before reconnecting (`bp_sdk.onboarding.reonboard_with_invitation`).
+This is what recovers an agent whose stored token was signed by a since-rotated
+`ROUTER_JWT_SECRET`: it can't detect a stale signature locally (no secret), so
+`onboard_or_resume` would otherwise resume the dead token forever. The retry is
+bounded (`reonboard_max_attempts`, reset on a successful handshake) so a
+non-recoverable agent — no invitation, **evicted** (`agent_evicted`, terminal),
+or a spent single-use invitation — can't hot-loop the onboard endpoint. The
+other 4003 reasons are deliberately excluded: `agent_suspended` is an
+intentional stop, `superseded` means a newer socket won (the token is fine).
 
 ### 3.5 Disconnect
 
