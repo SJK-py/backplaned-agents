@@ -538,7 +538,11 @@ def test_admin_routes_registered_at_boot() -> None:
     app.state.upstream = UpstreamClient(
         cfg.router_url, timeout_s=cfg.upstream_timeout_s
     )
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    # fastapi >=0.137 lazily wraps included routers in app.routes
+    # (_IncludedRouter), so individual routes are no longer flattened there.
+    # openapi()["paths"] reflects every registered path on both old and new
+    # fastapi — the version-stable way to assert route registration.
+    paths = set(app.openapi()["paths"])
     assert "/mcp-servers" in paths
     assert "/mcp-servers/new" in paths
     assert "/mcp-servers/{server_id}/edit" in paths

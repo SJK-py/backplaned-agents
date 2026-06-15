@@ -331,7 +331,11 @@ def test_admin_login_page_renders_registrations_nav_link() -> None:
     pytest.importorskip("fastapi")
 
     app = _build_admin_app()
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    # fastapi >=0.137 lazily wraps included routers in app.routes
+    # (_IncludedRouter), so individual routes are no longer flattened there.
+    # openapi()["paths"] reflects every registered path on both old and new
+    # fastapi — the version-stable way to assert route registration.
+    paths = set(app.openapi()["paths"])
     # The exact paths under /registrations:
     assert "/registrations" in paths
     assert "/registrations/{registration_id}" in paths
