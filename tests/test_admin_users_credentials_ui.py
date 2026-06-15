@@ -78,7 +78,11 @@ def test_user_routes_registered_on_admin_app() -> None:
     app.state.upstream = UpstreamClient(
         cfg.router_url, timeout_s=cfg.upstream_timeout_s
     )
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    # fastapi >=0.137 lazily wraps included routers in app.routes
+    # (_IncludedRouter), so individual routes are no longer flattened there.
+    # openapi()["paths"] reflects every registered path on both old and new
+    # fastapi — the version-stable way to assert route registration.
+    paths = set(app.openapi()["paths"])
     assert "/users/{user_id}/serviced-by" in paths
     assert "/users/{user_id}/serviced-by/{service_user_id}/revoke" in paths
     assert "/users/{user_id}/refresh-tokens/revoke" in paths
