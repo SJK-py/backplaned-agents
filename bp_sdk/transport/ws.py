@@ -51,37 +51,63 @@ _MEDIA_SCAN_MAX_DEPTH = 16
 # can't stall shutdown past this.
 _CLOSE_DRAIN_TIMEOUT_S = 5.0
 
-# Router WS closes that mean "your CREDENTIAL is no longer valid — drop it and
-# re-onboard with your invitation." 4001 `auth_failed` is the handshake
-# rejection (e.g. ROUTER_JWT_SECRET rotated under the persisted token); 4003
-# `agent_reprovision` / `agent_reset` are admin resets to `pending` + a fresh
-# invitation. The OTHER 4003 reasons are deliberately EXCLUDED — `agent_evicted`
-# is terminal (re-onboard would 409), `agent_suspended` is an intentional stop
-# (re-onboarding would defeat it), `superseded` means a newer socket won (the
-# token is fine). 4002 (heartbeat/outbox) and 4029 (rate-limit) are transient:
-# a plain reconnect with the SAME token is correct. Mirrors bp_router/ws_hub.py.
-_AUTH_FAILED_CLOSE_CODE = 4001
+# Re-onboard is the LAST-RESORT recovery (purge credentials.json + onboard with
+# the invitation) and is only viable/necessary for a credential that neither a
+# reconnect nor a token refresh can fix: a token signed by a since-rotated
+# ROUTER_JWT_SECRET. It must NOT fire on the router's normal token-lifecycle
+# closes, or it throws away a good token and burns the (single-use, already
+# consumed) invitation. Two narrow triggers, by close/reason — mirrors
+# bp_router/ws_hub.py + bp_router/security/jwt.py:
+#
+#   * HANDSHAKE auth rejection (ErrorFrame code=AUTH_FAILED) whose message is
+#     `invalid` — i.e. TokenError("invalid"...), a signature/malformed failure.
+#     A refresh would fail the same signature check, so re-onboard is the only
+#     path. Reached only when the locally-non-expired token is cryptographically
+#     dead (the rotated-secret case). See _is_reonboardable_handshake_failure.
+#   * LIVE-socket 4003 `agent_reprovision` / `agent_reset` — an admin reset to
+#     `pending` + fresh invitation. See _admin_reset_close_reason.
+#
+# Deliberately EXCLUDED (the bug this guards against):
+#   * LIVE-socket 4001 `auth_token_rotated` — the NORMAL proactive-refresh close
+#     (bp_router/api/onboard.py:395). The agent already holds the refreshed
+#     token; it must simply RECONNECT. Treating it as a rejection re-onboarded
+#     on a consumed invitation and broke every rotation.
+#   * Handshake `revoked` (jti rotated by a refresh — reconnect uses the new
+#     token), `expired` (already re-onboarded at startup by onboard_or_resume's
+#     local expiry check), and `sub mismatch` / `wrong_kind` (misconfig).
 _ADMIN_RESET_CLOSE_CODE = 4003
 _REONBOARD_4003_REASONS = frozenset({"agent_reprovision", "agent_reset"})
 
 
 class _CredentialRejected(Exception):
-    """The router rejected/closed the socket on credential grounds — the
-    transport should purge the rejected token and re-onboard (see
-    `_REONBOARD_4003_REASONS` / `_AUTH_FAILED_CLOSE_CODE`)."""
+    """The router rejected the agent's token in a way only a re-onboard can fix
+    (signature-invalid at handshake, or a 4003 admin reset). The transport
+    purges the dead token and re-onboards with its invitation."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
 
 
-def _credential_rejection_reason(exc: BaseException) -> str | None:
-    """Return the close reason if `exc` is a router WS close that warrants a
-    re-onboard (4001, or 4003 with a reset reason); else None.
+def _is_reonboardable_handshake_failure(message: str | None) -> bool:
+    """True for a handshake AUTH_FAILED that a re-onboard can fix: a
+    cryptographically INVALID token (signature mismatch / malformed), which is
+    what a rotated ROUTER_JWT_SECRET produces. Matches the router's
+    TokenError("invalid"...) surface and EXCLUDES the reconnect/refresh-
+    recoverable reasons (`revoked`, `expired`) and misconfig (`sub`, `wrong_kind`,
+    `stale_key_version`) — none of which contain `invalid`."""
+    return "invalid" in (message or "")
+
+
+def _admin_reset_close_reason(exc: BaseException) -> str | None:
+    """Return the close reason if `exc` is a LIVE-socket 4003 admin reset that
+    warrants a re-onboard (`agent_reprovision` / `agent_reset`); else None.
 
     Reads the close code/reason off a `websockets` ConnectionClosed without
-    importing it: newer versions expose `.code`/`.reason`, older nest them
-    under `.rcvd` (the received Close frame)."""
+    importing it: newer versions expose `.code`/`.reason`, older nest them under
+    `.rcvd`. A live-socket 4001 (`auth_token_rotated`) is intentionally NOT
+    matched here — that's a normal rotation; the agent reconnects with its
+    refreshed token."""
     code = getattr(exc, "code", None)
     reason = getattr(exc, "reason", None)
     if code is None:
@@ -89,8 +115,6 @@ def _credential_rejection_reason(exc: BaseException) -> str | None:
         if rcvd is not None:
             code = getattr(rcvd, "code", None)
             reason = getattr(rcvd, "reason", None)
-    if code == _AUTH_FAILED_CLOSE_CODE:
-        return reason or "auth_failed"
     if code == _ADMIN_RESET_CLOSE_CODE and reason in _REONBOARD_4003_REASONS:
         return reason
     return None
@@ -447,23 +471,19 @@ class WebSocketTransport:
             resume_token=self._resume_token,
         )
         await ws.send(serialize_frame(hello))
-        try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
-        except Exception as exc:  # noqa: BLE001
-            # The router may close (no ErrorFrame) instead of replying — if that
-            # close is a credential rejection (4001), surface it as such so the
-            # supervisor re-onboards rather than retrying the dead token.
-            reason = _credential_rejection_reason(exc)
-            if reason is not None:
-                raise _CredentialRejected(reason) from exc
-            raise
+        raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
         frame = parse_frame(raw)
 
         if isinstance(frame, ErrorFrame):
-            # Auth rejection (signature/revoked/sub-mismatch) → re-onboard.
-            # The router sends this ErrorFrame just before closing 4001.
-            if frame.code == ErrorCode.AUTH_FAILED:
-                raise _CredentialRejected("auth_failed")
+            # Only a cryptographically INVALID token (rotated ROUTER_JWT_SECRET)
+            # warrants a re-onboard — a refresh can't fix it. Other AUTH_FAILED
+            # reasons (revoked-by-rotation, expired) are reconnect/refresh-
+            # recoverable, so they raise and the supervisor just reconnects;
+            # purging the token there would discard a good/refreshed one.
+            if frame.code == ErrorCode.AUTH_FAILED and _is_reonboardable_handshake_failure(
+                frame.message
+            ):
+                raise _CredentialRejected("auth_invalid")
             raise RuntimeError(f"router rejected Hello: {frame.code}: {frame.message}")
         if not isinstance(frame, WelcomeFrame):
             raise RuntimeError(f"expected Welcome, got {frame.type}")
@@ -495,10 +515,13 @@ class WebSocketTransport:
                 await self._inbox.put(frame)
         except Exception as exc:  # noqa: BLE001
             # An admin reset to `pending` + fresh invitation (4003
-            # agent_reprovision / agent_reset) closes the LIVE socket here.
-            # Reclassify it so the supervisor re-onboards; every other close
-            # (transient drop, superseded, evict, suspend) propagates unchanged.
-            reason = _credential_rejection_reason(exc)
+            # agent_reprovision / agent_reset) closes the LIVE socket here →
+            # reclassify so the supervisor re-onboards. Every other live close
+            # propagates unchanged for a plain reconnect — crucially the 4001
+            # `auth_token_rotated` close from a proactive token refresh, where
+            # the agent must reconnect with its already-refreshed token, NOT
+            # re-onboard.
+            reason = _admin_reset_close_reason(exc)
             if reason is not None:
                 raise _CredentialRejected(reason) from exc
             raise
