@@ -43,12 +43,15 @@ class _FakeCloseNested(Exception):
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        (_FakeClose(4001, "auth_failed"), "auth_failed"),
-        (_FakeClose(4001, ""), "auth_failed"),          # default reason
+        # Only a LIVE-socket 4003 admin reset → re-onboard.
         (_FakeClose(4003, "agent_reprovision"), "agent_reprovision"),
         (_FakeClose(4003, "agent_reset"), "agent_reset"),
         (_FakeCloseNested(4003, "agent_reprovision"), "agent_reprovision"),
-        # NOT re-onboard-worthy:
+        # NOT re-onboard-worthy on the live socket:
+        # 4001 auth_token_rotated is the NORMAL proactive-refresh close — the
+        # agent must reconnect with its refreshed token, never re-onboard.
+        (_FakeClose(4001, "auth_token_rotated"), None),
+        (_FakeClose(4001, "auth_failed"), None),
         (_FakeClose(4003, "agent_evicted"), None),      # terminal
         (_FakeClose(4003, "agent_suspended"), None),    # intentional stop
         (_FakeClose(4003, "superseded"), None),         # newer socket won
@@ -57,11 +60,23 @@ class _FakeCloseNested(Exception):
         (TimeoutError(), None),                         # no code at all
     ],
 )
-def test_credential_rejection_classifier(exc: BaseException, expected: str | None) -> None:
+def test_admin_reset_close_classifier(exc: BaseException, expected: str | None) -> None:
     pytest.importorskip("websockets")
-    from bp_sdk.transport.ws import _credential_rejection_reason
+    from bp_sdk.transport.ws import _admin_reset_close_reason
 
-    assert _credential_rejection_reason(exc) == expected
+    assert _admin_reset_close_reason(exc) == expected
+
+
+def test_live_socket_rotation_close_does_not_reonboard() -> None:
+    """Regression: the proactive token-refresh path force-closes the live socket
+    with 4001 `auth_token_rotated` and the agent must RECONNECT with its
+    refreshed token. Treating it as a credential rejection (re-onboard) threw the
+    refreshed token away and burned the consumed invitation — every rotation
+    broke. The live-socket classifier must return None for it."""
+    pytest.importorskip("websockets")
+    from bp_sdk.transport.ws import _admin_reset_close_reason
+
+    assert _admin_reset_close_reason(_FakeClose(4001, "auth_token_rotated")) is None
 
 
 # --- handshake detection ---------------------------------------------------
@@ -101,26 +116,52 @@ class _FakeWs:
         return self._recv_result
 
 
-def _error_frame(code: str) -> str:
+def _error_frame(code: str, message: str = "rejected") -> str:
     from bp_protocol.frames import ErrorFrame, serialize_frame
 
     return serialize_frame(
         ErrorFrame(
             agent_id="router", trace_id="0" * 32, span_id="0" * 16,
-            code=code, message="rejected",
+            code=code, message=message,
         )
     )
 
 
-def test_do_hello_auth_failed_errorframe_raises_credential_rejected(tmp_path: Any) -> None:
+def test_do_hello_signature_invalid_raises_credential_rejected(tmp_path: Any) -> None:
+    # The rotated-secret case: TokenError("invalid: Signature verification
+    # failed") → re-onboard (a refresh can't fix a signature mismatch).
     from bp_protocol.frames import ErrorCode
     from bp_sdk.transport.ws import _CredentialRejected
 
     t = _transport(tmp_path)
-    ws = _FakeWs(recv_result=_error_frame(ErrorCode.AUTH_FAILED))
-    with pytest.raises(_CredentialRejected) as ei:
+    ws = _FakeWs(
+        recv_result=_error_frame(
+            ErrorCode.AUTH_FAILED, "auth_failed: invalid: Signature verification failed"
+        )
+    )
+    with pytest.raises(_CredentialRejected):
         asyncio.run(t._do_hello(ws))
-    assert ei.value.reason == "auth_failed"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "auth_failed: revoked",          # jti rotated by a refresh — reconnect recovers
+        "auth_failed: expired",          # startup onboard_or_resume handles expiry
+        "auth_failed: token sub does not match Hello.agent_id",  # misconfig
+    ],
+)
+def test_do_hello_recoverable_auth_failures_do_not_reonboard(tmp_path: Any, message: str) -> None:
+    # These AUTH_FAILED reasons are reconnect/refresh-recoverable — re-onboarding
+    # (purging the token) here would discard a good/refreshed credential.
+    from bp_protocol.frames import ErrorCode
+    from bp_sdk.transport.ws import _CredentialRejected
+
+    t = _transport(tmp_path)
+    ws = _FakeWs(recv_result=_error_frame(ErrorCode.AUTH_FAILED, message))
+    with pytest.raises(Exception) as ei:  # noqa: PT011
+        asyncio.run(t._do_hello(ws))
+    assert not isinstance(ei.value, _CredentialRejected)
 
 
 def test_do_hello_other_errorframe_is_not_reonboard(tmp_path: Any) -> None:
@@ -133,15 +174,6 @@ def test_do_hello_other_errorframe_is_not_reonboard(tmp_path: Any) -> None:
     with pytest.raises(Exception) as ei:  # noqa: PT011
         asyncio.run(t._do_hello(ws))
     assert not isinstance(ei.value, _CredentialRejected)
-
-
-def test_do_hello_4001_close_without_errorframe_raises_credential_rejected(tmp_path: Any) -> None:
-    from bp_sdk.transport.ws import _CredentialRejected
-
-    t = _transport(tmp_path)
-    ws = _FakeWs(recv_exc=_FakeClose(4001, "auth_failed"))
-    with pytest.raises(_CredentialRejected):
-        asyncio.run(t._do_hello(ws))
 
 
 # --- reonboard_with_invitation ---------------------------------------------

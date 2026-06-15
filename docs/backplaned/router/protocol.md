@@ -467,19 +467,31 @@ protocol-version mismatch), **1009** (Hello/payload too large),
 `agent_suspended`, `agent_evicted` — distinguished by `reason`), **4029**
 (handshake rate-limited).
 
-**Client self-heal on credential invalidation.** When the router rejects the
-agent's token on credential grounds — **4001** `auth_failed` at the handshake,
-or **4003** `agent_reprovision` / `agent_reset` on a live socket — the SDK
-transport DROPS the persisted token (`credentials.json`) and re-onboards with
-its `invitation_token` before reconnecting (`bp_sdk.onboarding.reonboard_with_invitation`).
-This is what recovers an agent whose stored token was signed by a since-rotated
-`ROUTER_JWT_SECRET`: it can't detect a stale signature locally (no secret), so
-`onboard_or_resume` would otherwise resume the dead token forever. The retry is
-bounded (`reonboard_max_attempts`, reset on a successful handshake) so a
-non-recoverable agent — no invitation, **evicted** (`agent_evicted`, terminal),
-or a spent single-use invitation — can't hot-loop the onboard endpoint. The
-other 4003 reasons are deliberately excluded: `agent_suspended` is an
-intentional stop, `superseded` means a newer socket won (the token is fine).
+**Client self-heal — only for a credential a reconnect/refresh can't fix.**
+Re-onboard (drop `credentials.json`, onboard with `invitation_token` via
+`bp_sdk.onboarding.reonboard_with_invitation`) is the LAST resort and fires on
+exactly two signals:
+
+- a **handshake** `auth_failed` whose reason is **`invalid`** (signature
+  mismatch / malformed — `TokenError("invalid"...)`), i.e. the token was signed
+  by a since-rotated `ROUTER_JWT_SECRET`. A refresh would fail the same
+  signature check, so re-onboarding is the only path; the agent can't detect
+  this locally (no secret), so it would otherwise resume the dead token forever.
+- a live-socket **4003** `agent_reprovision` / `agent_reset` (admin reset to
+  `pending` + fresh invitation).
+
+It is **bounded** (`reonboard_max_attempts`, reset on a successful handshake) so
+a non-recoverable agent (no invitation, **evicted**, or a spent single-use
+invitation) can't hot-loop the onboard endpoint.
+
+Everything else **reconnects with the existing token** and is NOT a re-onboard —
+critically the live-socket **4001 `auth_token_rotated`** close from a proactive
+token refresh (the agent already holds the refreshed token; §see refresh flow).
+Re-onboarding there would discard a good token and burn the invitation. Likewise
+handshake `revoked` (jti rotated by a refresh — reconnect uses the new token),
+`expired` (re-onboarded at startup by `onboard_or_resume`'s local expiry check),
+and the 4003 `agent_evicted` (terminal) / `agent_suspended` (intentional stop) /
+`superseded` (newer socket won) closes.
 
 ### 3.5 Disconnect
 
