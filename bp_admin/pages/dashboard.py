@@ -147,7 +147,7 @@ def _top_breakdown(d: dict[str, float] | None, limit: int = 3) -> str | None:
 
 def _metric_cards(summary: dict | None) -> list[dict[str, Any]]:
     """Build dashboard cards from the router metrics summary. `tone='alert'`
-    flags non-zero error/failure counts (and a down Redis) for the template."""
+    flags non-zero error/failure counts (and a down Valkey) for the template."""
     if not summary:
         return []
     llm = summary.get("llm", {}) or {}
@@ -193,7 +193,7 @@ def _metric_cards(summary: dict | None) -> list[dict[str, Any]]:
             "tone": None,
         },
         {
-            "label": "Redis",
+            "label": "Valkey",
             "value": ("OK" if redis == 1 else "DOWN" if redis == 0 else "—"),
             "sub": None,
             "tone": "alert" if redis == 0 else None,

@@ -57,7 +57,7 @@ def test_metric_cards_values_and_alert_tone() -> None:
     # populated by any adapter, so it would always read $0.00.
     assert not any(c["label"] == "LLM cost" for c in cards)
     assert _card(cards, "Active tasks")["value"] == 2
-    assert _card(cards, "Redis")["value"] == "OK"
+    assert _card(cards, "Valkey")["value"] == "OK"
 
 
 def test_metric_cards_healthy_has_no_alert() -> None:
@@ -68,12 +68,12 @@ def test_metric_cards_healthy_has_no_alert() -> None:
     }
     cards = _metric_cards(healthy)
     assert all(c["tone"] is None for c in cards)
-    assert _card(cards, "Redis")["value"] == "OK"
+    assert _card(cards, "Valkey")["value"] == "OK"
 
 
 def test_metric_cards_redis_down_alerts() -> None:
     cards = _metric_cards({"llm": {}, "tasks": {}, "infra": {"redis_health": 0}})
-    redis = _card(cards, "Redis")
+    redis = _card(cards, "Valkey")
     assert redis["value"] == "DOWN" and redis["tone"] == "alert"
 
 
