@@ -19,12 +19,12 @@ services in Docker. Production deployment (everything in Docker via
 uv venv && source .venv/bin/activate
 uv pip install -e ".[router,suite,dev,llm-gemini,admin,webapp]"
 
-# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Redis,
+# 1. Backing services — Postgres (creates BOTH bp_router + bp_suite). Valkey,
 #    SearXNG, and an S3 store (SeaweedFS) are opt-in profiles; none are needed
-#    to run. Redis only matters for cross-process correctness (e.g. driving one
+#    to run. Valkey only matters for cross-process correctness (e.g. driving one
 #    session from both the Telegram bot and the webapp) — see the footgun table.
 docker compose -f docker-compose.dev.yml up -d
-#    # extras: … --profile redis --profile search --profile s3 up -d
+#    # extras: … --profile valkey --profile search --profile s3 up -d
 
 # 2. Router — dev-up.sh generates ./.env (printing a bootstrap admin password)
 #    and migrates bp_router. Set your LLM key, then boot it (leave running).
@@ -68,7 +68,7 @@ If you'd rather wire it up by hand or your environment doesn't
 have Docker:
 
 ```bash
-# Postgres / Redis (host or container — your choice)
+# Postgres / Valkey (host or container — your choice)
 docker compose -f docker-compose.dev.yml up -d
 
 # Project (Python 3.12+).

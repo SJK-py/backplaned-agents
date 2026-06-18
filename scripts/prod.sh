@@ -380,9 +380,10 @@ build_env() {
         echo "# KakaoTalk (optional, 2nd chatbot channel). Egress-only pull"
         echo "# consumer behind the deploy/kakao-relay Cloudflare Worker + a"
         echo "# Cloudflare Queue (deploy that separately — see its README)."
-        echo "# Redis is on by default (compose -> redis://redis:6379/1), which"
+        echo "# Valkey is on by default (compose -> redis://valkey:6379/1), which"
         echo "# also backs Kakao's registry; only set SUITE_REDIS_URL to override."
-        echo "# SUITE_REDIS_URL=redis://redis:6379/1"
+        echo "# (Valkey is Redis-wire-compatible — the URL scheme stays redis://.)"
+        echo "# SUITE_REDIS_URL=redis://valkey:6379/1"
         echo "# SUITE_KAKAO_CF_ACCOUNT_ID="
         echo "# SUITE_KAKAO_CF_QUEUE_ID="
         echo "# SUITE_KAKAO_CF_API_TOKEN="
@@ -594,14 +595,14 @@ case "${ACTION,,}" in
         exec docker compose "${CARGS[@]}" down ;;
     4|reset)
         # `down -v` ALSO removes named volumes — the Postgres DB (agent rows,
-        # users, tasks), Redis, SeaweedFS blobs, LanceDB, and every agent's
+        # users, tasks), Valkey, SeaweedFS blobs, LanceDB, and every agent's
         # persisted credentials — for a genuine clean slate. (Normal
         # start/restart no longer needs this: invitations are refreshed each
         # launch and the router allows idempotent re-onboard, so agents
         # recover across redeploys. Use reset when you want to wipe DATA.)
         # Destructive — confirm.
         echo
-        echo "  This DELETES ALL DATA: Postgres (users/tasks/agents), Redis,"
+        echo "  This DELETES ALL DATA: Postgres (users/tasks/agents), Valkey,"
         echo "  object store, LanceDB, and agent credentials. Irreversible."
         ask CONFIRM "  Type 'reset' to confirm" ""
         if [[ "$CONFIRM" == "reset" ]]; then

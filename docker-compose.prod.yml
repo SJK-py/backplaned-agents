@@ -1,7 +1,7 @@
 # Backplaned production topology (skeleton).
 #
 # Brings up the full stack from THIS monorepo: edge proxy, router (+ a
-# one-shot `migrate`), Postgres (router + suite DBs), Redis, SeaweedFS (S3),
+# one-shot `migrate`), Postgres (router + suite DBs), Valkey, SeaweedFS (S3),
 # and the AGENT SUITE (chatbot, webapp, sandbox, orchestrator/l1, stores,
 # helpers, searxng, mcp_bridge) — all defined below and built from this repo's
 # Dockerfile / Dockerfile.suite. See docs/agent-suite/deployment.md.
@@ -15,13 +15,13 @@ name: backplaned
 
 networks:
   edge: {}        # proxy  <-> router  (+ webapp in v2)
-  backend: {}     # router <-> postgres / redis / seaweedfs (private)
+  backend: {}     # router <-> postgres / valkey / seaweedfs (private)
   agents: {}      # router <-> every agent (the agent WS /v1/agent)
-  suite: {}       # chatbot + suite agents <-> suite Postgres / Redis
+  suite: {}       # chatbot + suite agents <-> suite Postgres / Valkey
 
 volumes:
   pg_data: {}
-  redis_data: {}
+  valkey_data: {}
   seaweedfs_data: {}
   caddy_data: {}
   caddy_config: {}
@@ -77,13 +77,14 @@ x-suite-agent: &suite-agent
     AGENT_STATE_DIR: /state
     SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
     SUITE_LANCE_ROOT: /lancedb
-    # Suite Redis (db 1; the router uses db 0). Consumed only by the channel
+    # Suite Valkey (db 1; the router uses db 0). Consumed only by the channel
     # agents (chatbot, webapp): it makes the per-session turn lock a
     # DISTRIBUTED lock so the two channels serialize turns on a shared
     # session, and it backs the KakaoTalk deadline/next-touch registry.
-    # Defaults to the in-cluster redis (on the `suite` network); the lock
+    # Defaults to the in-cluster valkey (on the `suite` network); the lock
     # fails open if it's unreachable. Worker agents inherit but ignore it.
-    SUITE_REDIS_URL: ${SUITE_REDIS_URL:-redis://redis:6379/1}
+    # (Valkey is Redis-wire-compatible, so the URL scheme stays redis://.)
+    SUITE_REDIS_URL: ${SUITE_REDIS_URL:-redis://valkey:6379/1}
     # Per-tier preset defaults seeded into a new user's config (chatbot
     # approval). prod.sh wires these to the chosen provider's
     # aliases; empty → the seeded `default` (Gemini).
@@ -169,14 +170,19 @@ services:
       retries: 20
     networks: [backend, suite]
 
-  redis:
-    image: redis:7-alpine
+  valkey:
+    # Valkey — the BSD-licensed, Redis-7.2-compatible fork (Linux Foundation),
+    # used instead of Redis to avoid the RSALv2/SSPL relicensing. Drop-in: same
+    # RESP wire protocol + command set (EVAL/Lua, WATCH/MULTI, EXPIRE, AOF), so
+    # the redis-py client and the `redis://` URL scheme are unchanged — only the
+    # server binary (valkey-server) and CLI (valkey-cli) differ from Redis.
+    image: valkey/valkey:8-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["valkey-server", "--appendonly", "yes"]
     volumes:
-      - redis_data:/data
+      - valkey_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -256,12 +262,13 @@ services:
     stop_grace_period: 30s
     depends_on:
       postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      valkey: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
     environment:
       ROUTER_DEPLOYMENT_ENV: prod
       ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
-      ROUTER_REDIS_URL: redis://redis:6379/0
+      # Valkey speaks the Redis wire protocol, so the URL scheme stays redis://.
+      ROUTER_REDIS_URL: redis://valkey:6379/0
       # Canonical PUBLIC origin (always https). prod.sh sets ROUTER_PUBLIC_URL
       # to the domain (domain/both modes) or the bare IP (ip mode); the fallback
       # keeps an old env / bare-up working off PUBLIC_DOMAIN.
@@ -520,7 +527,7 @@ services:
     cap_add: ["SETUID", "SETGID", "CHOWN"]
     # Prefer a sandboxed runtime (gVisor/Kata): runtime: runsc. Add
     # resource caps (cpus, mem_limit, pids_limit) + egress allowlisting.
-    networks: [agents]             # router WS only — no db/redis/web
+    networks: [agents]             # router WS only — no db/valkey/web
     # Mount at /sandbox-state (root-owned 0700) — see AGENT_STATE_DIR above.
     volumes: [sandbox_state:/sandbox-state]
 

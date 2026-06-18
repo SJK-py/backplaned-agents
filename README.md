@@ -50,7 +50,7 @@ Every task runs as the end user, so all of the above is isolated per person.
 
 ## QuickStart (production)
 
-A single launcher — [`scripts/prod.sh`](./scripts/prod.sh) — drives the whole production lifecycle on top of [`docker-compose.prod.yml`](./docker-compose.prod.yml): the router, all 12 suite agents, and the bundled dependencies (Postgres, Redis, SeaweedFS, and optionally SearXNG), behind a Caddy edge proxy. For **local development** (router + agents from source), see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+A single launcher — [`scripts/prod.sh`](./scripts/prod.sh) — drives the whole production lifecycle on top of [`docker-compose.prod.yml`](./docker-compose.prod.yml): the router, all 12 suite agents, and the bundled dependencies (Postgres, Valkey, SeaweedFS, and optionally SearXNG), behind a Caddy edge proxy. For **local development** (router + agents from source), see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 **Prerequisites:** Docker (compose v2) on the host, a hostname for the edge proxy (a real domain, a LAN name, or a bare IP — `localhost` also works), an LLM provider API key (Anthropic / Gemini / OpenAI), and a Telegram bot token (from [@BotFather](https://t.me/BotFather)).
 
@@ -75,7 +75,7 @@ Re-run later and answer "no" to reuse the existing file — volume-baked secrets
 | **start** | `up -d` (optionally `--build` to rebuild images from source first) |
 | **restart** | `up -d --force-recreate` (optionally `--build`) |
 | **stop** | `down` — keeps data volumes |
-| **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Redis, SeaweedFS, LanceDB, agent creds) for a clean slate |
+| **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Valkey, SeaweedFS, LanceDB, agent creds) for a clean slate |
 
 Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
 

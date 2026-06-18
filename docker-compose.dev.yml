@@ -3,7 +3,7 @@
 # Brings up Postgres (with BOTH databases — `bp_router` and `bp_suite`).
 # Everything else is opt-in via a profile — single-worker dev runs fine
 # without them:
-#   --profile redis   Redis (else the router uses its per-process fallback
+#   --profile valkey  Valkey (else the router uses its per-process fallback
 #                     for JWT revocation + rate-limit quotas — fine single-worker)
 #   --profile search  SearXNG for the research agent's web search
 #   --profile s3      SeaweedFS (S3) to exercise the non-local file store
@@ -12,7 +12,7 @@
 # agents) — this file is only the backing services.
 #
 # Bring up:    docker compose -f docker-compose.dev.yml up -d
-#   + extras:  docker compose -f docker-compose.dev.yml --profile redis --profile search --profile s3 up -d
+#   + extras:  docker compose -f docker-compose.dev.yml --profile valkey --profile search --profile s3 up -d
 # Tear down:   docker compose -f docker-compose.dev.yml down        (keep data)
 #   + volumes: docker compose -f docker-compose.dev.yml down -v     (wipe data)
 #
@@ -45,17 +45,19 @@ services:
       retries: 10
 
   # Optional. Off by default — the router falls back to per-process state
-  # (correct for single-worker dev). Enable with `--profile redis` and set
-  # ROUTER_REDIS_URL=redis://localhost:6379/0.
-  redis:
-    image: redis:7-alpine
-    container_name: bp-redis
-    profiles: ["redis"]
+  # (correct for single-worker dev). Enable with `--profile valkey` and set
+  # ROUTER_REDIS_URL=redis://localhost:6379/0 (Valkey speaks the Redis wire
+  # protocol, so the redis:// scheme is unchanged).
+  valkey:
+    # Valkey — the BSD-licensed, Redis-7.2-compatible fork (see prod compose).
+    image: valkey/valkey:8-alpine
+    container_name: bp-valkey
+    profiles: ["valkey"]
     restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
