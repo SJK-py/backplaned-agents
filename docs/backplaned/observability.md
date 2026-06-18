@@ -257,7 +257,7 @@ router_llm_cost_microusd_total{model}                                   counter 
 **router_deliver_frame_dropped_total{frame_type}**                      counter       # per-socket outbox saturation, per frame type
 **router_ws_handshake_catalog_cache_total{result}**                     counter       # result ∈ hit | miss; single-flight list_agents cache
 **router_redis_health**                                                 gauge         # 1 = reachable; 0 = degraded / in-process fallback
-**router_redis_fallback_total{subsystem}**                              counter       # subsystem ∈ rate_limit | jwt_revocation; Redis op fell back
+**router_redis_fallback_total{subsystem}**                              counter       # subsystem ∈ rate_limit | jwt_revocation; Valkey op fell back
 
 sdk_handler_duration_seconds{agent_id, status}                          histogram     # planned (SDK-side, not the router registry)
 sdk_pending_acks_count{agent_id}                                        gauge         # planned (SDK-side)

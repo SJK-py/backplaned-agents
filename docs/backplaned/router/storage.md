@@ -320,7 +320,7 @@ source of truth: `bp_router/observability/metrics.py`):
 - `router_db_query_duration_seconds{query}` (histogram)
 - `router_storage_bytes_total{backend, op}` (counter)
 - `router_db_pool_connections{state}` (gauge),
-  `router_redis_health` (gauge) — pool / Redis saturation.
+  `router_redis_health` (gauge) — pool / Valkey saturation.
 
 ## 5. Configuration
 
@@ -337,7 +337,7 @@ class Settings(BaseSettings):
     db_pool_min_size: int = 1
     db_pool_max_size: int = 10
     db_statement_timeout_ms: int = 30_000
-    redis_url: Optional[str] = None                   # required for multi-worker
+    valkey_url: Optional[str] = None                   # required for multi-worker
 
     # File storage
     file_store: Literal["local", "s3", "gcs", "r2"] = "local"
@@ -388,7 +388,7 @@ hot-reload + `CatalogUpdate` fan-out.
 - DB calls via `asyncpg` — never block the loop.
 - CPU-bound work (image resize, hashing) offloaded to a
   `concurrent.futures.ThreadPoolExecutor` via `asyncio.to_thread`.
-- One Postgres connection pool per worker; one Redis pool per worker.
+- One Postgres connection pool per worker; one Valkey pool per worker.
 - Per-socket send tasks isolate slow consumers from each other.
 
 ### 6.1 Multi-worker — planned
@@ -402,7 +402,7 @@ the ranked backlog; this section is the design detail.
 
 The intended path: an external load balancer terminates TLS and
 sticky-routes WebSocket connections by `agent_id` (consistent
-hashing). The socket registry moves to Redis so cross-worker
+hashing). The socket registry moves to Valkey so cross-worker
 admit can locate a destination; pending-ack futures stay
 process-local because the registering worker is also the receiving
 worker.

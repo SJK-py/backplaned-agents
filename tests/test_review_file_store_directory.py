@@ -194,7 +194,7 @@ def _base_settings_kwargs() -> dict:
         jwt_secret="x" * 64,
         serve_admin_ui=False,
         metrics_token="m" * 32,
-        redis_url="redis://localhost:6379/0",
+        valkey_url="redis://localhost:6379/0",
     )
 
 

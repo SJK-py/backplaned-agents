@@ -3,7 +3,7 @@
 > How to run the v1 suite (Telegram + KakaoTalk chatbot + webapp browser
 > channel + orchestrator + specialists)
 > on top of a Backplaned router. The router's own deployment (Postgres,
-> Redis, file store, edge proxy, secrets) is in
+> Valkey, file store, edge proxy, secrets) is in
 > [`../backplaned/deployment.md`](../backplaned/deployment.md); this covers the **suite**
 > layer. `docker-compose.prod.yml` ships a complete reference topology.
 
@@ -21,7 +21,7 @@
   the webapp (fronted by Caddy) are additionally on `edge`; the **sandbox**
   is on `agents` only. The optional KakaoTalk channel adds no inbound
   surface — the chatbot pulls its turns outbound from a Cloudflare Queue,
-  and reaches the in-cluster Redis over `suite` (so enabling Kakao needs no
+  and reaches the in-cluster Valkey over `suite` (so enabling Kakao needs no
   new network).
 
 ## Databases
@@ -69,14 +69,14 @@ automatically for a local router.
 - `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`
 - `SUITE_LANCE_ROOT` — per-user LanceDB root (`/lancedb`; shared volume
   for `knowledge_base` + `memory`).
-- chatbot / webapp Redis: `SUITE_REDIS_URL` makes the per-session turn lock
+- chatbot / webapp Valkey: `SUITE_VALKEY_URL` makes the per-session turn lock
   **distributed** so the two channels serialize turns on a shared session
   (the lock key is `session_id`-only, so a Telegram turn and a webapp turn
   for the same session contend on the same key). The reference
-  `docker-compose.prod.yml` **defaults it on** (in-cluster `redis` on db 1;
+  `docker-compose.prod.yml` **defaults it on** (in-cluster `valkey` on db 1;
   db 0 is the router's) — because v1 runs both channels — and the lock
-  **fails open** if Redis is unreachable. Override only to point at a
-  different Redis; a single-channel deploy can unset it for an in-process
+  **fails open** if Valkey is unreachable. Override only to point at a
+  different Valkey; a single-channel deploy can unset it for an in-process
   lock.
 - chatbot: `SUITE_TELEGRAM_BOT_TOKEN` (Telegram).
 - chatbot (KakaoTalk, optional): an egress-only second channel. The agent
@@ -84,8 +84,8 @@ automatically for a local router.
   [`deploy/kakao-relay`](../../deploy/kakao-relay/) Worker — it opens no
   inbound port. Gate it with `SUITE_KAKAO_CF_ACCOUNT_ID` /
   `SUITE_KAKAO_CF_QUEUE_ID` / `SUITE_KAKAO_CF_API_TOKEN` (a token scoped to
-  Queues pull+ack); it uses the same `SUITE_REDIS_URL` above for its
-  deadline / next-touch registry (so keep Redis on when Kakao is enabled).
+  Queues pull+ack); it uses the same `SUITE_VALKEY_URL` above for its
+  deadline / next-touch registry (so keep Valkey on when Kakao is enabled).
   Outbound images additionally need the `SUITE_KAKAO_R2_*` vars (a
   presigned-URL bucket); inbound images reuse the router file store. Design
   + the relay/queue setup: [`../design/kakao-channel.md`](../design/kakao-channel.md)

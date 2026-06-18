@@ -71,7 +71,7 @@ Boundaries (each is a place where authentication is required):
 1. User browser → Webapp BFF.
 2. Webapp / Admin → Router HTTP API.
 3. External agent → Router WebSocket.
-4. Router → Storage backend (S3 / Postgres / Redis).
+4. Router → Storage backend (S3 / Postgres / Valkey).
 5. Router → LLM provider APIs.
 
 Embedded agents are inside the router's trust boundary. This is a
@@ -144,7 +144,7 @@ immediate socket close with `ErrorCode.AUTH_FAILED` /
 The WS handshake also enforces:
 - **Per-IP rate limit** on `/v1/agent` connects (`ws_handshake_rate_limit_per_ip_*`,
   default 5/s burst 20). Bucket consumed BEFORE the JWT verify
-  + Redis lookup so a flooding IP doesn't burn auth machinery.
+  + Valkey lookup so a flooding IP doesn't burn auth machinery.
   Saturated bucket closes the WS with code **4029**.
 - **Hello frame size cap** at `max_payload_bytes` (default 1 MiB).
   Oversized payload closes with code **1009** before
@@ -221,7 +221,7 @@ checked by a single helper used by every read path.
 
 ### 5.2 Revocation
 
-- A `jti` revocation list is held in Redis with TTL = JWT
+- A `jti` revocation list is held in Valkey with TTL = JWT
   remaining lifetime. Cheap to check on every frame admit.
 - Admin can revoke an agent (`POST /v1/admin/agents/{id}/suspend`)
   or a user session via the same mechanism.
@@ -246,7 +246,7 @@ checked by a single helper used by every read path.
   bumping a global `key_version` and rejecting JWTs signed against
   earlier versions.
 
-> **Single-worker dev fallback.** When `ROUTER_REDIS_URL` is unset,
+> **Single-worker dev fallback.** When `ROUTER_VALKEY_URL` is unset,
 > `revoke_jti` and `is_jti_revoked` silently no-op — single-worker
 > deployments accept that revocation is best-effort (the underlying
 > JWT's `exp` claim still bounds the replay window to the JWT's
@@ -256,16 +256,16 @@ checked by a single helper used by every read path.
 > shape at startup when `deployment_env` is `staging` or `prod` —
 > across multiple workers a logout on one worker would otherwise
 > silently fail to invalidate the token on the others. A prod
-> deployment with `ROUTER_REDIS_URL` **unset** fails fast at boot
+> deployment with `ROUTER_VALKEY_URL` **unset** fails fast at boot
 > with a message pointing at it.
 >
 > **Boot-tolerant for the *unreachable* case.** The validator only
-> checks the URL is *set*, not *reachable*. If Redis is configured
+> checks the URL is *set*, not *reachable*. If Valkey is configured
 > but down at boot, the router no longer crashloops — it starts
 > **degraded**: `state.redis = None`, `redis_health` gauge → 0,
 > an error log `redis_unreachable_at_boot`, and the same
 > per-process fallback the dev path uses (the running router
-> already tolerates Redis flakes everywhere — failing boot was the
+> already tolerates Valkey flakes everywhere — failing boot was the
 > one place that didn't, turning a transient blip into a total
 > outage). Consequence: **while degraded, JWT revocation fails
 > open** — `is_jti_revoked` returns `False` when `redis is None`,
@@ -338,7 +338,7 @@ with Retry-After and writes an
 | JWT signing key            | Env / KMS / HSM                               | Router only                   |
 | Provider API keys          | Secrets backend (Vault / AWS SM / GCP SM)     | LLM service (router) only     |
 | Database password          | Env / secrets backend                         | Router only                   |
-| Redis password             | Same                                          | Router only                   |
+| Valkey password             | Same                                          | Router only                   |
 | Storage credentials        | Same                                          | Router only                   |
 | Per-user provider keys     | DB (encrypted at rest with envelope keys)     | LLM service per request       |
 | Agent shared secret / pubkey | DB                                          | Router only                   |
@@ -378,7 +378,7 @@ env vars; production deployments should not.
 - Provider API keys: rotated by updating the secrets backend; the
   router refetches on the next request (or on a scheduled
   interval).
-- DB / Redis / storage credentials: standard infra rotation;
+- DB / Valkey / storage credentials: standard infra rotation;
   router supports config reload via SIGHUP without dropping
   connections.
 
@@ -391,7 +391,7 @@ env vars; production deployments should not.
   rejected at the edge).
 - Network policies (deployment-local): router accepts inbound only
   from the load balancer subnet; outbound to provider endpoints
-  is allowlisted; Redis and Postgres are private-subnet only.
+  is allowlisted; Valkey and Postgres are private-subnet only.
 - Storage backends (S3 / GCS) accessed via VPC endpoints where
   available; presigned URLs scoped to single objects with short
   TTL.
@@ -585,7 +585,7 @@ backend tool, not the API.
 | Soft-deleted user replays a still-valid JWT    | `_principal_from_request` consults `deleted_at` per-request (cached). |
 | Stale tier permission for soft-deleted user    | `delete_user` invalidates `LlmService._user_level_cache` synchronously. |
 | Compromised service principal mass-mints       | Per-target rate-limit on refresh + password-reset endpoints. |
-| Revoked agent JWT reconnects via WS            | Handshake calls `is_jti_revoked` after `verify_agent_token`. **Fails open if Redis is down/unset** (degraded boot or dev) — `exp` then bounds replay. See §5.2. |
+| Revoked agent JWT reconnects via WS            | Handshake calls `is_jti_revoked` after `verify_agent_token`. **Fails open if Valkey is down/unset** (degraded boot or dev) — `exp` then bounds replay. See §5.2. |
 | Validator-message echo leaks input fragments   | `safe_validator_message` caps Ack.reason at 200 chars.     |
 | `/metrics` exposition leaks agent ID list      | `ROUTER_METRICS_TOKEN` bearer required (mandatory in non-dev). |
 | MCP SSE endpoint URL hijack                    | Origin (scheme+host+port) must match SSE base; cross-origin refused. |

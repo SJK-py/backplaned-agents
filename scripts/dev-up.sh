@@ -103,8 +103,8 @@ ROUTER_MCP_BRIDGE_SECRET=$MCP_SECRET
 # driving the SAME session from both the Telegram bot and the webapp:
 #   docker compose -f docker-compose.dev.yml --profile valkey up -d
 # then uncomment both:
-# ROUTER_REDIS_URL=redis://localhost:6379/0    # router: JWT revocation + rate-limit
-# SUITE_REDIS_URL=redis://localhost:6379/1     # suite: distributed session lock
+# ROUTER_VALKEY_URL=redis://localhost:6379/0    # router: JWT revocation + rate-limit
+# SUITE_VALKEY_URL=redis://localhost:6379/1     # suite: distributed session lock
 # LLM provider key for the router's seeded presets (the suite's `default`
 # preset resolves env://GEMINI_API_KEY). Set this before booting the router.
 GEMINI_API_KEY=

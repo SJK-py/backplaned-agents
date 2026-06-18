@@ -215,7 +215,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             redis_health,
         )
 
-        if settings.redis_url:
+        if settings.valkey_url:
             from bp_router.db.connection import open_redis  # noqa: PLC0415
 
             try:

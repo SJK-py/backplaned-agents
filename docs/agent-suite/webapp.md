@@ -45,7 +45,7 @@ So **no service-principal/minting dance** (unlike the chatbot, which needs it
 because Telegram users have no password): the user logs in and the webapp
 holds *their* token.
 
-**Concurrency:** webapp + chatbot share `SUITE_REDIS_URL`, so the
+**Concurrency:** webapp + chatbot share `SUITE_VALKEY_URL`, so the
 **distributed per-session lock** serializes turns for one session across both
 processes. The webapp is the reason that lock exists.
 

@@ -371,7 +371,7 @@ map is per-socket, so an agent can only abort its own in-flight calls.
 - Per-IP handshake rate limit on `/v1/agent` (default 5/s, burst 20).
   Saturation closes the socket with WebSocket close code **4029**
   (`reason="rate_limited"`) BEFORE the JWT verify, so a flooding
-  IP can't burn HMAC + Redis lookups. Tunable via
+  IP can't burn HMAC + Valkey lookups. Tunable via
   `ws_handshake_rate_limit_per_ip_per_s` / `_burst`; set rate=0 to
   disable.
 

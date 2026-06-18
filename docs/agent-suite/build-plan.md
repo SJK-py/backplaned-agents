@@ -173,7 +173,7 @@ Dockerfiles + compose; end-to-end integration tests; deploy docs.
    promoting it.
 2. **Separate suite Alembic config** rather than reusing the router's
    `alembic.ini` — the suite DB is independent.
-3. **Per-user memory lock is in-memory single-instance for v1** (Redis
+3. **Per-user memory lock is in-memory single-instance for v1** (Valkey
    later), matching the single-replica router.
 4. **SearXNG ships in the default `docker-compose` deployment behind a
    compose `profile`** — enabled by default for a batteries-included install,

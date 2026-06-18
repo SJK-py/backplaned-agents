@@ -84,7 +84,7 @@ x-suite-agent: &suite-agent
     # Defaults to the in-cluster valkey (on the `suite` network); the lock
     # fails open if it's unreachable. Worker agents inherit but ignore it.
     # (Valkey is Redis-wire-compatible, so the URL scheme stays redis://.)
-    SUITE_REDIS_URL: ${SUITE_REDIS_URL:-redis://valkey:6379/1}
+    SUITE_VALKEY_URL: ${SUITE_VALKEY_URL:-redis://valkey:6379/1}
     # Per-tier preset defaults seeded into a new user's config (chatbot
     # approval). prod.sh wires these to the chosen provider's
     # aliases; empty → the seeded `default` (Gemini).
@@ -268,7 +268,7 @@ services:
       ROUTER_DEPLOYMENT_ENV: prod
       ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
       # Valkey speaks the Redis wire protocol, so the URL scheme stays redis://.
-      ROUTER_REDIS_URL: redis://valkey:6379/0
+      ROUTER_VALKEY_URL: redis://valkey:6379/0
       # Canonical PUBLIC origin (always https). prod.sh sets ROUTER_PUBLIC_URL
       # to the domain (domain/both modes) or the bare IP (ip mode); the fallback
       # keeps an old env / bare-up working off PUBLIC_DOMAIN.
@@ -388,7 +388,7 @@ services:
       # KakaoTalk channel (optional). Egress-only pull consumer behind the
       # deploy/kakao-relay Cloudflare Worker + a Cloudflare Queue. Inert
       # unless the three CF queue vars are set. Needs Redis (the
-      # deadline/next-touch registry) — already provided by SUITE_REDIS_URL
+      # deadline/next-touch registry) — already provided by SUITE_VALKEY_URL
       # in the suite-env anchor above.
       SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
       SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}

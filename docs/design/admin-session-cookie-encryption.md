@@ -15,7 +15,7 @@
 >
 > **Outcome we want:** the session cookie carries an opaque
 > session-id only; the actual tokens live in a server-side store
-> (Redis preferred — already a dependency for JTI revocation).
+> (Valkey preferred — already a dependency for JTI revocation).
 > Cookie-stealer attacks degrade from "instant token theft" to
 > "instant session takeover until logout" — still bad, but the
 > tokens themselves don't leak and a server-side revocation can
@@ -66,14 +66,14 @@ For all four, the difference between "cookie holds tokens" and
 "cookie holds opaque session-id" is the difference between
 "attacker has tokens until natural expiry" and "attacker has
 session until next admin clicks logout / operator deletes the
-Redis key."
+Valkey key."
 
 ## 2. Two natural designs
 
 ### 2.1 Server-side session store (recommended)
 
 Cookie holds an opaque session-id (`secrets.token_urlsafe(32)`);
-all token state lives in Redis under `admin_session:{session_id}`.
+all token state lives in Valkey under `admin_session:{session_id}`.
 Format:
 
 ```
@@ -98,7 +98,7 @@ EXPIRE admin_session:{sid}  <session_max_age_s>
   - Refresh-token rotation: hot-swap the stored values on a
     successful refresh; cookie unchanged.
 
-Redis is already a soft dependency (JTI revocation set, future
+Valkey is already a soft dependency (JTI revocation set, future
 quota work in `quota-enforcement.md`). Hardening this dependency
 to "required" is a one-line `Settings` validator change.
 
@@ -109,13 +109,13 @@ Cookie payload becomes ciphertext + AEAD tag; only the BFF (which
 holds the key) can decrypt.
 
   - Pro: no infrastructure dependency. Stateless BFF survives
-    Redis outages.
+    Valkey outages.
   - Pro: minimal migration — replace one middleware, keep the
     `request.session[...]` API.
   - Con: cookie size grows (Fernet adds ~57 bytes overhead +
     base64 expansion). Browsers cap at ~4 KiB total per domain;
     headroom is fine but the JWT pair already eats ~1.5 KiB.
-  - Con: revocation still requires JTI-set Redis (already true
+  - Con: revocation still requires JTI-set Valkey (already true
     for the upstream tokens). No server-side "kick this session"
     capability — only natural expiry.
   - Con: key rotation is a real operation. The signing key for
@@ -123,21 +123,21 @@ holds the key) can decrypt.
     a separate encryption key means two secrets to rotate.
 
 Pick this only if a deployment commits to single-binary,
-no-Redis operation. Otherwise §2.1 is strictly better.
+no-Valkey operation. Otherwise §2.1 is strictly better.
 
-## 3. Recommended approach: §2.1 with Redis
+## 3. Recommended approach: §2.1 with Valkey
 
 Three migrations:
 
   1. **Add `RedisSessionStore` class.** Lives in
      `bp_admin/session_store.py`. Methods: `create(payload)`,
      `read(sid)`, `update(sid, patch)`, `delete(sid)`,
-     `extend(sid, ttl_s)`. Wraps `redis.asyncio.Redis` with
+     `extend(sid, ttl_s)`. Wraps `redis.asyncio.Valkey` with
      `HSET`/`HGETALL`/`DEL`/`EXPIRE` calls.
 
   2. **Replace SessionMiddleware with a thin shim.** New
      `OpaqueSessionMiddleware` reads the session-id from a signed
-     cookie, fetches the dict from Redis on request entry,
+     cookie, fetches the dict from Valkey on request entry,
      mounts it on `request.state.session`, writes back any
      mutations on response. The existing call sites
      (`request.session["access_token"]`, etc.) get a one-line
@@ -146,7 +146,7 @@ Three migrations:
   3. **Logout DELs the key.** Currently `clear_session` calls
      `request.session.clear()` — which empties the in-memory
      dict but leaves the cookie holding stale tokens until the
-     middleware writes back an empty dict. With the Redis store,
+     middleware writes back an empty dict. With the Valkey store,
      `clear_session` becomes `await store.delete(sid)` and the
      cookie is unset on the response. No more "logged-out
      session still has valid tokens" race.
@@ -157,7 +157,7 @@ Three migrations:
 class AdminConfig(BaseSettings):
     # Existing.
     session_secret: SecretStr               # cookie signing only
-    session_cookie_max_age_s: int = 86_400  # cookie + Redis TTL
+    session_cookie_max_age_s: int = 86_400  # cookie + Valkey TTL
     session_cookie_secure: bool = True
 
     # NEW.
@@ -168,7 +168,7 @@ class AdminConfig(BaseSettings):
 
     session_redis_url: Optional[str] = None
     """Required when `session_store == "redis"`. Falls back to the
-    main router's REDIS_URL if both processes share Redis (the
+    main router's REDIS_URL if both processes share Valkey (the
     common deployment shape)."""
 ```
 
@@ -186,7 +186,7 @@ Two small PRs:
   2. **Wire it in.** `bp_admin/main.py` swaps middleware based on
      `config.session_store`. Tests exercise the migration path:
      legacy cookie still readable while in `cookie` mode; flip
-     to `redis` and the new sessions land in Redis. No
+     to `redis` and the new sessions land in Valkey. No
      downtime-migration tooling — admins re-login on the cutover
      (acceptable; the admin user count is small).
 
@@ -199,16 +199,16 @@ Three reasons:
      is one. Cookie-stealer XSS isn't a credible vector because
      there's no cross-user content rendered in the admin UI.
 
-  2. **Redis-or-stateless ambiguity.** The right backend choice
-     depends on whether the deployment has Redis available
-     (multi-worker setup) or is single-binary (no Redis). The
+  2. **Valkey-or-stateless ambiguity.** The right backend choice
+     depends on whether the deployment has Valkey available
+     (multi-worker setup) or is single-binary (no Valkey). The
      review-fix bundle PRs left that decision unresolved; same
-     unresolved-Redis question gates this work as the quota one
+     unresolved-Valkey question gates this work as the quota one
      (`quota-enforcement.md` §4).
 
   3. **Adjacent CSRF refactor pending.** The CSRF token is
      currently stored in the same session dict
-     (`bp_admin/csrf.py`). When we move tokens to Redis we want
+     (`bp_admin/csrf.py`). When we move tokens to Valkey we want
      the CSRF token to ride along — splitting it out into a
      separate cookie would create a second migration. Bundling
      is cheaper but means waiting until both items are ready.
@@ -216,5 +216,5 @@ Three reasons:
 ## 7. Tracking
 
 This doc is the durable home for the M1 finding. When a
-deployment commits to Redis-backed sessions, start here and walk
+deployment commits to Valkey-backed sessions, start here and walk
 the implementation plan in §5.

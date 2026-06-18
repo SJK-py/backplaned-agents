@@ -33,8 +33,8 @@ class SuiteSettings(BaseSettings):
     """Per-connection `statement_timeout` so a runaway query can't pin
     a pool connection indefinitely."""
 
-    redis_url: str | None = None
-    """Optional Redis DSN (`SUITE_REDIS_URL`). When set, the channel's
+    valkey_url: str | None = None
+    """Optional Valkey DSN (`SUITE_VALKEY_URL`). When set, the channel's
     per-session lock becomes cross-process (a distributed lock) instead of
     an in-process `asyncio.Lock` — the prerequisite for running more than
     one channel instance (e.g. a webapp alongside the Telegram bot). When

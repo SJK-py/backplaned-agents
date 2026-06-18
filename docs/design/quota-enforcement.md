@@ -9,7 +9,7 @@
 > (`router_quota_exceeded_total{counter, level}`) but no caller
 > increments it, and `admit_task` does no per-tier rate limiting.
 > The metric was declared but the enforcement leg was never
-> implemented. Surfaced again by the Redis-completeness audit.
+> implemented. Surfaced again by the Valkey-completeness audit.
 >
 > **Outcome we want:** a tier-N agent cannot spawn unlimited child
 > tasks per second; admins can see quota pressure on dashboards
@@ -62,7 +62,7 @@ For the throughput axis, **token bucket** is the natural choice:
   - Allows bursts up to bucket size while still honouring the
     long-term rate.
   - Per-key state is just `(tokens_remaining, last_refill_ts)` —
-    fits easily in Redis with a Lua script for atomicity.
+    fits easily in Valkey with a Lua script for atomicity.
   - Time-windowed dashboards stay readable: rate of refusals over
     1m / 5m / 1h is straightforward.
 
@@ -70,13 +70,13 @@ Leaky bucket (request-queue) shape would be overengineered for
 admit-time rejection — we don't want to hold requests, we want
 to reject them so the caller backs off.
 
-## 4. Storage: Redis vs in-memory
+## 4. Storage: Valkey vs in-memory
 
 In-memory works for single-worker deployments, but the existing
-deployment shape (multi-worker FastAPI + shared Redis for the
-JWT revocation set) makes Redis the correct choice. Per-tier
+deployment shape (multi-worker FastAPI + shared Valkey for the
+JWT revocation set) makes Valkey the correct choice. Per-tier
 limits live in `Settings`; per-(user_id, level) buckets live in
-Redis with TTL = bucket-fill-time × 2 to bound the keyspace.
+Valkey with TTL = bucket-fill-time × 2 to bound the keyspace.
 
 A shared Lua script wraps the read-update-write so two workers
 admitting concurrent tasks can't both see "1 token left" and
@@ -135,18 +135,18 @@ Three small PRs:
   1. **Settings + token-bucket helper.** Add `quota_admit_*` and
      `quota_concurrent_*` settings. New
      `bp_router/security/rate_limit.py` with a `TokenBucket`
-     class and a `try_consume` method that honours Redis when
+     class and a `try_consume` method that honours Valkey when
      configured / falls back to a **bounded per-process LRU**
      (`BoundedLRUDict`, cap `_MEM_FALLBACK_MAX = 50_000`) when
      not — an unbounded dict here would leak one entry per
-     distinct key under a Redis outage. No call-site changes yet.
+     distinct key under a Valkey outage. No call-site changes yet.
 
   2. **Wire into `admit_task`.** Insert the quota check between
      ACL (`step 3`) and depth check (`step 3c`). On rejection:
      `metrics.router_quota_exceeded_total.labels(...).inc()` and
      raise `AdmitError("quota_exceeded", ...)`.
 
-  3. **Concurrent-tasks cap.** Maintain a Redis SET keyed on
+  3. **Concurrent-tasks cap.** Maintain a Valkey SET keyed on
      `quota:in_flight:{user_id}` of in-flight task_ids;
      `admit_task` SADDs, `complete_task` / `cancel_task` SREMs.
      Cap on SADD via `SCARD` check — Lua-scripted for atomicity.
@@ -172,9 +172,9 @@ Three reasons:
      workload to validate it would mean shipping numbers
      pulled out of thin air.
 
-  2. **Redis-or-in-memory ambiguity.** The right backend choice
-     depends on whether this deployment has Redis available
-     (multi-worker setup) or is single-worker (no Redis). The
+  2. **Valkey-or-in-memory ambiguity.** The right backend choice
+     depends on whether this deployment has Valkey available
+     (multi-worker setup) or is single-worker (no Valkey). The
      review fixes #62-#67 left that decision unresolved; deferring
      until at least one deployment commits.
 
@@ -192,18 +192,18 @@ This doc is the durable home for the WS-H3 finding. When a
 deployment needs quota enforcement, start here and walk the
 implementation plan in §7.
 
-## 12. What shipped (Redis-completeness PR)
+## 12. What shipped (Valkey-completeness PR)
 
 §7 phase 1 + 2 are now in `main`:
 
   - `bp_router/security/rate_limit.py` — `TokenBucket` class with
-    a Lua script for atomic check-and-deduct on Redis, plus a
+    a Lua script for atomic check-and-deduct on Valkey, plus a
     **bounded** per-process LRU fallback (`BoundedLRUDict`, cap
     `_MEM_FALLBACK_MAX = 50_000`) for single-worker deployments
-    and Redis-outage degradation — bounded so a Redis blip can't
+    and Valkey-outage degradation — bounded so a Valkey blip can't
     leak the keyspace into RSS.
-    Redis flake (`eval` raises) drops to the fallback path with a
-    warning log, so a Redis blip doesn't cascade into a
+    Valkey flake (`eval` raises) drops to the fallback path with a
+    warning log, so a Valkey blip doesn't cascade into a
     global admit-task outage.
   - `Settings.quota_admit_rate_per_s` / `quota_admit_burst` per-tier
     dicts (defaults match §5: admin / service uncapped, tier0…3
@@ -212,14 +212,14 @@ implementation plan in §7.
     (rate-without-burst, burst-without-rate, zero or negative)
     at startup.
   - `_redis_required_in_non_dev` Settings validator: rejects
-    deployment_env in {staging, prod} when ROUTER_REDIS_URL is
+    deployment_env in {staging, prod} when ROUTER_VALKEY_URL is
     None. Closes the silent-revocation-bypass / silent-quota-
     fan-out foot-gun across multi-worker replicas. Single-worker
-    dev still works without Redis.
+    dev still works without Valkey.
   - `admit_task` consults `state.admit_quota.try_consume(...)`
     after the ACL gate (step 3c) and before the spawn-depth gate.
     `None` rate short-circuits before the bucket call so admin /
-    service admits don't pay a Redis round-trip. On rejection:
+    service admits don't pay a Valkey round-trip. On rejection:
     `metrics.quota_exceeded_total.labels(counter="admit_rate",
     level=level).inc()` and `AdmitError("quota_exceeded", ...,
     retry_after_s=d.retry_after_s)`.
@@ -227,10 +227,10 @@ implementation plan in §7.
     `POST /v1/admin/tasks/test` handler — emits
     `Retry-After: <seconds>` (rounded up per RFC 7231 §7.1.3) on
     HTTP 429 responses.
-  - Real-Redis-protocol integration tests via `fakeredis` cover:
+  - Real-Valkey-protocol integration tests via `fakeredis` cover:
     JTI revocation round-trip, bucket drain → refill → re-consume,
     per-key isolation, atomic two-worker race, fallback on
-    Redis flake. No mocks for the contract surface.
+    Valkey flake. No mocks for the contract surface.
   - Live E2E in `scripts/run-test-agents.sh --run-quota-test`:
     fires N admit calls, asserts at least one 429 + matching
     `Retry-After` header + non-zero metric value.

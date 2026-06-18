@@ -53,13 +53,13 @@ async def open_pool(settings: SuiteSettings) -> asyncpg.Pool:
 
 
 async def open_redis(settings: SuiteSettings):  # type: ignore[no-untyped-def]
-    """Open the suite's Redis client, or return None when `redis_url` is
+    """Open the suite's Redis client, or return None when `valkey_url` is
     unset (the in-process single-instance default). `decode_responses=True`
     so the session-lock Lua scripts compare plain strings."""
-    if not settings.redis_url:
+    if not settings.valkey_url:
         return None
     import redis.asyncio as aredis  # noqa: PLC0415
 
-    client = aredis.Redis.from_url(settings.redis_url, decode_responses=True)
+    client = aredis.Redis.from_url(settings.valkey_url, decode_responses=True)
     logger.info("suite_redis_opened", extra={"event": "suite_redis_opened"})
     return client

@@ -20,11 +20,11 @@
                          │   router    │──────┬─────────┬──────────┐
                          │ (this repo) │      │         │          │
                          └──────┬──────┘  ┌───▼───┐ ┌───▼───┐ ┌────▼────┐
-                       agents   │         │  PG   │ │ Redis │ │seaweedfs│
+                       agents   │         │  PG   │ │ Valkey │ │seaweedfs│
                        net      │         │ (×2db)│ │       │ │  (S3)   │
             ┌────────────┬──────┴────┬────────────┐└───────┘ └─────────┘
         ┌───▼───┐   ┌────▼────┐  ┌───▼────┐   ┌────▼────┐         ▲ suite net
-        │chatbot│   │sandbox  │  │reasoning│  │ stores  │ helpers │ (PG#2/Redis)
+        │chatbot│   │sandbox  │  │reasoning│  │ stores  │ helpers │ (PG#2/Valkey)
         │(gway) │   │(untrust)│  │ l0+l1   │  │ kb+mem  │  …      │
         └───────┘   └─────────┘  └─────────┘  └─────────┘─────────┘
 ```
@@ -37,7 +37,7 @@ Two boundaries to keep straight:
 ## 2. Boxes
 
 ### Edge — `caddy`
-TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Redis/SeaweedFS are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
+TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI (`/admin/*`) + webapp. The router does **not** terminate TLS. PG/Valkey/SeaweedFS are never proxied. Two public hostnames, both served by the one Caddy container (see [`deploy/Caddyfile`](../../deploy/Caddyfile)) — **full setup in [§9 Edge / reverse proxy](#9-edge--reverse-proxy-caddy)**:
 
 | Env var | Serves | Default |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ FastAPI + WS + admin UI (`bp-router` → uvicorn `create_app` factory). Config (
 | Env | Purpose |
 | --- | --- |
 | `ROUTER_DB_URL` | → `bp_router` DB |
-| `ROUTER_REDIS_URL` | jti revocation, rate limits (required in prod) |
+| `ROUTER_VALKEY_URL` | jti revocation, rate limits (required in prod) |
 | `ROUTER_JWT_SECRET` | ≥32 bytes (`openssl rand -base64 32`) |
 | `ROUTER_FILE_STORE=s3` + `ROUTER_FILE_STORE_OPTIONS` | JSON: `bucket`, `endpoint_url`, `region_name`, `access_key_id`, `secret_access_key` → SeaweedFS |
 | `ROUTER_PUBLIC_URL` | external URL (behind the proxy) |
@@ -78,17 +78,17 @@ LLM **presets** are rows in the router's `llm_presets` table, admin-managed via 
 ### docker 2 — Postgres 16
 Hosts both `bp_router` and `bp_suite`. The router DB is migrated by this repo's alembic; the suite DB by the suite repo's migrations. Persistent volume + backups. Reachable by the router (router DB) and the suite session-manager/agents (suite DB) — **never by the sandbox**. The second DB is created on first init by [`deploy/postgres-init/`](../../deploy/postgres-init).
 
-### docker 3 — Redis 7
+### docker 3 — Valkey 8
 Shared: router (revocation/rate-limits) + suite (the per-session FIFO queue when the channel is multi-worker; cron coordination). One instance.
 
 ### docker 4 — SeaweedFS (S3)
 The router's blob backend (`file_store=s3`, `endpoint_url=http://seaweedfs:8333`). Persistent volume, **internal-only**. Downloads default to **router-proxy** mode (`ROUTER_FILE_DOWNLOAD_PRESIGNED=false`), which streams bytes through the router and keeps SeaweedFS off the public net. This is required for the bundled topology: every download consumer (agents, chatbot, webapp backend) is in-cluster and can't resolve the store host, so a presigned redirect to `seaweedfs:8333` would fail. Only switch to **302-presigned** (`ROUTER_FILE_DOWNLOAD_PRESIGNED=true`) if you front the store on a hostname download clients can actually reach and want to offload bytes from the router. Only the router holds the S3 keys. *(Replaced rustfs beta, whose multipart path was broken — `create_multipart_upload` succeeded but the immediate `upload_part` returned NoSuchUpload, failing any upload bigger than one PUT. SeaweedFS has reliable S3 multipart. Pin the tag + confirm flags against upstream; MinIO is a drop-in.)*
 
 ### docker 5 — chatbot (channel; webapp in v2)
-The gateway ([`agent-suite/channel.md`](../agent-suite/channel.md)). Bootstraps **two identities at onboarding** from a single invitation flagged `provisions_service_user`: its agent JWT *and* the `usr_service_{agent_id}` service refresh token ([`security.md` §3.2](./security.md)). Holds the Telegram bot token + suite-DB creds. Stateful (`state_dir` volume: credentials.json + Telegram offset); runs the cron scheduler (v1). Needs router WS + router HTTP (token mint, `/v1/files/names`) + suite DB + Redis + Telegram egress.
+The gateway ([`agent-suite/channel.md`](../agent-suite/channel.md)). Bootstraps **two identities at onboarding** from a single invitation flagged `provisions_service_user`: its agent JWT *and* the `usr_service_{agent_id}` service refresh token ([`security.md` §3.2](./security.md)). Holds the Telegram bot token + suite-DB creds. Stateful (`state_dir` volume: credentials.json + Telegram offset); runs the cron scheduler (v1). Needs router WS + router HTTP (token mint, `/v1/files/names`) + suite DB + Valkey + Telegram egress.
 
 ### docker 6 — sandbox (untrusted code)
-The one box running untrusted user code — isolate hard: a sandboxed runtime (**gVisor/Kata**), `no-new-privileges`, seccomp, read-only rootfs + a writable per-user workspace, CPU/mem/pids limits, **no DB/Redis/S3/provider access**, egress off or tightly allowlisted. It reaches **only the router WS**. Files move via the router (`stash_to_workspace`/`workspace_to_stash`), never direct S3. Prefer **per-user/per-task ephemeral sub-containers** over one shared container (a single container shares a kernel across users).
+The one box running untrusted user code — isolate hard: a sandboxed runtime (**gVisor/Kata**), `no-new-privileges`, seccomp, read-only rootfs + a writable per-user workspace, CPU/mem/pids limits, **no DB/Valkey/S3/provider access**, egress off or tightly allowlisted. It reaches **only the router WS**. Files move via the router (`stash_to_workspace`/`workspace_to_stash`), never direct S3. Prefer **per-user/per-task ephemeral sub-containers** over one shared container (a single container shares a kernel across users).
 
 **Per-user uid isolation (and why this box runs as root).** Inside the shared container the sandbox drops each user's `bash` to a distinct OS uid (`setgroups([])`/`setgid`/`setuid` in the child pre-exec; the `user_id → uid` map is owned locally in a JSON file on the sandbox's `/state` volume — it has no DB). The drop needs `CAP_SETUID`/`CAP_SETGID`, which only root holds, so the prod compose runs **this one service as `user: "0:0"`** (the agent process does nothing privileged — it immediately drops per command). Two implications for hardening:
 
@@ -100,7 +100,7 @@ The one box running untrusted user code — isolate hard: a sandboxed runtime (*
 One **process per agent** (own `agent_id` + invitation + `state_dir`); pack processes into containers with a supervisor. Recommended grouping (refines the proposed 7/8 split):
 
 - **reasoning** — `orchestrator` (l0) + `computer_use`, `research`, `deep_reasoning` (l1). Split `orchestrator` out if you want to scale the hot path alone.
-- **stores** — `knowledge_base` + `memory`, **co-located** with the per-user **LanceDB volume**. They back onto the same per-user LanceDB (non-transactional; memory holds a per-user lock), so they must not be split across containers. The lock is in-process here → move it to Redis if this box scales >1.
+- **stores** — `knowledge_base` + `memory`, **co-located** with the per-user **LanceDB volume**. They back onto the same per-user LanceDB (non-transactional; memory holds a per-user lock), so they must not be split across containers. The lock is in-process here → move it to Valkey if this box scales >1.
 - **helpers** — `config` (suite DB) + `history_summarizer` (stateless) + `md_converter` (non-LLM).
 
 All need only: router WS + their invitation + (for history/config) suite DB. **No provider keys.**
@@ -120,15 +120,15 @@ Web-search backend for `research`. Internal-only; the one agent-side box with we
 ## 4. Networks
 
 - `edge` — proxy ↔ router (+ webapp in v2).
-- `backend` — router ↔ PG / Redis / SeaweedFS. **Private**; agents never join it.
+- `backend` — router ↔ PG / Valkey / SeaweedFS. **Private**; agents never join it.
 - `agents` — router ↔ every agent (the agent WS).
-- `suite` — chatbot + suite agents ↔ `bp_suite` Postgres / Redis.
+- `suite` — chatbot + suite agents ↔ `bp_suite` Postgres / Valkey.
 
 The sandbox joins `agents` **only** (router WS), nothing else.
 
 ## 5. First-boot order
 
-1. `docker compose -f docker-compose.prod.yml up -d postgres redis seaweedfs` — data services.
+1. `docker compose -f docker-compose.prod.yml up -d postgres valkey seaweedfs` — data services.
 2. `migrate` one-shot runs `alembic upgrade head` against `bp_router`.
 3. `router` starts; the bootstrap-admin env seeds the first admin.
 4. Admin logs into `/admin`, configures LLM presets, and **issues agent invitations** — the chatbot's flagged `provisions_service_user`.
@@ -146,13 +146,13 @@ The agent-suite services are commented in the compose as the contract; bring the
 
 ## 7. Graceful shutdown (rollouts)
 
-On `SIGTERM` (every restart/rollout) the **router** lifespan drains in order — close live WS sockets with code 1001, cancel in-flight router-side LLM tasks (stop burning provider tokens), drain background loops, stop the PendingAcks reaper, close the pool/Redis — and the **suite agents** drain in-flight tasks via the SDK's graceful shutdown. The compose gives router + agents `stop_grace_period: 30s` so Docker doesn't `SIGKILL` mid-drain (its default is only 10s). The router caps its own wait at `ROUTER_SHUTDOWN_GRACE_S` (default 25s, the uvicorn `timeout_graceful_shutdown`) — keep it **below** `stop_grace_period`. Under `gunicorn -k uvicorn.workers.UvicornWorker`, set the worker's `--graceful-timeout` to match.
+On `SIGTERM` (every restart/rollout) the **router** lifespan drains in order — close live WS sockets with code 1001, cancel in-flight router-side LLM tasks (stop burning provider tokens), drain background loops, stop the PendingAcks reaper, close the pool/Valkey — and the **suite agents** drain in-flight tasks via the SDK's graceful shutdown. The compose gives router + agents `stop_grace_period: 30s` so Docker doesn't `SIGKILL` mid-drain (its default is only 10s). The router caps its own wait at `ROUTER_SHUTDOWN_GRACE_S` (default 25s, the uvicorn `timeout_graceful_shutdown`) — keep it **below** `stop_grace_period`. Under `gunicorn -k uvicorn.workers.UvicornWorker`, set the worker's `--graceful-timeout` to match.
 
 ## 8. Scaling notes
 
 See **[`scaling.md`](./scaling.md)** for the full picture: the current
 scaling posture (the router runs as a **single worker** today; which
-subsystems already have a Redis path), the per-service scaling rules, and
+subsystems already have a Valkey path), the per-service scaling rules, and
 the ranked backlog of work to lift each ceiling. In short:
 
 - **router** — **single worker** today (process-local socket registry /
@@ -160,10 +160,10 @@ the ranked backlog of work to lift each ceiling. In short:
   ([`scaling.md §1.1`](./scaling.md), [`router/storage.md §6.1`](./router/storage.md#61-multi-worker--planned))
   lands. The one-shot `migrate` is the only process that runs `upgrade`.
 - **chatbot** — stateful (session queue, Telegram offset). v1: single
-  instance. To scale: `SUITE_REDIS_URL` (distributed session lock) +
+  instance. To scale: `SUITE_VALKEY_URL` (distributed session lock) +
   session→worker affinity.
 - **stores** — co-located KB+memory; >1 replica requires the memory
-  per-user lock in Redis (`SUITE_REDIS_URL`).
+  per-user lock in Valkey (`SUITE_VALKEY_URL`).
 - **sandbox** — scale by workspace/runtime capacity; keep the isolation
   invariants regardless of replica count.
 
@@ -172,7 +172,7 @@ the ranked backlog of work to lift each ceiling. In short:
 The `caddy` service (image `caddy:2`) is the only thing on `:80`/`:443` (plus
 the optional webapp port below). It terminates TLS, proxies the public
 hostnames, and transparently upgrades the agent WebSocket on `/v1/agent`. The
-router never terminates TLS; Postgres / Redis / SeaweedFS are never proxied.
+router never terminates TLS; Postgres / Valkey / SeaweedFS are never proxied.
 
 **The Caddyfile is generated.** `scripts/prod.sh` asks how the stack is reached
 (**`EDGE_MODE`**) and runs [`scripts/render-caddyfile.sh`](../../scripts/render-caddyfile.sh)

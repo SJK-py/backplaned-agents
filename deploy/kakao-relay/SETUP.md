@@ -125,7 +125,7 @@ SUITE_KAKAO_R2_ENDPOINT_URL=https://<A>.r2.cloudflarestorage.com
 SUITE_KAKAO_R2_BUCKET=kakao-images
 SUITE_KAKAO_R2_ACCESS_KEY_ID=<B.2>
 SUITE_KAKAO_R2_SECRET_ACCESS_KEY=<B.2>
-# SUITE_REDIS_URL already defaults to the in-cluster redis in compose.
+# SUITE_VALKEY_URL already defaults to the in-cluster redis in compose.
 ```
 
 Restart the chatbot. On boot it logs `kakao_consumer_started`. The three

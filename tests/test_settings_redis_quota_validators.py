@@ -1,6 +1,6 @@
 """Tests for the Redis-completeness audit's settings validators.
 
-  1. `_redis_required_in_non_dev` — ROUTER_REDIS_URL is mandatory
+  1. `_redis_required_in_non_dev` — ROUTER_VALKEY_URL is mandatory
      when deployment_env in {staging, prod}. Without it, JWT
      revocation and the admit-rate quota silently fall back to
      per-process state — correct for single-worker dev, a security
@@ -32,7 +32,7 @@ def _base_settings_kwargs() -> dict:
 
 
 # ===========================================================================
-# Validator 1: ROUTER_REDIS_URL required in non-dev
+# Validator 1: ROUTER_VALKEY_URL required in non-dev
 # ===========================================================================
 
 
@@ -41,7 +41,7 @@ def test_dev_without_redis_is_ok(monkeypatch, tmp_path) -> None:
     Backwards-compatible — operators relying on the silent
     revocation no-op for local development keep working."""
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.delenv("ROUTER_DEPLOYMENT_ENV", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings
@@ -50,13 +50,13 @@ def test_dev_without_redis_is_ok(monkeypatch, tmp_path) -> None:
         **_base_settings_kwargs(),
         deployment_env="dev",
     )
-    assert cfg.redis_url is None
+    assert cfg.valkey_url is None
     assert cfg.deployment_env == "dev"
 
 
 def test_staging_without_redis_rejected(monkeypatch, tmp_path) -> None:
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings
 
@@ -66,13 +66,13 @@ def test_staging_without_redis_rejected(monkeypatch, tmp_path) -> None:
             deployment_env="staging",
         )
     msg = str(excinfo.value).lower()
-    assert "redis_url" in msg or "redis" in msg
+    assert "valkey_url" in msg or "redis" in msg
     assert "staging" in msg or "deployment_env" in msg
 
 
 def test_prod_without_redis_rejected(monkeypatch, tmp_path) -> None:
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings
 
@@ -82,28 +82,28 @@ def test_prod_without_redis_rejected(monkeypatch, tmp_path) -> None:
             deployment_env="prod",
         )
     msg = str(excinfo.value).lower()
-    assert "redis_url" in msg or "redis" in msg
+    assert "valkey_url" in msg or "redis" in msg
 
 
 def test_prod_with_redis_is_ok(monkeypatch, tmp_path) -> None:
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings
 
     cfg = Settings(  # type: ignore[arg-type]
         **_base_settings_kwargs(),
         deployment_env="prod",
-        redis_url="redis://example.com:6379/0",
+        valkey_url="redis://example.com:6379/0",
     )
-    assert cfg.redis_url == "redis://example.com:6379/0"
+    assert cfg.valkey_url == "redis://example.com:6379/0"
 
 
 def test_validator_error_message_actionable(monkeypatch, tmp_path) -> None:
     """Pin the ergonomics of the failure message — operators have
     to be able to fix this without reading the validator source."""
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings
 
@@ -113,7 +113,7 @@ def test_validator_error_message_actionable(monkeypatch, tmp_path) -> None:
         )
     msg = str(excinfo.value)
     # Names the env var, the offending value, and the way out.
-    assert "ROUTER_REDIS_URL" in msg
+    assert "ROUTER_VALKEY_URL" in msg
     assert "prod" in msg
     # Mentions the security implication so the operator understands
     # WHY the validator exists.

@@ -99,7 +99,7 @@ missing, that's a misconfiguration:
 | Event | Means |
 |---|---|
 | `db_pool_opened` | Postgres reachable + pool sized |
-| `redis_opened` | Redis reachable (omitted if `ROUTER_REDIS_URL` unset) |
+| `redis_opened` | Redis reachable (omitted if `ROUTER_VALKEY_URL` unset) |
 | `acl_rules_loaded` | Bootstrap ACL rows present (3 from migration 0001) |
 | `admin_console_agent_ensured` | Synthetic `admin_console` agent inserted |
 | `bootstrap_admin_created` (or `_exists`) | First-admin seeding fired (only when env vars set) |
@@ -246,7 +246,7 @@ rm .env                                             # secrets are local
 | `.test` admin can't log in | `EmailStr` rejects special-use TLDs | Use `example.com` |
 | `bash: ROUTER_FILE_STORE_OPTIONS=...` parse error | Sourcing `.env` from shell | Don't `set -a; . ./.env`; let pydantic-settings load it |
 | Gemini `finish_reason="length"` with only a handful of visible output tokens | `max_tokens` is the TOTAL budget on Gemini 2.5+; thinking ate it | Drop `max_tokens` (provider default applies) or raise it well above the thinking estimate |
-| Router refuses to start with `ROUTER_REDIS_URL is required when deployment_env=...` | `staging` / `prod` mode without Redis configured | Set `ROUTER_REDIS_URL`, OR switch `ROUTER_DEPLOYMENT_ENV=dev` (single-worker only — multi-worker without Redis silently disables JWT revocation across workers) |
+| Router refuses to start with `ROUTER_VALKEY_URL is required when deployment_env=...` | `staging` / `prod` mode without Redis configured | Set `ROUTER_VALKEY_URL`, OR switch `ROUTER_DEPLOYMENT_ENV=dev` (single-worker only — multi-worker without Redis silently disables JWT revocation across workers) |
 | Router refuses to start with `ROUTER_METRICS_TOKEN is required when deployment_env=...` | `staging` / `prod` mode without `/metrics` bearer configured | Generate one via `openssl rand -base64 32` and set `ROUTER_METRICS_TOKEN=<token>`; configure Prometheus scrapes with `Authorization: Bearer <token>` |
 | `bash: 2.0,: command not found` when sourcing `.env` | JSON-shaped values like `ROUTER_QUOTA_ADMIT_RATE_PER_S='{"admin": 2.0}'` | Don't `set -a; . ./.env`; pydantic-settings parses these correctly when `python -m bp_router` reads `.env` directly |
 | WS clients see 4029 / `reason="rate_limited"` close codes after burst reconnects | Per-IP handshake rate limit on `/v1/agent` (default 5/s burst 20) | Loosen via `ROUTER_WS_HANDSHAKE_RATE_LIMIT_PER_IP_PER_S` / `_BURST`; set rate=0 to disable |

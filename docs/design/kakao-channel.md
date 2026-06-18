@@ -95,7 +95,7 @@ KakaoTalk  ──webhook(5s)──▶  Cloudflare Worker (relay)        PUBLIC, 
    AGENT (egress-only) ───────────────────┘  kakao_consume_loop → KakaoGateway.handle_job
         │  reuses ChannelCore (lock + dispatch + result relay)
         ├─ POST answer ──────▶ job.callback_url            (outbound, within TTL)
-        ├─ park late turns ──▶ Redis registry              (deliver on next touch, §7)
+        ├─ park late turns ──▶ Valkey registry              (deliver on next touch, §7)
         ├─ inbound image ────▶ router named store          (outbound /v1/files)
         └─ outbound image ───▶ R2 presigned URL            (outbound)  ──▶ Kakao fetches
 ```
@@ -309,7 +309,7 @@ handle_job(job)
    │
    └─ deadline wins (turn still running)
           ├─ post_callback("아직 작업 중이에요…", quickReplies=[확인, 중지])   ← spends the callback
-          ├─ registry.park(chat_id, task_handle, started_at)        ← Redis, TTL = kakao_carry_ttl_s
+          ├─ registry.park(chat_id, task_handle, started_at)        ← Valkey, TTL = kakao_carry_ttl_s
           └─ dispatch keeps running in the background
                  └─ on completion → registry.store_result(chat_id, answer)
 
@@ -325,11 +325,11 @@ next inbound from same chat_id  (a new webhook → new callbackUrl)
     `kakao_callback_deadline_s` (≈50 s, comfortably inside the ~60 s TTL),
     the answer goes straight back. Otherwise that callback is spent on a
     *"still working — [확인] [중지]"* status, and the answer is **parked**
-    in Redis for the next touch. Either button or any later message
+    in Valkey for the next touch. Either button or any later message
     arrives as a fresh webhook with a **fresh** callback, which we use to
     deliver the parked result.
   * **The registry** (`bp_agents/agents/chatbot/kakao_registry.py`) is a
-    small Redis-backed store, reusing the already-open `_redis`
+    small Valkey-backed store, reusing the already-open `_redis`
     (`bp_agents/db/connection.py::open_redis`): keyed by `chat_id`, it
     holds the in-flight task handle (for `[중지]` cancellation), the
     parked result, and a dedupe set of seen `msg_id`s. TTL
@@ -344,7 +344,7 @@ next inbound from same chat_id  (a new webhook → new callbackUrl)
     the turn is still dispatched so the **user turn is recorded and
     answered on next touch** — losing the answer is worse than
     double-recording. Freshness is checked against `job["received_at"]`.
-  * **Restart safety.** A parked result lives in Redis, not process
+  * **Restart safety.** A parked result lives in Valkey, not process
     memory, so an agent restart mid-turn loses the running dispatch but
     not the user's recorded turn; the user re-touches and is told to
     re-ask once the TTL lapses. (Resuming a dispatch across restart is out
@@ -465,7 +465,7 @@ if _kakao_configured(_settings) and _redis is not None:
 ```
 
 `_shutdown` cancels `_kakao_task` and `await _kakao.aclose()`, alongside
-the existing cancellations. **Redis is required** for Kakao (the registry
+the existing cancellations. **Valkey is required** for Kakao (the registry
 backs the deadline state machine), so the gate also checks `_redis is not
 None`; without it the channel logs `kakao_redis_required` and skips.
 
