@@ -97,11 +97,11 @@ ROUTER_LOG_LEVEL=INFO
 # refresh-token credential; run-suite.sh launches the bridge with the same
 # value. Comment out to not run the MCP bridge in dev.
 ROUTER_MCP_BRIDGE_SECRET=$MCP_SECRET
-# Redis is opt-in for dev. Without it the router uses a per-process fallback
+# Valkey is opt-in for dev. Without it the router uses a per-process fallback
 # and the suite uses an in-process session lock — fine for single-channel use.
 # Enable it (one container backs both) for cross-process correctness, e.g.
 # driving the SAME session from both the Telegram bot and the webapp:
-#   docker compose -f docker-compose.dev.yml --profile redis up -d
+#   docker compose -f docker-compose.dev.yml --profile valkey up -d
 # then uncomment both:
 # ROUTER_REDIS_URL=redis://localhost:6379/0    # router: JWT revocation + rate-limit
 # SUITE_REDIS_URL=redis://localhost:6379/1     # suite: distributed session lock
