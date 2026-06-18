@@ -35,7 +35,7 @@ def _base_settings_kwargs() -> dict:
         jwt_secret="x" * 64,
         serve_admin_ui=False,
         metrics_token="m" * 32,
-        redis_url="redis://localhost:6379/0",
+        valkey_url="redis://localhost:6379/0",
     )
 
 
@@ -109,7 +109,7 @@ def test_dev_small_pool_is_silent(
 ) -> None:
     """Dev is the expected home of the small pool — no noise."""
     pytest.importorskip("pydantic_settings")
-    monkeypatch.delenv("ROUTER_REDIS_URL", raising=False)
+    monkeypatch.delenv("ROUTER_VALKEY_URL", raising=False)
     monkeypatch.delenv("ROUTER_DEPLOYMENT_ENV", raising=False)
     monkeypatch.chdir(tmp_path)
     from bp_router.settings import Settings

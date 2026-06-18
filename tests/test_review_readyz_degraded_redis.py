@@ -27,12 +27,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def _request(*, deployment_env: str, redis_url: str | None, redis: object) -> MagicMock:
+def _request(*, deployment_env: str, valkey_url: str | None, redis: object) -> MagicMock:
     """Build a fake Request whose app.state.bp has the settings /
     redis / db_pool the readiness probe reads."""
     state = MagicMock()
     state.settings.deployment_env = deployment_env
-    state.settings.redis_url = redis_url
+    state.settings.valkey_url = valkey_url
     state.redis = redis
 
     # Working DB pool (acquire() → async-CM → conn.execute).
@@ -64,7 +64,7 @@ def test_degraded_redis_in_non_dev_is_not_ready(env: str) -> None:
     """The headline fix: Redis configured but `state.redis is None`
     in staging/prod → 503, so the orchestrator won't route traffic
     to a pod whose revocation is failing open."""
-    resp = _call(_request(deployment_env=env, redis_url="redis://x", redis=None))
+    resp = _call(_request(deployment_env=env, valkey_url="redis://x", redis=None))
     assert resp.status_code == 503
     assert b"degraded" in resp.body or b"redis" in resp.body.lower()
 
@@ -74,22 +74,22 @@ def test_healthy_redis_in_non_dev_is_ready(env: str) -> None:
     """Redis configured AND connected → normal readiness (200)."""
     redis = MagicMock()
     redis.ping = AsyncMock(return_value=True)
-    resp = _call(_request(deployment_env=env, redis_url="redis://x", redis=redis))
+    resp = _call(_request(deployment_env=env, valkey_url="redis://x", redis=redis))
     assert resp.status_code == 200
 
 
 def test_dev_without_redis_stays_ready() -> None:
     """Dev single-worker (no Redis configured) is unaffected — the
-    gate is non-dev only and also requires `redis_url` set."""
-    resp = _call(_request(deployment_env="dev", redis_url=None, redis=None))
+    gate is non-dev only and also requires `valkey_url` set."""
+    resp = _call(_request(deployment_env="dev", valkey_url=None, redis=None))
     assert resp.status_code == 200
 
 
 def test_dev_with_configured_redis_down_is_not_gated() -> None:
-    """Even a misconfigured dev (redis_url set, redis None) is NOT
+    """Even a misconfigured dev (valkey_url set, redis None) is NOT
     gated — dev revocation is best-effort by design; only the DB
     check applies and it passes here."""
-    resp = _call(_request(deployment_env="dev", redis_url="redis://x", redis=None))
+    resp = _call(_request(deployment_env="dev", valkey_url="redis://x", redis=None))
     assert resp.status_code == 200
 
 
@@ -98,7 +98,7 @@ def test_non_dev_degraded_gate_precedes_db_check() -> None:
     a degraded required Redis is not-ready regardless of DB health
     (and we don't want to depend on DB I/O to surface a security
     regression)."""
-    req = _request(deployment_env="prod", redis_url="redis://x", redis=None)
+    req = _request(deployment_env="prod", valkey_url="redis://x", redis=None)
     # Make the DB pool explode — if the gate didn't precede it this
     # would raise / 503-for-the-wrong-reason.
     req.app.state.bp.db_pool.acquire.side_effect = RuntimeError("db down")
@@ -114,15 +114,15 @@ def test_non_dev_degraded_gate_precedes_db_check() -> None:
 
 def test_readiness_gate_checks_env_redis_url_and_state_redis() -> None:
     """AST pin: the gate conjunction is (deployment_env in
-    {staging,prod}) AND (redis_url is not None) AND
+    {staging,prod}) AND (valkey_url is not None) AND
     (state.redis is None). Guards a refactor silently dropping a
-    conjunct (e.g. forgetting `redis_url is not None` would 503 a
+    conjunct (e.g. forgetting `valkey_url is not None` would 503 a
     legitimately Redis-less dev)."""
     from bp_router.api import health
 
     src = inspect.getsource(health.readiness)
     assert 'deployment_env in ("staging", "prod")' in src
-    assert "settings.redis_url is not None" in src
+    assert "settings.valkey_url is not None" in src
     assert "state.redis is None" in src
     # The gate returns a 503 Response.
     tree = ast.parse(src.lstrip())

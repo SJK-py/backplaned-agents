@@ -46,7 +46,7 @@ services:
 
   # Optional. Off by default — the router falls back to per-process state
   # (correct for single-worker dev). Enable with `--profile valkey` and set
-  # ROUTER_REDIS_URL=redis://localhost:6379/0 (Valkey speaks the Redis wire
+  # ROUTER_VALKEY_URL=redis://localhost:6379/0 (Valkey speaks the Redis wire
   # protocol, so the redis:// scheme is unchanged).
   valkey:
     # Valkey — the BSD-licensed, Redis-7.2-compatible fork (see prod compose).

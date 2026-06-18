@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     db_pool_max_size: int = Field(default=_DB_POOL_DEV_DEFAULT, ge=1, le=1000)
     db_statement_timeout_ms: int = Field(default=30_000, ge=1)
 
-    redis_url: str | None = None
+    valkey_url: str | None = None
     """Required for multi-worker deployments and any non-dev
     `deployment_env`. Single-worker dev may omit. Without Redis,
     JWT revocation (`bp_router.security.jwt.revoke_jti`) and the
@@ -684,15 +684,15 @@ class Settings(BaseSettings):
         # per-user rate cap is per-process so the effective ceiling is
         # N×worker-count; the credential-stuffing defence loses
         # cross-worker correctness in the same way).
-        if self.deployment_env in ("staging", "prod") and self.redis_url is None:
+        if self.deployment_env in ("staging", "prod") and self.valkey_url is None:
             raise ValueError(
-                "ROUTER_REDIS_URL is required when deployment_env="
+                "ROUTER_VALKEY_URL is required when deployment_env="
                 f"{self.deployment_env!r}. JWT revocation, the "
                 "per-user admit-rate quota, and the login / refresh / "
                 "change-password rate limits fall back to per-process "
                 "state without Redis, which is incorrect across "
                 "multiple workers (silent revocation bypass, "
-                "fan-out of quota caps). Set ROUTER_REDIS_URL or "
+                "fan-out of quota caps). Set ROUTER_VALKEY_URL or "
                 "switch ROUTER_DEPLOYMENT_ENV to 'dev'."
             )
         return self

@@ -9,7 +9,7 @@
 
 `memory.add` is fired fire-and-forget by the channel and is **per-user**, so concurrent adds collide across a user's sessions and rapid turns. The fact-graph is read-modify-write and **LanceDB is non-transactional** (no row locks, no multi-row ACID). Unserialized, two adds will duplicate `NEW`s, lose `UPDATE`s, drop/asymmetric-link `related`, and dangle on `REMOVE`.
 
-**Rule:** a **per-`user_id` lock/queue** wraps the entire `add` (phases 1–4) **and** GC — at most one structural mutation per user at a time (in-memory single-instance / Redis multi-worker, same pattern as the session queue but keyed on user). `retrieve` stays **lock-free**: its only write is `last_used_at`, a recency heuristic that tolerates races. This is what makes phases 2–4 correct.
+**Rule:** a **per-`user_id` lock/queue** wraps the entire `add` (phases 1–4) **and** GC — at most one structural mutation per user at a time (in-memory single-instance / Valkey multi-worker, same pattern as the session queue but keyed on user). `retrieve` stays **lock-free**: its only write is `last_used_at`, a recency heuristic that tolerates races. This is what makes phases 2–4 correct.
 
 ## 2. Fact representation
 

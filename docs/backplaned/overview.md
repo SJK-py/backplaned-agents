@@ -51,7 +51,7 @@ It does **not** target:
 - Non-Python agents as first-class peers. (Non-Python agents remain possible
   but must speak the framed WebSocket protocol themselves — the SDK is Python.)
 - Fully distributed consensus. There is a single logical router, and it is
-  **single-replica**: only persistence (Postgres + Redis) is shared — the
+  **single-replica**: only persistence (Postgres + Valkey) is shared — the
   socket registry, frame delivery/fan-out, and pending-ack/result futures
   are per-process, so horizontal scaling needs a delivery-fabric rework
   (see Limitation 4 above).
@@ -77,7 +77,7 @@ remains only for file-store transfer and admin/UI endpoints.
 **P4. Durable state in storage, ephemeral state in memory.** Task records,
 user/session records, quotas, ACL config → Postgres (or aiosqlite for
 single-node). Pending ack futures, live socket registry, progress fan-out →
-in-memory, replaceable with Redis when scaling out.
+in-memory, replaceable with Valkey when scaling out.
 
 **P5. First-class user/session.** Every frame carries `user_id` and
 `session_id`. Every task row, every file, every audit entry is keyed by them.
@@ -112,7 +112,7 @@ codebase.
                   │  └────┬────┘  └────┬─────┘   └──────┬─────────┘  │
                   │       │            │                │            │
                   │  ┌────┴────────────┴──────┐  ┌──────┴──────────┐ │
-                  │  │ Frame dispatch + ACL   │  │ Postgres + Redis│ │
+                  │  │ Frame dispatch + ACL   │  │ Postgres + Valkey│ │
                   │  └────────────────────────┘  └─────────────────┘ │
                   │  ┌────────────────────────┐  ┌─────────────────┐ │
                   │  │ Embedded agent registry│  │ File store      │ │
@@ -228,7 +228,7 @@ The expected build sequence is documented in
 - **A plugin marketplace.** The agent SDK is opinionated and Python-only.
 - **Byzantine fault tolerance.** The router trusts authenticated agents.
 - **Multi-region active-active.** One logical router per deployment;
-  **single-replica** (Postgres + Redis are shared, but the message bus —
+  **single-replica** (Postgres + Valkey are shared, but the message bus —
   socket registry, delivery, correlation futures — is per-process, so
   multi-replica needs the delivery-fabric rework noted in Limitation 4).
 - **Automatic schema evolution of `payload` dicts.** Frame-level schemas are

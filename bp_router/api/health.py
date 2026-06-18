@@ -29,7 +29,7 @@ async def readiness(request: Request) -> Response:
     caps silently failing open (`is_jti_revoked` returns False when
     `state.redis is None`). Serving traffic in that state is a
     fleet-wide security regression the threat model assumes closed.
-    So when Redis is *configured* (`settings.redis_url` set) but
+    So when Redis is *configured* (`settings.valkey_url` set) but
     `state.redis is None` (boot degraded) and the env is non-dev,
     report NOT ready: the process stays up (no crashloop — a
     restart into a healthy Redis recovers it), but the orchestrator
@@ -43,7 +43,7 @@ async def readiness(request: Request) -> Response:
     settings = state.settings
     if (
         settings.deployment_env in ("staging", "prod")
-        and settings.redis_url is not None
+        and settings.valkey_url is not None
         and state.redis is None
     ):
         return Response(

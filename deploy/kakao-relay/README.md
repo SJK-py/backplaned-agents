@@ -62,7 +62,7 @@ SUITE_KAKAO_CF_QUEUE_ID=...      # the kakao-jobs queue id
 SUITE_KAKAO_CF_API_TOKEN=...     # scoped to Queues pull + ack
 ```
 
-With those set (and `SUITE_REDIS_URL`), the chatbot agent launches its
+With those set (and `SUITE_VALKEY_URL`), the chatbot agent launches its
 KakaoTalk pull consumer; unset, nothing Kakao-related runs.
 
 ## Verify before production

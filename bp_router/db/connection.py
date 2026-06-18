@@ -93,10 +93,10 @@ async def open_redis(settings: Settings) -> aredis.Redis:
     """Open a Redis async client. Required for multi-worker deployments."""
     import redis.asyncio as aredis  # noqa: PLC0415
 
-    if settings.redis_url is None:
-        raise RuntimeError("open_redis called but settings.redis_url is None")
+    if settings.valkey_url is None:
+        raise RuntimeError("open_redis called but settings.valkey_url is None")
     client = aredis.Redis.from_url(
-        settings.redis_url,
+        settings.valkey_url,
         decode_responses=True,
     )
     await client.ping()

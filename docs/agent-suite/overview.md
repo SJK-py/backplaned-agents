@@ -53,7 +53,7 @@ Everything — files, memory, sessions, knowledge — is **per end-user**, and t
 
 The router serializes per **task**, never per **session** or per **user**. The suite adds two of its own:
 
-- **Per-`session_id` FIFO queue** (in the channel) — serializes message turns + summarization so history reads/writes never race. In-memory for a single channel instance; **Redis** (or session→worker affinity) when the channel is multi-worker. See [sessions.md](./sessions.md).
+- **Per-`session_id` FIFO queue** (in the channel) — serializes message turns + summarization so history reads/writes never race. In-memory for a single channel instance; **Valkey** (or session→worker affinity) when the channel is multi-worker. See [sessions.md](./sessions.md).
 - **Per-`user_id` lock** (in the memory agent) — serializes `memory.add` + GC, because the fact-graph is per-user and LanceDB is non-transactional. See [memory.md](./memory.md).
 
 `memory.add` is **not** in the session queue (it's per-user, and a multi-LLM-call extraction shouldn't block the next message).

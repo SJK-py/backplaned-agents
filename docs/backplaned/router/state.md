@@ -254,8 +254,8 @@ still planned.**
 Shipped today: a per-`(user_id, level)` **admit-rate token bucket**
 enforced at `NewTask` admit (`bp_router/security/rate_limit.py`
 `TokenBucket`; per-tier `quota_admit_rate_per_s` /
-`quota_admit_burst` Settings with real defaults; atomic via a Redis
-Lua script, falling back to a bounded per-process LRU when Redis is
+`quota_admit_burst` Settings with real defaults; atomic via a Valkey
+Lua script, falling back to a bounded per-process LRU when Valkey is
 absent). Exceeding it rejects the admit with
 `Ack{accepted:false, reason:"quota_exceeded"}` carrying
 `retry_after_s`. This is the throughput cap; it is per-user, **not**
@@ -268,7 +268,7 @@ that ships, only the admit-rate axis is enforced router-side; the
 rest rely on upstream (BFF, provider) limits.
 
 Target shape — every user will carry quota counters tracked in
-Postgres (or a Redis cache for hot-path checks):
+Postgres (or a Valkey cache for hot-path checks):
 
 | Counter              | Window       | Default              | Enforced where                     |
 | -------------------- | ------------ | -------------------- | ---------------------------------- |

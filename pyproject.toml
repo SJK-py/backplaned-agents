@@ -147,7 +147,7 @@ suite = [
     "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0",
     # DST-aware cron evaluation for the scheduler.
     "croniter>=2.0",
-    # Optional distributed per-session lock (SUITE_REDIS_URL); the import is
+    # Optional distributed per-session lock (SUITE_VALKEY_URL); the import is
     # lazy, so a single-instance deploy that leaves it unset never needs it.
     "redis>=5.0",
 ]

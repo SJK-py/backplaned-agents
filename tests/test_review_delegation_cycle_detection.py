@@ -414,7 +414,7 @@ def test_settings_field_exposes_delegation_cap() -> None:
         db_url="postgresql://x:x@localhost/x",
         public_url="https://example.com",
         jwt_secret="x" * 32,
-        redis_url="redis://localhost:6379/0",
+        valkey_url="redis://localhost:6379/0",
         admin_session_secret="y" * 32,
     )
 

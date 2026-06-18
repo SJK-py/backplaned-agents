@@ -10,7 +10,7 @@ This document is the single home for two things that were previously
 scattered across the docs:
 
 1. **Current scaling posture** — what is safe to run multi-instance
-   today, what is not, and which subsystems already have a Redis path.
+   today, what is not, and which subsystems already have a Valkey path.
 2. **Deferred scaling backlog** — the perf/scale findings from the
    pre-release review passes, ranked, each with the impact, the scale at
    which it bites, and the intended fix. None are launch blockers; the
@@ -38,32 +38,32 @@ Running more than one router worker today causes, concretely:
   populated only on the worker that admitted the task, so Progress frames
   arriving on another worker always miss and fall through to a `tasks`
   lookup (see backlog item **②**).
-- **JTI revocation no-ops without Redis.** `revoke_jti` / `is_jti_revoked`
-  silently no-op when `ROUTER_REDIS_URL` is unset, so a logout on one
+- **JTI revocation no-ops without Valkey.** `revoke_jti` / `is_jti_revoked`
+  silently no-op when `ROUTER_VALKEY_URL` is unset, so a logout on one
   worker isn't seen by another (see [`security.md`](./security.md) §
-  "Single-worker dev fallback"). With Redis set, revocation is shared.
+  "Single-worker dev fallback"). With Valkey set, revocation is shared.
 - **Quota counters drift.** In-memory rate-limit buckets are per-process;
-  without the shared Redis counter the same user gets N× the limit across
+  without the shared Valkey counter the same user gets N× the limit across
   N workers (see [`design/quota-enforcement.md`](../design/quota-enforcement.md)).
 
 The intended multi-worker path (sticky WS routing by `agent_id`, the
-socket registry in Redis, pending-ack futures staying process-local) is
+socket registry in Valkey, pending-ack futures staying process-local) is
 specified in [`router/storage.md §6.1`](./router/storage.md#61-multi-worker--planned).
 
-### 1.2 What Redis already buys (partial multi-instance)
+### 1.2 What Valkey already buys (partial multi-instance)
 
-Redis support is **partially implemented** — some subsystems are already
-cross-process-correct when a Redis URL is configured, even though the
-router WS plane (§1.1) is not. So "needs Redis" and "multi-worker safe"
+Valkey support is **partially implemented** — some subsystems are already
+cross-process-correct when a Valkey URL is configured, even though the
+router WS plane (§1.1) is not. So "needs Valkey" and "multi-worker safe"
 are **not** the same thing; the table is the precise map:
 
 | Subsystem | Config | Single instance | Multi-instance correctness |
 |---|---|---|---|
 | Router WS socket registry / fan-out | — | ✅ | ❌ not yet (item ②; storage §6.1) |
-| JWT JTI revocation | `ROUTER_REDIS_URL` | ✅ (no-op, documented) | ✅ with Redis |
-| Login / rate-limit quota counters | `ROUTER_REDIS_URL` | ✅ (in-mem) | ✅ with Redis |
-| Suite per-session turn lock | `SUITE_REDIS_URL` | ✅ (`asyncio.Lock`) | ✅ with Redis (distributed lock) |
-| Suite memory per-user lock | `SUITE_REDIS_URL` | ✅ (in-proc) | ✅ with Redis |
+| JWT JTI revocation | `ROUTER_VALKEY_URL` | ✅ (no-op, documented) | ✅ with Valkey |
+| Login / rate-limit quota counters | `ROUTER_VALKEY_URL` | ✅ (in-mem) | ✅ with Valkey |
+| Suite per-session turn lock | `SUITE_VALKEY_URL` | ✅ (`asyncio.Lock`) | ✅ with Valkey (distributed lock) |
+| Suite memory per-user lock | `SUITE_VALKEY_URL` | ✅ (in-proc) | ✅ with Valkey |
 | Cron double-fire safety | — (DB) | ✅ | ✅ atomic DB claim |
 
 The suite per-session lock detail lives in
@@ -76,13 +76,13 @@ The suite per-session lock detail lives in
 - **router** — single worker (§1.1); scale vertically. The one-shot
   `migrate` is the only process that runs `alembic upgrade`.
 - **chatbot** — stateful (per-session FIFO queue, Telegram offset). v1:
-  **single instance**. To run more, set `SUITE_REDIS_URL` (distributed
+  **single instance**. To run more, set `SUITE_VALKEY_URL` (distributed
   session lock) and add session→worker affinity.
 - **webapp** — shares the suite image; the per-session lock makes a
   second instance alongside the chatbot safe **for session serialization**,
   but it connects to the single-worker router, so it inherits §1.1.
 - **stores (KB + memory)** — co-located; >1 replica requires the memory
-  per-user lock in Redis (`SUITE_REDIS_URL`).
+  per-user lock in Valkey (`SUITE_VALKEY_URL`).
 - **sandbox** — scale by workspace / runtime capacity; keep the isolation
   invariants (uid drop, rlimits, workspace confinement) regardless of
   replica count.
@@ -123,7 +123,7 @@ checkout per frame on the dominant streaming path). Tied to §1.1 — only
 relevant once the router is multi-worker.
 
 **Fix:** pin a task's frames to its admitting worker (sticky WS routing,
-the same mechanism §1.1 needs), OR share the cache via Redis, OR document
+the same mechanism §1.1 needs), OR share the cache via Valkey, OR document
 as a known multi-worker cost. *File:* `bp_router/dispatch.py`.
 
 ### ⑤ Audit-log append throughput — **MED** (high auditable-op rate)
