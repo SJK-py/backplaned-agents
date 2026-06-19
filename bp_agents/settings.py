@@ -324,6 +324,12 @@ class SuiteSettings(BaseSettings):
     web_fetch_max_redirects: int = Field(default=3, ge=0)
     """Max redirect hops an agent fetch follows. Each hop is re-validated
     against the SSRF guard. `0` disables redirect-following."""
+    web_extract_fetch_chars: int = Field(default=16000, ge=1)
+    """When `html_fetch` is given an `extract_query`, how much of each page's
+    cleaned content to read before the query-focused distillation pass. Very
+    long pages are distilled from the top portion (after md_converter has
+    already stripped boilerplate), trading completeness for a bounded,
+    single-pass LLM cost on the research agent's lite preset."""
 
 
 def load_suite_settings() -> SuiteSettings:

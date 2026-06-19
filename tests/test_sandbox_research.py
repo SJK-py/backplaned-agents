@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,11 +51,24 @@ class _StubPeers:
         )
 
 
+class _StubLlm:
+    """Records prompts and echoes a canned distillation reply."""
+
+    def __init__(self, reply="DISTILLED") -> None:
+        self._reply = reply
+        self.calls: list[tuple] = []
+
+    async def generate(self, messages, *, preset=None, **kw):
+        self.calls.append((messages, preset))
+        return SimpleNamespace(text=self._reply)
+
+
 class _Ctx:
-    def __init__(self, *, user_id="usr_a", files=None, peers=None) -> None:
+    def __init__(self, *, user_id="usr_a", files=None, peers=None, llm=None) -> None:
         self.user_id = user_id
         self.files = files
         self.peers = peers
+        self.llm = llm
 
 
 # --------------------------------------------------------------------------- #
@@ -264,9 +278,66 @@ def test_html_fetch_multiple_urls_each_headed() -> None:
     asyncio.run(_drive())
 
 
+def test_html_fetch_dedups_repeated_urls() -> None:
+    # The model passing the same URL twice must fetch it once.
+    async def _drive() -> None:
+        peers = _StubPeers("body")
+        ctx = _Ctx(peers=peers)
+        out = await html_fetch(
+            ctx, urls=["http://a", "http://a", ""], raw=False, settings=SuiteSettings()
+        )
+        assert len(peers.spawns) == 1
+        # Single distinct URL → no per-URL header (original single-URL shape).
+        assert "## http://a" not in out and out == "body"
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_extract_query_distills_each_page() -> None:
+    async def _drive() -> None:
+        peers = _StubPeers("a very long page body about many things")
+        llm = _StubLlm(reply="just the relevant facts")
+        ctx = _Ctx(peers=peers, llm=llm)
+        out = await html_fetch(
+            ctx, urls=["http://a"], extract_query="what is X?",
+            lite_preset="lite-x", settings=SuiteSettings(),
+        )
+        # Distilled (not raw) content, headered for source attribution.
+        assert "just the relevant facts" in out and "## http://a" in out
+        # The distiller ran on the resolved lite preset, and the query rode
+        # along in the user message.
+        assert llm.calls and llm.calls[0][1] == "lite-x"
+        assert "what is X?" in llm.calls[0][0][1].content
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_extract_query_ignored_for_raw() -> None:
+    # raw=true bypasses md_converter and distillation (no llm call).
+    async def _drive() -> None:
+        llm = _StubLlm()
+
+        async def _get_bytes(url, timeout, cap):
+            return b"<html>raw</html>"
+
+        ctx = _Ctx(llm=llm)
+        out = await html_fetch(
+            ctx, urls=["http://a"], raw=True, extract_query="q",
+            settings=SuiteSettings(), get_bytes=_get_bytes,
+        )
+        assert "raw" in out and not llm.calls
+
+    asyncio.run(_drive())
+
+
 def test_make_web_tools_names() -> None:
     tools = make_web_tools(SuiteSettings())
     assert {t.spec.name for t in tools} == {"web_search", "html_fetch", "web_download"}
+
+
+def test_html_fetch_tool_exposes_extract_query() -> None:
+    fetch = {t.spec.name: t for t in make_web_tools(SuiteSettings())}["html_fetch"]
+    assert "extract_query" in fetch.spec.parameters["properties"]
 
 
 def test_web_search_falls_back_to_searxng_when_key_missing() -> None:

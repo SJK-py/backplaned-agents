@@ -13,7 +13,9 @@
 
 The chosen backend's key must be set; if it isn't, the suite falls back to
 SearXNG with a logged warning. `html_fetch` returns Markdown (or raw HTML for
-`raw=true`) for a list of URLs; `web_download` saves a URL to the file store.
+`raw=true`) for a list of URLs — and, given an `extract_query`, distils each
+page to just the query-relevant facts via the lite preset; `web_download`
+saves a URL to the file store.
 The core functions take injectable fetchers so they are testable without a
 network; `make_web_tools` wraps them as `LocalTool`s closing over settings —
 the `web_search` tool's parameter schema reflects the active backend.
@@ -33,7 +35,7 @@ import httpx
 from bp_agents.common import LocalTool
 from bp_agents.common.urlsafe import safe_stream_get
 from bp_agents.settings import load_suite_settings
-from bp_sdk import ToolSpec
+from bp_sdk import Message, ToolSpec
 
 if TYPE_CHECKING:
     from bp_agents.settings import SuiteSettings
@@ -347,11 +349,14 @@ async def web_search(
     )
 
 
-async def _kagi_extract(
+async def _kagi_extract_pairs(
     urls: list[str], *, truncate: int, settings: SuiteSettings,
     request_json: ApiRequester | None,
-) -> str:
-    """Fetch + clean a batch of URLs via Kagi's Extract API (returns Markdown)."""
+) -> list[tuple[str, str]]:
+    """Fetch + clean a batch of URLs via Kagi's Extract API, returning
+    `(url, markdown-or-error-placeholder)` pairs. Pairs (not a joined string)
+    so callers can post-process each page's content — e.g. run a query-focused
+    distillation pass — before formatting."""
     request = request_json or _default_request_json
     pages = [{"url": u} for u in urls[:_KAGI_EXTRACT_MAX_URLS]]
     headers = {"Authorization": f"Bearer {settings.kagi_api_key.get_secret_value()}"}
@@ -365,15 +370,49 @@ async def _kagi_extract(
         headers=headers, timeout=settings.web_fetch_timeout_s,
     )
     items = data.get("data") or []
-    blocks = []
+    pairs: list[tuple[str, str]] = []
     for item in items:
         url = item.get("url", "")
         md = item.get("markdown")
-        if md:
-            blocks.append(f"## {url}\n{md[:truncate]}")
-        else:
-            blocks.append(f"## {url}\n[Couldn't extract: {item.get('error') or 'unknown error'}]")
-    return "\n\n".join(blocks) or "No content extracted."
+        body = md[:truncate] if md else (
+            f"[Couldn't extract: {item.get('error') or 'unknown error'}]"
+        )
+        pairs.append((url, body))
+    return pairs
+
+
+def _join_blocks(pairs: list[tuple[str, str]], *, headered: bool) -> str:
+    if headered:
+        return "\n\n".join(f"## {url}\n{body}" for url, body in pairs)
+    return "\n\n".join(body for _, body in pairs)
+
+
+# Query-focused distillation: turn a fetched page into just the facts that
+# bear on the caller's question, so a long page doesn't flood the loop's
+# context with boilerplate. Runs on the research agent's lite preset.
+_EXTRACT_SYSTEM = (
+    "You pull only the information relevant to the user's query out of a web "
+    "page. Keep concrete facts, figures, dates, names, quotes, and any source "
+    "URLs; drop navigation, ads, and unrelated sections. Be faithful — never "
+    "add anything not present in the text. If nothing is relevant, say so in "
+    "one line."
+)
+
+
+async def _distill(
+    ctx: TaskContext, content: str, query: str, *,
+    lite_preset: str | None, settings: SuiteSettings,
+) -> str:
+    content = content.strip()
+    if not content:
+        return "[No content to extract.]"
+    preset = lite_preset or settings.default_preset_lite
+    resp = await ctx.llm.generate(
+        [Message(role="system", content=_EXTRACT_SYSTEM),
+         Message(role="user", content=f"Query: {query}\n\nPage content:\n{content}")],
+        preset=preset,
+    )
+    return resp.text.strip() or "[Nothing relevant found.]"
 
 
 async def _fetch_one(
@@ -394,28 +433,59 @@ async def _fetch_one(
 
 async def html_fetch(
     ctx: TaskContext, *, urls: list[str] | str, raw: bool = False,
-    truncate: int = 2000, settings: SuiteSettings,
+    truncate: int = 2000, extract_query: str | None = None,
+    lite_preset: str | None = None, settings: SuiteSettings,
     get_bytes: BytesGetter | None = None, request_json: ApiRequester | None = None,
 ) -> str:
     if isinstance(urls, str):
         urls = [urls]
+    # Dedup the model's URL list (order-preserving). Search backends already
+    # dedup their own result lists; this guards the one case they can't — the
+    # model asking for the same URL twice in a single fetch call.
+    urls = list(dict.fromkeys(u for u in urls if u))
     if not urls:
         return "No URLs given."
-    truncate = min(max(truncate, 0), _CONTENT_CAP)
 
-    # Kagi backend (non-raw) → batch through Kagi Extract.
-    if not raw and _resolve_backend(settings) == "kagi":
-        return await _kagi_extract(
-            urls, truncate=truncate, settings=settings, request_json=request_json,
-        )
+    extracting = bool(extract_query) and not raw
+    # In extract mode we read more of each page (the distiller compresses it
+    # back down), so the fetch cap is the extract budget rather than `truncate`.
+    fetch_cap = settings.web_extract_fetch_chars if extracting else truncate
+    fetch_cap = min(max(fetch_cap, 0), _CONTENT_CAP)
 
-    blocks = []
-    for url in urls:
-        body = await _fetch_one(
-            ctx, url, raw=raw, truncate=truncate, settings=settings, get_bytes=get_bytes,
+    # Gather (url, body) for every URL, backend-appropriately. Kagi (non-raw)
+    # batches through Kagi Extract; everything else fetches per URL.
+    kagi = not raw and _resolve_backend(settings) == "kagi"
+    if kagi:
+        pairs = await _kagi_extract_pairs(
+            urls, truncate=fetch_cap, settings=settings, request_json=request_json,
         )
-        blocks.append(f"## {url}\n{body}" if len(urls) > 1 else body)
-    return "\n\n".join(blocks)
+    else:
+        pairs = [
+            (
+                url,
+                await _fetch_one(
+                    ctx, url, raw=raw, truncate=fetch_cap,
+                    settings=settings, get_bytes=get_bytes,
+                ),
+            )
+            for url in urls
+        ]
+
+    if extracting:
+        pairs = [
+            (url, await _distill(
+                ctx, body, extract_query, lite_preset=lite_preset, settings=settings,
+            ))
+            for url, body in pairs
+        ]
+        return _join_blocks(pairs, headered=True) or "No content extracted."
+
+    # Header each block when fetching multiple URLs, or always for Kagi (its
+    # blocks carried `## {url}` headers before this refactor — keep that).
+    result = _join_blocks(pairs, headered=kagi or len(pairs) > 1)
+    if kagi and not result:
+        return "No content extracted."
+    return result
 
 
 async def web_download(
@@ -550,7 +620,9 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
     )
 
 
-def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
+def make_web_tools(
+    settings: SuiteSettings, *, lite_preset: str | None = None
+) -> list[LocalTool]:
     backend = _resolve_backend(settings)
     search_desc, search_params = _search_tool_schema(backend)
 
@@ -575,7 +647,9 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
     async def _fetch(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await html_fetch(
             ctx, urls=args["urls"], raw=bool(args.get("raw", False)),
-            truncate=int(args.get("truncate", 2000)), settings=settings,
+            truncate=int(args.get("truncate", 2000)),
+            extract_query=args.get("extract_query") or None,
+            lite_preset=lite_preset, settings=settings,
         )
 
     async def _download(ctx: TaskContext, args: dict[str, Any]) -> str:
@@ -584,7 +658,10 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
 
     fetch_desc = (
         "Fetch one or more URLs. raw=false (default) returns readable Markdown; "
-        "raw=true returns raw HTML."
+        "raw=true returns raw HTML. Set extract_query to pull just the facts "
+        "relevant to a question from long pages — it reads more of each page "
+        "and returns a distilled, query-focused summary instead of the raw "
+        "text (ignored when raw=true)."
     )
     if backend == "kagi":
         fetch_desc += " (Markdown is extracted via Kagi's Extract API.)"
@@ -612,6 +689,14 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
                         },
                         "raw": {"type": "boolean"},
                         "truncate": {"type": "integer"},
+                        "extract_query": {
+                            "type": "string",
+                            "description": (
+                                "Optional. A question/topic to distill each "
+                                "page down to — returns only the relevant facts "
+                                "instead of the full text. Use for long pages."
+                            ),
+                        },
                     },
                     "required": ["urls"],
                 },
