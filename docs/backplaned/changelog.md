@@ -18,6 +18,77 @@
 
 ---
 
+## 2026-06-20
+
+> Platform (`bp_router`) surface of suite work whose channel halves live in
+> `bp_agents` (the webapp `/register` page, the bot `/link` change, the
+> Settings link-code UI — not tracked here). This adds a browser-side
+> self-service registration path alongside the channel-submitted one, and
+> moves `serviced_by` acquisition to channel-link time.
+
+### Added — public self-service registration (`POST /v1/registrations/public`)
+
+- **What:** new **unauthenticated** route in `api/registrations.py`. An
+  anonymous browser visitor submits `{email, password, display_name?}`; the
+  router stores the **chosen password as an argon2 hash** on the pending row
+  (new `pending_user_registrations.requested_password_hash`, **migration
+  0006**; `PendingRegistrationRow` + `upsert_pending_registration` carry it)
+  and records **no** `submitted_by_service_user_id`. `channel` is forced to
+  `webapp` and `external_id` to the lower-cased email, so `UNIQUE(channel,
+  external_id)` makes a re-submit idempotent (bumps `attempts`, lets the user
+  correct the password). Rate-limited per-IP (new
+  `registration_web_rate_limit_per_ip_*`, bucket `BUCKET_REGISTRATION_WEB`)
+  **before** the argon2 hash, plus the existing per-`(channel, external_id)`
+  bucket. Audited `registration.submitted` with `actor_id=None` + `self_service`.
+- **What (approval):** `approve_registration` (`api/admin.py`) now seeds the
+  new user's `auth_secret_hash` from `requested_password_hash` when present
+  (admin `initial_password` override still wins; random fallback otherwise).
+  `ApproveRegistrationResponse.initial_password` is now **nullable** — `null`
+  for a web signup, since the user already knows their password.
+- **Why:** there is no email-delivery channel to send a reset link to, so the
+  user picks a password at signup and the hash rides the pending row → they can
+  sign in the instant an admin approves. Because there's no service submitter,
+  approval grants **no** `serviced_by` (the webapp authenticates as the user
+  and needs no per-user minting). Enumeration-safe: a duplicate email returns
+  the same `201 pending`.
+
+### Added — self-service link tokens + serviced-on-link (`/v1/auth/link-*`)
+
+- **What:** `POST /v1/auth/link-tokens` (`require_authenticated`) mints a
+  single-use token **for the caller's own account** (reuses the
+  `password_reset_tokens` table; new `link_token_ttl_s` +
+  `link_token_mint_rate_limit_per_user_*`, bucket `BUCKET_LINK_TOKEN_MINT`),
+  audited `auth.link_token_minted`.
+- **What:** `POST /v1/auth/link-channel` (`require_service`) consumes a link
+  token, returns `{user_id}`, **and appends the calling service principal to
+  that user's `serviced_by`** (`append_to_serviced_by`). Refuses (403) over an
+  admin/service target — same `_PRIVILEGED_LEVELS` escalation guard as the
+  F8/F9 mint endpoints — and over inactive users (409) / bad tokens (401).
+  Audited `auth.channel_linked` (+ `user.serviced_by_grant_denied` on the
+  privileged refusal).
+- **Why:** a web-first account has no chat channel and so no service principal
+  that can mint it a reset token (the channel-anchored `/password` flow is
+  service-gated) — `link-tokens` bootstraps the first link, authorised by the
+  user's own session. `link-channel` then lets the bot's `/link` acquire
+  `serviced_by` at link time, gated on a single-use token the user
+  deliberately generated and pasted in, instead of an admin round-trip. This
+  is the link-time analogue of the registration-approval auto-grant.
+
+### Changed — `verify-reset-token` is now legacy (superseded, retained)
+
+- **What:** `POST /v1/auth/verify-reset-token` (added 2026-06-02 for the
+  suite's `/link`) now has **no live caller** — the suite's `/link` moved to
+  `link-channel`, which consumes the **same** single-use token AND grants
+  `serviced_by`. The endpoint and its rate-limit/audit shape are **unchanged
+  and retained** (purely-additive policy; possible external consumers); only
+  shape-pin tests in `test_phase3_password_reset.py` reference it now.
+- **Note:** the corresponding suite-side wrapper `credentials.verify_link_token`
+  (in `bp_agents`, not tracked here) is consequently dead — it can be removed,
+  or kept as a verify-only (no-`serviced_by`) primitive distinct from
+  `link_channel`. No platform change either way.
+
+---
+
 ## 2026-06-06
 
 > Platform (`bp_router` / `bp_admin`) surface of suite work whose executor
