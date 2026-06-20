@@ -3,7 +3,10 @@
 `web_search` is pluggable via `SUITE_WEB_SEARCH_BACKEND`:
 
 * `searxng` (default) — a Brave-API-compatible JSON endpoint
-  (`SUITE_SEARXNG_URL`); returns a classic list of result links.
+  (`SUITE_SEARXNG_URL`); returns a classic list of result links. Because
+  SearXNG only relays upstream snippets, it can optionally escalate to
+  content ranking (fetch + embed + rank the top pages) — see
+  `SUITE_WEB_SEARCH_DEEP` and `research.deepsearch`.
 * `brave` — Brave's LLM-Context API (`SUITE_BRAVE_API_KEY`); returns
   AI-grounded context (title/url/snippets) for the query.
 * `kagi` — Kagi's Search API (`SUITE_KAGI_API_KEY`); returns ranked results
@@ -13,7 +16,9 @@
 
 The chosen backend's key must be set; if it isn't, the suite falls back to
 SearXNG with a logged warning. `html_fetch` returns Markdown (or raw HTML for
-`raw=true`) for a list of URLs; `web_download` saves a URL to the file store.
+`raw=true`) for a list of URLs — and, given an `extract_query`, distils each
+page to just the query-relevant facts via the lite preset; `web_download`
+saves a URL to the file store.
 The core functions take injectable fetchers so they are testable without a
 network; `make_web_tools` wraps them as `LocalTool`s closing over settings —
 the `web_search` tool's parameter schema reflects the active backend.
@@ -33,7 +38,7 @@ import httpx
 from bp_agents.common import LocalTool
 from bp_agents.common.urlsafe import safe_stream_get
 from bp_agents.settings import load_suite_settings
-from bp_sdk import ToolSpec
+from bp_sdk import Message, ToolSpec
 
 if TYPE_CHECKING:
     from bp_agents.settings import SuiteSettings
@@ -156,12 +161,16 @@ def _resolve_backend(settings: SuiteSettings) -> str:
     return backend
 
 
-async def _searxng_search(
+async def _searxng_rows(
     query: str, *, settings: SuiteSettings, count: int,
-    time_range: str | None, language: str | None, get_json: JsonGetter | None,
-) -> str:
+    time_range: str | None = None, language: str | None = None,
+    get_json: JsonGetter | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch raw SearXNG results (capped at `count`), each carrying
+    `title / url / content / score`. Shared by the plain snippet search and
+    the deep content-ranking path. Returns `[]` when unconfigured/empty."""
     if not settings.searxng_url:
-        return "Web search is not configured (no search backend set)."
+        return []
     count = min(max(count, 1), _SEARXNG_MAX_COUNT)
     get = get_json or _default_get_json
     params: dict[str, Any] = {"q": query, "format": "json"}
@@ -174,13 +183,29 @@ async def _searxng_search(
         params,
         settings.web_fetch_timeout_s,
     )
-    results = (data.get("results") or [])[:count]
-    if not results:
+    return (data.get("results") or [])[:count]
+
+
+def _format_searxng_rows(rows: list[dict[str, Any]], query: str) -> str:
+    if not rows:
         return f"No results for {query!r}."
     return "\n\n".join(
         f"{i + 1}. {r.get('title', '')}\n{r.get('url', '')}\n{r.get('content', '')}"
-        for i, r in enumerate(results)
+        for i, r in enumerate(rows)
     )
+
+
+async def _searxng_search(
+    query: str, *, settings: SuiteSettings, count: int,
+    time_range: str | None, language: str | None, get_json: JsonGetter | None,
+) -> str:
+    if not settings.searxng_url:
+        return "Web search is not configured (no search backend set)."
+    rows = await _searxng_rows(
+        query, settings=settings, count=count, time_range=time_range,
+        language=language, get_json=get_json,
+    )
+    return _format_searxng_rows(rows, query)
 
 
 async def _brave_search(
@@ -347,11 +372,14 @@ async def web_search(
     )
 
 
-async def _kagi_extract(
+async def _kagi_extract_pairs(
     urls: list[str], *, truncate: int, settings: SuiteSettings,
     request_json: ApiRequester | None,
-) -> str:
-    """Fetch + clean a batch of URLs via Kagi's Extract API (returns Markdown)."""
+) -> list[tuple[str, str]]:
+    """Fetch + clean a batch of URLs via Kagi's Extract API, returning
+    `(url, markdown-or-error-placeholder)` pairs. Pairs (not a joined string)
+    so callers can post-process each page's content — e.g. run a query-focused
+    distillation pass — before formatting."""
     request = request_json or _default_request_json
     pages = [{"url": u} for u in urls[:_KAGI_EXTRACT_MAX_URLS]]
     headers = {"Authorization": f"Bearer {settings.kagi_api_key.get_secret_value()}"}
@@ -365,15 +393,49 @@ async def _kagi_extract(
         headers=headers, timeout=settings.web_fetch_timeout_s,
     )
     items = data.get("data") or []
-    blocks = []
+    pairs: list[tuple[str, str]] = []
     for item in items:
         url = item.get("url", "")
         md = item.get("markdown")
-        if md:
-            blocks.append(f"## {url}\n{md[:truncate]}")
-        else:
-            blocks.append(f"## {url}\n[Couldn't extract: {item.get('error') or 'unknown error'}]")
-    return "\n\n".join(blocks) or "No content extracted."
+        body = md[:truncate] if md else (
+            f"[Couldn't extract: {item.get('error') or 'unknown error'}]"
+        )
+        pairs.append((url, body))
+    return pairs
+
+
+def _join_blocks(pairs: list[tuple[str, str]], *, headered: bool) -> str:
+    if headered:
+        return "\n\n".join(f"## {url}\n{body}" for url, body in pairs)
+    return "\n\n".join(body for _, body in pairs)
+
+
+# Query-focused distillation: turn a fetched page into just the facts that
+# bear on the caller's question, so a long page doesn't flood the loop's
+# context with boilerplate. Runs on the research agent's lite preset.
+_EXTRACT_SYSTEM = (
+    "You pull only the information relevant to the user's query out of a web "
+    "page. Keep concrete facts, figures, dates, names, quotes, and any source "
+    "URLs; drop navigation, ads, and unrelated sections. Be faithful — never "
+    "add anything not present in the text. If nothing is relevant, say so in "
+    "one line."
+)
+
+
+async def _distill(
+    ctx: TaskContext, content: str, query: str, *,
+    lite_preset: str | None, settings: SuiteSettings,
+) -> str:
+    content = content.strip()
+    if not content:
+        return "[No content to extract.]"
+    preset = lite_preset or settings.default_preset_lite
+    resp = await ctx.llm.generate(
+        [Message(role="system", content=_EXTRACT_SYSTEM),
+         Message(role="user", content=f"Query: {query}\n\nPage content:\n{content}")],
+        preset=preset,
+    )
+    return resp.text.strip() or "[Nothing relevant found.]"
 
 
 async def _fetch_one(
@@ -394,28 +456,59 @@ async def _fetch_one(
 
 async def html_fetch(
     ctx: TaskContext, *, urls: list[str] | str, raw: bool = False,
-    truncate: int = 2000, settings: SuiteSettings,
+    truncate: int = 2000, extract_query: str | None = None,
+    lite_preset: str | None = None, settings: SuiteSettings,
     get_bytes: BytesGetter | None = None, request_json: ApiRequester | None = None,
 ) -> str:
     if isinstance(urls, str):
         urls = [urls]
+    # Dedup the model's URL list (order-preserving). Search backends already
+    # dedup their own result lists; this guards the one case they can't — the
+    # model asking for the same URL twice in a single fetch call.
+    urls = list(dict.fromkeys(u for u in urls if u))
     if not urls:
         return "No URLs given."
-    truncate = min(max(truncate, 0), _CONTENT_CAP)
 
-    # Kagi backend (non-raw) → batch through Kagi Extract.
-    if not raw and _resolve_backend(settings) == "kagi":
-        return await _kagi_extract(
-            urls, truncate=truncate, settings=settings, request_json=request_json,
-        )
+    extracting = bool(extract_query) and not raw
+    # In extract mode we read more of each page (the distiller compresses it
+    # back down), so the fetch cap is the extract budget rather than `truncate`.
+    fetch_cap = settings.web_extract_fetch_chars if extracting else truncate
+    fetch_cap = min(max(fetch_cap, 0), _CONTENT_CAP)
 
-    blocks = []
-    for url in urls:
-        body = await _fetch_one(
-            ctx, url, raw=raw, truncate=truncate, settings=settings, get_bytes=get_bytes,
+    # Gather (url, body) for every URL, backend-appropriately. Kagi (non-raw)
+    # batches through Kagi Extract; everything else fetches per URL.
+    kagi = not raw and _resolve_backend(settings) == "kagi"
+    if kagi:
+        pairs = await _kagi_extract_pairs(
+            urls, truncate=fetch_cap, settings=settings, request_json=request_json,
         )
-        blocks.append(f"## {url}\n{body}" if len(urls) > 1 else body)
-    return "\n\n".join(blocks)
+    else:
+        pairs = [
+            (
+                url,
+                await _fetch_one(
+                    ctx, url, raw=raw, truncate=fetch_cap,
+                    settings=settings, get_bytes=get_bytes,
+                ),
+            )
+            for url in urls
+        ]
+
+    if extracting:
+        pairs = [
+            (url, await _distill(
+                ctx, body, extract_query, lite_preset=lite_preset, settings=settings,
+            ))
+            for url, body in pairs
+        ]
+        return _join_blocks(pairs, headered=True) or "No content extracted."
+
+    # Header each block when fetching multiple URLs, or always for Kagi (its
+    # blocks carried `## {url}` headers before this refactor — keep that).
+    result = _join_blocks(pairs, headered=kagi or len(pairs) > 1)
+    if kagi and not result:
+        return "No content extracted."
+    return result
 
 
 async def web_download(
@@ -550,14 +643,63 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
     )
 
 
-def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
+_DEEP_POLICIES = {"off", "auto", "always", "model"}
+
+
+def _deep_policy(settings: SuiteSettings) -> str:
+    """Effective SearXNG deep-search policy (unknown values → 'auto')."""
+    policy = (settings.web_search_deep or "auto").lower()
+    return policy if policy in _DEEP_POLICIES else "auto"
+
+
+def make_web_tools(
+    settings: SuiteSettings, *,
+    lite_preset: str | None = None, embedding_preset: str | None = None,
+) -> list[LocalTool]:
     backend = _resolve_backend(settings)
     search_desc, search_params = _search_tool_schema(backend)
+    policy = _deep_policy(settings)
+    # Deep content ranking only exists for SearXNG (Brave/Kagi snippets are
+    # already strong, and there's no deep pipeline for them).
+    deep_enabled = (
+        backend == "searxng" and policy != "off" and bool(settings.searxng_url)
+    )
+    if policy == "model" and backend != "searxng":
+        logger.warning(
+            "web_search_deep_unsupported_backend",
+            extra={"event": "web_search_deep_unsupported_backend", "backend": backend},
+        )
+
+    async def _deep_rank(ctx: TaskContext, query: str, rows: list, count: int) -> str:
+        from bp_agents.agents.research.deepsearch import deep_searxng_search  # noqa: PLC0415
+
+        return await deep_searxng_search(
+            ctx, query, rows=rows, count=count, settings=settings,
+            embedding_preset=embedding_preset,
+        )
 
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
+        query = args["query"]
+        count = int(args.get("count", _DEFAULT_COUNT))
+        # SearXNG + deep policy: fetch a wider pool, then content-rank when the
+        # policy forces it (`always`) or the snippets are too thin (`auto`).
+        # Under `model` the base tool keeps the `auto` behaviour (a floor the
+        # model can only raise, via the separate deep_web_search tool).
+        if deep_enabled:
+            from bp_agents.agents.research.deepsearch import snippets_too_thin  # noqa: PLC0415
+
+            rows = await _searxng_rows(
+                query, settings=settings,
+                count=count * settings.web_deep_fetch_multiplier,
+                time_range=args.get("time_range"), language=args.get("language"),
+            )
+            if not rows:
+                return f"No results for {query!r}."
+            if policy == "always" or snippets_too_thin(rows, settings):
+                return await _deep_rank(ctx, query, rows, count)
+            return _format_searxng_rows(rows[:count], query)
         return await web_search(
-            args["query"], settings=settings,
-            count=int(args.get("count", _DEFAULT_COUNT)),
+            query, settings=settings, count=count,
             time_range=args.get("time_range"),
             language=args.get("language"),
             country=args.get("country"),
@@ -572,10 +714,24 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
             file_type=args.get("file_type"),
         )
 
+    async def _deep_search(ctx: TaskContext, args: dict[str, Any]) -> str:
+        query = args["query"]
+        count = int(args.get("count", _DEFAULT_COUNT))
+        rows = await _searxng_rows(
+            query, settings=settings,
+            count=count * settings.web_deep_fetch_multiplier,
+            time_range=args.get("time_range"), language=args.get("language"),
+        )
+        if not rows:
+            return f"No results for {query!r}."
+        return await _deep_rank(ctx, query, rows, count)
+
     async def _fetch(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await html_fetch(
             ctx, urls=args["urls"], raw=bool(args.get("raw", False)),
-            truncate=int(args.get("truncate", 2000)), settings=settings,
+            truncate=int(args.get("truncate", 2000)),
+            extract_query=args.get("extract_query") or None,
+            lite_preset=lite_preset, settings=settings,
         )
 
     async def _download(ctx: TaskContext, args: dict[str, Any]) -> str:
@@ -584,12 +740,15 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
 
     fetch_desc = (
         "Fetch one or more URLs. raw=false (default) returns readable Markdown; "
-        "raw=true returns raw HTML."
+        "raw=true returns raw HTML. Set extract_query to pull just the facts "
+        "relevant to a question from long pages — it reads more of each page "
+        "and returns a distilled, query-focused summary instead of the raw "
+        "text (ignored when raw=true)."
     )
     if backend == "kagi":
         fetch_desc += " (Markdown is extracted via Kagi's Extract API.)"
 
-    return [
+    tools = [
         LocalTool(
             spec=ToolSpec(
                 name="web_search",
@@ -612,6 +771,14 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
                         },
                         "raw": {"type": "boolean"},
                         "truncate": {"type": "integer"},
+                        "extract_query": {
+                            "type": "string",
+                            "description": (
+                                "Optional. A question/topic to distill each "
+                                "page down to — returns only the relevant facts "
+                                "instead of the full text. Use for long pages."
+                            ),
+                        },
                     },
                     "required": ["urls"],
                 },
@@ -631,3 +798,47 @@ def make_web_tools(settings: SuiteSettings) -> list[LocalTool]:
             handler=_download,
         ),
     ]
+
+    # Under the `model` policy, offer a second tool so the research model can
+    # opt into a thorough, content-ranked search per query (the floor — plain
+    # web_search — stays on `auto`). SearXNG-only.
+    if deep_enabled and policy == "model":
+        tools.append(
+            LocalTool(
+                spec=ToolSpec(
+                    name="deep_web_search",
+                    description=(
+                        "Slower, thorough web search: fetches and content-ranks "
+                        "the top results instead of trusting their snippets. Use "
+                        "for research-grade or ambiguous queries where snippets "
+                        "may mislead; prefer plain web_search otherwise."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "count": {
+                                "type": "integer",
+                                "description": (
+                                    f"Number of pages to return (1-{_SEARXNG_MAX_COUNT}, "
+                                    f"default {_DEFAULT_COUNT})."
+                                ),
+                                "minimum": 1, "maximum": _SEARXNG_MAX_COUNT,
+                            },
+                            "time_range": {
+                                "type": "string",
+                                "enum": ["day", "week", "month", "year"],
+                                "description": "Restrict results by recency.",
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Result language code, e.g. 'en', 'ko'.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                handler=_deep_search,
+            )
+        )
+    return tools

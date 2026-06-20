@@ -14,6 +14,7 @@ The pieces every l0/l1 agent reuses:
     and output helpers (`text_output`, `estimate_context_tokens`).
 """
 
+from bp_agents.common.chunking import chunk_markdown
 from bp_agents.common.loop import run_llm_loop
 from bp_agents.common.output import (
     estimate_context_tokens,
@@ -43,6 +44,7 @@ __all__ = [
     "FILE_DELIVERY_NOTE",
     "INCOMING_FILE_NOTE",
     "SUBAGENT_FILE_NOTE",
+    "chunk_markdown",
     "compose_system_prompt",
     "emit_loop_progress",
     "estimate_context_tokens",

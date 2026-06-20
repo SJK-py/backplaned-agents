@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,11 +51,36 @@ class _StubPeers:
         )
 
 
+class _StubLlm:
+    """Records prompts and echoes a canned distillation reply. `embed` returns
+    deterministic keyword-count vectors ('cat'/'dog' axes) so content ranking
+    is assertable without a real embedding model."""
+
+    def __init__(self, reply="DISTILLED") -> None:
+        self._reply = reply
+        self.calls: list[tuple] = []
+        self.embed_calls: list[tuple] = []
+
+    async def generate(self, messages, *, preset=None, **kw):
+        self.calls.append((messages, preset))
+        return SimpleNamespace(text=self._reply)
+
+    @staticmethod
+    def _vec(text):
+        t = text.lower()
+        return [float(t.count("cat")), float(t.count("dog")), 0.1]
+
+    async def embed(self, texts, *, preset=None, **kw):
+        self.embed_calls.append((texts, preset))
+        return [self._vec(t) for t in texts]
+
+
 class _Ctx:
-    def __init__(self, *, user_id="usr_a", files=None, peers=None) -> None:
+    def __init__(self, *, user_id="usr_a", files=None, peers=None, llm=None) -> None:
         self.user_id = user_id
         self.files = files
         self.peers = peers
+        self.llm = llm
 
 
 # --------------------------------------------------------------------------- #
@@ -264,9 +290,66 @@ def test_html_fetch_multiple_urls_each_headed() -> None:
     asyncio.run(_drive())
 
 
+def test_html_fetch_dedups_repeated_urls() -> None:
+    # The model passing the same URL twice must fetch it once.
+    async def _drive() -> None:
+        peers = _StubPeers("body")
+        ctx = _Ctx(peers=peers)
+        out = await html_fetch(
+            ctx, urls=["http://a", "http://a", ""], raw=False, settings=SuiteSettings()
+        )
+        assert len(peers.spawns) == 1
+        # Single distinct URL → no per-URL header (original single-URL shape).
+        assert "## http://a" not in out and out == "body"
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_extract_query_distills_each_page() -> None:
+    async def _drive() -> None:
+        peers = _StubPeers("a very long page body about many things")
+        llm = _StubLlm(reply="just the relevant facts")
+        ctx = _Ctx(peers=peers, llm=llm)
+        out = await html_fetch(
+            ctx, urls=["http://a"], extract_query="what is X?",
+            lite_preset="lite-x", settings=SuiteSettings(),
+        )
+        # Distilled (not raw) content, headered for source attribution.
+        assert "just the relevant facts" in out and "## http://a" in out
+        # The distiller ran on the resolved lite preset, and the query rode
+        # along in the user message.
+        assert llm.calls and llm.calls[0][1] == "lite-x"
+        assert "what is X?" in llm.calls[0][0][1].content
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_extract_query_ignored_for_raw() -> None:
+    # raw=true bypasses md_converter and distillation (no llm call).
+    async def _drive() -> None:
+        llm = _StubLlm()
+
+        async def _get_bytes(url, timeout, cap):
+            return b"<html>raw</html>"
+
+        ctx = _Ctx(llm=llm)
+        out = await html_fetch(
+            ctx, urls=["http://a"], raw=True, extract_query="q",
+            settings=SuiteSettings(), get_bytes=_get_bytes,
+        )
+        assert "raw" in out and not llm.calls
+
+    asyncio.run(_drive())
+
+
 def test_make_web_tools_names() -> None:
     tools = make_web_tools(SuiteSettings())
     assert {t.spec.name for t in tools} == {"web_search", "html_fetch", "web_download"}
+
+
+def test_html_fetch_tool_exposes_extract_query() -> None:
+    fetch = {t.spec.name: t for t in make_web_tools(SuiteSettings())}["html_fetch"]
+    assert "extract_query" in fetch.spec.parameters["properties"]
 
 
 def test_web_search_falls_back_to_searxng_when_key_missing() -> None:
@@ -445,3 +528,159 @@ def test_web_search_tool_schema_reflects_backend() -> None:
     assert {"query", "kind", "count", "region", "file_type", "time_relative",
             "time_after", "time_before"} <= set(kagi_props)
     assert kagi_props["count"]["maximum"] == 20
+
+
+# --------------------------------------------------------------------------- #
+# deep SearXNG content ranking
+# --------------------------------------------------------------------------- #
+
+from bp_agents.agents.research.deepsearch import (  # noqa: E402
+    _cosine,
+    _page_score,
+    deep_searxng_search,
+    snippets_too_thin,
+)
+from bp_agents.common.htmltext import html_to_text  # noqa: E402
+
+
+def test_html_to_text_strips_scripts_styles_and_unescapes() -> None:
+    out = html_to_text(
+        "<style>a{color:red}</style><h1>Title</h1>"
+        "<script>evil()</script><p>a&amp;b</p>"
+    )
+    assert "Title" in out and "a&b" in out
+    assert "evil()" not in out and "color:red" not in out
+
+
+def test_cosine_and_page_score_math() -> None:
+    assert round(_cosine([1.0, 0.0], [1.0, 0.0]), 3) == 1.0
+    assert round(_cosine([1.0, 0.0], [0.0, 1.0]), 3) == 0.0
+    # Top-2 squared: 0.9² + 0.8² = 1.45 (the 0.1 chunk is dropped).
+    assert round(_page_score([0.9, 0.1, 0.8], top_n=2), 3) == 1.45
+
+
+def test_snippets_too_thin_heuristic() -> None:
+    s = SuiteSettings()  # min 80 chars, fraction 0.5
+    assert snippets_too_thin([{"content": "x"}, {"content": "y"}], s) is True
+    assert snippets_too_thin([{"content": "z" * 100}, {"content": "w" * 100}], s) is False
+    assert snippets_too_thin([], s) is False
+
+
+def test_deep_search_ranks_by_fetched_content() -> None:
+    # The dog page has the richer snippet, but the cat page's *content* matches
+    # the query — content ranking must surface it first.
+    async def _drive() -> None:
+        rows = [
+            {"title": "Dogs", "url": "http://dog", "content": "a long rich snippet here"},
+            {"title": "Cats", "url": "http://cat", "content": "x"},
+        ]
+        pages = {
+            "http://dog": b"<p>dog dog dog puppies kennel</p>",
+            "http://cat": b"<p>cat cat cat felines kitten</p>",
+        }
+
+        async def _get_bytes(url):
+            return pages[url]
+
+        llm = _StubLlm()
+        out = await deep_searxng_search(
+            _Ctx(llm=llm), "cat", rows=rows, count=2,
+            settings=SuiteSettings(), embedding_preset="emb", get_bytes=_get_bytes,
+        )
+        assert "Content-ranked" in out
+        assert out.index("http://cat") < out.index("http://dog")
+        # Embedded on the embedding preset.
+        assert llm.embed_calls and llm.embed_calls[0][1] == "emb"
+
+    asyncio.run(_drive())
+
+
+def test_deep_search_unfetchable_falls_back_to_flagged_snippet() -> None:
+    async def _drive() -> None:
+        rows = [{"title": "Cats", "url": "http://cat", "content": "cat cat snippet"}]
+
+        async def _get_bytes(url):
+            raise RuntimeError("boom")
+
+        out = await deep_searxng_search(
+            _Ctx(llm=_StubLlm()), "cat", rows=rows, count=1,
+            settings=SuiteSettings(), embedding_preset="emb", get_bytes=_get_bytes,
+        )
+        assert "http://cat" in out and "unverified" in out
+
+    asyncio.run(_drive())
+
+
+def test_deep_search_empty_rows() -> None:
+    async def _drive() -> None:
+        out = await deep_searxng_search(
+            _Ctx(llm=_StubLlm()), "q", rows=[], count=3,
+            settings=SuiteSettings(), embedding_preset="emb",
+        )
+        assert "No results" in out
+
+    asyncio.run(_drive())
+
+
+def test_deep_policy_model_exposes_deep_tool_on_searxng() -> None:
+    names = {
+        t.spec.name
+        for t in make_web_tools(
+            SuiteSettings(searxng_url="http://x", web_search_deep="model")
+        )
+    }
+    assert "deep_web_search" in names
+
+
+def test_deep_policy_model_no_deep_tool_on_brave() -> None:
+    # Brave snippets are already strong — no deep pipeline, no extra tool.
+    names = {
+        t.spec.name
+        for t in make_web_tools(
+            SuiteSettings(
+                web_search_backend="brave", brave_api_key="k", web_search_deep="model"
+            )
+        )
+    }
+    assert "deep_web_search" not in names
+
+
+def test_deep_policy_auto_and_off_have_no_deep_tool() -> None:
+    for policy in ("auto", "off"):
+        names = {
+            t.spec.name
+            for t in make_web_tools(
+                SuiteSettings(searxng_url="http://x", web_search_deep=policy)
+            )
+        }
+        assert "deep_web_search" not in names
+
+
+def test_web_search_handler_always_policy_content_ranks(monkeypatch) -> None:
+    import bp_agents.agents.research.deepsearch as ds
+    import bp_agents.agents.research.web as web
+
+    async def _drive() -> None:
+        async def _get_json(url, params, timeout):
+            return {"results": [
+                {"title": "Cats", "url": "http://cat", "content": "x"},
+                {"title": "Dogs", "url": "http://dog", "content": "y"},
+            ]}
+
+        async def _fetch_bytes(url, *, settings):
+            return b"cat cat cat" if "cat" in url else b"dog dog dog"
+
+        monkeypatch.setattr(web, "_default_get_json", _get_json)
+        monkeypatch.setattr(ds, "_default_fetch_bytes", _fetch_bytes)
+        settings = SuiteSettings(
+            searxng_url="http://x", web_search_deep="always"
+        )
+        search = {
+            t.spec.name: t
+            for t in make_web_tools(settings, embedding_preset="emb")
+        }["web_search"]
+        out = await search.handler(_Ctx(llm=_StubLlm()), {"query": "cat"})
+        assert "Content-ranked" in out
+        assert out.index("http://cat") < out.index("http://dog")
+
+    asyncio.run(_drive())

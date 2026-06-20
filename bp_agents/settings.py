@@ -324,6 +324,40 @@ class SuiteSettings(BaseSettings):
     web_fetch_max_redirects: int = Field(default=3, ge=0)
     """Max redirect hops an agent fetch follows. Each hop is re-validated
     against the SSRF guard. `0` disables redirect-following."""
+    web_extract_fetch_chars: int = Field(default=16000, ge=1)
+    """When `html_fetch` is given an `extract_query`, how much of each page's
+    cleaned content to read before the query-focused distillation pass. Very
+    long pages are distilled from the top portion (after md_converter has
+    already stripped boilerplate), trading completeness for a bounded,
+    single-pass LLM cost on the research agent's lite preset. Also caps each
+    page fetched by the SearXNG deep-search content ranker."""
+    web_search_deep: str = "auto"
+    """SearXNG content-ranking policy (ignored by the Brave/Kagi backends,
+    whose snippets are already strong):
+
+    * `off`    — never; return SearXNG's snippet results as-is.
+    * `auto`   — (default) escalate to fetch-and-rank only when the top
+      results' snippets are too thin to choose on (a deterministic, model-
+      independent trigger).
+    * `always` — always fetch-and-rank.
+    * `model`  — expose a second `deep_web_search` tool (force fetch-and-rank)
+      alongside `web_search` (which keeps the `auto` behaviour), letting the
+      research model opt into a thorough search per query. Unknown values
+      normalise to `auto`."""
+    web_deep_fetch_multiplier: int = Field(default=2, ge=1)
+    """Deep search fetches `count * this` SearXNG results, ranks their fetched
+    content, and returns the top `count` pages."""
+    web_deep_min_snippet_chars: int = Field(default=80, ge=0)
+    """In `auto` mode, a result whose snippet is shorter than this counts as
+    'thin' for the escalation trigger."""
+    web_deep_thin_fraction: float = Field(default=0.5, ge=0.0, le=1.0)
+    """In `auto` mode, escalate to deep search when more than this fraction of
+    the top results have thin snippets."""
+    web_deep_chunk_chars: int = Field(default=2000, ge=1)
+    """Max chunk length (chars) when splitting a fetched page for ranking."""
+    web_deep_top_chunks: int = Field(default=3, ge=1)
+    """A page's relevance score is the sum of its top-N chunk scores squared —
+    rewards concentrated relevance while bounding long-page bias."""
 
 
 def load_suite_settings() -> SuiteSettings:
