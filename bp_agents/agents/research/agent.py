@@ -66,18 +66,23 @@ knowledge base.
 async def _tools(
     ctx: TaskContext, settings: SuiteSettings, timezone: str
 ) -> LocalToolset:
-    # `html_fetch`'s extract_query distillation runs on the user's lite preset
-    # (cheap, fast) — resolve it here so the web tools can close over it.
+    # Resolve the user's presets so the web tools can close over them:
+    # `html_fetch`'s extract_query distillation runs on the lite preset, and
+    # the SearXNG deep-search content ranker embeds on the embedding preset.
     lite_preset = settings.default_preset_lite
+    embedding_preset = settings.default_preset_embedding
     if _pool is not None:
         async with _pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, ctx.user_id)
         if cfg is not None:
             lite_preset = cfg.preset_lite
+            embedding_preset = cfg.preset_embedding
     return LocalToolset(
         [
             make_current_time_tool(timezone),
-            *make_web_tools(settings, lite_preset=lite_preset),
+            *make_web_tools(
+                settings, lite_preset=lite_preset, embedding_preset=embedding_preset
+            ),
         ]
     )
 

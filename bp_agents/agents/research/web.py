@@ -3,7 +3,10 @@
 `web_search` is pluggable via `SUITE_WEB_SEARCH_BACKEND`:
 
 * `searxng` (default) — a Brave-API-compatible JSON endpoint
-  (`SUITE_SEARXNG_URL`); returns a classic list of result links.
+  (`SUITE_SEARXNG_URL`); returns a classic list of result links. Because
+  SearXNG only relays upstream snippets, it can optionally escalate to
+  content ranking (fetch + embed + rank the top pages) — see
+  `SUITE_WEB_SEARCH_DEEP` and `research.deepsearch`.
 * `brave` — Brave's LLM-Context API (`SUITE_BRAVE_API_KEY`); returns
   AI-grounded context (title/url/snippets) for the query.
 * `kagi` — Kagi's Search API (`SUITE_KAGI_API_KEY`); returns ranked results
@@ -158,12 +161,16 @@ def _resolve_backend(settings: SuiteSettings) -> str:
     return backend
 
 
-async def _searxng_search(
+async def _searxng_rows(
     query: str, *, settings: SuiteSettings, count: int,
-    time_range: str | None, language: str | None, get_json: JsonGetter | None,
-) -> str:
+    time_range: str | None = None, language: str | None = None,
+    get_json: JsonGetter | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch raw SearXNG results (capped at `count`), each carrying
+    `title / url / content / score`. Shared by the plain snippet search and
+    the deep content-ranking path. Returns `[]` when unconfigured/empty."""
     if not settings.searxng_url:
-        return "Web search is not configured (no search backend set)."
+        return []
     count = min(max(count, 1), _SEARXNG_MAX_COUNT)
     get = get_json or _default_get_json
     params: dict[str, Any] = {"q": query, "format": "json"}
@@ -176,13 +183,29 @@ async def _searxng_search(
         params,
         settings.web_fetch_timeout_s,
     )
-    results = (data.get("results") or [])[:count]
-    if not results:
+    return (data.get("results") or [])[:count]
+
+
+def _format_searxng_rows(rows: list[dict[str, Any]], query: str) -> str:
+    if not rows:
         return f"No results for {query!r}."
     return "\n\n".join(
         f"{i + 1}. {r.get('title', '')}\n{r.get('url', '')}\n{r.get('content', '')}"
-        for i, r in enumerate(results)
+        for i, r in enumerate(rows)
     )
+
+
+async def _searxng_search(
+    query: str, *, settings: SuiteSettings, count: int,
+    time_range: str | None, language: str | None, get_json: JsonGetter | None,
+) -> str:
+    if not settings.searxng_url:
+        return "Web search is not configured (no search backend set)."
+    rows = await _searxng_rows(
+        query, settings=settings, count=count, time_range=time_range,
+        language=language, get_json=get_json,
+    )
+    return _format_searxng_rows(rows, query)
 
 
 async def _brave_search(
@@ -620,16 +643,63 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
     )
 
 
+_DEEP_POLICIES = {"off", "auto", "always", "model"}
+
+
+def _deep_policy(settings: SuiteSettings) -> str:
+    """Effective SearXNG deep-search policy (unknown values → 'auto')."""
+    policy = (settings.web_search_deep or "auto").lower()
+    return policy if policy in _DEEP_POLICIES else "auto"
+
+
 def make_web_tools(
-    settings: SuiteSettings, *, lite_preset: str | None = None
+    settings: SuiteSettings, *,
+    lite_preset: str | None = None, embedding_preset: str | None = None,
 ) -> list[LocalTool]:
     backend = _resolve_backend(settings)
     search_desc, search_params = _search_tool_schema(backend)
+    policy = _deep_policy(settings)
+    # Deep content ranking only exists for SearXNG (Brave/Kagi snippets are
+    # already strong, and there's no deep pipeline for them).
+    deep_enabled = (
+        backend == "searxng" and policy != "off" and bool(settings.searxng_url)
+    )
+    if policy == "model" and backend != "searxng":
+        logger.warning(
+            "web_search_deep_unsupported_backend",
+            extra={"event": "web_search_deep_unsupported_backend", "backend": backend},
+        )
+
+    async def _deep_rank(ctx: TaskContext, query: str, rows: list, count: int) -> str:
+        from bp_agents.agents.research.deepsearch import deep_searxng_search  # noqa: PLC0415
+
+        return await deep_searxng_search(
+            ctx, query, rows=rows, count=count, settings=settings,
+            embedding_preset=embedding_preset,
+        )
 
     async def _search(ctx: TaskContext, args: dict[str, Any]) -> str:
+        query = args["query"]
+        count = int(args.get("count", _DEFAULT_COUNT))
+        # SearXNG + deep policy: fetch a wider pool, then content-rank when the
+        # policy forces it (`always`) or the snippets are too thin (`auto`).
+        # Under `model` the base tool keeps the `auto` behaviour (a floor the
+        # model can only raise, via the separate deep_web_search tool).
+        if deep_enabled:
+            from bp_agents.agents.research.deepsearch import snippets_too_thin  # noqa: PLC0415
+
+            rows = await _searxng_rows(
+                query, settings=settings,
+                count=count * settings.web_deep_fetch_multiplier,
+                time_range=args.get("time_range"), language=args.get("language"),
+            )
+            if not rows:
+                return f"No results for {query!r}."
+            if policy == "always" or snippets_too_thin(rows, settings):
+                return await _deep_rank(ctx, query, rows, count)
+            return _format_searxng_rows(rows[:count], query)
         return await web_search(
-            args["query"], settings=settings,
-            count=int(args.get("count", _DEFAULT_COUNT)),
+            query, settings=settings, count=count,
             time_range=args.get("time_range"),
             language=args.get("language"),
             country=args.get("country"),
@@ -643,6 +713,18 @@ def make_web_tools(
             region=args.get("region"),
             file_type=args.get("file_type"),
         )
+
+    async def _deep_search(ctx: TaskContext, args: dict[str, Any]) -> str:
+        query = args["query"]
+        count = int(args.get("count", _DEFAULT_COUNT))
+        rows = await _searxng_rows(
+            query, settings=settings,
+            count=count * settings.web_deep_fetch_multiplier,
+            time_range=args.get("time_range"), language=args.get("language"),
+        )
+        if not rows:
+            return f"No results for {query!r}."
+        return await _deep_rank(ctx, query, rows, count)
 
     async def _fetch(ctx: TaskContext, args: dict[str, Any]) -> str:
         return await html_fetch(
@@ -666,7 +748,7 @@ def make_web_tools(
     if backend == "kagi":
         fetch_desc += " (Markdown is extracted via Kagi's Extract API.)"
 
-    return [
+    tools = [
         LocalTool(
             spec=ToolSpec(
                 name="web_search",
@@ -716,3 +798,47 @@ def make_web_tools(
             handler=_download,
         ),
     ]
+
+    # Under the `model` policy, offer a second tool so the research model can
+    # opt into a thorough, content-ranked search per query (the floor — plain
+    # web_search — stays on `auto`). SearXNG-only.
+    if deep_enabled and policy == "model":
+        tools.append(
+            LocalTool(
+                spec=ToolSpec(
+                    name="deep_web_search",
+                    description=(
+                        "Slower, thorough web search: fetches and content-ranks "
+                        "the top results instead of trusting their snippets. Use "
+                        "for research-grade or ambiguous queries where snippets "
+                        "may mislead; prefer plain web_search otherwise."
+                    ),
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "count": {
+                                "type": "integer",
+                                "description": (
+                                    f"Number of pages to return (1-{_SEARXNG_MAX_COUNT}, "
+                                    f"default {_DEFAULT_COUNT})."
+                                ),
+                                "minimum": 1, "maximum": _SEARXNG_MAX_COUNT,
+                            },
+                            "time_range": {
+                                "type": "string",
+                                "enum": ["day", "week", "month", "year"],
+                                "description": "Restrict results by recency.",
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Result language code, e.g. 'en', 'ko'.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                handler=_deep_search,
+            )
+        )
+    return tools
