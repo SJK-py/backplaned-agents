@@ -449,7 +449,10 @@ class ChatbotGateway:
             await self._telegram.send_message(chat_id=chat_id, text=_UNAVAILABLE)
             return
         try:
-            user_id = await self._credentials.verify_link_token(token=token)
+            # Consumes the token AND grants this channel's service principal
+            # serviced_by over the account (so /password recovery + scheduled
+            # delivery work from here on) — router /v1/auth/link-channel.
+            user_id = await self._credentials.link_channel(token=token)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "link_verify_failed", extra={"event": "link_verify_failed"}
@@ -479,9 +482,20 @@ class ChatbotGateway:
                 await queries.set_mapping_session_id(
                     conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
                 )
-                # Adopt it as the cron fallback only if the account has none.
+                # Adopt this Telegram session as the cron/notification
+                # fallback when the account has none — OR when the current
+                # default lives on a non-Telegram channel. Telegram is the
+                # only channel that delivers scheduled-task results
+                # out-of-band ([cron.md] §6), so a web-first account whose
+                # default is a (non-pushable) webapp session should hand the
+                # default to Telegram on link. An existing Telegram default
+                # from another chat is left untouched.
                 cfg = await queries.get_user_config(conn, user_id)
-                if cfg is None or cfg.default_session_id is None:
+                cur_default = (
+                    await queries.get_session_info(conn, cfg.default_session_id)
+                    if cfg and cfg.default_session_id else None
+                )
+                if cur_default is None or cur_default.channel != CHANNEL:
                     await queries.set_default_session_id(
                         conn, user_id=user_id, session_id=new_session,
                     )

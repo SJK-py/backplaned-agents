@@ -18,6 +18,11 @@
       Password changed — please sign in with your new password.
     </div>
   {% endif %}
+  {% if registered_ok %}
+    <div class="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+      Request received. An administrator will review it — you can sign in once it’s approved.
+    </div>
+  {% endif %}
 
   <!-- Sign in -->
   <form method="post" action="/login" x-show="mode === 'login'"
@@ -59,6 +64,13 @@
             class="font-medium text-brand-700 underline underline-offset-2">
       Set one with a token
     </button>
+  </p>
+
+  <p class="mt-2 text-center text-xs text-brand-500/80" x-show="mode === 'login'">
+    No account?
+    <a href="/register" class="font-medium text-brand-700 underline underline-offset-2">
+      Request access
+    </a>
   </p>
 
   <!-- Set / reset password with a one-time token -->

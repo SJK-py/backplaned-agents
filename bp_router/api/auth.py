@@ -11,9 +11,11 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
+from bp_router.api.admin import _PRIVILEGED_LEVELS, _denial_audit_allowed
 from bp_router.db import queries
 from bp_router.quota import (
     BUCKET_CHANGE_PASSWORD,
+    BUCKET_LINK_TOKEN_MINT,
     BUCKET_LOGIN,
     BUCKET_REFRESH,
     BUCKET_RESET_PASSWORD,
@@ -22,6 +24,7 @@ from bp_router.security.jwt import (
     SessionPrincipal,
     issue_session_token,
     require_authenticated,
+    require_service,
     revoke_jti,
 )
 from bp_router.security.passwords import (
@@ -701,70 +704,120 @@ async def reset_password(
     )
 
 
-class VerifyResetTokenRequest(BaseModel):
-    token: str
+# ---------------------------------------------------------------------------
+# Channel linking — self-service link-token mint + service-side consume.
+# ---------------------------------------------------------------------------
 
 
-class VerifyResetTokenResponse(BaseModel):
-    user_id: str
+class LinkTokenResponse(BaseModel):
+    link_token: str
+    expires_at: datetime
 
 
-@router.post(
-    "/verify-reset-token",
-    response_model=VerifyResetTokenResponse,
-    status_code=200,
-)
-async def verify_reset_token(
-    req: VerifyResetTokenRequest,
+@router.post("/link-tokens", response_model=LinkTokenResponse, status_code=201)
+async def mint_link_token(
     request: Request,
-) -> VerifyResetTokenResponse:
-    """Consume a password-reset token and return the user it belongs to —
-    WITHOUT setting a password or issuing a session.
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> LinkTokenResponse:
+    """Mint a single-use token the CALLER can paste into a chat bot's
+    `/link` to bind that chat to this (already-authenticated) account.
 
-    The verify-only sibling of `reset-password`: the suite's channel-link
-    flow (`/link <token>`) uses it to prove that whoever pastes a token
-    into an unmapped chat owns an existing account, then binds the chat to
-    the returned `user_id`. Like reset-password, the token IS the auth (no
-    Bearer header) and it is SINGLE-USE — consumed here, so a leaked token
-    can't be replayed to hijack a link. The same per-IP rate limit bounds
-    token enumeration; the bucket is shared with reset-password so the two
-    consumption paths draw on one enumeration budget.
+    Self-service: authorised by the caller's OWN access token, so the token
+    is always minted for `principal.user_id` — a logged-in user can only
+    ever link channels to themselves. This is the one legitimate
+    self-service mint (the channel-anchored `/password` reset is
+    service-gated because there the channel, not a session, is the identity
+    proof). It bootstraps the FIRST chat link for a web-only account, which
+    otherwise has no channel and thus no way to ever reach the
+    service-minted reset flow.
 
-    On a missing / expired / already-used token: 401. If the user has been
-    deactivated since the token was minted: 409.
+    Reuses the `password_reset_tokens` table; consumed at
+    `POST /v1/auth/link-channel` (or harmlessly at reset-password — it's
+    the caller's own account either way). Per-user rate-limited; single-use;
+    short TTL (`link_token_ttl_s`).
     """
     state = request.app.state.bp
     settings = state.settings
     pool = state.db_pool
 
-    ip = _client_ip(request)
     wait = await _enforce_single_bucket_rate_limit(
         quota=state.login_quota,
-        key=f"{BUCKET_RESET_PASSWORD}:ip:{ip}",
-        rate_per_s=settings.password_reset_consume_rate_limit_per_ip_per_s,
-        burst=settings.password_reset_consume_rate_limit_per_ip_burst,
+        key=f"{BUCKET_LINK_TOKEN_MINT}:user:{principal.user_id}",
+        rate_per_s=settings.link_token_mint_rate_limit_per_user_per_s,
+        burst=settings.link_token_mint_rate_limit_per_user_burst,
     )
     if wait > 0:
         retry_after = max(int(wait + 0.999), 1)
-        try:
-            async with pool.acquire() as conn:
-                await queries.append_audit_event(
-                    conn, actor_kind="user", actor_id=None,
-                    event="auth.password_reset_rate_limited",
-                    payload={"ip": ip, "retry_after_s": retry_after,
-                             "purpose": "verify"},
-                )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "auth_rate_limit_audit_failed",
-                extra={"event": "auth_rate_limit_audit_failed"},
-                exc_info=True,
-            )
         raise HTTPException(
             status_code=429,
-            detail="too many verify-reset-token attempts; retry later",
+            detail="too many link-token mints; retry later",
             headers={"Retry-After": str(retry_after)},
         )
+
+    token = secrets.token_urlsafe(32)
+    expires_at = _now() + timedelta(seconds=settings.link_token_ttl_s)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await queries.insert_password_reset_token(
+                conn,
+                token_hash=_hash_refresh_token(token),
+                user_id=principal.user_id,
+                expires_at=expires_at,
+                created_by=principal.user_id,
+            )
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=principal.user_id,
+                event="auth.link_token_minted",
+                target_kind="user", target_id=principal.user_id,
+                payload={"expires_at": expires_at.isoformat()},
+            )
+    return LinkTokenResponse(link_token=token, expires_at=expires_at)
+
+
+class LinkChannelRequest(BaseModel):
+    token: str
+    grant_service: bool = True
+
+
+class LinkChannelResponse(BaseModel):
+    user_id: str
+
+
+@router.post("/link-channel", response_model=LinkChannelResponse, status_code=200)
+async def link_channel(
+    req: LinkChannelRequest,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_service),
+) -> LinkChannelResponse:
+    """Consume a single-use link token and return the owning `user_id` so
+    the calling service principal can bind a chat to that account — and, by
+    default, grant the caller `serviced_by` over the user.
+
+    A chat channel (Telegram/Kakao) calls this from its `/link` command: the
+    user pasted a token proving they own an existing account, so the channel
+    binds the chat to `user_id` (caller-side). With `grant_service=true` (the
+    default — and the only flow that exists today) it ALSO appends the caller
+    to the user's `serviced_by`, authorising it to mint reset/refresh tokens
+    going forward (the `/password` recovery flow, scheduled-task delivery).
+    Granting HERE — gated on a single-use token the user deliberately
+    generated and pasted into this channel — is the link-time analogue of the
+    registration-approval auto-grant, without an admin round-trip.
+
+    `grant_service=false` is the verify-only mode (consume + return `user_id`,
+    no grant): a bind that doesn't authorise minting. It exists so a future
+    caller that genuinely wants a non-servicing bind needn't a second
+    endpoint; note a channel bound this way can't perform per-user ops until
+    it gains `serviced_by` some other way.
+
+    The token IS single-use (consumed regardless of outcome). On a missing /
+    expired / already-used token → 401; inactive user → 409. When granting,
+    the privilege boundary refuses an admin/service target (403) — a service
+    principal must never gain minting rights on a privileged account (same
+    guard as the F8/F9 mint endpoints); the guard does not apply to a
+    verify-only bind, which confers no power.
+    """
+    state = request.app.state.bp
+    pool = state.db_pool
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -773,18 +826,45 @@ async def verify_reset_token(
             )
             if user_id is None:
                 await queries.append_audit_event(
-                    conn, actor_kind="user", actor_id=None,
+                    conn, actor_kind="user", actor_id=principal.user_id,
                     event="auth.password_reset_token_invalid",
-                    payload={"purpose": "verify"},
+                    payload={"purpose": "link_channel"},
                 )
                 raise HTTPException(401, "invalid or expired token")
             user = await queries.get_user_by_id(conn, user_id)
             if not queries.user_is_active(user):
                 raise HTTPException(409, "user inactive")
+            granted = False
+            if req.grant_service:
+                if user.level in _PRIVILEGED_LEVELS:
+                    # Raising here rolls back the consume (it's in this txn),
+                    # so the token stays valid — harmless, since a service
+                    # principal can never turn an admin/service token into a
+                    # grant: every attempt 403s right here.
+                    if await _denial_audit_allowed(
+                        state, principal.user_id, "user.serviced_by_grant_denied"
+                    ):
+                        await queries.append_audit_event(
+                            conn, actor_kind="user", actor_id=principal.user_id,
+                            event="user.serviced_by_grant_denied",
+                            target_kind="user", target_id=user_id,
+                            payload={"reason": "privileged_target",
+                                     "purpose": "link_channel"},
+                        )
+                    raise HTTPException(
+                        403,
+                        "service principals may not be granted serviced_by "
+                        "over admin/service users",
+                    )
+                granted = await queries.append_to_serviced_by(
+                    conn, user_id, principal.user_id,
+                )
             await queries.append_audit_event(
-                conn, actor_kind="user", actor_id=user_id,
-                event="auth.password_reset_token_verified",
+                conn, actor_kind="user", actor_id=principal.user_id,
+                event="auth.channel_linked",
                 target_kind="user", target_id=user_id,
-                payload={"purpose": "link"},
+                payload={"service_user_id": principal.user_id,
+                         "grant_requested": req.grant_service,
+                         "serviced_by_granted": granted},
             )
-    return VerifyResetTokenResponse(user_id=user_id)
+    return LinkChannelResponse(user_id=user_id)

@@ -96,6 +96,22 @@ async def _load_rows(request: Request) -> list[SessionRow]:
     return rows
 
 
+async def _needs_telegram_link(request: Request) -> bool:
+    """True when the account has no Telegram mapping. Telegram is the only
+    channel that delivers scheduled-task notifications out-of-band AND the
+    self-service link token only works while signed in, so we nudge the user
+    to connect it now ([cron.md] §6)."""
+    pool = request.app.state.pool
+    user_id = session_user_id(request)
+    if pool is None or not user_id:
+        return False
+    async with pool.acquire() as conn:
+        mappings = await queries.list_platform_mappings_for_user(
+            conn, user_id=user_id, platform="telegram"
+        )
+    return not mappings
+
+
 @router.get("/", response_class=HTMLResponse)
 async def session_list(request: Request) -> HTMLResponse:
     templates = request.app.state.templates
@@ -111,13 +127,14 @@ async def session_list(request: Request) -> HTMLResponse:
             request,
             "sessions/list.html",
             {"rows": [], "error": "Couldn't load your sessions. Please retry.",
-             "active_section": "sessions"},
+             "active_section": "sessions", "show_link_nudge": False},
             status_code=502,
         )
     return templates.TemplateResponse(
         request,
         "sessions/list.html",
-        {"rows": rows, "error": None, "active_section": "sessions"},
+        {"rows": rows, "error": None, "active_section": "sessions",
+         "show_link_nudge": await _needs_telegram_link(request)},
     )
 
 

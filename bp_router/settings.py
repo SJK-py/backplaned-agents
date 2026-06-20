@@ -541,6 +541,16 @@ class Settings(BaseSettings):
     )
     registration_rate_limit_per_submitter_burst: int = Field(default=60, ge=1)
 
+    # Public self-service web signup (`POST /v1/registrations/public`). This
+    # endpoint is UNAUTHENTICATED — there's no submitting principal to bucket
+    # on, so we cap per source IP (mirrors the password-reset consume cap).
+    # Tight by default: a real person signs up once. The per-(channel,
+    # external_id=email) bucket above still dedups retry storms per address.
+    registration_web_rate_limit_per_ip_per_s: float = Field(
+        default=0.0014, ge=0.0
+    )  # ≈5/h
+    registration_web_rate_limit_per_ip_burst: int = Field(default=5, ge=1)
+
     # Phase 10e: AgentInfo updates. Each update triggers a
     # CatalogUpdate broadcast (O(agents²) per push); rate-limit
     # per-agent to bound the load. Default 1/sec, burst 5 — fine
@@ -581,6 +591,16 @@ class Settings(BaseSettings):
     password_reset_consume_rate_limit_per_ip_burst: int = Field(
         default=20, ge=1
     )
+
+    # Self-service channel-link tokens. A logged-in user mints a single-use
+    # token for THEMSELVES (`POST /v1/auth/link-tokens`) to paste into a chat
+    # bot's `/link`. Reuses the password_reset_tokens table; shorter TTL since
+    # the user acts on it immediately. Per-user mint cap bounds churn.
+    link_token_ttl_s: int = Field(default=900, ge=60)  # 15 min
+    link_token_mint_rate_limit_per_user_per_s: float = Field(
+        default=0.0028, ge=0.0
+    )  # ≈10/h
+    link_token_mint_rate_limit_per_user_burst: int = Field(default=5, ge=1)
 
     # F8: per-target cap on service-minted refresh tokens. Defends
     # `serviced_by` users against mass-mint by a compromised service

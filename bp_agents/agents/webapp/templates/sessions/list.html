@@ -25,6 +25,15 @@
     </div>
   {% endif %}
 
+  {% if show_link_nudge %}
+    <div class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+      <span class="font-medium">Connect Telegram.</span>
+      Link it now (while you’re signed in) so you can recover a forgotten
+      password and receive scheduled-task notifications.
+      <a href="/config" class="font-medium underline underline-offset-2">Connect in Settings →</a>
+    </div>
+  {% endif %}
+
   {% set open_rows = rows | rejectattr("closed") | list %}
   {% set closed_rows = rows | selectattr("closed") | list %}
 

@@ -18,6 +18,84 @@
 
 ---
 
+## 2026-06-20
+
+> Platform (`bp_router`) surface of suite work whose channel halves live in
+> `bp_agents` (the webapp `/register` page, the bot `/link` change, the
+> Settings link-code UI — not tracked here). This adds a browser-side
+> self-service registration path alongside the channel-submitted one, and
+> moves `serviced_by` acquisition to channel-link time.
+
+### Added — public self-service registration (`POST /v1/registrations/public`)
+
+- **What:** new **unauthenticated** route in `api/registrations.py`. An
+  anonymous browser visitor submits `{email, password, display_name?}`; the
+  router stores the **chosen password as an argon2 hash** on the pending row
+  (new `pending_user_registrations.requested_password_hash`, **migration
+  0006**; `PendingRegistrationRow` + `upsert_pending_registration` carry it)
+  and records **no** `submitted_by_service_user_id`. `channel` is forced to
+  `webapp` and `external_id` to the lower-cased email, so `UNIQUE(channel,
+  external_id)` makes a re-submit idempotent (bumps `attempts`, lets the user
+  correct the password). Rate-limited per-IP (new
+  `registration_web_rate_limit_per_ip_*`, bucket `BUCKET_REGISTRATION_WEB`)
+  **before** the argon2 hash, plus the existing per-`(channel, external_id)`
+  bucket. Audited `registration.submitted` with `actor_id=None` + `self_service`.
+- **What (approval):** `approve_registration` (`api/admin.py`) now seeds the
+  new user's `auth_secret_hash` from `requested_password_hash` when present
+  (admin `initial_password` override still wins; random fallback otherwise).
+  `ApproveRegistrationResponse.initial_password` is now **nullable** — `null`
+  for a web signup, since the user already knows their password.
+- **Why:** there is no email-delivery channel to send a reset link to, so the
+  user picks a password at signup and the hash rides the pending row → they can
+  sign in the instant an admin approves. Because there's no service submitter,
+  approval grants **no** `serviced_by` (the webapp authenticates as the user
+  and needs no per-user minting). Enumeration-safe: a duplicate email returns
+  the same `201 pending`.
+
+### Added — self-service link tokens + serviced-on-link (`/v1/auth/link-*`)
+
+- **What:** `POST /v1/auth/link-tokens` (`require_authenticated`) mints a
+  single-use token **for the caller's own account** (reuses the
+  `password_reset_tokens` table; new `link_token_ttl_s` +
+  `link_token_mint_rate_limit_per_user_*`, bucket `BUCKET_LINK_TOKEN_MINT`),
+  audited `auth.link_token_minted`.
+- **What:** `POST /v1/auth/link-channel` (`require_service`) consumes a link
+  token, returns `{user_id}`, **and (by default) appends the calling service
+  principal to that user's `serviced_by`** (`append_to_serviced_by`). The
+  request carries `grant_service: bool = True`; with the default it grants,
+  refusing (403) over an admin/service target — same `_PRIVILEGED_LEVELS`
+  escalation guard as the F8/F9 mints (the guard sits inside the grant branch,
+  since a verify-only bind confers no power). `grant_service=false` is the
+  verify-only mode: consume + return `user_id`, no grant, no privileged guard.
+  Inactive user → 409; bad token → 401. Audited `auth.channel_linked`
+  (`grant_requested` + `serviced_by_granted`; `user.serviced_by_grant_denied`
+  on the privileged refusal).
+- **Why:** a web-first account has no chat channel and so no service principal
+  that can mint it a reset token (the channel-anchored `/password` flow is
+  service-gated) — `link-tokens` bootstraps the first link, authorised by the
+  user's own session. `link-channel` then lets the bot's `/link` acquire
+  `serviced_by` at link time, gated on a single-use token the user
+  deliberately generated and pasted in, instead of an admin round-trip. This
+  is the link-time analogue of the registration-approval auto-grant.
+
+### Removed — `verify-reset-token` (folded into `link-channel`)
+
+- **What:** deleted `POST /v1/auth/verify-reset-token` (added 2026-06-02 for
+  the suite's `/link`) and its request/response models. Its verify-only
+  behaviour is now `link-channel` with `grant_service=false`, so the duplicate
+  route is gone; the shared single-use machinery it used
+  (`consume_password_reset_token`, the `BUCKET_RESET_PASSWORD` bucket) stays
+  (still used by `reset-password`). Suite-side, the dead
+  `credentials.verify_link_token` wrapper was removed too.
+- **Why:** with `link-channel` superseding it (the suite `/link` moved over,
+  and a linked chat is inert without `serviced_by` so a bind-without-grant has
+  no real flow), the endpoint had no live caller. It was a suite-added route,
+  not upstream Backplaned, so removing it reverts our own addition rather than
+  diverging from the vendored platform. Verify-only stays addressable via the
+  `grant_service` flag, so no capability is lost.
+
+---
+
 ## 2026-06-06
 
 > Platform (`bp_router` / `bp_admin`) surface of suite work whose executor

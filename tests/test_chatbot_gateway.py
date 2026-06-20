@@ -492,9 +492,10 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
 
 
 class _LinkCreds:
-    """Credentials double for the /link flow: verify_link_token returns the
-    configured user_id (or None to simulate a bad token), and open_session
-    hands back a fresh session id for the linked chat's own conversation."""
+    """Credentials double for the /link flow: link_channel returns the
+    configured user_id (or None to simulate a bad/refused token), and
+    open_session hands back a fresh session id for the linked chat's own
+    conversation."""
 
     def __init__(self, *, user_id: str | None, new_session: str = "ses_link") -> None:
         self._user_id = user_id
@@ -502,7 +503,7 @@ class _LinkCreds:
         self.verified: list[str] = []
         self.opened: list[str] = []
 
-    async def verify_link_token(self, *, token: str) -> str | None:
+    async def link_channel(self, *, token: str) -> str | None:
         self.verified.append(token)
         return self._user_id
 
@@ -568,6 +569,46 @@ def test_link_invalid_token_reports_and_does_not_map(suite_db_url: str) -> None:
                     conn, platform="telegram", chat_id="tg_new"
                 )
             assert resolved is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_link_promotes_default_when_current_is_webapp(suite_db_url: str) -> None:
+    """A web-first account whose default session lives on a (non-pushable)
+    webapp session hands the cron/notification default to Telegram on /link —
+    Telegram is the only out-of-band carrier ([cron.md] §6)."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "suite_platform_mappings RESTART IDENTITY"
+                )
+                # usr_a: a webapp-default account with no Telegram chat yet.
+                await queries.create_user_config(
+                    conn, user_id="usr_a", default_session_id="ses_web"
+                )
+                await queries.create_session_info(
+                    conn, session_id="ses_web", user_id="usr_a", channel="webapp"
+                )
+            tg = _FakeTelegram()
+            creds = _LinkCreds(user_id="usr_a", new_session="ses_tg")
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=tg, credentials=creds,
+            )
+
+            await gw.handle_update("tg_new", "/link tok-xyz")
+
+            assert tg.sent == [("tg_new", _LINK_OK)]
+            async with pool.acquire() as conn:
+                cfg = await queries.get_user_config(conn, "usr_a")
+            # Promoted from the webapp session to the new Telegram session.
+            assert cfg.default_session_id == "ses_tg"
         finally:
             await pool.close()
 

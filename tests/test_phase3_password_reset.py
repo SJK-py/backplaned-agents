@@ -246,64 +246,73 @@ def test_reset_password_endpoint_is_unauthenticated() -> None:
 
 
 # ===========================================================================
-# verify-reset-token (verify-only sibling, for channel linking)
+# link-channel (consume + bind; grants serviced_by unless grant_service=False)
 # ===========================================================================
 
 
-def test_verify_reset_token_consumes_single_use() -> None:
-    """Verify-only path still CONSUMES the token (single-use) so a leaked
-    token can't be replayed to hijack a link — it reuses the same consume
-    helper as reset-password."""
+def test_link_channel_consumes_single_use() -> None:
+    """Reuses the same single-use consume helper as reset-password, so a
+    leaked link token can't be replayed to hijack a link."""
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    src = inspect.getsource(auth.verify_reset_token)
+    src = inspect.getsource(auth.link_channel)
     assert "consume_password_reset_token" in src
 
 
-def test_verify_reset_token_does_not_set_password_or_issue_session() -> None:
-    """It returns the user_id only — no password write, no token issuance."""
+def test_link_channel_grants_serviced_by_by_default() -> None:
+    """The grant is gated on `grant_service` (default True) and uses the
+    append helper; it issues no password/session."""
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    src = inspect.getsource(auth.verify_reset_token)
+    assert auth.LinkChannelRequest.model_fields["grant_service"].default is True
+    src = inspect.getsource(auth.link_channel)
+    assert "if req.grant_service:" in src
+    assert "append_to_serviced_by" in src
     assert "set_user_password_hash" not in src
     assert "issue_session_token" not in src
-    assert "TokenPair" not in src
 
 
-def test_verify_reset_token_shares_reset_password_rate_limit_bucket() -> None:
+def test_link_channel_refuses_privileged_target_only_when_granting() -> None:
+    """The privilege boundary guards the GRANT — it sits inside the
+    `grant_service` branch (a verify-only bind confers no power)."""
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    src = inspect.getsource(auth.verify_reset_token)
-    assert "BUCKET_RESET_PASSWORD" in src
-    assert "password_reset_consume_rate_limit_per_ip_per_s" in src
+    src = inspect.getsource(auth.link_channel)
+    grant_branch = src.split("if req.grant_service:", 1)[1]
+    assert "_PRIVILEGED_LEVELS" in grant_branch
+    assert "403" in grant_branch
 
 
-def test_verify_reset_token_invalid_returns_401_inactive_409() -> None:
+def test_link_channel_invalid_returns_401_inactive_409() -> None:
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    src = inspect.getsource(auth.verify_reset_token)
+    src = inspect.getsource(auth.link_channel)
     assert "if user_id is None:" in src
     assert "401" in src and "invalid or expired token" in src
     assert "user_is_active(" in src
     assert "409" in src and "user inactive" in src
 
 
-def test_verify_reset_token_audits_verification() -> None:
+def test_link_channel_requires_service_principal() -> None:
+    """Unlike the removed verify-reset-token, the caller must authenticate as
+    a service principal — the router needs to know who to grant."""
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    src = inspect.getsource(auth.verify_reset_token)
-    assert "auth.password_reset_token_verified" in src
+    sig = inspect.signature(auth.link_channel)
+    assert "principal" in sig.parameters
 
 
-def test_verify_reset_token_endpoint_is_unauthenticated() -> None:
-    """The token IS the auth — no Bearer dependency."""
+def test_verify_reset_token_endpoint_removed() -> None:
+    """Superseded by link-channel (grant_service=False covers verify-only);
+    the route + handler are gone."""
     pytest.importorskip("fastapi")
     from bp_router.api import auth
 
-    sig = inspect.signature(auth.verify_reset_token)
-    assert "principal" not in sig.parameters
+    assert not hasattr(auth, "verify_reset_token")
+    paths = {r.path for r in auth.router.routes}
+    assert "/verify-reset-token" not in paths

@@ -22,8 +22,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from bp_router.api.admin import _denial_audit_allowed
+from bp_router.api.auth import _client_ip, _enforce_single_bucket_rate_limit
 from bp_router.db import queries
+from bp_router.quota import BUCKET_REGISTRATION_WEB
 from bp_router.security.jwt import SessionPrincipal, require_authenticated
+from bp_router.security.passwords import hash_password
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,6 +38,12 @@ router = APIRouter()
 _CHANNEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _EXTERNAL_ID_MAX_LEN = 256
 _DISPLAY_NAME_MAX_LEN = 256
+
+# Channel slug for self-service web signups. Matches the `channel` the webapp
+# session/approval flow tags (`webapp`), so the admin queue and the
+# `registration.approved` audit read consistently.
+_WEB_CHANNEL = "webapp"
+_PASSWORD_MIN_LEN = 8
 
 
 class RegistrationSubmitRequest(BaseModel):
@@ -171,6 +180,122 @@ async def submit_registration(
                     "channel": req.channel,
                     "external_id": req.external_id,
                     "attempts": pending.attempts,
+                },
+            )
+
+    return RegistrationSubmitResponse(
+        registration_id=pending.registration_id,
+        status="pending",
+        attempts=pending.attempts,
+    )
+
+
+class WebRegistrationRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=_PASSWORD_MIN_LEN, max_length=1024)
+    display_name: str | None = Field(default=None, max_length=_DISPLAY_NAME_MAX_LEN)
+
+
+@router.post(
+    "/public", response_model=RegistrationSubmitResponse, status_code=201
+)
+async def submit_web_registration(
+    req: WebRegistrationRequest,
+    request: Request,
+) -> RegistrationSubmitResponse:
+    """Public, UNAUTHENTICATED self-service web signup.
+
+    Unlike `POST /v1/registrations` (a service channel agent vouching for
+    a chat it controls), this is the end user submitting for themselves
+    from the browser — there's no principal, so nothing is recorded as
+    `submitted_by_service_user_id` and approval therefore grants NO
+    `serviced_by` (the webapp can't push and needs no per-user minting;
+    servicing rights are acquired later when the user links a chat
+    channel). The user CHOOSES their password here; its argon2 hash rides
+    the pending row so they can log in the moment an admin approves —
+    there is no email-delivery channel to send a reset link to.
+
+    Abuse control: a per-IP cap (no submitting principal to bucket on)
+    plus the existing per-`(channel, email)` cap. `UNIQUE(channel,
+    external_id)` makes a re-submit idempotent (bumps `attempts`, lets the
+    user correct the chosen password) rather than spawning rows.
+
+    Enumeration-safe: a duplicate email still returns 201 `pending` (the
+    upsert is a no-op create) — the caller can't distinguish "new" from
+    "already registered". 429 carries Retry-After.
+    """
+    state = request.app.state.bp
+    settings = state.settings
+    ip = _client_ip(request)
+    # EmailStr validates shape; lower-case it so the dedup key + the
+    # eventual unique email don't fork on case.
+    email = req.email.lower()
+
+    # Rate-limit BEFORE the argon2 hash (≈100 ms) so a saturated bucket
+    # can't be used as a CPU-exhaustion oracle.
+    ip_wait = await _enforce_single_bucket_rate_limit(
+        quota=state.login_quota,
+        key=f"{BUCKET_REGISTRATION_WEB}:ip:{ip}",
+        rate_per_s=settings.registration_web_rate_limit_per_ip_per_s,
+        burst=settings.registration_web_rate_limit_per_ip_burst,
+    )
+    ext_wait = await _enforce_single_bucket_rate_limit(
+        quota=state.login_quota,
+        key=f"registration:{_WEB_CHANNEL}:{email}",
+        rate_per_s=settings.registration_rate_limit_per_external_per_s,
+        burst=settings.registration_rate_limit_per_external_burst,
+    )
+    if ip_wait > 0 or ext_wait > 0:
+        retry_after = max(int(max(ip_wait, ext_wait, 1.0) + 0.999), 1)
+        scope = "per_ip" if ip_wait >= ext_wait else "per_external"
+        if await _denial_audit_allowed(
+            state, f"ip:{ip}", "registration.rate_limited"
+        ):
+            async with state.db_pool.acquire() as conn:
+                await queries.append_audit_event(
+                    conn, actor_kind="user", actor_id=None,
+                    event="registration.rate_limited",
+                    payload={
+                        "channel": _WEB_CHANNEL,
+                        "external_id": email,
+                        "retry_after_s": retry_after,
+                        "scope": scope,
+                        "self_service": True,
+                    },
+                )
+        raise HTTPException(
+            status_code=429,
+            detail="too many registration submissions; retry later",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    password_hash = hash_password(req.password)
+
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            await queries.log_registration_attempt(
+                conn, channel=_WEB_CHANNEL, external_id=email,
+            )
+            pending = await queries.upsert_pending_registration(
+                conn,
+                channel=_WEB_CHANNEL,
+                external_id=email,
+                display_name=req.display_name,
+                requested_email=email,
+                metadata={},
+                submitted_by_service_user_id=None,
+                requested_password_hash=password_hash,
+            )
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=None,
+                event="registration.submitted",
+                target_kind="registration",
+                target_id=pending.registration_id,
+                payload={
+                    "channel": _WEB_CHANNEL,
+                    "external_id": email,
+                    "attempts": pending.attempts,
+                    "self_service": True,
                 },
             )
 

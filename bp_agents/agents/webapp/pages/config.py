@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
+from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.config_edit import (
     PRESET_FIELDS,
     ConfigError,
@@ -26,6 +27,21 @@ from bp_agents.db import queries
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Chat platforms a web user can connect for password recovery / notifications.
+# `telegram` is called out specially because it's the only channel that
+# delivers scheduled-task notifications out-of-band ([cron.md] §6).
+_LINKABLE_PLATFORMS = ("telegram", "kakao")
+
+
+async def _linked_platforms(pool: object, user_id: str) -> set[str]:
+    """The chat platforms this account already has a mapping for, so the UI
+    can tell the user what's connected (and nudge linking what isn't)."""
+    async with pool.acquire() as conn:  # type: ignore[attr-defined]
+        mappings = await queries.list_platform_mappings_for_user(
+            conn, user_id=user_id
+        )
+    return {m.platform for m in mappings}
 
 # Friendly labels for the opt-in LLM-tier <select>s.
 _PRESET_LABELS = {
@@ -84,13 +100,61 @@ async def config_view(
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, user_id)
     preset_choices = _preset_choices(request)
+    linked = await _linked_platforms(pool, user_id)
     return request.app.state.templates.TemplateResponse(
         request,
         "config/form.html",
         {"cfg": cfg, "saved": bool(saved), "error": None,
          "active_section": "config",
          "pw_error": _PW_ERRORS.get(pw_error or ""),
-         "preset_fields": _preset_fields_for_template(cfg, preset_choices)},
+         "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+         "linkable_platforms": _LINKABLE_PLATFORMS,
+         "linked_platforms": linked,
+         "link_token": None},
+    )
+
+
+@router.post("/link-token", response_class=HTMLResponse)
+async def mint_link_token(request: Request) -> HTMLResponse:
+    """Mint a single-use channel-link token for the logged-in user and show
+    it once (re-renders Settings). The user pastes `/link <token>` into the
+    Telegram/Kakao bot to connect that chat to this account. Rendered in the
+    response body — never on the URL — so it can't leak via history/referer."""
+    pool = request.app.state.pool
+    user_id = session_user_id(request)
+    access = request.session.get("access_token")
+    if pool is None or not user_id or not access:
+        raise HTTPException(status_code=404)
+    preset_choices = _preset_choices(request)
+    link_token: str | None = None
+    error: str | None = None
+    try:
+        body = await request.app.state.upstream.mint_link_token(access_token=access)
+        link_token = body["link_token"]
+    except UpstreamError as exc:
+        error = (
+            "Too many attempts — please wait a moment and try again."
+            if exc.status_code == 429
+            else "Couldn’t create a link token. Please try again."
+        )
+        logger.info(
+            "webapp_mint_link_token_failed",
+            extra={"event": "webapp_mint_link_token_failed",
+                   "status_code": exc.status_code},
+        )
+    async with pool.acquire() as conn:
+        cfg = await queries.get_user_config(conn, user_id)
+    linked = await _linked_platforms(pool, user_id)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "config/form.html",
+        {"cfg": cfg, "saved": False, "error": None,
+         "active_section": "config", "pw_error": None,
+         "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+         "linkable_platforms": _LINKABLE_PLATFORMS,
+         "linked_platforms": linked,
+         "link_token": link_token,
+         "link_error": error},
     )
 
 
@@ -122,12 +186,16 @@ async def config_save(request: Request) -> HTMLResponse:
     if errors:
         async with pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, user_id)
+        linked = await _linked_platforms(pool, user_id)
         return request.app.state.templates.TemplateResponse(
             request,
             "config/form.html",
             {"cfg": cfg, "saved": False, "error": "; ".join(errors),
              "active_section": "config", "pw_error": None,
-             "preset_fields": _preset_fields_for_template(cfg, preset_choices)},
+             "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+             "linkable_platforms": _LINKABLE_PLATFORMS,
+             "linked_platforms": linked,
+             "link_token": None},
             status_code=400,
         )
 

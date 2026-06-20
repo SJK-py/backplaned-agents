@@ -88,6 +88,31 @@ duplicating the logic — rejected (drift risk).
   sessions it listed with the user's token, so it can't reach another user's.
 - Mobile: same responsive form.
 
+### 3a. Self-service registration (`/register`)
+
+A public, pre-auth + CSRF-exempt page (like `/login`/`/set-password`): the
+visitor supplies email + a **chosen password** + name, which the webapp
+proxies to the router's unauthenticated `POST /v1/registrations/public`
+(per-IP + per-email rate-limited). The router stores the password **hash**
+on the pending row (no email-delivery channel exists to send a reset link
+to) and records **no service submitter**, so admin approval creates the user
+with that password and grants **no `serviced_by`** — the user can sign in the
+moment they're approved. Duplicate emails return the same neutral "request
+received" outcome (enumeration-safe).
+
+### 3b. Connecting a chat channel (later)
+
+Web accounts have no email-based recovery, so the user is nudged (signup
+disclaimer + a Sessions banner when no Telegram is linked) to connect a chat
+channel **while signed in**. Settings → *Connect a chat channel* mints a
+single-use token (`POST /v1/auth/link-tokens`, the user's own session is the
+auth) that they paste into the bot's `/link`. The bot redeems it via
+`POST /v1/auth/link-channel`, which binds the chat **and grants that channel's
+service principal `serviced_by`** — enabling `/password` recovery from then on,
+and (Telegram only) out-of-band scheduled-task notifications (§6). Linking
+Telegram also promotes its session to the cron `default_session_id` when the
+current default is a non-pushable webapp session.
+
 ## 4. Feature panes (server-rendered, HTMX-swapped)
 
 **Session list (left panel)** — the **collapsible sidebar** (in `base.html`,
