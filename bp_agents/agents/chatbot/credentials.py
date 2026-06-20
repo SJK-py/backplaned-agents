@@ -82,9 +82,9 @@ class ChannelCredentials(Protocol):
 
     async def mint_password_reset_token(self, *, user_id: str) -> str: ...
 
-    async def verify_link_token(self, *, token: str) -> str | None: ...
-
-    async def link_channel(self, *, token: str) -> str | None: ...
+    async def link_channel(
+        self, *, token: str, grant_service: bool = True
+    ) -> str | None: ...
 
     async def store_named_file(
         self, *, user_id: str, session_id: str, filename: str, data: bytes,
@@ -360,32 +360,19 @@ class HttpChannelCredentials:
         resp.raise_for_status()
         return resp.json()["reset_token"]
 
-    async def verify_link_token(self, *, token: str) -> str | None:
-        """Verify a password-reset token for the channel-link flow (the
-        `/link` command). Calls the router's verify-only endpoint, which
-        consumes the token (single-use) and returns the owning `user_id`
-        WITHOUT setting a password. The token IS the auth — no Bearer.
+    async def link_channel(
+        self, *, token: str, grant_service: bool = True
+    ) -> str | None:
+        """Link the chat that pasted `token` to its owning account (the
+        `/link` command) and, by default, acquire `serviced_by` over that
+        user. Calls the router's `/link-channel` with this channel's SERVICE
+        token (the router needs to know which principal to grant), which
+        consumes the token (single-use) and returns the owning `user_id`.
 
-        Returns the `user_id` on success, or None when the token is
-        rejected (4xx: missing / expired / already-used, or the user is
-        inactive) so the caller can tell the user it didn't take. Network
-        / server (5xx) errors propagate."""
-        resp = await self._client.post(
-            f"{self._http_url}/v1/auth/verify-reset-token",
-            json={"token": token},
-        )
-        if 400 <= resp.status_code < 500:
-            return None
-        resp.raise_for_status()
-        return resp.json()["user_id"]
-
-    async def link_channel(self, *, token: str) -> str | None:
-        """Link the chat that pasted `token` to its owning account AND
-        acquire `serviced_by` over that user — the service-authenticated
-        sibling of `verify_link_token`. Calls the router's `/link-channel`
-        with this channel's SERVICE token (the router needs to know which
-        service principal to grant), which consumes the token (single-use)
-        and returns the owning `user_id`.
+        `grant_service=True` (default) is the real flow: it gains the
+        servicing rights the channel needs for per-user ops (`/password`
+        recovery, scheduled delivery). `grant_service=False` is a verify-only
+        bind (no grant) — kept addressable for symmetry with the router.
 
         Returns the `user_id` on success, or None on a 4xx (missing /
         expired / already-used token, inactive user, or a refused grant
@@ -395,7 +382,7 @@ class HttpChannelCredentials:
         resp = await self._client.post(
             f"{self._http_url}/v1/auth/link-channel",
             headers={"Authorization": f"Bearer {svc}"},
-            json={"token": token},
+            json={"token": token, "grant_service": grant_service},
         )
         if 400 <= resp.status_code < 500:
             return None

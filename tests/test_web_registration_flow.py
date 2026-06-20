@@ -192,6 +192,46 @@ def test_link_channel_refuses_privileged_target(test_db_url: str) -> None:
     asyncio.run(_drive())
 
 
+def test_link_channel_verify_only_binds_without_grant(test_db_url: str) -> None:
+    """grant_service=False is the verify-only mode: it consumes the token and
+    returns the user_id (a bind) but grants NO serviced_by — and the
+    privilege guard doesn't apply since nothing is granted."""
+
+    async def _drive() -> None:
+        async with TestRouter(db_url=test_db_url) as router:
+            pool = router._app.state.bp.db_pool
+            async with httpx.AsyncClient(
+                base_url=router.public_url, timeout=10.0
+            ) as client:
+                user = await router.create_user(level="tier0", email="vo@x.io")
+                user_tok = _session_token(
+                    router, user_id=user.user_id, level="tier0"
+                )
+                r = await client.post(
+                    "/v1/auth/link-tokens",
+                    headers={"Authorization": f"Bearer {user_tok}"},
+                )
+                token = r.json()["link_token"]
+
+                svc = await router.create_user(level="service", email="vo-s@x.io")
+                svc_tok = _session_token(
+                    router, user_id=svc.user_id, level="service"
+                )
+                r = await client.post(
+                    "/v1/auth/link-channel",
+                    headers={"Authorization": f"Bearer {svc_tok}"},
+                    json={"token": token, "grant_service": False},
+                )
+                assert r.status_code == 200, r.text
+                assert r.json()["user_id"] == user.user_id
+
+                async with pool.acquire() as conn:
+                    u = await queries.get_user_by_id(conn, user.user_id)
+                assert svc.user_id not in u.serviced_by  # no grant
+
+    asyncio.run(_drive())
+
+
 def test_link_tokens_requires_authentication(test_db_url: str) -> None:
     """The self-service mint is gated on the caller's own session — an
     anonymous request can't mint a link token for anyone."""

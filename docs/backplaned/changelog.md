@@ -60,12 +60,16 @@
   `link_token_mint_rate_limit_per_user_*`, bucket `BUCKET_LINK_TOKEN_MINT`),
   audited `auth.link_token_minted`.
 - **What:** `POST /v1/auth/link-channel` (`require_service`) consumes a link
-  token, returns `{user_id}`, **and appends the calling service principal to
-  that user's `serviced_by`** (`append_to_serviced_by`). Refuses (403) over an
-  admin/service target — same `_PRIVILEGED_LEVELS` escalation guard as the
-  F8/F9 mint endpoints — and over inactive users (409) / bad tokens (401).
-  Audited `auth.channel_linked` (+ `user.serviced_by_grant_denied` on the
-  privileged refusal).
+  token, returns `{user_id}`, **and (by default) appends the calling service
+  principal to that user's `serviced_by`** (`append_to_serviced_by`). The
+  request carries `grant_service: bool = True`; with the default it grants,
+  refusing (403) over an admin/service target — same `_PRIVILEGED_LEVELS`
+  escalation guard as the F8/F9 mints (the guard sits inside the grant branch,
+  since a verify-only bind confers no power). `grant_service=false` is the
+  verify-only mode: consume + return `user_id`, no grant, no privileged guard.
+  Inactive user → 409; bad token → 401. Audited `auth.channel_linked`
+  (`grant_requested` + `serviced_by_granted`; `user.serviced_by_grant_denied`
+  on the privileged refusal).
 - **Why:** a web-first account has no chat channel and so no service principal
   that can mint it a reset token (the channel-anchored `/password` flow is
   service-gated) — `link-tokens` bootstraps the first link, authorised by the
@@ -74,18 +78,21 @@
   deliberately generated and pasted in, instead of an admin round-trip. This
   is the link-time analogue of the registration-approval auto-grant.
 
-### Changed — `verify-reset-token` is now legacy (superseded, retained)
+### Removed — `verify-reset-token` (folded into `link-channel`)
 
-- **What:** `POST /v1/auth/verify-reset-token` (added 2026-06-02 for the
-  suite's `/link`) now has **no live caller** — the suite's `/link` moved to
-  `link-channel`, which consumes the **same** single-use token AND grants
-  `serviced_by`. The endpoint and its rate-limit/audit shape are **unchanged
-  and retained** (purely-additive policy; possible external consumers); only
-  shape-pin tests in `test_phase3_password_reset.py` reference it now.
-- **Note:** the corresponding suite-side wrapper `credentials.verify_link_token`
-  (in `bp_agents`, not tracked here) is consequently dead — it can be removed,
-  or kept as a verify-only (no-`serviced_by`) primitive distinct from
-  `link_channel`. No platform change either way.
+- **What:** deleted `POST /v1/auth/verify-reset-token` (added 2026-06-02 for
+  the suite's `/link`) and its request/response models. Its verify-only
+  behaviour is now `link-channel` with `grant_service=false`, so the duplicate
+  route is gone; the shared single-use machinery it used
+  (`consume_password_reset_token`, the `BUCKET_RESET_PASSWORD` bucket) stays
+  (still used by `reset-password`). Suite-side, the dead
+  `credentials.verify_link_token` wrapper was removed too.
+- **Why:** with `link-channel` superseding it (the suite `/link` moved over,
+  and a linked chat is inert without `serviced_by` so a bind-without-grant has
+  no real flow), the endpoint had no live caller. It was a suite-added route,
+  not upstream Backplaned, so removing it reverts our own addition rather than
+  diverging from the vendored platform. Verify-only stays addressable via the
+  `grant_service` flag, so no capability is lost.
 
 ---
 
