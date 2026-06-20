@@ -84,6 +84,8 @@ class ChannelCredentials(Protocol):
 
     async def verify_link_token(self, *, token: str) -> str | None: ...
 
+    async def link_channel(self, *, token: str) -> str | None: ...
+
     async def store_named_file(
         self, *, user_id: str, session_id: str, filename: str, data: bytes,
         mime_type: str | None = None,
@@ -370,6 +372,29 @@ class HttpChannelCredentials:
         / server (5xx) errors propagate."""
         resp = await self._client.post(
             f"{self._http_url}/v1/auth/verify-reset-token",
+            json={"token": token},
+        )
+        if 400 <= resp.status_code < 500:
+            return None
+        resp.raise_for_status()
+        return resp.json()["user_id"]
+
+    async def link_channel(self, *, token: str) -> str | None:
+        """Link the chat that pasted `token` to its owning account AND
+        acquire `serviced_by` over that user — the service-authenticated
+        sibling of `verify_link_token`. Calls the router's `/link-channel`
+        with this channel's SERVICE token (the router needs to know which
+        service principal to grant), which consumes the token (single-use)
+        and returns the owning `user_id`.
+
+        Returns the `user_id` on success, or None on a 4xx (missing /
+        expired / already-used token, inactive user, or a refused grant
+        over a privileged target) so the caller can tell the user it didn't
+        take. Network / server (5xx) errors propagate."""
+        svc = await self._service_token()
+        resp = await self._client.post(
+            f"{self._http_url}/v1/auth/link-channel",
+            headers={"Authorization": f"Bearer {svc}"},
             json={"token": token},
         )
         if 400 <= resp.status_code < 500:

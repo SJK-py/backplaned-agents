@@ -70,6 +70,30 @@ class UpstreamClient:
             "POST", "/v1/auth/refresh", json={"refresh_token": refresh_token}
         )
 
+    async def submit_web_registration(
+        self, *, email: str, password: str, display_name: str | None = None
+    ) -> dict[str, Any]:
+        """Submit a public self-service signup (`POST
+        /v1/registrations/public`). UNAUTHENTICATED — no Bearer header, like
+        an anonymous visitor. The user chooses their password here; an admin
+        approves before they can sign in. 429 on rate-limit; 422 on a weak
+        password / bad email."""
+        body: dict[str, Any] = {"email": email, "password": password}
+        if display_name:
+            body["display_name"] = display_name
+        return await self.request(
+            "POST", "/v1/registrations/public", json=body
+        )
+
+    async def mint_link_token(self, *, access_token: str) -> dict[str, Any]:
+        """Mint a single-use channel-link token for the logged-in user
+        (`POST /v1/auth/link-tokens`). The user pastes it into a chat bot's
+        `/link` to connect Telegram/KakaoTalk to this account. Returns
+        `{link_token, expires_at}`."""
+        return await self.request(
+            "POST", "/v1/auth/link-tokens", access_token=access_token
+        )
+
     async def reset_password(
         self, *, token: str, new_password: str
     ) -> dict[str, Any]:

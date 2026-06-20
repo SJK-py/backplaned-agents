@@ -243,6 +243,11 @@ class PendingRegistrationRow(_Row):
     attempts: int
     last_attempt_at: datetime
     submitted_by_service_user_id: str | None = None
+    # Self-service web signup: argon2 hash of the password the user chose on
+    # the public form. NULL for channel-submitted registrations (password set
+    # later via the reset-token flow). Approval seeds the user's hash from this
+    # when present, so a web user can log in the moment they're approved.
+    requested_password_hash: str | None = None
 
 
 class RefreshTokenRow(_Row):

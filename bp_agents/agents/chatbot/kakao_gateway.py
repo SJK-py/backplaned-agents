@@ -902,7 +902,13 @@ class KakaoGateway:
             await self._client.post_callback(callback_url, _UNAVAILABLE_TEXT)
             return
         try:
-            user_id = await self._credentials.verify_link_token(token=token)
+            # Consumes the token AND grants this channel's service principal
+            # serviced_by over the account (enables /password recovery from
+            # Kakao) — router /v1/auth/link-channel. NOTE: unlike Telegram we
+            # do NOT promote this session to the cron default; Kakao has no
+            # out-of-band push ([cron.md] §6), so it can't carry scheduled
+            # notifications.
+            user_id = await self._credentials.link_channel(token=token)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "kakao_link_verify_failed",

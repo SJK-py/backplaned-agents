@@ -1378,7 +1378,10 @@ class ApproveRegistrationResponse(BaseModel):
     channel: str
     external_id: str
     session_id: str
-    initial_password: str
+    initial_password: str | None
+    """The generated/admin-set initial password, returned exactly once.
+    NULL for self-service web signups — the user already chose their own
+    password on the public form, so there is nothing to reveal."""
 
 
 @router.post(
@@ -1405,7 +1408,8 @@ async def approve_registration(
                 SELECT registration_id::text, channel, external_id,
                        display_name, requested_email, metadata,
                        requested_at, attempts, last_attempt_at,
-                       submitted_by_service_user_id
+                       submitted_by_service_user_id,
+                       requested_password_hash
                 FROM pending_user_registrations
                 WHERE registration_id = $1::uuid
                 FOR UPDATE
@@ -1426,14 +1430,30 @@ async def approve_registration(
                 raise HTTPException(
                     409, f"user with email {email!r} already exists"
                 )
-            password = req.initial_password or _secrets.token_urlsafe(16)
+            # Self-service web signup carries the user's chosen password as a
+            # hash on the pending row — seed it directly so they can log in the
+            # moment they're approved (no token bootstrap, no email). An
+            # explicit admin override (`req.initial_password`) always wins; the
+            # random fallback covers channel registrations that carry neither.
+            stored_hash = pending.get("requested_password_hash")
+            password: str | None
+            if req.initial_password:
+                password = req.initial_password
+                auth_hash = hash_password(password)
+            elif stored_hash:
+                # The user already knows their password; nothing to reveal.
+                password = None
+                auth_hash = stored_hash
+            else:
+                password = _secrets.token_urlsafe(16)
+                auth_hash = hash_password(password)
             submitter = pending["submitted_by_service_user_id"]
             user = await queries.insert_user(
                 conn,
                 email=email,
                 level=req.level,
                 auth_kind="password",
-                auth_secret_hash=hash_password(password),
+                auth_secret_hash=auth_hash,
                 serviced_by=[submitter] if submitter else [],
             )
             label = req.label or (

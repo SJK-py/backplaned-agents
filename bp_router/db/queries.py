@@ -1180,6 +1180,7 @@ async def upsert_pending_registration(
     requested_email: str | None,
     metadata: dict[str, Any],
     submitted_by_service_user_id: str | None,
+    requested_password_hash: str | None = None,
 ) -> PendingRegistrationRow:
     """Insert a new pending registration, OR upsert: bump `attempts`
     and refresh `last_attempt_at` when `(channel, external_id)`
@@ -1187,14 +1188,17 @@ async def upsert_pending_registration(
     when previously NULL; non-empty metadata replaces. Service-
     principal submitter is overwritten by the latest non-NULL value
     (most-recent wins so admin sees the current submitter on the
-    queue row).
+    queue row). `requested_password_hash` (self-service web signup)
+    is REPLACED by the latest non-NULL value — a re-submit lets the
+    user correct the password they chose before approval.
     """
     row = await conn.fetchrow(
         """
         INSERT INTO pending_user_registrations
             (channel, external_id, display_name, requested_email,
-             metadata, submitted_by_service_user_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+             metadata, submitted_by_service_user_id,
+             requested_password_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (channel, external_id) DO UPDATE
         SET attempts        = pending_user_registrations.attempts + 1,
             last_attempt_at = now(),
@@ -1210,14 +1214,18 @@ async def upsert_pending_registration(
             submitted_by_service_user_id = COALESCE(
                 EXCLUDED.submitted_by_service_user_id,
                 pending_user_registrations.submitted_by_service_user_id
+            ),
+            requested_password_hash = COALESCE(
+                EXCLUDED.requested_password_hash,
+                pending_user_registrations.requested_password_hash
             )
         RETURNING registration_id::text, channel, external_id,
                   display_name, requested_email, metadata,
                   requested_at, attempts, last_attempt_at,
-                  submitted_by_service_user_id
+                  submitted_by_service_user_id, requested_password_hash
         """,
         channel, external_id, display_name, requested_email,
-        metadata, submitted_by_service_user_id,
+        metadata, submitted_by_service_user_id, requested_password_hash,
     )
     assert row is not None
     return PendingRegistrationRow.model_validate(dict(row))

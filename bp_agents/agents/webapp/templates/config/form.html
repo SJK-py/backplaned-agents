@@ -154,5 +154,54 @@
       Change password
     </button>
   </form>
+
+  <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Connect a chat channel</h2>
+  <p class="mb-3 text-sm text-brand-500">
+    Link Telegram or KakaoTalk to chat from those apps. Linking also enables
+    password recovery if you’re ever locked out — and
+    <span class="font-medium">Telegram</span> delivers your scheduled-task
+    notifications. We recommend connecting Telegram while you’re signed in.
+  </p>
+
+  <div class="rounded-md border border-brand-500/10 bg-white p-5">
+    <ul class="mb-4 space-y-1 text-sm">
+      {% for p in linkable_platforms %}
+      <li class="flex items-center gap-2">
+        {% if p in linked_platforms %}
+          <span class="inline-block rounded bg-green-50 px-2 py-0.5 text-xs font-medium text-green-700">connected</span>
+        {% else %}
+          <span class="inline-block rounded bg-brand-500/10 px-2 py-0.5 text-xs font-medium text-brand-500">not connected</span>
+        {% endif %}
+        <span class="capitalize text-brand-700">{{ p }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+
+    {% if link_error %}
+      <div class="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        {{ link_error }}
+      </div>
+    {% endif %}
+
+    {% if link_token %}
+      <div class="mb-3 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+        <p class="font-medium">Your one-time link code</p>
+        <p class="mt-1 break-all font-mono text-xs">{{ link_token }}</p>
+        <p class="mt-2 text-xs">
+          In the Telegram bot (or KakaoTalk channel), send
+          <span class="font-mono">/link {{ link_token }}</span>.
+          It’s single-use and expires shortly.
+        </p>
+      </div>
+    {% endif %}
+
+    <form method="post" action="/link-token">
+      {% include "_partials/csrf.html" %}
+      <button type="submit"
+              class="rounded bg-brand-900 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700">
+        Generate link code
+      </button>
+    </form>
+  </div>
 </div>
 {% endblock %}

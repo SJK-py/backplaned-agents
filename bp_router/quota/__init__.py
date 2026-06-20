@@ -19,9 +19,11 @@ from __future__ import annotations
 BUCKET_LOGIN = "login"
 BUCKET_REFRESH = "refresh"
 BUCKET_RESET_PASSWORD = "reset_password"
+BUCKET_REGISTRATION_WEB = "registration_web"
 
 # Authenticated endpoints — per-user buckets.
 BUCKET_CHANGE_PASSWORD = "change_password"
+BUCKET_LINK_TOKEN_MINT = "link_token_mint"
 
 # Per-target mint endpoints — caller writes to a bucket scoped by
 # the user being minted-for, not the caller.
@@ -36,7 +38,9 @@ __all__ = [
     "BUCKET_LOGIN",
     "BUCKET_REFRESH",
     "BUCKET_RESET_PASSWORD",
+    "BUCKET_REGISTRATION_WEB",
     "BUCKET_CHANGE_PASSWORD",
+    "BUCKET_LINK_TOKEN_MINT",
     "BUCKET_PASSWORD_RESET_MINT",
     "BUCKET_SERVICE_MINT_REFRESH_TOKEN",
     "BUCKET_AGENT_INFO_UPDATE",

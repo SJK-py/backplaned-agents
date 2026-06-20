@@ -20,10 +20,10 @@ from fastapi.responses import JSONResponse, Response
 logger = logging.getLogger(__name__)
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-# Pre-auth, token-authenticated POSTs — no session/CSRF token exists yet.
-# (`/set-password` redeems a one-time reset token; the router rate-limits it
-# per IP against enumeration.)
-EXEMPT_PATHS = frozenset({"/login", "/set-password"})
+# Pre-auth POSTs — no session/CSRF token exists yet. (`/set-password`
+# redeems a one-time reset token; `/register` is the anonymous self-service
+# signup; both are rate-limited per IP at the router against abuse.)
+EXEMPT_PATHS = frozenset({"/login", "/set-password", "/register"})
 
 
 def issue_token() -> str:

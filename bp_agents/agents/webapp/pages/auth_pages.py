@@ -33,6 +33,15 @@ _RESET_ERRORS = {
     "failed": "Couldn’t set your password. Please try again.",
 }
 
+# Friendly messages for a failed /register submit, keyed by a code on the
+# redirect (never reflect the router's raw error text).
+_REGISTER_ERRORS = {
+    "mismatch": "Those passwords don’t match.",
+    "weak": "Choose a password of at least 8 characters.",
+    "invalid": "Please check your email address and password and try again.",
+    "ratelimited": "Too many attempts — please wait a moment and try again.",
+}
+
 
 def _safe_next(raw: str | None) -> str:
     """Sanitise the post-login redirect target: reject absolute URLs
@@ -54,6 +63,7 @@ async def login_form(
     reset: str | None = None,
     reset_error: str | None = None,
     changed: str | None = None,
+    registered: str | None = None,
 ) -> HTMLResponse:
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
@@ -73,6 +83,8 @@ async def login_form(
             # Shown after a successful in-session password change (which
             # revokes the old session — the user must sign in again).
             "changed_ok": changed == "1",
+            # Shown after a successful self-service signup submission.
+            "registered_ok": registered == "1",
         },
     )
 
@@ -102,6 +114,63 @@ async def login_submit(
         )
     store_login(request, login_response=body, email=email)
     return RedirectResponse(url=_safe_next(next), status_code=303)
+
+
+@router.get("/register", response_class=HTMLResponse)
+async def register_form(
+    request: Request,
+    error: str | None = None,
+) -> HTMLResponse:
+    """Public self-service signup form. Reachable before any account
+    exists. Carries the disclaimer that web accounts need a linked chat
+    channel for password recovery / scheduled-task notifications."""
+    if is_authenticated(request):
+        return RedirectResponse(url="/", status_code=303)
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request, "register.html", {"error": _REGISTER_ERRORS.get(error or "")},
+    )
+
+
+@router.post("/register")
+async def register_submit(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    display_name: str = Form(""),
+) -> RedirectResponse:
+    """Submit a public registration request. Validates locally, then calls
+    the router's unauthenticated `/v1/registrations/public`. Enumeration-
+    safe: a duplicate email yields the same "request received" outcome as a
+    new one (the router upsert is a no-op create), so the page never reveals
+    whether an email is already registered."""
+    if password != confirm_password:
+        return RedirectResponse(url="/register?error=mismatch", status_code=303)
+    if len(password.strip()) < 8:
+        return RedirectResponse(url="/register?error=weak", status_code=303)
+    upstream = request.app.state.upstream
+    try:
+        await upstream.submit_web_registration(
+            email=email.strip(),
+            password=password,
+            display_name=display_name.strip() or None,
+        )
+    except UpstreamError as exc:
+        if exc.status_code == 429:
+            return RedirectResponse(
+                url="/register?error=ratelimited", status_code=303
+            )
+        if exc.status_code == 422:
+            # Bad email shape or weak password the router rejected.
+            return RedirectResponse(url="/register?error=invalid", status_code=303)
+        # Any other upstream error (incl. a duplicate surfaced as 4xx): don't
+        # leak detail — log and show the neutral "received" outcome.
+        logger.info(
+            "webapp_register_failed",
+            extra={"event": "webapp_register_failed", "status_code": exc.status_code},
+        )
+    return RedirectResponse(url="/login?registered=1", status_code=303)
 
 
 @router.post("/set-password")

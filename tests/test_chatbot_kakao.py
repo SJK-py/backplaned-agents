@@ -1047,7 +1047,7 @@ class _LinkCreds:
         self.verified: list[str] = []
         self.opened: list[str] = []
 
-    async def verify_link_token(self, *, token: str) -> str | None:
+    async def link_channel(self, *, token: str) -> str | None:
         self.verified.append(token)
         return self._user_id
 
