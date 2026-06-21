@@ -24,6 +24,7 @@ from bp_router.db.models import (
     InvitationRow,
     LlmPresetRow,
     McpServerRow,
+    OidcIdentityRow,
     PendingRegistrationRow,
     SessionRow,
     TaskEventRow,
@@ -1103,6 +1104,100 @@ async def remove_from_serviced_by(
         return False
 
 
+# ---------------------------------------------------------------------------
+# OIDC identities (SSO) — (issuer, sub) → user_id
+# ---------------------------------------------------------------------------
+
+
+async def get_user_by_oidc_sub(
+    conn: asyncpg.Connection, *, issuer: str, sub: str
+) -> UserRow | None:
+    """Resolve a validated OIDC `(issuer, sub)` to the linked user, or None
+    if that subject has never been linked. Touches `last_login_at` is the
+    caller's job (see `touch_oidc_identity`)."""
+    row = await conn.fetchrow(
+        """
+        SELECT u.* FROM users u
+        JOIN user_oidc_identities i ON i.user_id = u.user_id
+        WHERE i.issuer = $1 AND i.sub = $2
+        """,
+        issuer, sub,
+    )
+    return UserRow.model_validate(dict(row)) if row else None
+
+
+async def link_oidc_identity(
+    conn: asyncpg.Connection,
+    *,
+    issuer: str,
+    sub: str,
+    user_id: str,
+    email_at_link: str | None = None,
+) -> OidcIdentityRow:
+    """Attach `(issuer, sub)` to `user_id`. Raises asyncpg
+    `UniqueViolationError` if that `(issuer, sub)` is already linked to a
+    DIFFERENT account — the caller maps that to a conflict (a single OP
+    identity must map to exactly one user). Idempotent for the SAME user:
+    re-linking refreshes `email_at_link` and bumps `last_login_at`."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO user_oidc_identities (issuer, sub, user_id, email_at_link)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (issuer, sub) DO UPDATE
+        SET email_at_link = COALESCE(EXCLUDED.email_at_link,
+                                     user_oidc_identities.email_at_link),
+            last_login_at = now()
+        WHERE user_oidc_identities.user_id = EXCLUDED.user_id
+        RETURNING *
+        """,
+        issuer, sub, user_id, email_at_link,
+    )
+    if row is None:
+        # ON CONFLICT matched a row owned by a DIFFERENT user (the WHERE
+        # guard suppressed the UPDATE) — surface it as a conflict.
+        raise ValueError("oidc identity already linked to another user")
+    return OidcIdentityRow.model_validate(dict(row))
+
+
+async def touch_oidc_identity(
+    conn: asyncpg.Connection, *, issuer: str, sub: str
+) -> None:
+    """Stamp `last_login_at` on an existing identity (post-login)."""
+    await conn.execute(
+        "UPDATE user_oidc_identities SET last_login_at = now() "
+        "WHERE issuer = $1 AND sub = $2",
+        issuer, sub,
+    )
+
+
+async def list_oidc_identities_for_user(
+    conn: asyncpg.Connection, user_id: str
+) -> list[OidcIdentityRow]:
+    """All OPs linked to this account (for the 'linked logins' pane)."""
+    rows = await conn.fetch(
+        "SELECT * FROM user_oidc_identities WHERE user_id = $1 "
+        "ORDER BY created_at",
+        user_id,
+    )
+    return [OidcIdentityRow.model_validate(dict(r)) for r in rows]
+
+
+async def unlink_oidc_identity(
+    conn: asyncpg.Connection, *, user_id: str, issuer: str, sub: str
+) -> bool:
+    """Remove one linked OP identity from this account. Scoped by `user_id`
+    so a user can only unlink their own. Returns True if a row was removed."""
+    result = await conn.execute(
+        "DELETE FROM user_oidc_identities "
+        "WHERE user_id = $1 AND issuer = $2 AND sub = $3",
+        user_id, issuer, sub,
+    )
+    try:
+        return int(result.rsplit(" ", 1)[-1]) == 1
+    except ValueError:
+        return False
+
+
 async def list_serviced_sessions(
     conn: asyncpg.Connection,
     *,
@@ -1523,6 +1618,11 @@ async def purge_user(
     )
     await conn.execute(
         "UPDATE files SET expires_at = now() WHERE user_id = $1", user_id
+    )
+    # Erase linked OIDC identities (issuer/sub/email are PII and would
+    # otherwise let an SSO login resolve to the tombstone).
+    await conn.execute(
+        "DELETE FROM user_oidc_identities WHERE user_id = $1", user_id
     )
     await conn.execute(
         "UPDATE users SET email = NULL, auth_secret_hash = NULL, "
