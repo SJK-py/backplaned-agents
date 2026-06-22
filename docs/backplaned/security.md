@@ -92,7 +92,11 @@ see `docs/router/state.md` §2.4).
   the verifier path is currently a no-op
   (`bp_router/api/auth.py:_no_totp_yet`). Until that lands, password
   is the only factor.
-- **OIDC** (Google, Microsoft, GitHub) — planned. Not yet wired.
+- **OIDC** (Authelia, Keycloak, Google, Microsoft) — the router is an OIDC
+  relying party for the webapp (`/v1/auth/oidc/*`, `bp_router/security/oidc.py`,
+  `ROUTER_OIDC_*`). After validating the OP `id_token` it issues the same
+  first-party session/refresh pair as password login. See
+  `docs/design/oidc-webapp.md`.
 - **Service principals** (`level=service`) authenticate with a
   long-lived API key (rotatable) carried as
   `Authorization: Bearer <key>`.
