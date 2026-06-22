@@ -909,6 +909,11 @@ class OidcExchangeRequest(BaseModel):
     code_verifier: str
     nonce: str
     redirect_uri: str
+    link_token: str | None = None
+    """Telegram-interop bootstrap: a single-use token minted by the bot's
+    `/password` (proving the caller owns a pre-existing account). When set,
+    the validated OIDC identity is ATTACHED to that account instead of
+    resolving/provisioning — see docs/design/oidc-webapp.md §6.3.1."""
 
 
 def _oidc_provider(request: Request):  # type: ignore[no-untyped-def]
@@ -1007,9 +1012,15 @@ async def oidc_exchange(
     refresh_expires = _now() + timedelta(seconds=settings.refresh_token_ttl_s)
     async with pool.acquire() as conn:
         async with conn.transaction():
-            user, outcome = await _resolve_or_provision_oidc_user(
-                conn, settings, issuer=issuer, claims=claims
-            )
+            if req.link_token:
+                user = await _link_oidc_via_token(
+                    conn, link_token=req.link_token, issuer=issuer, claims=claims
+                )
+                outcome = "linked_token"
+            else:
+                user, outcome = await _resolve_or_provision_oidc_user(
+                    conn, settings, issuer=issuer, claims=claims
+                )
             await queries.insert_refresh_token(
                 conn,
                 token_hash=_hash_refresh_token(refresh),
@@ -1124,5 +1135,142 @@ async def _link_or_conflict(
         )
     except Exception as exc:  # noqa: BLE001 — unique-violation / WHERE-guard race
         raise HTTPException(
-            409, "this identity is being linked elsewhere; retry"
+            409, "this identity is already linked to another account"
         ) from exc
+
+
+async def _link_oidc_via_token(
+    conn: Any, *, link_token: str, issuer: str, claims: dict  # noqa: ANN401
+):
+    """Telegram-interop bootstrap: consume a bot-minted link token (proof the
+    caller owns an existing account) and attach the validated OIDC identity to
+    it. The token IS the authority, so this bypasses the provisioning policy."""
+    user_id = await queries.consume_password_reset_token(
+        conn, token_hash=_hash_refresh_token(link_token)
+    )
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired link token")
+    user = await queries.get_user_by_id(conn, user_id)
+    if not queries.user_is_active(user):
+        raise HTTPException(409, "account is not active")
+    await _link_or_conflict(
+        conn, issuer=issuer, sub=claims["sub"], user_id=user.user_id,
+        email=claims.get("email"),
+    )
+    return user
+
+
+# --- linked-logins management (authenticated as the user) -------------------
+
+
+class OidcIdentityView(BaseModel):
+    issuer: str
+    sub: str
+    email_at_link: str | None
+    created_at: datetime
+    last_login_at: datetime | None
+
+
+class OidcIdentitiesResponse(BaseModel):
+    identities: list[OidcIdentityView]
+    has_password: bool
+
+
+class UnlinkOidcRequest(BaseModel):
+    issuer: str
+    sub: str
+
+
+@router.get("/oidc/identities", response_model=OidcIdentitiesResponse)
+async def list_oidc_identities(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> OidcIdentitiesResponse:
+    """The caller's linked SSO logins (for the account-settings pane)."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await queries.list_oidc_identities_for_user(conn, principal.user_id)
+        user = await queries.get_user_by_id(conn, principal.user_id)
+    has_password = bool(
+        user and user.auth_kind == "password" and user.auth_secret_hash
+    )
+    return OidcIdentitiesResponse(
+        identities=[OidcIdentityView.model_validate(r, from_attributes=True)
+                    for r in rows],
+        has_password=has_password,
+    )
+
+
+@router.delete("/oidc/identities", status_code=204)
+async def unlink_oidc_identity(
+    req: UnlinkOidcRequest,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> None:
+    """Unlink one of the caller's SSO logins. Refuses to remove the LAST
+    remaining sign-in method (no password + this is the only identity), which
+    would otherwise lock the user out of their own account."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            user = await queries.get_user_by_id(conn, principal.user_id)
+            rows = await queries.list_oidc_identities_for_user(
+                conn, principal.user_id
+            )
+            has_password = bool(
+                user and user.auth_kind == "password" and user.auth_secret_hash
+            )
+            removing_last = (
+                not has_password
+                and len(rows) <= 1
+                and any(r.issuer == req.issuer and r.sub == req.sub for r in rows)
+            )
+            if removing_last:
+                raise HTTPException(
+                    409,
+                    "cannot remove your only sign-in method; set a password "
+                    "or link another login first",
+                )
+            removed = await queries.unlink_oidc_identity(
+                conn, user_id=principal.user_id, issuer=req.issuer, sub=req.sub,
+            )
+            if not removed:
+                raise HTTPException(404, "identity not found")
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=principal.user_id,
+                event="auth.oidc_identity_unlinked",
+                target_kind="user", target_id=principal.user_id,
+                payload={"issuer": req.issuer},
+            )
+
+
+class OidcLogoutUrlResponse(BaseModel):
+    logout_url: str | None
+
+
+@router.get("/oidc/logout-url", response_model=OidcLogoutUrlResponse)
+async def oidc_logout_url(
+    request: Request,
+    post_logout_redirect_uri: str | None = None,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> OidcLogoutUrlResponse:
+    """RP-initiated logout URL (the OP's `end_session_endpoint`), or null when
+    SSO is off / the OP advertises none. The frontend redirects the browser
+    here AFTER clearing its own session so the OP session ends too."""
+    provider = request.app.state.bp.oidc_provider
+    if provider is None:
+        return OidcLogoutUrlResponse(logout_url=None)
+    # Only honour a post-logout redirect that's on our allowlist (it's a
+    # browser-facing redirect target, same open-redirect concern).
+    settings = request.app.state.bp.settings
+    if post_logout_redirect_uri and (
+        post_logout_redirect_uri not in settings.oidc_allowed_redirect_uris
+    ):
+        post_logout_redirect_uri = None
+    try:
+        url = await provider.end_session_url(
+            post_logout_redirect_uri=post_logout_redirect_uri
+        )
+    except OidcError:
+        url = None
+    return OidcLogoutUrlResponse(logout_url=url)

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = frozenset({
     "/login", "/set-password", "/register",
-    "/auth/sso/login", "/auth/sso/callback",
+    "/auth/sso/login", "/auth/sso/callback", "/auth/sso/link",
 })
 """Paths that don't require authentication. `/set-password` redeems a
 one-time token (the token IS the auth, like login) — reachable before the

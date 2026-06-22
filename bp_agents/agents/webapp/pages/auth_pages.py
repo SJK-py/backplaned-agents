@@ -159,8 +159,46 @@ async def sso_login(request: Request, next: str = "") -> RedirectResponse:
         "nonce": body["nonce"],
         "verifier": body["code_verifier"],
         "next": _safe_next(next),
+        # A pending link token (bot bootstrap or add-an-IdP) attaches the
+        # resulting identity to a specific account instead of provisioning.
+        "link_token": request.session.pop("sso_link_token", None),
     }
     return RedirectResponse(url=body["authorize_url"], status_code=303)
+
+
+@router.post("/auth/sso/link")
+async def sso_link_start(
+    request: Request, token: str = Form(...)
+) -> RedirectResponse:
+    """Bootstrap SSO for a PRE-EXISTING account (e.g. a Telegram-first user):
+    stash the bot-minted `/password` token, then start the SSO redirect — the
+    callback attaches the validated identity to that account."""
+    if not request.app.state.config.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    request.session["sso_link_token"] = token.strip()
+    return RedirectResponse(url="/auth/sso/login", status_code=303)
+
+
+@router.post("/auth/sso/connect")
+async def sso_connect(request: Request) -> RedirectResponse:
+    """Add another SSO login to the CURRENT account. Mints a self-service link
+    token (authenticated by this session), stashes it, then runs the SSO
+    redirect so the callback links the new identity to this account."""
+    cfg = request.app.state.config
+    access = request.session.get("access_token")
+    if not cfg.sso_enabled or not access:
+        return RedirectResponse(url="/config", status_code=303)
+    try:
+        body = await request.app.state.upstream.mint_link_token(access_token=access)
+    except UpstreamError as exc:
+        logger.info(
+            "webapp_sso_connect_failed",
+            extra={"event": "webapp_sso_connect_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/config?sso_error=1", status_code=303)
+    request.session["sso_link_token"] = body["link_token"]
+    return RedirectResponse(url="/auth/sso/login", status_code=303)
 
 
 @router.get("/auth/sso/callback")
@@ -188,6 +226,7 @@ async def sso_callback(
         body = await request.app.state.upstream.oidc_exchange(
             code=code, code_verifier=flow["verifier"], nonce=flow["nonce"],
             redirect_uri=_sso_redirect_uri(request),
+            link_token=flow.get("link_token"),
         )
     except UpstreamError as exc:
         logger.info(
@@ -335,6 +374,16 @@ async def logout(request: Request) -> RedirectResponse:
     upstream = request.app.state.upstream
     access = request.session.get("access_token")
     refresh = request.session.get("refresh_token")
+    was_oidc = request.session.get("auth_kind") == "oidc"
+    # For an SSO session, ask the router for the OP's RP-initiated logout URL
+    # (while we still hold the access token) so we can propagate the logout to
+    # the IdP after revoking our own session.
+    op_logout_url: str | None = None
+    if access and was_oidc and request.app.state.config.sso_enabled:
+        try:
+            op_logout_url = await upstream.oidc_logout_url(access_token=access)
+        except UpstreamError:
+            op_logout_url = None
     if access:
         try:
             await upstream.logout(access_token=access, refresh_token=refresh)
@@ -345,4 +394,4 @@ async def logout(request: Request) -> RedirectResponse:
                        "status_code": exc.status_code},
             )
     clear_session(request)
-    return RedirectResponse(url="/login", status_code=303)
+    return RedirectResponse(url=op_logout_url or "/login", status_code=303)

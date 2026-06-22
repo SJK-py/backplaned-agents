@@ -95,15 +95,46 @@ class UpstreamClient:
         )
 
     async def oidc_exchange(
-        self, *, code: str, code_verifier: str, nonce: str, redirect_uri: str
+        self, *, code: str, code_verifier: str, nonce: str, redirect_uri: str,
+        link_token: str | None = None,
     ) -> dict[str, Any]:
         """Finish an SSO login: hand the OP `code` (+ our PKCE verifier and
-        nonce) to the router, which validates and returns a `TokenPair`."""
+        nonce) to the router, which validates and returns a `TokenPair`. With
+        `link_token` the validated identity is attached to the token's account
+        instead of resolving/provisioning (Telegram-interop / add-an-IdP)."""
+        body: dict[str, Any] = {
+            "code": code, "code_verifier": code_verifier,
+            "nonce": nonce, "redirect_uri": redirect_uri,
+        }
+        if link_token:
+            body["link_token"] = link_token
+        return await self.request("POST", "/v1/auth/oidc/exchange", json=body)
+
+    async def list_oidc_identities(self, *, access_token: str) -> dict[str, Any]:
         return await self.request(
-            "POST", "/v1/auth/oidc/exchange",
-            json={"code": code, "code_verifier": code_verifier,
-                  "nonce": nonce, "redirect_uri": redirect_uri},
+            "GET", "/v1/auth/oidc/identities", access_token=access_token
         )
+
+    async def unlink_oidc_identity(
+        self, *, access_token: str, issuer: str, sub: str
+    ) -> None:
+        await self.request(
+            "DELETE", "/v1/auth/oidc/identities", access_token=access_token,
+            json={"issuer": issuer, "sub": sub},
+        )
+
+    async def oidc_logout_url(
+        self, *, access_token: str, post_logout_redirect_uri: str | None = None
+    ) -> str | None:
+        params = (
+            {"post_logout_redirect_uri": post_logout_redirect_uri}
+            if post_logout_redirect_uri else None
+        )
+        body = await self.request(
+            "GET", "/v1/auth/oidc/logout-url", access_token=access_token,
+            params=params,
+        )
+        return (body or {}).get("logout_url")
 
     async def mint_link_token(self, *, access_token: str) -> dict[str, Any]:
         """Mint a single-use channel-link token for the logged-in user

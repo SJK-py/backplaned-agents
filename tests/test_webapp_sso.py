@@ -37,11 +37,13 @@ class _Upstream:
         }
 
     async def oidc_exchange(
-        self, *, code: str, code_verifier: str, nonce: str, redirect_uri: str
+        self, *, code: str, code_verifier: str, nonce: str, redirect_uri: str,
+        link_token: str | None = None,
     ) -> dict:
         self.exchanges.append({
             "code": code, "code_verifier": code_verifier,
             "nonce": nonce, "redirect_uri": redirect_uri,
+            "link_token": link_token,
         })
         if self.exchange_error is not None:
             raise self.exchange_error
@@ -49,6 +51,15 @@ class _Upstream:
             "access_token": _access_jwt("usr_sso"), "refresh_token": "r",
             "expires_at": "2999-01-01T00:00:00+00:00", "level": "tier1",
         }
+
+    async def mint_link_token(self, *, access_token: str) -> dict:
+        return {"link_token": "MINTED-TOK", "expires_at": "2999-01-01T00:00:00+00:00"}
+
+    async def unlink_oidc_identity(self, *, access_token: str, issuer: str, sub: str):
+        self.unlinked = getattr(self, "unlinked", [])
+        if getattr(self, "unlink_error", None) is not None:
+            raise self.unlink_error
+        self.unlinked.append((issuer, sub))
 
     async def aclose(self) -> None:
         pass
@@ -143,6 +154,7 @@ def test_sso_full_flow_authenticates() -> None:
     assert up.exchanges == [{
         "code": "CODE", "code_verifier": "VERIFIER-1", "nonce": "NONCE-1",
         "redirect_uri": "https://app.test/auth/sso/callback",
+        "link_token": None,
     }]
 
 
@@ -204,3 +216,109 @@ def test_login_page_sso_error_message() -> None:
     with _client(_build_app(_Upstream())) as c:
         html = c.get("/login?error=sso").text
     assert "Single sign-on failed" in html
+
+
+# --- Phase 3: linking ------------------------------------------------------
+
+
+def test_bootstrap_link_token_flows_to_exchange() -> None:
+    """The Telegram-interop path: paste a bot token at /auth/sso/link, then the
+    SSO round-trip carries it into the router exchange so the identity attaches
+    to the pre-existing account."""
+    pytest.importorskip("fastapi")
+    up = _Upstream()
+    with _client(_build_app(up)) as c:
+        r1 = c.post(
+            "/auth/sso/link", data={"token": "BOT-TOK"}, follow_redirects=False
+        )
+        assert r1.status_code == 303
+        assert r1.headers["location"] == "/auth/sso/login"
+        c.get("/auth/sso/login", follow_redirects=False)
+        r3 = c.get(
+            "/auth/sso/callback",
+            params={"code": "C", "state": "STATE-1"}, follow_redirects=False,
+        )
+    assert r3.headers["location"] == "/"
+    assert up.exchanges[0]["link_token"] == "BOT-TOK"
+
+
+def test_sso_link_is_csrf_exempt_and_public() -> None:
+    pytest.importorskip("fastapi")
+    from bp_agents.agents.webapp.auth import PUBLIC_PATHS
+    from bp_agents.agents.webapp.csrf import EXEMPT_PATHS
+
+    assert "/auth/sso/link" in PUBLIC_PATHS
+    assert "/auth/sso/link" in EXEMPT_PATHS
+
+
+def test_sso_connect_mints_and_stashes_then_redirects() -> None:
+    """`/auth/sso/connect` (authenticated) mints a self-service link token and
+    starts the SSO flow so a logged-in user can add another IdP. Tested by
+    calling the handler directly (the established auth-POST test pattern)."""
+    pytest.importorskip("fastapi")
+    import asyncio
+    from types import SimpleNamespace
+
+    from bp_agents.agents.webapp.pages.auth_pages import sso_connect
+
+    up = _Upstream()
+    req = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(
+            config=SimpleNamespace(sso_enabled=True), upstream=up,
+        )),
+        session={"access_token": "a"},
+    )
+    r = asyncio.run(sso_connect(req))
+    assert r.status_code == 303
+    assert r.headers["location"] == "/auth/sso/login"
+    assert req.session["sso_link_token"] == "MINTED-TOK"
+
+
+def test_oidc_unlink_handler() -> None:
+    pytest.importorskip("fastapi")
+    import asyncio
+    from types import SimpleNamespace
+
+    from bp_agents.agents.webapp.pages.config import oidc_unlink
+    from bp_agents.agents.webapp.upstream import UpstreamError
+
+    up = _Upstream()
+    req = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(upstream=up)),
+        session={"access_token": "a"},
+    )
+    r = asyncio.run(oidc_unlink(req, issuer="https://op", sub="s"))
+    assert r.headers["location"] == "/config?saved=1"
+    assert up.unlinked == [("https://op", "s")]
+
+    # last-method refusal (router 409) surfaces a friendly code.
+    up.unlink_error = UpstreamError(409, "last")
+    r2 = asyncio.run(oidc_unlink(req, issuer="https://op", sub="s"))
+    assert r2.headers["location"] == "/config?sso_error=last"
+
+
+def test_logout_redirects_to_op_for_sso_sessions() -> None:
+    """An SSO session's logout propagates to the OP (RP-initiated logout)."""
+    pytest.importorskip("fastapi")
+    import asyncio
+    from types import SimpleNamespace
+
+    from bp_agents.agents.webapp.pages.auth_pages import logout
+
+    class _U(_Upstream):
+        async def logout(self, *, access_token, refresh_token=None):
+            pass
+
+        async def oidc_logout_url(self, *, access_token, post_logout_redirect_uri=None):
+            return "https://op.example/logout"
+
+    up = _U()
+    req = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(
+            config=SimpleNamespace(sso_enabled=True), upstream=up,
+        )),
+        session={"access_token": "a", "refresh_token": "r", "auth_kind": "oidc"},
+    )
+    r = asyncio.run(logout(req))
+    assert r.headers["location"] == "https://op.example/logout"
+    assert req.session == {}  # local session cleared
