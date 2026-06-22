@@ -246,6 +246,38 @@ def test_validate_rejects_bad_claims(claims_over, nonce) -> None:
     asyncio.run(_drive())
 
 
+def test_validate_rejects_mismatched_azp() -> None:
+    """A multi-audience token whose authorized party isn't us is rejected
+    even though our client_id is listed in `aud` (OIDC §3.1.3.7)."""
+    from bp_router.security.oidc import OidcError
+
+    jwk, make_token, _ = _rsa_op()
+    p = _provider(jwk)
+
+    async def _drive():
+        token = make_token(_good_claims(
+            aud=[_CLIENT_ID, "other-client"], azp="other-client",
+        ))
+        with pytest.raises(OidcError):
+            await p.validate_id_token(token, nonce="N")
+
+    asyncio.run(_drive())
+
+
+def test_validate_accepts_matching_azp() -> None:
+    jwk, make_token, _ = _rsa_op()
+    p = _provider(jwk)
+
+    async def _drive():
+        token = make_token(_good_claims(
+            aud=[_CLIENT_ID, "other-client"], azp=_CLIENT_ID,
+        ))
+        claims = await p.validate_id_token(token, nonce="N")
+        assert claims["sub"] == "subject-1"
+
+    asyncio.run(_drive())
+
+
 def test_validate_rejects_wrong_signing_key() -> None:
     """Token signed by a key NOT in the OP's JWKS (kid collides) → rejected."""
     from cryptography.hazmat.primitives.asymmetric import rsa

@@ -215,6 +215,14 @@ class OidcProvider:
         # PyJWT doesn't check it.
         if not nonce or claims.get("nonce") != nonce:
             raise OidcError("id_token nonce mismatch")
+        # OIDC core §3.1.3.7: when present (required by spec if the token has
+        # multiple audiences), `azp` MUST identify us. PyJWT only checks that
+        # our client_id is *among* `aud`, so without this an OP that mints a
+        # multi-aud token for another client (with us merely listed) would
+        # pass. Reject any token whose authorized party isn't us.
+        azp = claims.get("azp")
+        if azp is not None and azp != self._client_id:
+            raise OidcError("id_token azp mismatch")
         return claims
 
     async def _signing_key(self, kid: str | None, alg: str) -> Any:
