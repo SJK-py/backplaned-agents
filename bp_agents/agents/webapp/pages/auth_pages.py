@@ -8,7 +8,7 @@ admin-gated, unlike the admin BFF).
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -69,12 +69,14 @@ async def login_form(
         return RedirectResponse(url="/", status_code=303)
     templates = request.app.state.templates
     reset_msg = _RESET_ERRORS.get(reset_error or "")
+    next_q = request.query_params.get("next", "")
     return templates.TemplateResponse(
         request,
         "login.html",
         {
-            "error": error,
-            "next": request.query_params.get("next", ""),
+            "error": "Single sign-on failed. Please try again." if error == "sso"
+            else error,
+            "next": next_q,
             "reset_ok": reset == "1",
             "reset_error": reset_msg,
             # Open the set-password form when redeeming failed, so the error
@@ -85,6 +87,11 @@ async def login_form(
             "changed_ok": changed == "1",
             # Shown after a successful self-service signup submission.
             "registered_ok": registered == "1",
+            # SSO button (frontend toggle; the router gates the actual flow).
+            "sso_enabled": request.app.state.config.sso_enabled,
+            "sso_login_url": "/auth/sso/login" + (
+                f"?next={quote(next_q)}" if next_q else ""
+            ),
         },
     )
 
@@ -113,7 +120,88 @@ async def login_submit(
             status_code=401,
         )
     store_login(request, login_response=body, email=email)
+    request.session["auth_kind"] = "password"
     return RedirectResponse(url=_safe_next(next), status_code=303)
+
+
+# Session key holding the in-flight OIDC flow's transient values between the
+# login redirect and the callback (state/nonce/PKCE verifier + post-login
+# next). Lives in the signed session cookie — same store as the eventual
+# tokens, so no weaker than the rest of the BFF session.
+_SSO_FLOW_KEY = "sso_flow"
+
+
+def _sso_redirect_uri(request: Request) -> str:
+    base = (request.app.state.config.public_base_url or "").rstrip("/")
+    return f"{base}/auth/sso/callback"
+
+
+@router.get("/auth/sso/login")
+async def sso_login(request: Request, next: str = "") -> RedirectResponse:
+    """Begin SSO: get the OP authorize URL from the router, stash the
+    transient state/nonce/verifier in the session cookie, redirect to the OP."""
+    cfg = request.app.state.config
+    if not cfg.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    try:
+        body = await request.app.state.upstream.oidc_authorize(
+            redirect_uri=_sso_redirect_uri(request)
+        )
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_sso_authorize_failed",
+            extra={"event": "webapp_sso_authorize_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    request.session[_SSO_FLOW_KEY] = {
+        "state": body["state"],
+        "nonce": body["nonce"],
+        "verifier": body["code_verifier"],
+        "next": _safe_next(next),
+    }
+    return RedirectResponse(url=body["authorize_url"], status_code=303)
+
+
+@router.get("/auth/sso/callback")
+async def sso_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+) -> RedirectResponse:
+    """Finish SSO: verify `state` against the cookie, exchange the code via
+    the router, and store the returned TokenPair like any other login."""
+    cfg = request.app.state.config
+    if not cfg.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    # Single-use: pop the flow so a replayed callback can't be reused.
+    flow = request.session.pop(_SSO_FLOW_KEY, None)
+    if error or not code or not state or not flow or state != flow.get("state"):
+        logger.info(
+            "webapp_sso_callback_rejected",
+            extra={"event": "webapp_sso_callback_rejected",
+                   "reason": error or "state_mismatch_or_missing"},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    try:
+        body = await request.app.state.upstream.oidc_exchange(
+            code=code, code_verifier=flow["verifier"], nonce=flow["nonce"],
+            redirect_uri=_sso_redirect_uri(request),
+        )
+    except UpstreamError as exc:
+        logger.info(
+            "webapp_sso_exchange_failed",
+            extra={"event": "webapp_sso_exchange_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    # The TokenPair carries no email; SSO display falls back to user_id.
+    store_login(request, login_response=body, email="")
+    request.session["auth_kind"] = "oidc"
+    return RedirectResponse(
+        url=_safe_next(flow.get("next") or "/"), status_code=303
+    )
 
 
 @router.get("/register", response_class=HTMLResponse)

@@ -85,6 +85,26 @@ class UpstreamClient:
             "POST", "/v1/registrations/public", json=body
         )
 
+    async def oidc_authorize(self, *, redirect_uri: str) -> dict[str, Any]:
+        """Start an SSO login: ask the router for the OP authorization URL +
+        the transient `state`/`nonce`/`code_verifier` to stash in our cookie.
+        Unauthenticated (no user yet)."""
+        return await self.request(
+            "POST", "/v1/auth/oidc/authorize",
+            json={"redirect_uri": redirect_uri},
+        )
+
+    async def oidc_exchange(
+        self, *, code: str, code_verifier: str, nonce: str, redirect_uri: str
+    ) -> dict[str, Any]:
+        """Finish an SSO login: hand the OP `code` (+ our PKCE verifier and
+        nonce) to the router, which validates and returns a `TokenPair`."""
+        return await self.request(
+            "POST", "/v1/auth/oidc/exchange",
+            json={"code": code, "code_verifier": code_verifier,
+                  "nonce": nonce, "redirect_uri": redirect_uri},
+        )
+
     async def mint_link_token(self, *, access_token: str) -> dict[str, Any]:
         """Mint a single-use channel-link token for the logged-in user
         (`POST /v1/auth/link-tokens`). The user pastes it into a chat bot's

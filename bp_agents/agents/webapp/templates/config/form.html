@@ -104,6 +104,7 @@
     </button>
   </form>
 
+  {% if request.session.get('auth_kind') != 'oidc' %}
   <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Change password</h2>
   <p class="mb-3 text-sm text-brand-500">
     Sets a new sign-in password. You’ll be signed out and need to sign in again.
@@ -154,6 +155,7 @@
       Change password
     </button>
   </form>
+  {% endif %}
 
   <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Connect a chat channel</h2>
   <p class="mb-3 text-sm text-brand-500">

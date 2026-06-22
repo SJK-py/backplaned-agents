@@ -56,6 +56,17 @@
                    font-medium px-3 py-2 transition-colors">
       Sign in
     </button>
+
+    {% if sso_enabled %}
+      <div class="relative my-1 text-center">
+        <span class="bg-white px-2 text-xs text-brand-500/70">or</span>
+      </div>
+      <a href="{{ sso_login_url }}"
+         class="block w-full rounded border border-brand-500/20 px-3 py-2 text-center
+                text-sm font-medium text-brand-700 hover:bg-brand-500/5 transition-colors">
+        Sign in with SSO
+      </a>
+    {% endif %}
   </form>
 
   <p class="mt-4 text-center text-xs text-brand-500/80" x-show="mode === 'login'">
