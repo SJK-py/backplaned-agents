@@ -177,6 +177,8 @@ File / webpage → Markdown (MarkItDown). **Not hidden** — `convert` is a usef
 
 `auto` ⇒ content if ≤2k chars else file; `content` over 100k force-truncates. `webpage` fetch capped at 5 MB (env-configurable). `non_tool_modes`: `[webpage]`.
 
+**LLM-vision OCR (optional).** With `SUITE_MD_OCR_API_KEY` + `SUITE_MD_OCR_MODEL` set, `convert` loads the `markitdown-ocr` plugin and OCRs images embedded in PDF/DOCX/PPTX/XLSX files — plus full-page OCR for scanned PDFs — inlining the extracted text. OCR uses its OWN OpenAI-compatible provider (key/model/`SUITE_MD_OCR_BASE_URL`/`SUITE_MD_OCR_PROMPT`), separate from the router's presets, because MarkItDown needs a synchronous `llm_client` that can't ride the frame channel. Unset ⇒ unchanged (metadata-only image handling).
+
 ---
 
 ## sandbox — group infra

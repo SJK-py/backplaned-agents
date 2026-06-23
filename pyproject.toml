@@ -145,6 +145,15 @@ suite = [
     # 0.0.x alphas don't define them, so a looser floor could resolve a version
     # that ignores the [pdf,...] request and still MissingDependency at runtime).
     "markitdown[pdf,docx,pptx,xlsx,xls,outlook]>=0.1.0",
+    # LLM-vision OCR for images embedded in PDF/DOCX/PPTX/XLSX (and scanned
+    # PDFs) — md_converter loads this MarkItDown plugin when SUITE_MD_OCR_* is
+    # configured. It reuses MarkItDown's `llm_client`/`llm_model` hook (no new
+    # ML/binary deps) and, with no client, silently no-ops — so it's safe to
+    # install unconditionally. `openai` supplies the synchronous OpenAI-
+    # compatible client the plugin expects (any OpenAI-shaped endpoint works:
+    # OpenAI/Azure/vLLM/Ollama/…); floor matches the `llm-openai` extra.
+    "markitdown-ocr>=0.1.0",
+    "openai>=1.68",
     # DST-aware cron evaluation for the scheduler.
     "croniter>=2.0",
     # Optional distributed per-session lock (SUITE_VALKEY_URL); the import is
