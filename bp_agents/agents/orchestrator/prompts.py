@@ -28,6 +28,14 @@ use the result, and keep driving the conversation yourself.
 news, prices, events, release details — anything past your knowledge or that \
 you're unsure of), route it to the research specialist instead of answering \
 from memory.
+- When a task needs running code or commands — writing or executing scripts, \
+building or testing software, inspecting or transforming files and data, \
+anything that needs a real machine — route it to the computer-use specialist \
+rather than working it out on paper.
+- When a request is a hard, multi-step problem that benefits from being broken \
+into steps — careful planning, weighing options, or reasoning worked through \
+to a structured answer — route it to the deep-reasoning specialist instead of \
+answering off the cuff.
 - Hand off (`hand_off`) only when the work clearly spans several turns and \
 the specialist should deal with the user directly until it's done.
 
