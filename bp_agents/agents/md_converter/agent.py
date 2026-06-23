@@ -4,6 +4,13 @@
 small results, or a stored `.md` stash name for large ones — `auto`
 decides on a threshold). `webpage` fetches a URL and converts the HTML.
 MarkItDown is synchronous, so conversions run in `asyncio.to_thread`.
+
+When `SUITE_MD_OCR_*` is configured, conversions additionally run the
+`markitdown-ocr` plugin: a vision LLM OCRs images embedded in
+PDF/DOCX/PPTX/XLSX files (and full pages of scanned PDFs). The plugin
+needs a synchronous OpenAI-compatible client, which can't ride the
+router's frame channel, so OCR uses its own dedicated provider
+credentials (see `bp_agents.settings`). Unconfigured → unchanged.
 """
 
 from __future__ import annotations
@@ -81,10 +88,58 @@ agent = Agent(
 )
 
 
-def _markitdown_file(path: str) -> str:
+# 1-slot memo for the lazily-built OCR client. A mutable container mutated
+# in place (not rebound), so the builder needs no `global`. Empty until the
+# first OCR conversion builds the client.
+_ocr_client_box: list = []
+
+
+def _ocr_llm_client():  # -> openai.OpenAI | None (lazy import)
+    """The OpenAI-compatible client MarkItDown's OCR plugin uses for image
+    OCR, or None when OCR is not configured. Built from the dedicated
+    `SUITE_MD_OCR_*` credentials (the router owns the suite's normal LLM
+    routing, but a synchronous third-party-library client can't ride the
+    frame channel, so OCR gets its own provider config). Cached so the
+    client is built once, not per conversion. OCR engages only when BOTH a
+    key and a model are set — otherwise the `openai` import never runs."""
+    if _settings.md_ocr_api_key is None or not _settings.md_ocr_model:
+        return None
+    if _ocr_client_box:
+        return _ocr_client_box[0]
+    from openai import OpenAI  # noqa: PLC0415
+
+    client = OpenAI(
+        api_key=_settings.md_ocr_api_key.get_secret_value(),
+        # None → the OpenAI SDK's default endpoint; set for Azure/vLLM/etc.
+        base_url=_settings.md_ocr_base_url or None,
+    )
+    _ocr_client_box.append(client)
+    return client
+
+
+def _make_markitdown():  # -> markitdown.MarkItDown (lazy import)
+    """A MarkItDown instance, OCR-enabled when `SUITE_MD_OCR_*` is configured
+    and plain otherwise. With OCR on, the `markitdown-ocr` plugin registers
+    vision-OCR converters (PDF/DOCX/PPTX/XLSX + scanned-PDF fallback) ahead of
+    the built-ins; with it off, behaviour is unchanged from a bare
+    `MarkItDown()`."""
     from markitdown import MarkItDown  # noqa: PLC0415
 
-    return MarkItDown().convert(path).text_content
+    client = _ocr_llm_client()
+    if client is None:
+        return MarkItDown()
+    kwargs = {
+        "enable_plugins": True,
+        "llm_client": client,
+        "llm_model": _settings.md_ocr_model,
+    }
+    if _settings.md_ocr_prompt:  # else the plugin's default prompt
+        kwargs["llm_prompt"] = _settings.md_ocr_prompt
+    return MarkItDown(**kwargs)
+
+
+def _markitdown_file(path: str) -> str:
+    return _make_markitdown().convert(path).text_content
 
 
 def _markitdown_bytes(data: bytes, suffix: str) -> str:

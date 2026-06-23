@@ -359,6 +359,35 @@ class SuiteSettings(BaseSettings):
     """A page's relevance score is the sum of its top-N chunk scores squared —
     rewards concentrated relevance while bounding long-page bias."""
 
+    # ------------------------------------------------------------------
+    # md_converter — LLM-vision OCR (markitdown-ocr plugin)
+    #
+    # MarkItDown's built-in converters do NOT OCR images embedded in
+    # PDF/DOCX/PPTX/XLSX (or scanned PDFs). The `markitdown-ocr` plugin
+    # adds that by reusing MarkItDown's `llm_client` / `llm_model` hook,
+    # which expects a *synchronous* OpenAI-compatible client passed
+    # straight into the constructor. The router owns the suite's normal
+    # LLM routing (over the frame channel), but that path can't be handed
+    # to a third-party library, so OCR gets its OWN dedicated provider
+    # credentials here. OCR engages ONLY when both key and model are set;
+    # otherwise md_converter behaves exactly as before (plugin loads but
+    # silently skips OCR — falling back to the built-in converters).
+    # ------------------------------------------------------------------
+
+    md_ocr_api_key: SecretStr | None = None
+    """API key for the OCR vision model (OpenAI-compatible). The gate, with
+    `md_ocr_model`: unset → OCR disabled and conversions are byte-for-byte
+    what they were before this feature."""
+    md_ocr_model: str | None = None
+    """Vision-capable model id for image OCR (e.g. `gpt-4o`). Must support
+    image inputs. Required (with `md_ocr_api_key`) to enable OCR."""
+    md_ocr_base_url: str | None = None
+    """OpenAI-compatible endpoint for the OCR client (e.g. an Azure/vLLM/
+    Ollama/LM Studio base_url). Unset → the OpenAI SDK's default endpoint."""
+    md_ocr_prompt: str | None = None
+    """Optional override of the plugin's extraction prompt (e.g. "Extract all
+    text, preserving table structure."). Unset → the plugin's default."""
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]

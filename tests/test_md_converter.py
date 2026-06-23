@@ -112,6 +112,105 @@ def test_html_to_text_regex_fallback() -> None:
     assert "- one" in out and "- two" in out
 
 
+def test_ocr_disabled_by_default() -> None:
+    """With no SUITE_MD_OCR_* config, no OCR client is built (the `openai`
+    import never runs) and MarkItDown is constructed plain — behaviour is
+    byte-for-byte what it was before the OCR feature."""
+    import sys
+    import types
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    assert mod._ocr_llm_client() is None
+
+    md_kwargs: dict = {}
+
+    class _FakeMarkItDown:
+        def __init__(self, **kwargs) -> None:
+            md_kwargs.update(kwargs)
+
+    fake_md = types.ModuleType("markitdown")
+    fake_md.MarkItDown = _FakeMarkItDown
+    saved = sys.modules.get("markitdown")
+    sys.modules["markitdown"] = fake_md
+    try:
+        mod._make_markitdown()
+    finally:
+        if saved is not None:
+            sys.modules["markitdown"] = saved
+        else:
+            del sys.modules["markitdown"]
+    assert md_kwargs == {}  # no enable_plugins / llm_client / llm_model
+
+
+def test_ocr_configured_builds_plugin_client(monkeypatch) -> None:
+    """KEY + MODEL set ⇒ an OpenAI-compatible client is built from the
+    dedicated OCR creds and handed to MarkItDown with enable_plugins +
+    llm_model (+ llm_prompt when set)."""
+    import sys
+    import types
+
+    from pydantic import SecretStr
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+
+    monkeypatch.setattr(mod._settings, "md_ocr_api_key", SecretStr("sk-test"))
+    monkeypatch.setattr(mod._settings, "md_ocr_model", "gpt-4o")
+    monkeypatch.setattr(mod._settings, "md_ocr_base_url", "https://oai.example/v1")
+    monkeypatch.setattr(mod._settings, "md_ocr_prompt", "Extract text.")
+    mod._ocr_client_box.clear()
+
+    client_kwargs: dict = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs) -> None:
+            client_kwargs.update(kwargs)
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = _FakeOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    md_kwargs: dict = {}
+
+    class _FakeMarkItDown:
+        def __init__(self, **kwargs) -> None:
+            md_kwargs.update(kwargs)
+
+    fake_md = types.ModuleType("markitdown")
+    fake_md.MarkItDown = _FakeMarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", fake_md)
+
+    mod._make_markitdown()
+
+    # Client built from the OCR-specific credentials (secret unwrapped).
+    assert client_kwargs == {
+        "api_key": "sk-test",
+        "base_url": "https://oai.example/v1",
+    }
+    # Plugin enabled and pointed at the vision model + custom prompt.
+    assert md_kwargs["enable_plugins"] is True
+    assert md_kwargs["llm_model"] == "gpt-4o"
+    assert md_kwargs["llm_prompt"] == "Extract text."
+    assert isinstance(md_kwargs["llm_client"], _FakeOpenAI)
+
+    # Cached: a second call reuses the same client, no rebuild.
+    again = mod._ocr_llm_client()
+    assert again is md_kwargs["llm_client"]
+
+
+def test_ocr_key_without_model_stays_disabled(monkeypatch) -> None:
+    """A key alone (no model) must NOT enable OCR — the gate requires both,
+    so a half-configured deploy fails safe to the built-in converters."""
+    import sys
+
+    from pydantic import SecretStr
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    monkeypatch.setattr(mod._settings, "md_ocr_api_key", SecretStr("sk-test"))
+    monkeypatch.setattr(mod._settings, "md_ocr_model", None)
+    mod._ocr_client_box.clear()
+    assert mod._ocr_llm_client() is None
+
+
 def test_decode_html_detects_non_utf8_charset() -> None:
     """The fallback decode must honour the page's charset — a naive UTF-8
     decode mangles EUC-KR/CP949 Korean pages into replacement chars."""
