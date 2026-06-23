@@ -7,6 +7,7 @@ import hashlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
@@ -17,6 +18,7 @@ from bp_router.quota import (
     BUCKET_CHANGE_PASSWORD,
     BUCKET_LINK_TOKEN_MINT,
     BUCKET_LOGIN,
+    BUCKET_OIDC,
     BUCKET_REFRESH,
     BUCKET_RESET_PASSWORD,
 )
@@ -26,6 +28,12 @@ from bp_router.security.jwt import (
     require_authenticated,
     require_service,
     revoke_jti,
+)
+from bp_router.security.oidc import (
+    OidcError,
+    generate_nonce,
+    generate_pkce,
+    generate_state,
 )
 from bp_router.security.passwords import (
     hash_password,
@@ -868,3 +876,401 @@ async def link_channel(
                          "serviced_by_granted": granted},
             )
     return LinkChannelResponse(user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# OIDC / SSO — back-channel authorize + exchange (see docs/design/oidc-webapp)
+# ---------------------------------------------------------------------------
+#
+# The router is the OIDC RP/identity authority. These two endpoints are
+# back-channel JSON APIs called by a frontend BFF (the webapp), which owns
+# the browser redirects and holds the transient state/nonce/PKCE verifier in
+# its own signed cookie. They are UNAUTHENTICATED — there is no user yet —
+# but safe by construction: `authorize` only returns a redirect URL + random
+# values, and `exchange` requires a valid OP authorization `code` + matching
+# PKCE `code_verifier` + an allow-listed `redirect_uri`, none of which an
+# attacker can forge without completing the real OP login (same trust shape
+# as `/login`). Both are per-IP rate-limited.
+
+
+class OidcAuthorizeRequest(BaseModel):
+    redirect_uri: str
+
+
+class OidcAuthorizeResponse(BaseModel):
+    authorize_url: str
+    state: str
+    nonce: str
+    code_verifier: str
+
+
+class OidcExchangeRequest(BaseModel):
+    code: str
+    code_verifier: str
+    nonce: str
+    redirect_uri: str
+    link_token: str | None = None
+    """Telegram-interop bootstrap: a single-use token minted by the bot's
+    `/password` (proving the caller owns a pre-existing account). When set,
+    the validated OIDC identity is ATTACHED to that account instead of
+    resolving/provisioning — see docs/design/oidc-webapp.md §6.3.1."""
+
+
+def _oidc_provider(request: Request):  # type: ignore[no-untyped-def]
+    provider = request.app.state.bp.oidc_provider
+    if provider is None:
+        raise HTTPException(404, "OIDC is not enabled")
+    return provider
+
+
+def _check_oidc_redirect_uri(settings: Any, redirect_uri: str) -> None:  # noqa: ANN401
+    # Exact-match allowlist: stops the router being used as an open
+    # redirector / code-exchange oracle for an attacker-chosen URI.
+    if redirect_uri not in settings.oidc_allowed_redirect_uris:
+        raise HTTPException(400, "redirect_uri not allowed")
+
+
+async def _oidc_rate_limit(state: Any, request: Request) -> None:  # noqa: ANN401
+    # Reuse the per-IP login rate config (same front-door class), own bucket.
+    ip = _client_ip(request)
+    wait = await _enforce_single_bucket_rate_limit(
+        quota=state.login_quota,
+        key=f"{BUCKET_OIDC}:ip:{ip}",
+        rate_per_s=state.settings.login_rate_limit_per_ip_per_s,
+        burst=state.settings.login_rate_limit_per_ip_burst,
+    )
+    if wait > 0:
+        raise HTTPException(
+            status_code=429,
+            detail="too many OIDC attempts; retry later",
+            headers={"Retry-After": str(max(int(wait + 0.999), 1))},
+        )
+
+
+@router.post("/oidc/authorize", response_model=OidcAuthorizeResponse)
+async def oidc_authorize(
+    req: OidcAuthorizeRequest, request: Request
+) -> OidcAuthorizeResponse:
+    """Begin an SSO login: return the OP authorization-code redirect URL plus
+    the freshly-minted `state` / `nonce` / PKCE `code_verifier` for the BFF to
+    stash in its cookie and replay on `exchange`."""
+    state = request.app.state.bp
+    provider = _oidc_provider(request)
+    _check_oidc_redirect_uri(state.settings, req.redirect_uri)
+    await _oidc_rate_limit(state, request)
+
+    st = generate_state()
+    nonce = generate_nonce()
+    verifier, challenge = generate_pkce()
+    try:
+        url = await provider.authorize_url(
+            redirect_uri=req.redirect_uri, state=st, nonce=nonce,
+            code_challenge=challenge,
+        )
+    except OidcError as exc:
+        logger.warning(
+            "oidc_authorize_failed",
+            extra={"event": "oidc_authorize_failed"}, exc_info=exc,
+        )
+        raise HTTPException(502, "OIDC provider unavailable") from exc
+    return OidcAuthorizeResponse(
+        authorize_url=url, state=st, nonce=nonce, code_verifier=verifier
+    )
+
+
+@router.post("/oidc/exchange", response_model=TokenPair)
+async def oidc_exchange(
+    req: OidcExchangeRequest, request: Request
+) -> TokenPair:
+    """Complete an SSO login: exchange the OP `code`, validate the `id_token`,
+    resolve/provision the user, and issue the normal first-party `TokenPair`
+    (so the BFF stores it exactly like a password login)."""
+    state = request.app.state.bp
+    settings = state.settings
+    pool = state.db_pool
+    provider = _oidc_provider(request)
+    _check_oidc_redirect_uri(settings, req.redirect_uri)
+    await _oidc_rate_limit(state, request)
+
+    try:
+        tokens = await provider.exchange_code(
+            code=req.code, code_verifier=req.code_verifier,
+            redirect_uri=req.redirect_uri,
+        )
+        claims = await provider.validate_id_token(
+            tokens["id_token"], nonce=req.nonce
+        )
+    except OidcError as exc:
+        logger.info(
+            "oidc_exchange_failed",
+            extra={"event": "oidc_exchange_failed"}, exc_info=exc,
+        )
+        raise HTTPException(401, "OIDC authentication failed") from exc
+
+    issuer = settings.oidc_issuer
+    refresh = secrets.token_urlsafe(32)
+    refresh_expires = _now() + timedelta(seconds=settings.refresh_token_ttl_s)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if req.link_token:
+                user = await _link_oidc_via_token(
+                    conn, link_token=req.link_token, issuer=issuer, claims=claims
+                )
+                outcome = "linked_token"
+            else:
+                user, outcome = await _resolve_or_provision_oidc_user(
+                    conn, settings, issuer=issuer, claims=claims
+                )
+            await queries.insert_refresh_token(
+                conn,
+                token_hash=_hash_refresh_token(refresh),
+                user_id=user.user_id,
+                expires_at=refresh_expires,
+            )
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=user.user_id,
+                event="auth.oidc_login_succeeded",
+                target_kind="user", target_id=user.user_id,
+                payload={"issuer": issuer, "outcome": outcome},
+            )
+
+    access, expires_at, _jti = issue_session_token(
+        user_id=user.user_id,
+        level=user.level,
+        secret=settings.jwt_secret.get_secret_value(),
+        ttl_s=settings.session_jwt_ttl_s,
+        key_version=settings.jwt_key_version,
+        algorithm=settings.jwt_algorithm,
+    )
+    return TokenPair(
+        access_token=access, refresh_token=refresh,
+        expires_at=expires_at, level=user.level,
+    )
+
+
+def _level_from_groups(settings: Any, groups: list[str]) -> str:  # noqa: ANN401
+    """Map IdP groups → router level. First configured mapping (by config
+    order) whose group the user carries wins; otherwise the default."""
+    carried = {str(g) for g in groups}
+    for group, level in settings.oidc_group_to_level.items():
+        if group in carried:
+            return level
+    return settings.oidc_default_level
+
+
+async def _resolve_or_provision_oidc_user(
+    conn: Any, settings: Any, *, issuer: str, claims: dict  # noqa: ANN401
+):
+    """Resolve a validated id_token to a local user. Returns `(user,
+    outcome)` where outcome ∈ {login, linked_email, provisioned}. Raises
+    HTTPException(403) when the subject isn't admitted."""
+    sub = claims["sub"]
+
+    # 1) Already linked → straight login.
+    user = await queries.get_user_by_oidc_sub(conn, issuer=issuer, sub=sub)
+    if user is not None:
+        if not queries.user_is_active(user):
+            raise HTTPException(403, "account is not active")
+        await queries.touch_oidc_identity(conn, issuer=issuer, sub=sub)
+        return user, "login"
+
+    # Group gate (defense-in-depth on top of the OP's own policy). Some OPs
+    # send a single group as a bare string; normalise to a list.
+    raw_groups = claims.get(settings.oidc_group_claim) or []
+    groups = raw_groups if isinstance(raw_groups, list) else [raw_groups]
+    if settings.oidc_allowed_groups and not (
+        {str(g) for g in groups} & set(settings.oidc_allowed_groups)
+    ):
+        raise HTTPException(403, "not permitted to sign in")
+
+    email = claims.get("email")
+    email_verified = bool(claims.get("email_verified"))
+
+    # 2) Optional, gated auto-link to an existing account by verified email.
+    # Never onto an admin/service account (email-collision → privilege
+    # escalation), mirroring the serviced_by guard.
+    if settings.oidc_auto_link_by_verified_email and email and email_verified:
+        existing = await queries.get_user_by_email(conn, email)
+        if (
+            existing is not None
+            and queries.user_is_active(existing)
+            and existing.level not in _PRIVILEGED_LEVELS
+        ):
+            await _link_or_conflict(
+                conn, issuer=issuer, sub=sub, user_id=existing.user_id,
+                email=email,
+            )
+            return existing, "linked_email"
+
+    # 3) JIT provisioning (or refuse, in match-existing-only mode).
+    if not settings.oidc_jit_provisioning:
+        raise HTTPException(
+            403, "no account for this identity; ask an administrator"
+        )
+    level = _level_from_groups(settings, groups)
+    # Only adopt the email as the account's UNIQUE email when it's verified
+    # AND unclaimed — otherwise leave it NULL (the sub is the identity; the
+    # email is still snapshotted on the identity row).
+    store_email = None
+    if email and email_verified and (
+        await queries.get_user_by_email(conn, email) is None
+    ):
+        store_email = email
+    user = await queries.insert_user(
+        conn, email=store_email, level=level,
+        auth_kind="oidc", auth_secret_hash=None,
+    )
+    await _link_or_conflict(
+        conn, issuer=issuer, sub=sub, user_id=user.user_id, email=email,
+    )
+    return user, "provisioned"
+
+
+async def _link_or_conflict(
+    conn: Any, *, issuer: str, sub: str, user_id: str, email: str | None  # noqa: ANN401
+) -> None:
+    try:
+        await queries.link_oidc_identity(
+            conn, issuer=issuer, sub=sub, user_id=user_id, email_at_link=email,
+        )
+    except Exception as exc:  # noqa: BLE001 — unique-violation / WHERE-guard race
+        raise HTTPException(
+            409, "this identity is already linked to another account"
+        ) from exc
+
+
+async def _link_oidc_via_token(
+    conn: Any, *, link_token: str, issuer: str, claims: dict  # noqa: ANN401
+):
+    """Telegram-interop bootstrap: consume a bot-minted link token (proof the
+    caller owns an existing account) and attach the validated OIDC identity to
+    it. The token IS the authority, so this bypasses the provisioning policy."""
+    user_id = await queries.consume_password_reset_token(
+        conn, token_hash=_hash_refresh_token(link_token)
+    )
+    if user_id is None:
+        raise HTTPException(401, "invalid or expired link token")
+    user = await queries.get_user_by_id(conn, user_id)
+    if not queries.user_is_active(user):
+        raise HTTPException(409, "account is not active")
+    await _link_or_conflict(
+        conn, issuer=issuer, sub=claims["sub"], user_id=user.user_id,
+        email=claims.get("email"),
+    )
+    return user
+
+
+# --- linked-logins management (authenticated as the user) -------------------
+
+
+class OidcIdentityView(BaseModel):
+    issuer: str
+    sub: str
+    email_at_link: str | None
+    created_at: datetime
+    last_login_at: datetime | None
+
+
+class OidcIdentitiesResponse(BaseModel):
+    identities: list[OidcIdentityView]
+    has_password: bool
+
+
+class UnlinkOidcRequest(BaseModel):
+    issuer: str
+    sub: str
+
+
+@router.get("/oidc/identities", response_model=OidcIdentitiesResponse)
+async def list_oidc_identities(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> OidcIdentitiesResponse:
+    """The caller's linked SSO logins (for the account-settings pane)."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await queries.list_oidc_identities_for_user(conn, principal.user_id)
+        user = await queries.get_user_by_id(conn, principal.user_id)
+    has_password = bool(
+        user and user.auth_kind == "password" and user.auth_secret_hash
+    )
+    return OidcIdentitiesResponse(
+        identities=[OidcIdentityView.model_validate(r, from_attributes=True)
+                    for r in rows],
+        has_password=has_password,
+    )
+
+
+@router.delete("/oidc/identities", status_code=204)
+async def unlink_oidc_identity(
+    req: UnlinkOidcRequest,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> None:
+    """Unlink one of the caller's SSO logins. Refuses to remove the LAST
+    remaining sign-in method (no password + this is the only identity), which
+    would otherwise lock the user out of their own account."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            user = await queries.get_user_by_id(conn, principal.user_id)
+            rows = await queries.list_oidc_identities_for_user(
+                conn, principal.user_id
+            )
+            has_password = bool(
+                user and user.auth_kind == "password" and user.auth_secret_hash
+            )
+            removing_last = (
+                not has_password
+                and len(rows) <= 1
+                and any(r.issuer == req.issuer and r.sub == req.sub for r in rows)
+            )
+            if removing_last:
+                raise HTTPException(
+                    409,
+                    "cannot remove your only sign-in method; set a password "
+                    "or link another login first",
+                )
+            removed = await queries.unlink_oidc_identity(
+                conn, user_id=principal.user_id, issuer=req.issuer, sub=req.sub,
+            )
+            if not removed:
+                raise HTTPException(404, "identity not found")
+            await queries.append_audit_event(
+                conn, actor_kind="user", actor_id=principal.user_id,
+                event="auth.oidc_identity_unlinked",
+                target_kind="user", target_id=principal.user_id,
+                payload={"issuer": req.issuer},
+            )
+
+
+class OidcLogoutUrlResponse(BaseModel):
+    logout_url: str | None
+
+
+@router.get("/oidc/logout-url", response_model=OidcLogoutUrlResponse)
+async def oidc_logout_url(
+    request: Request,
+    post_logout_redirect_uri: str | None = None,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> OidcLogoutUrlResponse:
+    """RP-initiated logout URL (the OP's `end_session_endpoint`), or null when
+    SSO is off / the OP advertises none. The frontend redirects the browser
+    here AFTER clearing its own session so the OP session ends too."""
+    provider = request.app.state.bp.oidc_provider
+    if provider is None:
+        return OidcLogoutUrlResponse(logout_url=None)
+    # Only honour a post-logout redirect that's on our allowlist (it's a
+    # browser-facing redirect target, same open-redirect concern).
+    settings = request.app.state.bp.settings
+    if post_logout_redirect_uri and (
+        post_logout_redirect_uri not in settings.oidc_allowed_redirect_uris
+    ):
+        post_logout_redirect_uri = None
+    try:
+        url = await provider.end_session_url(
+            post_logout_redirect_uri=post_logout_redirect_uri
+        )
+    except OidcError:
+        url = None
+    return OidcLogoutUrlResponse(logout_url=url)

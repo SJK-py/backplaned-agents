@@ -56,6 +56,21 @@ class UserRow(_Row):
     serviced_by: list[str] = []
 
 
+class OidcIdentityRow(_Row):
+    """An external OIDC subject linked to a local user. SSO login resolves a
+    validated `(issuer, sub)` to `user_id` here. One user may have many rows
+    (multiple OPs); `(issuer, sub)` is globally unique (one OP identity maps
+    to exactly one account). `email_at_link` is a profile snapshot taken at
+    link time — never an authority for matching."""
+
+    issuer: str
+    sub: str
+    user_id: str
+    email_at_link: str | None = None
+    created_at: datetime
+    last_login_at: datetime | None = None
+
+
 
 class SessionRow(_Row):
     session_id: str

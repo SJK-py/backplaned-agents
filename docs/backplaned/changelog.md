@@ -18,6 +18,53 @@
 
 ---
 
+## 2026-06-22
+
+> Platform (`bp_router`) surface of webapp SSO. The webapp/BFF halves
+> (`/auth/sso/*`, the Settings SSO pane) live in `bp_agents` and aren't
+> tracked here. Design: `docs/design/oidc-webapp.md`. Purely additive — off
+> unless `ROUTER_OIDC_ENABLED=true`.
+
+### Added — OIDC relying-party (webapp SSO)
+
+- **What:** the router becomes an OIDC RP. New `user_oidc_identities`
+  (`(issuer, sub)` PK → `user_id`, **migration 0007**; `OidcIdentityRow` +
+  query layer) keeps SSO identities in a child table decoupled from
+  `auth_kind`/`auth_secret_hash`, so one account can hold a password AND
+  multiple linked OPs. `purge_user` erases them (PII).
+- **What:** `bp_router/security/oidc.py` — `OidcProvider`: discovery (with
+  issuer-match guard) + cached JWKS (refetch-on-kid-miss), PKCE-S256
+  authorize URL, `client_secret_post` code exchange, and `id_token`
+  validation (asymmetric algs only; `aud`/`iss`/`exp`/`iat` + nonce). Built
+  once in the app lifespan (its httpx client closed on shutdown);
+  `AppState.oidc_provider`.
+- **What (endpoints, `api/auth.py`):** back-channel JSON APIs the BFF calls
+  (it owns the browser redirects + transient state) — `POST
+  /v1/auth/oidc/authorize` → `{authorize_url, state, nonce, code_verifier}`
+  and `POST /v1/auth/oidc/exchange` → the normal `TokenPair`. Both
+  unauthenticated but safe (valid OP code + PKCE verifier + allow-listed
+  `redirect_uri` required), per-IP rate-limited (`BUCKET_OIDC`). Provisioning:
+  `(issuer, sub)` login → gated auto-link by verified email (never onto
+  admin/service) → JIT (group→level, allowed-groups gate, default level) or
+  refuse in match-only mode. Optional `link_token` (a bot-minted `/password`
+  token) attaches the identity to a pre-existing account (Telegram interop).
+  Authenticated management: `GET`/`DELETE /v1/auth/oidc/identities` (list /
+  unlink, last-method guard) and `GET /v1/auth/oidc/logout-url`
+  (RP-initiated logout).
+- **What (settings):** `OIDC_*` block (enabled, issuer, client_id,
+  client_secret as a secret-ref-capable `SecretStr`, scopes, redirect-URI
+  allowlist, JIT/group/allowed-groups policy, auto-link escape hatch, cache/
+  timeout). `model_validator` fails fast when enabled-but-incomplete, requires
+  an https issuer + a redirect allowlist, and rejects invalid levels.
+- **Why:** humans wanted SSO (Authelia/Keycloak/Google/MS) for the webapp.
+  Keeping the router as the identity authority means it issues the SAME
+  first-party `TokenPair` after validation, so refresh and every downstream
+  consumer (ACL, agents, sessions, cron) are unchanged; only the front-door
+  authentication is new. `auth_kind="oidc"` and the OIDC-refusing
+  `reset-password` path already anticipated this.
+
+---
+
 ## 2026-06-20
 
 > Platform (`bp_router`) surface of suite work whose channel halves live in

@@ -20,6 +20,7 @@ BUCKET_LOGIN = "login"
 BUCKET_REFRESH = "refresh"
 BUCKET_RESET_PASSWORD = "reset_password"
 BUCKET_REGISTRATION_WEB = "registration_web"
+BUCKET_OIDC = "oidc"
 
 # Authenticated endpoints — per-user buckets.
 BUCKET_CHANGE_PASSWORD = "change_password"
@@ -39,6 +40,7 @@ __all__ = [
     "BUCKET_REFRESH",
     "BUCKET_RESET_PASSWORD",
     "BUCKET_REGISTRATION_WEB",
+    "BUCKET_OIDC",
     "BUCKET_CHANGE_PASSWORD",
     "BUCKET_LINK_TOKEN_MINT",
     "BUCKET_PASSWORD_RESET_MINT",

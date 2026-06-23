@@ -8,7 +8,7 @@ admin-gated, unlike the admin BFF).
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -69,12 +69,14 @@ async def login_form(
         return RedirectResponse(url="/", status_code=303)
     templates = request.app.state.templates
     reset_msg = _RESET_ERRORS.get(reset_error or "")
+    next_q = request.query_params.get("next", "")
     return templates.TemplateResponse(
         request,
         "login.html",
         {
-            "error": error,
-            "next": request.query_params.get("next", ""),
+            "error": "Single sign-on failed. Please try again." if error == "sso"
+            else error,
+            "next": next_q,
             "reset_ok": reset == "1",
             "reset_error": reset_msg,
             # Open the set-password form when redeeming failed, so the error
@@ -85,6 +87,11 @@ async def login_form(
             "changed_ok": changed == "1",
             # Shown after a successful self-service signup submission.
             "registered_ok": registered == "1",
+            # SSO button (frontend toggle; the router gates the actual flow).
+            "sso_enabled": request.app.state.config.sso_enabled,
+            "sso_login_url": "/auth/sso/login" + (
+                f"?next={quote(next_q)}" if next_q else ""
+            ),
         },
     )
 
@@ -113,7 +120,127 @@ async def login_submit(
             status_code=401,
         )
     store_login(request, login_response=body, email=email)
+    request.session["auth_kind"] = "password"
     return RedirectResponse(url=_safe_next(next), status_code=303)
+
+
+# Session key holding the in-flight OIDC flow's transient values between the
+# login redirect and the callback (state/nonce/PKCE verifier + post-login
+# next). Lives in the signed session cookie — same store as the eventual
+# tokens, so no weaker than the rest of the BFF session.
+_SSO_FLOW_KEY = "sso_flow"
+
+
+def _sso_redirect_uri(request: Request) -> str:
+    base = (request.app.state.config.public_base_url or "").rstrip("/")
+    return f"{base}/auth/sso/callback"
+
+
+@router.get("/auth/sso/login")
+async def sso_login(request: Request, next: str = "") -> RedirectResponse:
+    """Begin SSO: get the OP authorize URL from the router, stash the
+    transient state/nonce/verifier in the session cookie, redirect to the OP."""
+    cfg = request.app.state.config
+    if not cfg.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    try:
+        body = await request.app.state.upstream.oidc_authorize(
+            redirect_uri=_sso_redirect_uri(request)
+        )
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_sso_authorize_failed",
+            extra={"event": "webapp_sso_authorize_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    request.session[_SSO_FLOW_KEY] = {
+        "state": body["state"],
+        "nonce": body["nonce"],
+        "verifier": body["code_verifier"],
+        "next": _safe_next(next),
+        # A pending link token (bot bootstrap or add-an-IdP) attaches the
+        # resulting identity to a specific account instead of provisioning.
+        "link_token": request.session.pop("sso_link_token", None),
+    }
+    return RedirectResponse(url=body["authorize_url"], status_code=303)
+
+
+@router.post("/auth/sso/link")
+async def sso_link_start(
+    request: Request, token: str = Form(...)
+) -> RedirectResponse:
+    """Bootstrap SSO for a PRE-EXISTING account (e.g. a Telegram-first user):
+    stash the bot-minted `/password` token, then start the SSO redirect — the
+    callback attaches the validated identity to that account."""
+    if not request.app.state.config.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    request.session["sso_link_token"] = token.strip()
+    return RedirectResponse(url="/auth/sso/login", status_code=303)
+
+
+@router.post("/auth/sso/connect")
+async def sso_connect(request: Request) -> RedirectResponse:
+    """Add another SSO login to the CURRENT account. Mints a self-service link
+    token (authenticated by this session), stashes it, then runs the SSO
+    redirect so the callback links the new identity to this account."""
+    cfg = request.app.state.config
+    access = request.session.get("access_token")
+    if not cfg.sso_enabled or not access:
+        return RedirectResponse(url="/config", status_code=303)
+    try:
+        body = await request.app.state.upstream.mint_link_token(access_token=access)
+    except UpstreamError as exc:
+        logger.info(
+            "webapp_sso_connect_failed",
+            extra={"event": "webapp_sso_connect_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/config?sso_error=1", status_code=303)
+    request.session["sso_link_token"] = body["link_token"]
+    return RedirectResponse(url="/auth/sso/login", status_code=303)
+
+
+@router.get("/auth/sso/callback")
+async def sso_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+) -> RedirectResponse:
+    """Finish SSO: verify `state` against the cookie, exchange the code via
+    the router, and store the returned TokenPair like any other login."""
+    cfg = request.app.state.config
+    if not cfg.sso_enabled:
+        return RedirectResponse(url="/login", status_code=303)
+    # Single-use: pop the flow so a replayed callback can't be reused.
+    flow = request.session.pop(_SSO_FLOW_KEY, None)
+    if error or not code or not state or not flow or state != flow.get("state"):
+        logger.info(
+            "webapp_sso_callback_rejected",
+            extra={"event": "webapp_sso_callback_rejected",
+                   "reason": error or "state_mismatch_or_missing"},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    try:
+        body = await request.app.state.upstream.oidc_exchange(
+            code=code, code_verifier=flow["verifier"], nonce=flow["nonce"],
+            redirect_uri=_sso_redirect_uri(request),
+            link_token=flow.get("link_token"),
+        )
+    except UpstreamError as exc:
+        logger.info(
+            "webapp_sso_exchange_failed",
+            extra={"event": "webapp_sso_exchange_failed",
+                   "status_code": exc.status_code},
+        )
+        return RedirectResponse(url="/login?error=sso", status_code=303)
+    # The TokenPair carries no email; SSO display falls back to user_id.
+    store_login(request, login_response=body, email="")
+    request.session["auth_kind"] = "oidc"
+    return RedirectResponse(
+        url=_safe_next(flow.get("next") or "/"), status_code=303
+    )
 
 
 @router.get("/register", response_class=HTMLResponse)
@@ -247,6 +374,16 @@ async def logout(request: Request) -> RedirectResponse:
     upstream = request.app.state.upstream
     access = request.session.get("access_token")
     refresh = request.session.get("refresh_token")
+    was_oidc = request.session.get("auth_kind") == "oidc"
+    # For an SSO session, ask the router for the OP's RP-initiated logout URL
+    # (while we still hold the access token) so we can propagate the logout to
+    # the IdP after revoking our own session.
+    op_logout_url: str | None = None
+    if access and was_oidc and request.app.state.config.sso_enabled:
+        try:
+            op_logout_url = await upstream.oidc_logout_url(access_token=access)
+        except UpstreamError:
+            op_logout_url = None
     if access:
         try:
             await upstream.logout(access_token=access, refresh_token=refresh)
@@ -257,4 +394,4 @@ async def logout(request: Request) -> RedirectResponse:
                        "status_code": exc.status_code},
             )
     clear_session(request)
-    return RedirectResponse(url="/login", status_code=303)
+    return RedirectResponse(url=op_logout_url or "/login", status_code=303)

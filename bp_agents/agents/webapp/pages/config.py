@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
@@ -42,6 +42,29 @@ async def _linked_platforms(pool: object, user_id: str) -> set[str]:
             conn, user_id=user_id
         )
     return {m.platform for m in mappings}
+
+
+async def _oidc_pane(request: Request) -> dict:
+    """Linked SSO logins for the account-settings pane. Empty/hidden unless
+    SSO is enabled and we hold the user's token; failures degrade to an empty
+    list rather than breaking the page."""
+    cfg = request.app.state.config
+    access = request.session.get("access_token")
+    if not getattr(cfg, "sso_enabled", False) or not access:
+        return {"sso_enabled": False, "oidc_identities": [],
+                "oidc_has_password": True}
+    try:
+        body = await request.app.state.upstream.list_oidc_identities(
+            access_token=access
+        )
+    except UpstreamError:
+        return {"sso_enabled": True, "oidc_identities": [],
+                "oidc_has_password": True}
+    return {
+        "sso_enabled": True,
+        "oidc_identities": body.get("identities", []),
+        "oidc_has_password": body.get("has_password", True),
+    }
 
 # Friendly labels for the opt-in LLM-tier <select>s.
 _PRESET_LABELS = {
@@ -89,9 +112,17 @@ _PW_ERRORS = {
 }
 
 
+_SSO_UNLINK_ERRORS = {
+    "last": "That's your only sign-in method — set a password or link another "
+            "login before removing it.",
+    "failed": "Couldn’t remove that login. Please try again.",
+}
+
+
 @router.get("/config", response_class=HTMLResponse)
 async def config_view(
-    request: Request, saved: int = 0, pw_error: str | None = None
+    request: Request, saved: int = 0, pw_error: str | None = None,
+    sso_error: str | None = None,
 ) -> HTMLResponse:
     pool = request.app.state.pool
     user_id = session_user_id(request)
@@ -110,8 +141,28 @@ async def config_view(
          "preset_fields": _preset_fields_for_template(cfg, preset_choices),
          "linkable_platforms": _LINKABLE_PLATFORMS,
          "linked_platforms": linked,
-         "link_token": None},
+         "link_token": None,
+         "sso_unlink_error": _SSO_UNLINK_ERRORS.get(sso_error or ""),
+         **(await _oidc_pane(request))},
     )
+
+
+@router.post("/config/oidc/unlink")
+async def oidc_unlink(
+    request: Request, issuer: str = Form(...), sub: str = Form(...)
+) -> RedirectResponse:
+    """Remove one linked SSO login from this account."""
+    access = request.session.get("access_token")
+    if not access:
+        return RedirectResponse(url="/login", status_code=303)
+    try:
+        await request.app.state.upstream.unlink_oidc_identity(
+            access_token=access, issuer=issuer, sub=sub
+        )
+    except UpstreamError as exc:
+        code = "last" if exc.status_code == 409 else "failed"
+        return RedirectResponse(url=f"/config?sso_error={code}", status_code=303)
+    return RedirectResponse(url="/config?saved=1", status_code=303)
 
 
 @router.post("/link-token", response_class=HTMLResponse)

@@ -45,6 +45,17 @@ class WebappConfig(BaseSettings):
 
     deployment_env: Literal["dev", "staging", "prod"] = "dev"
 
+    sso_enabled: bool = False
+    """Show the 'Sign in with SSO' button and enable the OIDC browser flow.
+    The router must also have ROUTER_OIDC_ENABLED=true; this is just the
+    frontend toggle."""
+
+    public_base_url: str | None = None
+    """The webapp's externally-reachable base URL (e.g. https://app.example),
+    used to build the OIDC `redirect_uri` (`<base>/auth/sso/callback`). Must be
+    set when `sso_enabled`, registered at the OP, and present in the router's
+    ROUTER_OIDC_ALLOWED_REDIRECT_URIS allowlist."""
+
     use_built_css: bool = False
     """Serve the pre-built `/static/tailwind.css` instead of the Tailwind Play
     CDN. Opt-in (default False) so a deploy that hasn't built the CSS yet keeps
@@ -68,6 +79,17 @@ class WebappConfig(BaseSettings):
                 "(generate via `openssl rand -base64 32`)"
             )
         return v
+
+    @model_validator(mode="after")
+    def _sso_needs_base_url(self) -> WebappConfig:
+        if self.sso_enabled:
+            base = (self.public_base_url or "").rstrip("/")
+            if not base.startswith(("http://", "https://")):
+                raise ValueError(
+                    "WEBAPP_PUBLIC_BASE_URL must be an absolute URL when "
+                    "WEBAPP_SSO_ENABLED=true (used for the OIDC redirect_uri)"
+                )
+        return self
 
     @model_validator(mode="after")
     def _prod_hardening(self) -> WebappConfig:

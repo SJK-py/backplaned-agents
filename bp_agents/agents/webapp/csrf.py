@@ -22,8 +22,11 @@ logger = logging.getLogger(__name__)
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Pre-auth POSTs — no session/CSRF token exists yet. (`/set-password`
 # redeems a one-time reset token; `/register` is the anonymous self-service
-# signup; both are rate-limited per IP at the router against abuse.)
-EXEMPT_PATHS = frozenset({"/login", "/set-password", "/register"})
+# signup; `/auth/sso/link` stashes a bot-minted one-time token to bootstrap
+# SSO for a pre-existing account. All are rate-limited / single-use upstream.)
+EXEMPT_PATHS = frozenset({
+    "/login", "/set-password", "/register", "/auth/sso/link",
+})
 
 
 def issue_token() -> str:

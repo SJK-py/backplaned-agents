@@ -613,6 +613,45 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # OIDC / SSO for the webapp — see docs/design/oidc-webapp.md
+    # ------------------------------------------------------------------
+    # The router is the identity authority: it does discovery, code
+    # exchange (with the client secret), id_token validation, user
+    # provisioning, and issues the normal first-party TokenPair. The
+    # browser redirects + transient state live in the frontend BFF.
+    oidc_enabled: bool = False
+    oidc_issuer: str | None = None
+    """OP base URL; discovery at `<issuer>/.well-known/openid-configuration`."""
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    """Confidential-client secret. May be a secret_ref (`env://VAR`, …),
+    resolved via `bp_router.security.secrets.resolve_secret_ref`."""
+    oidc_scopes: str = "openid email profile"
+    oidc_allowed_redirect_uris: list[str] = []
+    """Exact-match allowlist for the browser callback URL a frontend may pass
+    to the OIDC endpoints — stops the router being used as an open redirector
+    / code-exchange oracle for arbitrary URIs."""
+    oidc_jit_provisioning: bool = True
+    """Create a local user on first successful SSO login (gated by the group /
+    allowlist rules below). When false, only already-linked subjects sign in."""
+    oidc_default_level: str = "tier1"
+    """Level for a JIT-provisioned user when no group mapping matched."""
+    oidc_group_claim: str = "groups"
+    oidc_group_to_level: dict[str, str] = Field(default_factory=dict)
+    """Map an IdP group → router level. First entry (by config order) whose
+    group the user carries wins; otherwise `oidc_default_level`."""
+    oidc_allowed_groups: list[str] = []
+    """If non-empty, the user MUST carry at least one of these groups to be
+    admitted — defense-in-depth on top of the OP's own access policy."""
+    oidc_auto_link_by_verified_email: bool = False
+    """DANGER (default off): on first SSO login, auto-link to an existing
+    account sharing the same `email_verified` address. Trusts an OP-verified
+    email against a router-UNVERIFIED stored email — an operator assertion of
+    a single trust domain, not a guarantee. See docs/design/oidc-webapp.md §6."""
+    oidc_discovery_cache_ttl_s: int = Field(default=3600, ge=0)
+    oidc_http_timeout_s: float = Field(default=10.0, gt=0)
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
@@ -652,6 +691,44 @@ class Settings(BaseSettings):
         if self.serve_admin_ui and self.admin_session_secret is None:
             raise ValueError(
                 "ROUTER_ADMIN_SESSION_SECRET must be set when serve_admin_ui=true"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _oidc_config_complete(self) -> Settings:
+        # When SSO is on, the confidential-client essentials must all be
+        # present (fail fast rather than 500 on first login), and every
+        # configured level must be real.
+        from bp_router.principals import is_valid_level  # noqa: PLC0415
+
+        if self.oidc_enabled:
+            missing = [
+                name for name, val in (
+                    ("ROUTER_OIDC_ISSUER", self.oidc_issuer),
+                    ("ROUTER_OIDC_CLIENT_ID", self.oidc_client_id),
+                    ("ROUTER_OIDC_CLIENT_SECRET", self.oidc_client_secret),
+                ) if not val
+            ]
+            if missing:
+                raise ValueError(
+                    f"oidc_enabled=true requires {', '.join(missing)}"
+                )
+            if not self.oidc_allowed_redirect_uris:
+                raise ValueError(
+                    "oidc_enabled=true requires ROUTER_OIDC_ALLOWED_REDIRECT_URIS "
+                    "(exact-match allowlist for the frontend callback URL)"
+                )
+            if self.oidc_issuer and not self.oidc_issuer.startswith("https://"):
+                raise ValueError("oidc_issuer must be an https:// URL")
+        # Validate levels even when disabled — a typo'd default/mapping
+        # shouldn't lurk until the flag is flipped.
+        bad = [
+            lvl for lvl in (self.oidc_default_level, *self.oidc_group_to_level.values())
+            if not is_valid_level(lvl)
+        ]
+        if bad:
+            raise ValueError(
+                f"invalid OIDC level(s) {bad!r}: must be admin|service|tierN"
             )
         return self
 

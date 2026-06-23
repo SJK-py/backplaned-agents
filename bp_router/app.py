@@ -95,6 +95,11 @@ class AppState:
     ws_handshake_semaphore: object  # asyncio.Semaphore
     agent_catalog_cache: object  # bp_router.ws_hub._CatalogCache
 
+    # OIDC relying-party client (None when ROUTER_OIDC_ENABLED is false).
+    # `oidc_http` is its dedicated httpx client, closed on shutdown.
+    oidc_provider: object  # bp_router.security.oidc.OidcProvider | None
+    oidc_http: object  # httpx.AsyncClient | None
+
 
 def spawn_background(state: AppState, coro) -> asyncio.Task:  # type: ignore[no-untyped-def]
     """Schedule `coro`, register on the AppState set, and auto-discard on done.
@@ -143,6 +148,16 @@ async def _boot_cleanup(state: AppState) -> None:
                 extra={"event": "boot_cleanup_pool_close_failed"},
                 exc_info=True,
             )
+    oidc_http = getattr(state, "oidc_http", None)
+    if oidc_http is not None:
+        try:
+            await oidc_http.aclose()
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "boot_cleanup_oidc_close_failed",
+                extra={"event": "boot_cleanup_oidc_close_failed"},
+                exc_info=True,
+            )
     redis = getattr(state, "redis", None)
     if redis is not None:
         try:
@@ -182,6 +197,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Plain dict: self-bounded by the per-Task done-callback that
     # discards entries, so no LRU cap needed.
     state.llm_tasks_by_task_id = {}
+    # Defaults so handlers can `getattr`-free access even on a partial boot.
+    state.oidc_provider = None
+    state.oidc_http = None
     app.state.bp = state
 
     # Every phase below sets `current_phase` (via `_boot_phase`,
@@ -379,6 +397,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ttl_s=settings.ws_handshake_catalog_cache_ttl_s
         )
 
+        # 7b. OIDC relying-party client (webapp SSO). Built once so the
+        # discovery doc + JWKS are cached across logins; its httpx client
+        # is closed at shutdown. Skipped entirely when SSO is disabled.
+        current_phase = _boot_phase("oidc")
+        if settings.oidc_enabled:
+            import httpx  # noqa: PLC0415
+
+            from bp_router.security.oidc import OidcProvider  # noqa: PLC0415
+            from bp_router.security.secrets import (  # noqa: PLC0415
+                resolve_secret_ref,
+            )
+
+            client = httpx.AsyncClient(timeout=settings.oidc_http_timeout_s)
+            state.oidc_http = client
+            state.oidc_provider = OidcProvider(
+                issuer=settings.oidc_issuer,  # type: ignore[arg-type]
+                client_id=settings.oidc_client_id,  # type: ignore[arg-type]
+                client_secret=resolve_secret_ref(
+                    settings.oidc_client_secret.get_secret_value()  # type: ignore[union-attr]
+                ),
+                scopes=settings.oidc_scopes,
+                http=client,
+                cache_ttl_s=settings.oidc_discovery_cache_ttl_s,
+            )
+
         # 8. Background tasks
         current_phase = _boot_phase("background_tasks")
         from bp_router.tasks import start_background_loops  # noqa: PLC0415
@@ -432,6 +475,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # future mounted sub-app following the same pattern is
         # cleaned up too.
         await _shutdown_mounted_subapps(app)
+        if state.oidc_http is not None:
+            await state.oidc_http.aclose()  # type: ignore[attr-defined]
         await state.db_pool.close()  # type: ignore[attr-defined]
         if state.redis is not None:
             await state.redis.aclose()  # type: ignore[attr-defined]

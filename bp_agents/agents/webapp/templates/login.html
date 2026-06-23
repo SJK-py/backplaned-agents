@@ -56,6 +56,17 @@
                    font-medium px-3 py-2 transition-colors">
       Sign in
     </button>
+
+    {% if sso_enabled %}
+      <div class="relative my-1 text-center">
+        <span class="bg-white px-2 text-xs text-brand-500/70">or</span>
+      </div>
+      <a href="{{ sso_login_url }}"
+         class="block w-full rounded border border-brand-500/20 px-3 py-2 text-center
+                text-sm font-medium text-brand-700 hover:bg-brand-500/5 transition-colors">
+        Sign in with SSO
+      </a>
+    {% endif %}
   </form>
 
   <p class="mt-4 text-center text-xs text-brand-500/80" x-show="mode === 'login'">
@@ -72,6 +83,24 @@
       Request access
     </a>
   </p>
+
+  {% if sso_enabled %}
+  <details class="mt-3 text-xs text-brand-500/80" x-show="mode === 'login'">
+    <summary class="cursor-pointer text-center">
+      Have a one-time code to link an existing account to SSO?
+    </summary>
+    <form method="post" action="/auth/sso/link" class="mt-2 flex gap-2">
+      <input id="link_token" name="token" type="text" required autocomplete="off"
+             placeholder="one-time code from the bot"
+             class="flex-1 rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
+      <button type="submit"
+              class="rounded bg-brand-900 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700">
+        Link
+      </button>
+    </form>
+  </details>
+  {% endif %}
 
   <!-- Set / reset password with a one-time token -->
   <form method="post" action="/set-password" x-show="mode === 'reset'" x-cloak

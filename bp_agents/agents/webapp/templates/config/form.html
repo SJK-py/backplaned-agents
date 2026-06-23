@@ -104,6 +104,7 @@
     </button>
   </form>
 
+  {% if request.session.get('auth_kind') != 'oidc' %}
   <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Change password</h2>
   <p class="mb-3 text-sm text-brand-500">
     Sets a new sign-in password. You’ll be signed out and need to sign in again.
@@ -154,6 +155,7 @@
       Change password
     </button>
   </form>
+  {% endif %}
 
   <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Connect a chat channel</h2>
   <p class="mb-3 text-sm text-brand-500">
@@ -203,5 +205,55 @@
       </button>
     </form>
   </div>
+
+  {% if sso_enabled %}
+  <h2 class="mt-8 mb-1 text-lg font-semibold text-brand-900">Single sign-on</h2>
+  <p class="mb-3 text-sm text-brand-500">
+    Logins linked to your account from an identity provider (SSO).
+  </p>
+
+  {% if sso_unlink_error %}
+    <div class="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {{ sso_unlink_error }}
+    </div>
+  {% endif %}
+
+  <div class="rounded-md border border-brand-500/10 bg-white p-5">
+    {% if oidc_identities %}
+      <ul class="mb-4 space-y-2 text-sm">
+        {% for ident in oidc_identities %}
+        <li class="flex items-center justify-between gap-2">
+          <span class="min-w-0">
+            <span class="block truncate text-brand-700">{{ ident.issuer }}</span>
+            <span class="block truncate text-xs text-brand-500/70">
+              {{ ident.email_at_link or ident.sub }}
+            </span>
+          </span>
+          <form method="post" action="/config/oidc/unlink">
+            {% include "_partials/csrf.html" %}
+            <input type="hidden" name="issuer" value="{{ ident.issuer }}" />
+            <input type="hidden" name="sub" value="{{ ident.sub }}" />
+            <button type="submit"
+                    class="rounded border border-brand-500/20 px-2 py-1 text-xs
+                           text-brand-700 hover:bg-brand-500/5">
+              Remove
+            </button>
+          </form>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="mb-4 text-sm text-brand-500">No SSO logins linked yet.</p>
+    {% endif %}
+
+    <form method="post" action="/auth/sso/connect">
+      {% include "_partials/csrf.html" %}
+      <button type="submit"
+              class="rounded bg-brand-900 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700">
+        Connect an SSO login
+      </button>
+    </form>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}
