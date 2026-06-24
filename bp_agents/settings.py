@@ -388,6 +388,32 @@ class SuiteSettings(BaseSettings):
     """Optional override of the plugin's extraction prompt (e.g. "Extract all
     text, preserving table structure."). Unset → the plugin's default."""
 
+    # ------------------------------------------------------------------
+    # md_converter — conversion isolation
+    #
+    # File→Markdown conversion runs in a SEPARATE child process. MarkItDown
+    # parses untrusted documents with native/heavy libraries (pdfminer,
+    # PyMuPDF via the OCR plugin, …); a pathological PDF can spin forever or
+    # balloon memory until the kernel OOM-kills the worker. In-process that
+    # killed the whole md_converter agent with NO error log and NO result
+    # frame — the task just vanished. Isolation turns any such death into a
+    # bounded, observable failure: only the child dies, and the handler
+    # reports a clean error.
+    # ------------------------------------------------------------------
+
+    md_convert_timeout_s: float = Field(default=120.0, gt=0.0)
+    """Wall-clock budget for one file→Markdown conversion. On overrun the
+    isolated worker is killed and the task fails cleanly instead of hanging
+    the agent."""
+    md_convert_mem_limit_mb: int = Field(default=0, ge=0)
+    """Optional per-conversion address-space cap (RLIMIT_AS) for the isolated
+    worker, in MiB. 0 (default) leaves it unbounded and relies on the
+    container's `mem_limit` to bound total memory (the cgroup OOM-killer then
+    targets the ballooning worker, not the parent agent). Set a value to add a
+    hard per-conversion ceiling — but keep it generous: RLIMIT_AS caps VIRTUAL
+    memory, so too low a value makes legitimate large documents fail with
+    MemoryError."""
+
 
 def load_suite_settings() -> SuiteSettings:
     return SuiteSettings()  # type: ignore[call-arg]

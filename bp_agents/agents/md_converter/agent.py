@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import html as _html
 import logging
+import os
 import re
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
@@ -31,6 +33,12 @@ from bp_agents.common.urlsafe import safe_stream_get
 from bp_agents.settings import load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
+from bp_sdk.errors import UpstreamError
+
+try:
+    import resource  # POSIX-only; the suite runs on Linux containers.
+except ImportError:  # pragma: no cover — non-POSIX dev box
+    resource = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +157,93 @@ def _markitdown_bytes(data: bytes, suffix: str) -> str:
         return _markitdown_file(tmp.name)
 
 
+def _worker_argv(in_path: str, out_path: str) -> list[str]:
+    """argv for the isolated conversion worker. A seam so tests can swap in a
+    stand-in command that simulates timeout / signal-death / non-zero exit."""
+    return [
+        sys.executable, "-m", "bp_agents.agents.md_converter._worker",
+        in_path, out_path,
+    ]
+
+
+def _rlimit_preexec(mem_bytes: int):
+    """A child preexec that caps RLIMIT_AS to `mem_bytes` (child-only; the
+    parent's limits are untouched). Returns None when no cap applies."""
+    if not mem_bytes or resource is None:
+        return None
+
+    def _apply() -> None:  # pragma: no cover — runs in the forked child
+        resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+
+    return _apply
+
+
+async def _convert_isolated(in_path: str) -> str:
+    """Convert a file to Markdown in a bounded CHILD process.
+
+    This is the fix for silent conversion deaths: a segfault / OOM-kill on a
+    pathological document kills only the worker, and a hang is bounded by a
+    timeout — both surface as a clean `UpstreamError` (→ failed result + log)
+    instead of taking the shared agent down with no trace. On success the
+    worker's Markdown is read back from a temp file."""
+    out_fd, out_path = tempfile.mkstemp(suffix=".md")
+    os.close(out_fd)
+    preexec = _rlimit_preexec(_settings.md_convert_mem_limit_mb * 1024 * 1024)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *_worker_argv(in_path, out_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            preexec_fn=preexec,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=_settings.md_convert_timeout_s
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning(
+                "md_convert_timeout",
+                extra={
+                    "event": "md_convert_timeout",
+                    "timeout_s": _settings.md_convert_timeout_s,
+                },
+            )
+            raise UpstreamError(
+                f"conversion timed out after {_settings.md_convert_timeout_s:g}s "
+                "(the file is too large or complex to convert)"
+            ) from None
+        if proc.returncode != 0:
+            reason = (stderr or b"").decode("utf-8", "replace").strip()
+            logger.warning(
+                "md_convert_worker_failed",
+                extra={
+                    "event": "md_convert_worker_failed",
+                    "returncode": proc.returncode,
+                    # Bounded; the worker prints a single safe line. The full
+                    # detail is here for ops, never on the wire.
+                    "stderr": reason[:500],
+                },
+            )
+            # A negative return code is death by signal (e.g. -9 SIGKILL = the
+            # cgroup/kernel OOM-killer or rlimit). Surface a bounded, path-free
+            # message either way — the log carries the specifics.
+            if proc.returncode < 0:
+                raise UpstreamError(
+                    "the conversion ran out of memory or was killed "
+                    "(the file is too large or complex to convert)"
+                )
+            raise UpstreamError("could not convert this file")
+        with open(out_path, encoding="utf-8") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
 def _strip_tags(text: str) -> str:
     text = re.sub(r"<script[\s\S]*?</script>", "", text, flags=re.I)
     text = re.sub(r"<style[\s\S]*?</style>", "", text, flags=re.I)
@@ -199,7 +294,10 @@ def _html_to_text(raw_html: str) -> str:
 
 async def run_convert(ctx: TaskContext, payload: Convert) -> AgentOutput:
     path = await ctx.files.read(payload.name)
-    md = await asyncio.to_thread(_markitdown_file, str(path))
+    # Convert in an isolated, bounded child process: a crash / OOM / hang on a
+    # pathological document fails this one task cleanly instead of silently
+    # killing the shared agent (see `_convert_isolated`).
+    md = await _convert_isolated(str(path))
 
     output_type = payload.output_type
     if output_type == "auto":
