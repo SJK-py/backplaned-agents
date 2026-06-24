@@ -30,6 +30,36 @@ KAKAO_CHANNEL = "chatbot_kakao"
 CHATBOT_CHANNELS = frozenset({TELEGRAM_CHANNEL, KAKAO_CHANNEL})
 
 
+async def ensure_user_config(request: Request) -> None:
+    """Idempotently create the logged-in user's suite-side `user_config` row,
+    seeded from suite settings — mirrors the chatbot approval reconcile
+    (`create_user_config`).
+
+    Chat users get this row when the approval poller reconciles their serviced
+    session; web-first and OIDC accounts never go through that path, so without
+    this their `user_config` is missing — `get_user_config` returns None (the
+    config agent reads nothing) and `update_user_config` silently updates zero
+    rows (the webapp reports 'saved' but the value is unchanged). Idempotent
+    (`INSERT ... ON CONFLICT DO NOTHING`), so it's safe to call on every login
+    and on the config pages."""
+    pool = request.app.state.pool
+    user_id = session_user_id(request)
+    if pool is None or not user_id:
+        return
+    settings = request.app.state.suite_settings
+    async with pool.acquire() as conn:
+        await queries.create_user_config(
+            conn,
+            user_id=user_id,
+            preset_pro=getattr(settings, "default_preset_pro", "default"),
+            preset_balanced=getattr(settings, "default_preset_balanced", "default"),
+            preset_lite=getattr(settings, "default_preset_lite", "default"),
+            preset_embedding=getattr(
+                settings, "default_preset_embedding", "default_embedding"
+            ),
+        )
+
+
 async def owned_session(request: Request, session_id: str) -> SessionInfoRow | None:
     """The user's `session_info` row for `session_id`, or None (→ 404). The
     router's `admit_task` / file-scope check is the ultimate ownership gate;

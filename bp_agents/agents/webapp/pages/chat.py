@@ -28,7 +28,11 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.pages._common import KAKAO_CHANNEL, TELEGRAM_CHANNEL
+from bp_agents.agents.webapp.pages._common import (
+    KAKAO_CHANNEL,
+    TELEGRAM_CHANNEL,
+    ensure_user_config,
+)
 from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
 from bp_agents.channel import (
     ORCHESTRATOR_AGENT_ID,
@@ -127,6 +131,10 @@ async def chat_send(
     text = message.strip()
     if not text:
         return HTMLResponse("")
+    # Web/OIDC accounts aren't seeded by the chatbot reconcile; make sure their
+    # user_config exists before the turn runs so the orchestrator/config agent
+    # read real presets instead of a missing row.
+    await ensure_user_config(request)
 
     turns: dict[str, dict] = request.app.state.turns
     if len(turns) >= _MAX_PENDING_TURNS:
