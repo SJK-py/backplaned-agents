@@ -31,7 +31,14 @@ from bp_agents.common.progress import (
 from bp_agents.db.models import UserConfigRow
 from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
-from bp_sdk import LlmResponse, Message, ToolCall, ToolSpec
+from bp_sdk import (
+    LlmCallError,
+    LlmResponse,
+    Message,
+    ToolCall,
+    ToolSpec,
+    UpstreamError,
+)
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -53,7 +60,10 @@ class _StubLlm:
 
     async def generate(self, messages, **kw) -> LlmResponse:
         self.calls.append(kw)
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item  # queued failures (e.g. a provider LlmCallError)
+        return item
 
 
 class _StubStream:
@@ -88,10 +98,13 @@ class _StubStream:
 
 
 class _StubPeers:
-    def __init__(self, *, catalog=None, spawn_result=None, child_frames=None) -> None:
+    def __init__(
+        self, *, catalog=None, spawn_result=None, child_frames=None, spawn_exc=None
+    ) -> None:
         self._catalog = catalog or {}
         self._spawn_result = spawn_result
         self._child_frames = child_frames or []
+        self._spawn_exc = spawn_exc  # raise this from spawn (error-path tests)
         self.spawned: list[ToolCall] = []
 
     def visible(self, *, for_user_level=None):
@@ -99,6 +112,8 @@ class _StubPeers:
 
     async def spawn_from_tool_call(self, tc, *, stream=False, **kw):
         self.spawned.append(tc)
+        if self._spawn_exc is not None:
+            raise self._spawn_exc
         if stream:
             return _StubStream(self._child_frames, self._spawn_result)
         return self._spawn_result
@@ -118,7 +133,11 @@ class _StubFiles:
         return []
 
     async def write(self, name, text, *, persistent=False):
+        if self.write_exc is not None:
+            raise self.write_exc
         return name
+
+    write_exc: Exception | None = None
 
 
 class _StubCtx:
@@ -364,6 +383,180 @@ def test_failed_peer_call_surfaces_error_to_model() -> None:
     assert tool_msg.content
     assert "not succeed" in tool_msg.content
     assert "not_found" in tool_msg.content
+
+
+def test_peer_spawn_exception_feeds_error_and_continues() -> None:
+    """A peer spawn that RAISES (not a clean FAILED result frame — e.g. a
+    transport error / unexpected bug) must be fed back to the model so the loop
+    keeps going and still answers, instead of the exception killing the turn."""
+    round1 = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="call_md_converter", args={})],
+    )
+    round2 = LlmResponse(text="I couldn't convert it, here's why…", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    peers = _StubPeers(spawn_exc=RuntimeError("boom: /secret/path leaked"))
+    ctx = _StubCtx(llm, peers, _StubProgress())
+
+    messages: list[Message] = [Message(role="user", content="convert x.pdf")]
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", use_peer_tools=False,
+        )
+    )
+    # The loop ran a second round and the model produced a real answer.
+    assert resp.text == "I couldn't convert it, here's why…"
+    assert len(llm.calls) == 2
+    tool_msg = next(
+        m for m in messages if m.role == "tool" and m.name == "call_md_converter"
+    )
+    assert "call_md_converter call failed" in tool_msg.content
+
+
+def test_file_tool_exception_feeds_error_and_continues() -> None:
+    """A file-tool failure that ISN'T a clean FileStoreError (an unexpected
+    exception from the store) must also be caught and fed back — the file path
+    is a live error surface in the orchestrator (file_tools='full')."""
+    round1 = LlmResponse(
+        text="",
+        tool_calls=[
+            ToolCall(
+                id="c1", name="write_file",
+                args={"filename": "out.md", "text": "hi"},
+            )
+        ],
+    )
+    round2 = LlmResponse(text="Saving failed; want me to retry?", tool_calls=[])
+    llm = _StubLlm([round1, round2])
+    files = _StubFiles()
+    files.write_exc = RuntimeError("disk on fire")
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress(), files=files)
+
+    messages: list[Message] = [Message(role="user", content="save a note")]
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", use_peer_tools=False,
+            file_tools="full",
+        )
+    )
+    assert resp.text == "Saving failed; want me to retry?"
+    tool_msg = next(m for m in messages if m.role == "tool" and m.name == "write_file")
+    assert "write_file call failed" in tool_msg.content
+
+
+def test_tool_dispatch_cancellation_propagates() -> None:
+    """A genuine cancellation (task abort / shutdown) must NOT be swallowed and
+    fed to the model — it has to unwind the turn."""
+    from bp_sdk import CancellationError
+
+    round1 = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="call_kb", args={})],
+    )
+    # Only one response queued: if the loop wrongly continued, it'd IndexError
+    # on the next generate — but we expect CancellationError before that.
+    llm = _StubLlm([round1])
+    peers = _StubPeers(spawn_exc=CancellationError("user aborted"))
+    ctx = _StubCtx(llm, peers, _StubProgress())
+
+    messages: list[Message] = [Message(role="user", content="go")]
+    raised = False
+    try:
+        asyncio.run(
+            run_llm_loop(
+                ctx,  # type: ignore[arg-type]
+                messages=messages, preset="default", use_peer_tools=False,
+            )
+        )
+    except CancellationError:
+        raised = True
+    assert raised
+
+
+def test_unfeedable_file_ref_recovered_after_provider_reject() -> None:
+    """The reported case: read_file on a PDF, then the (Anthropic-compatible,
+    no-PDF) backend 400s on the document attachment. The loop must strip the
+    ref, let the model see a note, and retry — so the user gets a real reply
+    instead of a dead turn."""
+    read = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="read_file", args={"name": "report.pdf"})],
+    )
+    reject = LlmCallError("unsupported document", code="invalid_request", retriable=False)
+    final = LlmResponse(text="I can't read PDFs directly — let me convert it.", tool_calls=[])
+    # generate: round1→read, round2→reject (strip+retry)→final.
+    llm = _StubLlm([read, reject, final])
+    files = _StubFiles()
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress(), files=files)
+
+    messages: list[Message] = [Message(role="user", content="summarize report.pdf")]
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", use_peer_tools=False,
+            file_tools="read_only",
+        )
+    )
+    assert resp.text == "I can't read PDFs directly — let me convert it."
+    assert len(llm.calls) == 3  # read, rejected, retried
+    # The read_file tool result's file_ref was swapped for an actionable note.
+    tool_msg = next(m for m in messages if m.role == "tool" and m.name == "read_file")
+    assert isinstance(tool_msg.content, list)
+    assert not any("file_ref" in p for p in tool_msg.content)
+    assert any("could not be shown" in p.get("text", "") for p in tool_msg.content)
+
+
+def test_provider_reject_without_attachments_surfaces_error() -> None:
+    """A non-retriable LLM error with NO file_ref to strip can't be recovered —
+    it must surface (not loop forever)."""
+    reject = LlmCallError("bad request", code="invalid_request", retriable=False)
+    llm = _StubLlm([reject])
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress())
+
+    messages: list[Message] = [Message(role="user", content="hi")]
+    raised = False
+    try:
+        asyncio.run(
+            run_llm_loop(
+                ctx,  # type: ignore[arg-type]
+                messages=messages, preset="default", use_peer_tools=False,
+            )
+        )
+    except UpstreamError:
+        raised = True
+    assert raised
+    assert len(llm.calls) == 1  # no pointless retry without anything to strip
+
+
+def test_retriable_llm_error_not_stripped() -> None:
+    """A RETRIABLE error (transient) must NOT trigger attachment stripping —
+    the SDK already exhausted its retry budget; surface it, keep the file_ref
+    intact for the next user turn."""
+    reject = LlmCallError("overloaded", code="server_overloaded", retriable=True)
+    llm = _StubLlm([reject])
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress())
+
+    # Pre-seed a tool message carrying a file_ref (as read_file would leave).
+    messages: list[Message] = [
+        Message(role="user", content="read report.pdf"),
+        Message.tool_response(
+            tool_call_id="c1", name="read_file",
+            response=[{"file_ref": {"name": "report.pdf"}}],
+        ),
+    ]
+    raised = False
+    try:
+        asyncio.run(
+            run_llm_loop(
+                ctx,  # type: ignore[arg-type]
+                messages=messages, preset="default", use_peer_tools=False,
+            )
+        )
+    except UpstreamError:
+        raised = True
+    assert raised
+    # file_ref left untouched (not stripped on a transient error).
+    tool_msg = next(m for m in messages if m.role == "tool")
+    assert any("file_ref" in p for p in tool_msg.content)
 
 
 def test_run_llm_loop_forces_final_answer_at_round_limit() -> None:

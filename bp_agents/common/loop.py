@@ -14,12 +14,15 @@ exposed) is passed in; the loop itself is generic.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.progress import emit_loop_progress, relay_subagent_progress
 from bp_agents.common.tools import LocalToolset, peer_tool_specs
 from bp_protocol.types import TaskStatus
 from bp_sdk import (
+    CancellationError,
     LlmCallError,
     Message,
     UpstreamError,
@@ -31,6 +34,8 @@ from bp_sdk import file_tools as sdk_file_tools
 if TYPE_CHECKING:
     from bp_protocol.frames import ResultFrame
     from bp_sdk import LlmResponse, TaskContext, ToolCall, ToolSpec
+
+logger = logging.getLogger(__name__)
 
 
 def _failed_tool_text(tool_name: str, child: ResultFrame) -> str:
@@ -64,13 +69,21 @@ async def _dispatch_tool_call(
     When `forward_subagent_progress`, a peer (subagent) call is **streamed**
     and its action progress is re-emitted on this agent's task, so a verbose
     user sees the specialist's steps (e.g. `[Research Agent] [Tool]
-    web_search`) bubbling up — not just the umbrella call."""
-    if local_tools is not None and local_tools.has(tool_call.name):
-        return await local_tools.dispatch(ctx, tool_call)
-    if file_tools_enabled and is_file_tool(tool_call.name):
-        return await dispatch_file_tool(ctx.files, tool_call)
-    if tool_call.name.startswith("call_"):
-        try:
+    web_search`) bubbling up — not just the umbrella call.
+
+    EVERY dispatch path runs under ONE error boundary: any failure — a peer
+    spawn that raised, a file-store glitch that isn't a clean `FileStoreError`,
+    an unexpected bug in a local tool — is fed back to the model as the tool
+    result so the loop CONTINUES and the model can recover (retry, route
+    around it, or tell the user what broke) instead of the exception unwinding
+    the whole turn into a no-response failure. Genuine cancellation (task
+    abort / shutdown) is re-raised, never swallowed."""
+    try:
+        if local_tools is not None and local_tools.has(tool_call.name):
+            return await local_tools.dispatch(ctx, tool_call)
+        if file_tools_enabled and is_file_tool(tool_call.name):
+            return await dispatch_file_tool(ctx.files, tool_call)
+        if tool_call.name.startswith("call_"):
             if forward_subagent_progress:
                 async with (
                     await ctx.peers.spawn_from_tool_call(tool_call, stream=True)
@@ -80,32 +93,48 @@ async def _dispatch_tool_call(
                     child = await stream.result()
             else:
                 child = await ctx.peers.spawn_from_tool_call(tool_call)
-        except Exception as exc:  # noqa: BLE001
-            return Message.tool_response(
-                tool_call_id=tool_call.id,
-                name=tool_call.name,
-                response=f"tool error: {exc}",
+            # A FAILED/CANCELLED child has output=None and its reason in
+            # `child.error` — which tool_response_from_result drops, so the
+            # model would otherwise get an EMPTY tool result for a failed
+            # delegation and couldn't tell the user or retry. Surface the error
+            # code/message so the model can react (e.g. a file-name typo →
+            # not_found → ask/recheck).
+            if child.status is not TaskStatus.SUCCEEDED:
+                return Message.tool_response(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    response=_failed_tool_text(tool_call.name, child),
+                )
+            return Message.tool_response_from_result(
+                tool_call_id=tool_call.id, name=tool_call.name, result=child
             )
-        # A FAILED/CANCELLED child has output=None and its reason in
-        # `child.error` — which tool_response_from_result drops, so the model
-        # would otherwise get an EMPTY tool result for a failed delegation and
-        # couldn't tell the user or retry. Surface the error code/message so the
-        # model can react (e.g. a file-name typo → not_found → ask/recheck).
-        if child.status is not TaskStatus.SUCCEEDED:
-            return Message.tool_response(
-                tool_call_id=tool_call.id,
-                name=tool_call.name,
-                response=_failed_tool_text(tool_call.name, child),
-            )
-        return Message.tool_response_from_result(
-            tool_call_id=tool_call.id, name=tool_call.name, result=child
+        # Neither a known local tool nor a peer-agent tool name.
+        return Message.tool_response(
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
+            response=f"unknown tool: {tool_call.name}",
         )
-    # Neither a known local tool nor a peer-agent tool name.
-    return Message.tool_response(
-        tool_call_id=tool_call.id,
-        name=tool_call.name,
-        response=f"unknown tool: {tool_call.name}",
-    )
+    except (asyncio.CancelledError, CancellationError):
+        # Cooperative cancel / shutdown — end the turn; do NOT feed to the
+        # model and re-issue, that would defeat the abort.
+        raise
+    except Exception as exc:  # noqa: BLE001 — any tool failure becomes a result
+        # The detail (type + message) goes to ops via the log; the model sees a
+        # bounded line it can act on. Keeps a single bad tool call from killing
+        # the turn — the loop runs another round and the model still answers.
+        logger.warning(
+            "tool_dispatch_error",
+            extra={
+                "event": "tool_dispatch_error",
+                "tool": tool_call.name,
+                "error": type(exc).__name__,
+            },
+        )
+        return Message.tool_response(
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
+            response=f"The {tool_call.name} call failed: {exc}",
+        )
 
 
 def _detail_tail(text: str | None, limit: int) -> str | None:
@@ -134,6 +163,87 @@ def _message_text(msg: Message) -> str | None:
     """The plain-text body of a tool-response message, or `None` when it's
     multimodal/structured (e.g. a `read_file` `file_ref` part)."""
     return msg.content if isinstance(msg.content, str) else None
+
+
+# How many times one `generate` call may strip rejected attachments and retry
+# before giving up and surfacing the error. Small: one bad attachment type is
+# the common case; a loop that keeps failing on stripped input is broken.
+_MAX_ATTACHMENT_RECOVERIES = 2
+
+
+def _strip_unfeedable_file_refs(messages: list[Message]) -> int:
+    """Replace every `file_ref` part in `messages` with a text note the model
+    can act on, returning the count replaced (0 → nothing to recover).
+
+    The recovery path for a provider that REJECTS an attached file the model
+    can't ingest — e.g. `read_file` on a PDF against an Anthropic-compatible
+    backend without document support. The router resolves a `file_ref` into a
+    base64 `document`/`image` part on the NEXT `generate`; if the backend 400s
+    on it, the whole turn died with no reply. Swapping the ref for a
+    `[couldn't be shown — convert it first]` note lets the model route around
+    it (convert to text/Markdown and read that) instead."""
+    replaced = 0
+    for msg in messages:
+        content = msg.content
+        if not isinstance(content, list):
+            continue
+        for i, part in enumerate(content):
+            if isinstance(part, dict) and isinstance(part.get("file_ref"), dict):
+                name = part["file_ref"].get("name") or "file"
+                content[i] = {
+                    "text": (
+                        f"[The file {name!r} could not be shown to the model — "
+                        "this backend can't read that file type directly. "
+                        "Convert it to text or Markdown first (e.g. with a "
+                        "document-conversion tool) and read the result.]"
+                    )
+                }
+                replaced += 1
+    return replaced
+
+
+async def _generate_resilient(
+    ctx: TaskContext,
+    messages: list[Message],
+    *,
+    preset: str | None,
+    tools: list[ToolSpec] | None,
+    tool_choice: Any | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> LlmResponse:
+    """`ctx.llm.generate`, but recover from a provider rejecting an attached
+    file it can't ingest. On a NON-retriable `LlmCallError` (a content/4xx
+    problem, not a transient blip — the SDK already exhausts its retry budget
+    for retriable ones) when the messages carry `file_ref`-derived
+    attachments, strip those attachments, leave the model a note, and retry —
+    so an unfeedable file becomes a recoverable result the model can work
+    around, not a dead turn. Anything else maps to `UpstreamError` as before."""
+    attempts = 0
+    while True:
+        try:
+            return await ctx.llm.generate(
+                messages,
+                preset=preset,
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except LlmCallError as exc:
+            if exc.retriable or attempts >= _MAX_ATTACHMENT_RECOVERIES:
+                raise UpstreamError(f"LLM call failed: {exc}") from exc
+            if not _strip_unfeedable_file_refs(messages):
+                raise UpstreamError(f"LLM call failed: {exc}") from exc
+            attempts += 1
+            logger.warning(
+                "llm_input_rejected_recovered",
+                extra={
+                    "event": "llm_input_rejected_recovered",
+                    "error": exc.code,
+                    "attempt": attempts,
+                },
+            )
 
 
 async def run_llm_loop(
@@ -189,17 +299,14 @@ async def run_llm_loop(
     for round_idx in range(max_rounds):
         if emit_progress:
             await emit_loop_progress(ctx, kind="thinking", round=round_idx + 1)
-        try:
-            resp = await ctx.llm.generate(
-                messages,
-                preset=preset,
-                tools=tools or None,
-                tool_choice=tool_choice,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except LlmCallError as exc:
-            raise UpstreamError(f"LLM call failed: {exc}") from exc
+        resp = await _generate_resilient(
+            ctx, messages,
+            preset=preset,
+            tools=tools or None,
+            tool_choice=tool_choice,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
         # Round-trip the assistant turn verbatim (reasoning blocks +
         # thought-signatures) before dispatching tools.
@@ -263,12 +370,9 @@ async def run_llm_loop(
             ctx, kind="thinking", round=max_rounds, detail="wrapping up",
         )
     messages.append(Message(role="user", content=_FINAL_ANSWER_NUDGE))
-    try:
-        final = await ctx.llm.generate(
-            messages, preset=preset, tools=None,
-            temperature=temperature, max_tokens=max_tokens,
-        )
-    except LlmCallError as exc:
-        raise UpstreamError(f"LLM call failed: {exc}") from exc
+    final = await _generate_resilient(
+        ctx, messages, preset=preset, tools=None,
+        temperature=temperature, max_tokens=max_tokens,
+    )
     messages.append(Message.assistant_from_response(final))
     return final
