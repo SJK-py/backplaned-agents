@@ -19,14 +19,19 @@ aside {
   height: 100dvh;
 }
 
-/* Stop iOS Safari/Chrome auto-zooming when a form control is focused: it zooms
-   whenever the focused control's font-size is < 16px (Tailwind's text-sm is
-   14px). Pin 16px on touch-width screens; desktop keeps the Tailwind sizes. */
+/* Stop iOS Safari/Chrome auto-zooming when a text field is focused (e.g. the
+   chat message box): it zooms whenever the focused control's font-size is
+   < 16px. Most text controls carry Tailwind's `text-sm` (14px), so 16px must
+   be forced on touch-width screens; desktop keeps the Tailwind sizes.
+   `!important` is required: `.text-sm` (a class, specificity 0,1,0) beats a
+   bare `input`/`select`/`textarea` element selector (0,0,1), so without it
+   this rule silently no-ops and the zoom returns. checkbox/radio are excluded
+   — they're not text-entry and don't trigger the zoom. */
 @media (max-width: 767px) {
-  input,
+  input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
-    font-size: 16px;
+    font-size: 16px !important;
   }
 }
 
