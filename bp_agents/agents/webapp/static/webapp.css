@@ -6,24 +6,27 @@ aside {
   transition: transform 0.2s ease-in-out;
 }
 
-/* Full-viewport heights that track the *dynamic* viewport (dvh). iOS Safari /
-   Chrome size `100vh` to the LARGEST viewport (toolbars collapsed), so a
-   `100vh`-based layout is slightly taller than what's visible while the
-   address bar shows — a small awkward scroll. `dvh` tracks the visible
-   height; `vh` is kept first as the fallback for browsers without `dvh`
-   (< iOS 15.4) — the browser uses the last value it understands. */
-.app-min-h {
-  min-height: 100vh;
-  min-height: 100dvh;
+/* App-shell height tracking the *dynamic* viewport (dvh), with a vh fallback
+   for browsers without dvh (< iOS 15.4 — they use the last value they parse).
+   iOS Safari / Chrome size `100vh` to the LARGEST viewport (toolbars
+   collapsed), so a `100vh` shell is taller than what's visible while the
+   address bar shows. `app-h` is the *exact* shell height: the app fills the
+   screen and never page-scrolls (the inner panes scroll instead). That is what
+   keeps the chat input pinned to the bottom and the message list — not the
+   page — scrolling, on every viewport. */
+.app-h {
+  height: 100vh;
+  height: 100dvh;
 }
-.chat-pane {
-  height: calc(100vh - 7rem);
-  height: calc(100dvh - 7rem);
-}
-@media (min-width: 768px) {
-  .chat-pane {
-    height: calc(100vh - 4rem);
-    height: calc(100dvh - 4rem);
+
+/* Stop iOS Safari/Chrome auto-zooming when a form control is focused: it zooms
+   whenever the focused control's font-size is < 16px (Tailwind's text-sm is
+   14px). Pin 16px on touch-width screens; desktop keeps the Tailwind sizes. */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
   }
 }
 
