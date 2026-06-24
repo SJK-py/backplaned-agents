@@ -10,6 +10,8 @@ alongside.
 from __future__ import annotations
 
 import logging
+import re
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse
@@ -23,6 +25,26 @@ router = APIRouter()
 # Cap a single browser upload (the router enforces its own max; this just
 # avoids spooling an absurd body before the upstream rejects it).
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _content_disposition(filename: str) -> str:
+    """Build an RFC 6266 / RFC 5987 attachment ``Content-Disposition`` value.
+
+    HTTP header values must be latin-1, so interpolating a non-ASCII filename
+    (e.g. a Korean / Japanese name) straight into ``filename="..."`` makes
+    Starlette raise ``UnicodeEncodeError`` while building the response → a 500
+    that the browser saves AS the file ("Internal Server Error"). Emit an
+    ASCII-safe ``filename="..."`` (defanged) plus ``filename*=UTF-8''<percent>``
+    for modern clients. Mirrors ``bp_router.filename_utils`` — kept local
+    because the agent suite doesn't depend on the router package.
+    """
+    base = filename.replace("\\", "/").split("/")[-1] or "download"
+    ascii_safe = base.encode("ascii", "ignore").decode("ascii")
+    # Collapse unsafe chars to underscore so filename="..." stays a well-formed
+    # quoted string (also guards CR/LF header injection).
+    ascii_safe = re.sub(r'[\\"\x00-\x1f\x7f]', "_", ascii_safe) or "download"
+    star = quote(base, safe="")
+    return f"attachment; filename=\"{ascii_safe}\"; filename*=UTF-8''{star}"
 
 
 @router.get("/files/{session_id}", response_class=HTMLResponse)
@@ -128,5 +150,5 @@ async def download_file(session_id: str, name: str, request: Request) -> Respons
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": _content_disposition(filename)},
     )

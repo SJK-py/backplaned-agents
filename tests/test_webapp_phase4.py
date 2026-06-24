@@ -296,6 +296,51 @@ def test_stash_download_streams_bytes(suite_db_url: str) -> None:
     assert "report.md" in disposition
 
 
+def test_content_disposition_encodes_non_ascii_filename() -> None:
+    """A non-ASCII filename must not be interpolated raw into the header
+    (latin-1 only → UnicodeEncodeError → 500). RFC 6266: ASCII `filename=`
+    fallback + `filename*=UTF-8''<percent>`; the whole value stays latin-1."""
+    from bp_agents.agents.webapp.pages.files import _content_disposition
+
+    out = _content_disposition("보고서.md")
+    out.encode("latin-1")  # must not raise — this is the actual 500 trigger
+    assert "filename*=UTF-8''" in out
+    assert "%EB%B3%B4" in out  # 보 percent-encoded
+    # ASCII fallback present and quoted-string well-formed (exactly 2 quotes).
+    assert out.count('"') == 2
+    # Path separators / quotes can't break out of the header.
+    inj = _content_disposition('../a"b\r\nX: 1.txt')
+    inj.encode("latin-1")
+    assert "\r" not in inj and "\n" not in inj
+    assert inj.count('"') == 2
+
+
+def test_stash_download_unicode_filename_does_not_500(suite_db_url: str) -> None:
+    """Regression: downloading a file with a Korean name 500'd because the raw
+    name went into Content-Disposition (non-latin-1). Now it streams with an
+    RFC 6266 header."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, bytes, str]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/files/ses_1/보고서.md")
+            return r.status_code, r.content, r.headers.get("content-disposition", "")
+        finally:
+            await pool.close()
+
+    status, content, disposition = asyncio.run(_drive())
+    assert status == 200
+    assert content == b"FILE-BYTES"
+    assert "filename*=UTF-8''" in disposition
+
+
 def test_stash_404_for_unowned_session(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
 
