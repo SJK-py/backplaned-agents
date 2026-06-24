@@ -31,7 +31,14 @@ from bp_agents.common.progress import (
 from bp_agents.db.models import UserConfigRow
 from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
-from bp_sdk import LlmResponse, Message, ToolCall, ToolSpec
+from bp_sdk import (
+    LlmCallError,
+    LlmResponse,
+    Message,
+    ToolCall,
+    ToolSpec,
+    UpstreamError,
+)
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -53,7 +60,10 @@ class _StubLlm:
 
     async def generate(self, messages, **kw) -> LlmResponse:
         self.calls.append(kw)
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item  # queued failures (e.g. a provider LlmCallError)
+        return item
 
 
 class _StubStream:
@@ -461,6 +471,92 @@ def test_tool_dispatch_cancellation_propagates() -> None:
     except CancellationError:
         raised = True
     assert raised
+
+
+def test_unfeedable_file_ref_recovered_after_provider_reject() -> None:
+    """The reported case: read_file on a PDF, then the (Anthropic-compatible,
+    no-PDF) backend 400s on the document attachment. The loop must strip the
+    ref, let the model see a note, and retry — so the user gets a real reply
+    instead of a dead turn."""
+    read = LlmResponse(
+        text="", tool_calls=[ToolCall(id="c1", name="read_file", args={"name": "report.pdf"})],
+    )
+    reject = LlmCallError("unsupported document", code="invalid_request", retriable=False)
+    final = LlmResponse(text="I can't read PDFs directly — let me convert it.", tool_calls=[])
+    # generate: round1→read, round2→reject (strip+retry)→final.
+    llm = _StubLlm([read, reject, final])
+    files = _StubFiles()
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress(), files=files)
+
+    messages: list[Message] = [Message(role="user", content="summarize report.pdf")]
+    resp = asyncio.run(
+        run_llm_loop(
+            ctx,  # type: ignore[arg-type]
+            messages=messages, preset="default", use_peer_tools=False,
+            file_tools="read_only",
+        )
+    )
+    assert resp.text == "I can't read PDFs directly — let me convert it."
+    assert len(llm.calls) == 3  # read, rejected, retried
+    # The read_file tool result's file_ref was swapped for an actionable note.
+    tool_msg = next(m for m in messages if m.role == "tool" and m.name == "read_file")
+    assert isinstance(tool_msg.content, list)
+    assert not any("file_ref" in p for p in tool_msg.content)
+    assert any("could not be shown" in p.get("text", "") for p in tool_msg.content)
+
+
+def test_provider_reject_without_attachments_surfaces_error() -> None:
+    """A non-retriable LLM error with NO file_ref to strip can't be recovered —
+    it must surface (not loop forever)."""
+    reject = LlmCallError("bad request", code="invalid_request", retriable=False)
+    llm = _StubLlm([reject])
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress())
+
+    messages: list[Message] = [Message(role="user", content="hi")]
+    raised = False
+    try:
+        asyncio.run(
+            run_llm_loop(
+                ctx,  # type: ignore[arg-type]
+                messages=messages, preset="default", use_peer_tools=False,
+            )
+        )
+    except UpstreamError:
+        raised = True
+    assert raised
+    assert len(llm.calls) == 1  # no pointless retry without anything to strip
+
+
+def test_retriable_llm_error_not_stripped() -> None:
+    """A RETRIABLE error (transient) must NOT trigger attachment stripping —
+    the SDK already exhausted its retry budget; surface it, keep the file_ref
+    intact for the next user turn."""
+    reject = LlmCallError("overloaded", code="server_overloaded", retriable=True)
+    llm = _StubLlm([reject])
+    ctx = _StubCtx(llm, _StubPeers(), _StubProgress())
+
+    # Pre-seed a tool message carrying a file_ref (as read_file would leave).
+    messages: list[Message] = [
+        Message(role="user", content="read report.pdf"),
+        Message.tool_response(
+            tool_call_id="c1", name="read_file",
+            response=[{"file_ref": {"name": "report.pdf"}}],
+        ),
+    ]
+    raised = False
+    try:
+        asyncio.run(
+            run_llm_loop(
+                ctx,  # type: ignore[arg-type]
+                messages=messages, preset="default", use_peer_tools=False,
+            )
+        )
+    except UpstreamError:
+        raised = True
+    assert raised
+    # file_ref left untouched (not stripped on a transient error).
+    tool_msg = next(m for m in messages if m.role == "tool")
+    assert any("file_ref" in p for p in tool_msg.content)
 
 
 def test_run_llm_loop_forces_final_answer_at_round_limit() -> None:
