@@ -56,6 +56,14 @@ class WebappConfig(BaseSettings):
     set when `sso_enabled`, registered at the OP, and present in the router's
     ROUTER_OIDC_ALLOWED_REDIRECT_URIS allowlist."""
 
+    password_login_enabled: bool = True
+    """Whether the webapp offers email + password sign-in (and the password-
+    credential paths: `/register`, `/set-password`). Set false to make the
+    webapp **SSO-only** once OIDC is configured — the password form, the
+    "request access" / "set with a token" links, and the `/login`,
+    `/register`, `/set-password` POST handlers are all refused. Requires
+    `sso_enabled` (disabling it without SSO would lock everyone out)."""
+
     use_built_css: bool = False
     """Serve the pre-built `/static/tailwind.css` instead of the Tailwind Play
     CDN. Opt-in (default False) so a deploy that hasn't built the CSS yet keeps
@@ -89,6 +97,16 @@ class WebappConfig(BaseSettings):
                     "WEBAPP_PUBLIC_BASE_URL must be an absolute URL when "
                     "WEBAPP_SSO_ENABLED=true (used for the OIDC redirect_uri)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _no_password_only_lockout(self) -> WebappConfig:
+        if not self.password_login_enabled and not self.sso_enabled:
+            raise ValueError(
+                "WEBAPP_PASSWORD_LOGIN_ENABLED=false requires "
+                "WEBAPP_SSO_ENABLED=true — disabling password login without "
+                "SSO would leave no way to sign in"
+            )
         return self
 
     @model_validator(mode="after")

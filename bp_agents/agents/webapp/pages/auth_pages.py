@@ -68,8 +68,10 @@ async def login_form(
 ) -> HTMLResponse:
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
+    cfg = request.app.state.config
+    pw = cfg.password_login_enabled
     templates = request.app.state.templates
-    reset_msg = _RESET_ERRORS.get(reset_error or "")
+    reset_msg = _RESET_ERRORS.get(reset_error or "") if pw else None
     next_q = request.query_params.get("next", "")
     return templates.TemplateResponse(
         request,
@@ -89,10 +91,13 @@ async def login_form(
             # Shown after a successful self-service signup submission.
             "registered_ok": registered == "1",
             # SSO button (frontend toggle; the router gates the actual flow).
-            "sso_enabled": request.app.state.config.sso_enabled,
+            "sso_enabled": cfg.sso_enabled,
             "sso_login_url": "/auth/sso/login" + (
                 f"?next={quote(next_q)}" if next_q else ""
             ),
+            # When false, the webapp is SSO-only: hide the password form and
+            # the register / set-with-token links.
+            "password_login_enabled": pw,
         },
     )
 
@@ -104,6 +109,9 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form(""),
 ) -> HTMLResponse:
+    if not request.app.state.config.password_login_enabled:
+        # SSO-only: refuse password auth even on a direct POST.
+        return RedirectResponse(url="/login", status_code=303)
     upstream = request.app.state.upstream
     templates = request.app.state.templates
     try:
@@ -117,7 +125,12 @@ async def login_submit(
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": "Invalid credentials.", "next": next, "email": email},
+            {"error": "Invalid credentials.", "next": next, "email": email,
+             # This path is only reached when password login is enabled; keep
+             # the password form rendered (and offer SSO if configured).
+             "password_login_enabled": True,
+             "sso_enabled": request.app.state.config.sso_enabled,
+             "sso_login_url": "/auth/sso/login"},
             status_code=401,
         )
     store_login(request, login_response=body, email=email)
@@ -260,6 +273,8 @@ async def register_form(
     channel for password recovery / scheduled-task notifications."""
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
+    if not request.app.state.config.password_login_enabled:
+        return RedirectResponse(url="/login", status_code=303)
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request, "register.html", {"error": _REGISTER_ERRORS.get(error or "")},
@@ -279,6 +294,8 @@ async def register_submit(
     safe: a duplicate email yields the same "request received" outcome as a
     new one (the router upsert is a no-op create), so the page never reveals
     whether an email is already registered."""
+    if not request.app.state.config.password_login_enabled:
+        return RedirectResponse(url="/login", status_code=303)
     if password != confirm_password:
         return RedirectResponse(url="/register?error=mismatch", status_code=303)
     if len(password.strip()) < 8:
@@ -317,6 +334,8 @@ async def set_password_submit(
     password. On success the user signs in below with their email + the new
     password (the router's returned TokenPair is intentionally not used —
     the user just chose the password, so a normal sign-in is the clear UX)."""
+    if not request.app.state.config.password_login_enabled:
+        return RedirectResponse(url="/login", status_code=303)
     if len(new_password.strip()) < 8:
         return RedirectResponse(url="/login?reset_error=weak", status_code=303)
     upstream = request.app.state.upstream

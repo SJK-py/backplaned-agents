@@ -445,6 +445,9 @@ services:
       # deploy/.env.prod to turn it on.
       WEBAPP_SSO_ENABLED: "${OIDC_ENABLED:-false}"
       WEBAPP_PUBLIC_BASE_URL: "${WEBAPP_PUBLIC_BASE_URL:-https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}}"
+      # Set false to make the webapp SSO-only (hide/disable password login,
+      # /register, /set-password). Requires SSO enabled. Default keeps both.
+      WEBAPP_PASSWORD_LOGIN_ENABLED: "${WEBAPP_PASSWORD_LOGIN_ENABLED:-true}"
     # Fronted by the edge proxy (HTTPS + SSE); not published directly.
     networks: [edge, agents, suite]
     volumes: [webapp_state:/state]

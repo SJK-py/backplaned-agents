@@ -6,6 +6,27 @@ aside {
   transition: transform 0.2s ease-in-out;
 }
 
+/* Full-viewport heights that track the *dynamic* viewport (dvh). iOS Safari /
+   Chrome size `100vh` to the LARGEST viewport (toolbars collapsed), so a
+   `100vh`-based layout is slightly taller than what's visible while the
+   address bar shows — a small awkward scroll. `dvh` tracks the visible
+   height; `vh` is kept first as the fallback for browsers without `dvh`
+   (< iOS 15.4) — the browser uses the last value it understands. */
+.app-min-h {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.chat-pane {
+  height: calc(100vh - 7rem);
+  height: calc(100dvh - 7rem);
+}
+@media (min-width: 768px) {
+  .chat-pane {
+    height: calc(100vh - 4rem);
+    height: calc(100dvh - 4rem);
+  }
+}
+
 /* Hide Alpine-cloaked elements (e.g. the inactive file-stash tab) until
    Alpine initialises, to avoid a flash of both panels on load. */
 [x-cloak] {

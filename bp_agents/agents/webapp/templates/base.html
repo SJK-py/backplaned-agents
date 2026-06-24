@@ -37,10 +37,10 @@
 
   {% block head_extra %}{% endblock %}
 </head>
-<body class="min-h-screen bg-brand-50 text-brand-900 antialiased">
+<body class="app-min-h bg-brand-50 text-brand-900 antialiased">
 
 {% if request.session.get("access_token") %}
-  <div class="flex min-h-screen"
+  <div class="flex app-min-h"
        x-data="{ drawer: false, collapsed: localStorage.getItem('bp_sb') === '1',
                  setCollapsed(v) { this.collapsed = v; localStorage.setItem('bp_sb', v ? '1' : '0'); } }">
     <!-- Backdrop: tap to close the mobile drawer. -->
@@ -60,7 +60,7 @@
              'flex translate-x-0': drawer,
              'hidden -translate-x-full': !drawer,
              'md:hidden': collapsed,
-             'md:flex md:static md:translate-x-0': !collapsed
+             'md:flex md:sticky md:top-0 md:h-screen md:translate-x-0': !collapsed
            }">
       <div class="px-4 py-4 border-b border-brand-700/50 flex items-center justify-between">
         <a href="/" class="text-lg font-semibold tracking-wide">backplaned</a>
@@ -124,7 +124,7 @@
     </div>
   </div>
 {% else %}
-  <main class="min-h-screen flex items-center justify-center p-6">
+  <main class="app-min-h flex items-center justify-center p-6">
     {% block unauth_content %}{% endblock %}
   </main>
 {% endif %}
