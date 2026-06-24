@@ -30,6 +30,22 @@ aside {
   }
 }
 
+/* Stop the slight zoom iOS applies when tapping a small control — e.g. the
+   config "Verbose by default" checkbox. The 16px rule above kills the
+   font-size focus-zoom on text fields, but a checkbox is non-text: the zoom
+   there is the legacy double-tap-to-zoom firing on the small tap target.
+   `manipulation` drops double-tap-zoom (and the 300ms tap delay) while still
+   allowing pinch-zoom, so accessibility is preserved. Inert on non-touch. */
+label,
+button,
+input,
+select,
+textarea,
+a,
+[role="button"] {
+  touch-action: manipulation;
+}
+
 /* Hide Alpine-cloaked elements (e.g. the inactive file-stash tab) until
    Alpine initialises, to avoid a flash of both panels on load. */
 [x-cloak] {
