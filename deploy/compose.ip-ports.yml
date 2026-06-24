@@ -1,0 +1,22 @@
+# Bare-IP edge ports — Compose override for EDGE_MODE=ip.
+#
+# The base docker-compose.prod.yml publishes 80 + 443 for the DOMAIN identity
+# (HTTP→HTTPS redirect / ACME challenge / the public hostname). Pure bare-IP
+# mode has NO domain: the generated Caddyfile (scripts/render-caddyfile.sh)
+# emits no `:80` site block at all, and only touches :443 if the operator kept
+# the 443 default for ROUTER_HTTPS_PORT. So with dedicated ports, 80/443 are
+# dead surface — published to the host for nothing, and colliding with a
+# host-level reverse proxy (e.g. cloudflared + caddy) that wants those ports.
+#
+# scripts/prod.sh adds this file via `-f` ONLY when EDGE_MODE=ip, replacing the
+# whole `ports` list so caddy publishes just ROUTER_HTTPS_PORT + WEBAPP_HTTPS_PORT.
+# EDGE_MODE=both intentionally keeps the base 80/443 (it serves the domain too),
+# and a bare `docker compose up` without prod.sh keeps the base file's defaults.
+#
+# `!override` replaces the base service's `ports` list outright (the default
+# Compose merge for sequences is append). Requires Docker Compose v2.20+.
+services:
+  caddy:
+    ports: !override
+      - "${ROUTER_HTTPS_PORT:-443}:${ROUTER_HTTPS_PORT:-443}"
+      - "${WEBAPP_HTTPS_PORT:-8443}:${WEBAPP_HTTPS_PORT:-8443}"
