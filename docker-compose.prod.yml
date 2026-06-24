@@ -519,7 +519,20 @@ services:
 
   md_converter:
     <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: md_converter, AGENT_INVITATION_TOKEN: "${MD_CONVERTER_INVITATION:?}"}
+    environment:
+      <<: *suite-env
+      SUITE_AGENT: md_converter
+      AGENT_INVITATION_TOKEN: ${MD_CONVERTER_INVITATION:?}
+      # LLM-vision OCR (markitdown-ocr plugin). Set KEY + MODEL to OCR images
+      # embedded in PDF/DOCX/PPTX/XLSX (and full pages of scanned PDFs) via a
+      # vision model — a DEDICATED OpenAI-compatible provider, separate from the
+      # router's presets (MarkItDown needs a synchronous client that can't ride
+      # the frame channel). Both empty (default) → OCR disabled, image handling
+      # stays metadata-only. See deploy/.env.prod.example.
+      SUITE_MD_OCR_API_KEY: ${SUITE_MD_OCR_API_KEY:-}
+      SUITE_MD_OCR_MODEL: ${SUITE_MD_OCR_MODEL:-}
+      SUITE_MD_OCR_BASE_URL: ${SUITE_MD_OCR_BASE_URL:-}
+      SUITE_MD_OCR_PROMPT: ${SUITE_MD_OCR_PROMPT:-}
     volumes: [md_converter_state:/state]
 
   config:
