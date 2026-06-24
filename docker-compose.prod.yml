@@ -533,6 +533,12 @@ services:
       SUITE_MD_OCR_MODEL: ${SUITE_MD_OCR_MODEL:-}
       SUITE_MD_OCR_BASE_URL: ${SUITE_MD_OCR_BASE_URL:-}
       SUITE_MD_OCR_PROMPT: ${SUITE_MD_OCR_PROMPT:-}
+      # Bound each per-image OCR call. The OpenAI SDK default (600s × 2 retries)
+      # lets one slow/unreachable OCR endpoint hang the WHOLE conversion with no
+      # error — keep it tight. (The plugin speaks OpenAI Chat Completions; the
+      # OCR endpoint must be OpenAI-compatible, not Anthropic-shaped.)
+      SUITE_MD_OCR_TIMEOUT_S: ${SUITE_MD_OCR_TIMEOUT_S:-60}
+      SUITE_MD_OCR_MAX_RETRIES: ${SUITE_MD_OCR_MAX_RETRIES:-1}
       # Conversion runs in an isolated child process; these bound it so a
       # pathological document fails one task cleanly instead of OOM-killing
       # the agent with no trace. See deploy/.env.prod.example.

@@ -387,6 +387,18 @@ class SuiteSettings(BaseSettings):
     md_ocr_prompt: str | None = None
     """Optional override of the plugin's extraction prompt (e.g. "Extract all
     text, preserving table structure."). Unset → the plugin's default."""
+    md_ocr_timeout_s: float = Field(default=60.0, gt=0.0)
+    """Per-request timeout (seconds) for the OCR vision client. The OCR plugin
+    makes a SYNCHRONOUS call per embedded image/page; the OpenAI SDK's default
+    (600s) means ONE slow or unreachable endpoint stalls the entire conversion
+    with no error and no log. Keep it tight so a bad OCR call fails fast and the
+    conversion proceeds (that image just isn't OCR'd) instead of blocking. NB:
+    the plugin speaks OpenAI Chat Completions — point the OCR endpoint at an
+    OpenAI-compatible vision model, not an Anthropic-shaped one."""
+    md_ocr_max_retries: int = Field(default=1, ge=0)
+    """How many times the OCR client retries a failed request (the OpenAI SDK
+    default is 2). Low, so a dead endpoint doesn't multiply the per-image stall
+    by the retry count."""
 
     # ------------------------------------------------------------------
     # md_converter — conversion isolation
