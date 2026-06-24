@@ -81,6 +81,8 @@ Compose brings everything up in dependency order: schema **migrations** → a on
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
+**Optional — SSO (OIDC):** the webapp can also authenticate against an external identity provider (Authelia, Keycloak, Google, Microsoft). It's **off by default** and wired manually by the operator: set the `OIDC_*` variables in `deploy/.env.prod` (the compose files already pass them through) — see the commented block in [`deploy/.env.prod.example`](./deploy/.env.prod.example) and the design in [`docs/design/oidc-webapp.md`](./docs/design/oidc-webapp.md).
+
 ---
 
 ## Learn more
