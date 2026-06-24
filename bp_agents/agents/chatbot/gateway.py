@@ -15,7 +15,7 @@ import logging
 import mimetypes
 from typing import TYPE_CHECKING, Any, Protocol
 
-from bp_agents.agents.chatbot.credentials import ChannelCredentials
+from bp_agents.agents.chatbot.credentials import ChannelCredentials, LinkRefused
 from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.channel import (
     VERBOSE_PREFIX,
@@ -133,8 +133,13 @@ _LINK_OK = (
     "conversation here (separate from your other chats)."
 )
 _LINK_INVALID = (
-    "That token is invalid or expired. Mint a fresh one with /password and "
-    "try again."
+    "That token is invalid or expired. Mint a fresh one with /password (or in "
+    "webapp settings) and try again."
+)
+_LINK_PRIVILEGED = (
+    "This account can't be linked to a chat for security reasons — it's an "
+    "admin/service account. Use a regular (non-admin) account, or link the "
+    "chat before the account is promoted."
 )
 _SETDEFAULT_OK = (
     "Done — this chat's conversation is now your default. Scheduled reminders "
@@ -453,6 +458,13 @@ class ChatbotGateway:
             # serviced_by over the account (so /password recovery + scheduled
             # delivery work from here on) — router /v1/auth/link-channel.
             user_id = await self._credentials.link_channel(token=token)
+        except LinkRefused:
+            # Valid token, but the target is a privileged (admin/service)
+            # account the router won't let a channel service — say so plainly.
+            await self._telegram.send_message(
+                chat_id=chat_id, text=_LINK_PRIVILEGED
+            )
+            return
         except Exception:  # noqa: BLE001
             logger.exception(
                 "link_verify_failed", extra={"event": "link_verify_failed"}

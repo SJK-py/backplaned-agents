@@ -41,6 +41,15 @@ logger = logging.getLogger(__name__)
 _TOKEN_SKEW_S = 60.0
 
 
+class LinkRefused(Exception):
+    """Raised by `link_channel` when the token was VALID but the router refused
+    to link the account (HTTP 403): the target is a privileged (admin/service)
+    account, so granting this channel `serviced_by` over it would be a
+    privilege escalation. Distinct from an invalid/expired/used token (which
+    returns None) so the channel can tell the user the real reason instead of
+    "invalid or expired"."""
+
+
 @dataclass
 class ServicedSession:
     user_id: str
@@ -374,16 +383,21 @@ class HttpChannelCredentials:
         recovery, scheduled delivery). `grant_service=False` is a verify-only
         bind (no grant) — kept addressable for symmetry with the router.
 
-        Returns the `user_id` on success, or None on a 4xx (missing /
-        expired / already-used token, inactive user, or a refused grant
-        over a privileged target) so the caller can tell the user it didn't
-        take. Network / server (5xx) errors propagate."""
+        Returns the `user_id` on success, or None on a 4xx that means the
+        token didn't take (missing / expired / already-used token, inactive
+        user) so the caller can tell the user. A 403 — the router refusing to
+        grant `serviced_by` over a PRIVILEGED (admin/service) target — raises
+        `LinkRefused` instead, so the caller can give the real reason rather
+        than a misleading "invalid or expired". Network / server (5xx) errors
+        propagate."""
         svc = await self._service_token()
         resp = await self._client.post(
             f"{self._http_url}/v1/auth/link-channel",
             headers={"Authorization": f"Bearer {svc}"},
             json={"token": token, "grant_service": grant_service},
         )
+        if resp.status_code == 403:
+            raise LinkRefused
         if 400 <= resp.status_code < 500:
             return None
         resp.raise_for_status()

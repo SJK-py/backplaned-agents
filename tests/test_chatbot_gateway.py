@@ -13,9 +13,11 @@ import json
 
 import httpx
 
+from bp_agents.agents.chatbot.credentials import LinkRefused
 from bp_agents.agents.chatbot.gateway import (
     _LINK_INVALID,
     _LINK_OK,
+    _LINK_PRIVILEGED,
     _LINK_USAGE,
     _SETDEFAULT_OK,
     BOT_COMMANDS,
@@ -497,14 +499,23 @@ class _LinkCreds:
     open_session hands back a fresh session id for the linked chat's own
     conversation."""
 
-    def __init__(self, *, user_id: str | None, new_session: str = "ses_link") -> None:
+    def __init__(
+        self,
+        *,
+        user_id: str | None,
+        new_session: str = "ses_link",
+        refuse: bool = False,
+    ) -> None:
         self._user_id = user_id
         self._new = new_session
+        self._refuse = refuse
         self.verified: list[str] = []
         self.opened: list[str] = []
 
     async def link_channel(self, *, token: str) -> str | None:
         self.verified.append(token)
+        if self._refuse:
+            raise LinkRefused
         return self._user_id
 
     async def open_session(self, *, user_id, metadata=None) -> str:
@@ -564,6 +575,40 @@ def test_link_invalid_token_reports_and_does_not_map(suite_db_url: str) -> None:
             await gw.handle_update("tg_new", "/link bad")
 
             assert tg.sent == [("tg_new", _LINK_INVALID)]
+            async with pool.acquire() as conn:
+                resolved = await queries.resolve_user_id(
+                    conn, platform="telegram", chat_id="tg_new"
+                )
+            assert resolved is None
+        finally:
+            await pool.close()
+
+    asyncio.run(_drive())
+
+
+def test_link_privileged_target_reports_refusal_and_does_not_map(
+    suite_db_url: str,
+) -> None:
+    """A VALID token for an admin/service account is refused by the router
+    (403 → LinkRefused). The chat gets the privileged-account message (not the
+    misleading "invalid or expired") and stays unmapped."""
+
+    async def _drive() -> None:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            tg = _FakeTelegram()
+            creds = _LinkCreds(user_id="usr_a", refuse=True)
+            gw = ChatbotGateway(
+                dispatcher=_FakeDispatcher(), pool=pool,
+                telegram=tg, credentials=creds,
+            )
+
+            await gw.handle_update("tg_new", "/link tok-admin")
+
+            assert creds.verified == ["tok-admin"]
+            assert creds.opened == []  # no session opened
+            assert tg.sent == [("tg_new", _LINK_PRIVILEGED)]
             async with pool.acquire() as conn:
                 resolved = await queries.resolve_user_id(
                     conn, platform="telegram", chat_id="tg_new"

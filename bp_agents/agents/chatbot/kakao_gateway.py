@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from bp_agents.agents.chatbot.credentials import LinkRefused
 from bp_agents.agents.chatbot.kakao_client import _MAX_CALLBACK_OUTPUTS, KakaoClient
 from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
@@ -161,7 +162,11 @@ _LINK_OK_TEXT = (
     "🔗 연결됐어요! 이제 이 채팅이 기존 계정을 사용해요. (다른 채팅과는 별개의 대화를 가져요.)"
 )
 _LINK_INVALID_TEXT = (
-    "토큰이 올바르지 않거나 만료됐어요. /password 로 새 토큰을 받아 다시 시도해 주세요."
+    "토큰이 올바르지 않거나 만료됐어요. /password (또는 웹 설정)에서 새 토큰을 받아 다시 시도해 주세요."
+)
+_LINK_PRIVILEGED_TEXT = (
+    "이 계정은 보안상 채팅에 연결할 수 없어요 — 관리자/서비스 계정이에요. "
+    "일반 계정을 사용하거나, 관리자 권한을 부여하기 전에 채팅을 연결해 주세요."
 )
 _LINK_FAILED_TEXT = "연결에 실패했어요. 잠시 후 다시 시도해 주세요."
 _NO_SESSION_TEXT = "활성화된 대화가 없어요. 관리자에게 문의해 주세요."
@@ -909,6 +914,11 @@ class KakaoGateway:
             # out-of-band push ([cron.md] §6), so it can't carry scheduled
             # notifications.
             user_id = await self._credentials.link_channel(token=token)
+        except LinkRefused:
+            # Valid token, but the target is a privileged (admin/service)
+            # account the router won't let a channel service — say so plainly.
+            await self._client.post_callback(callback_url, _LINK_PRIVILEGED_TEXT)
+            return
         except Exception:  # noqa: BLE001
             logger.exception(
                 "kakao_link_verify_failed",
