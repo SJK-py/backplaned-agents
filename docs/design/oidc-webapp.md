@@ -255,6 +255,87 @@ level-mapping source where supported. **GitHub is OAuth2, not true OIDC**
 out of scope for the self-hosted (Authelia/Keycloak) and Google/MS cases
 that motivate this.
 
+> **Claims come from the `id_token`, not `/userinfo`.** The router validates
+> the `id_token` and reads `email` / `email_verified` / `groups` straight from
+> its claims — it does **not** call the OP's userinfo endpoint. So the OP must
+> be configured to put those claims **in the `id_token`**. SSO login by `sub`
+> works regardless; but `groups`→level mapping needs `groups` in the token,
+> and verified-email features (auto-link, JIT email adoption) need `email` +
+> `email_verified` in the token. Google/Microsoft include `email` by default;
+> Authelia/Keycloak need an explicit claims policy (below). Also: the router
+> authenticates the token exchange with **`client_secret_post`** (secret in the
+> request body), so the OP client must allow that method (some default to
+> `client_secret_basic`).
+
+### 9.1 Example wiring — Authelia
+
+IdP side (Authelia ≥ 4.39 `configuration.yml`; the OIDC schema moved across
+4.38→4.39, so check your version's docs). Only the `clients` /
+`claims_policies` bits are shown — `hmac_secret` and the issuer `jwks` signing
+key are configured per the Authelia OIDC guide.
+
+> **Why `claims_policies` is required (and where it went).** Since **v4.39.0**
+> Authelia mints a **minimal id_token** — only the spec-required claims — and
+> serves `email`/`groups`/`name` from the **UserInfo endpoint** by default. The
+> router reads claims from the **id_token** and does not call UserInfo, so you
+> must opt those claims back into the token: a `claims_policies` entry whose
+> `id_token:` list includes them, referenced from the client via
+> `claims_policy`. Without it, login by `sub` still works but `groups`→level
+> and verified-email features are inert. This config key is **new in 4.39.0**
+> — if you can't find it, you're likely on older docs / an older Authelia
+> (`authelia --version`), where claims are delivered differently. Reference:
+> [Authelia — OpenID Connect 1.0 Claims](https://www.authelia.com/integration/openid-connect/openid-connect-1.0-claims/).
+
+```yaml
+identity_providers:
+  oidc:
+    # Put email/groups INTO the id_token (the router doesn't call /userinfo).
+    claims_policies:
+      backplaned:
+        id_token: ['email', 'email_verified', 'groups']
+    clients:
+      - client_id: 'backplaned-webapp'
+        client_name: 'Backplaned'
+        # Authelia stores the secret HASHED; put the PLAINTEXT in the router's
+        # OIDC_CLIENT_SECRET. Generate a pair with:
+        #   authelia crypto hash generate pbkdf2 --variant sha512
+        client_secret: '$pbkdf2-sha512$310000$...'   # hash only
+        public: false
+        authorization_policy: 'two_factor'            # or 'one_factor'
+        require_pkce: true
+        pkce_challenge_method: 'S256'                 # the router always uses S256
+        token_endpoint_auth_method: 'client_secret_post'
+        claims_policy: 'backplaned'
+        redirect_uris:
+          - 'https://app.example.com/auth/sso/callback'
+        scopes: ['openid', 'email', 'profile', 'groups']
+```
+
+Backplaned side (`deploy/.env.prod`) — the matching values:
+
+```bash
+OIDC_ENABLED=true
+OIDC_ISSUER=https://auth.example.com        # Authelia root; must equal the token `iss` (no trailing slash)
+OIDC_CLIENT_ID=backplaned-webapp
+OIDC_CLIENT_SECRET=<the PLAINTEXT secret>   # NOT the pbkdf2 hash above
+OIDC_SCOPES=openid email profile groups
+# Redirect allowlist + webapp base default from WEBAPP_DOMAIN; shown explicit:
+OIDC_ALLOWED_REDIRECT_URIS=["https://app.example.com/auth/sso/callback"]
+WEBAPP_PUBLIC_BASE_URL=https://app.example.com
+# Optional: map an Authelia group → a backplaned level (first match wins).
+OIDC_GROUP_TO_LEVEL={"backplaned-admins":"admin","backplaned-users":"tier1"}
+# Optional: gate access to members of specific groups.
+# OIDC_ALLOWED_GROUPS=["backplaned-users","backplaned-admins"]
+```
+
+The `redirect_uris` (Authelia), `OIDC_ALLOWED_REDIRECT_URIS` (router), and the
+webapp's `WEBAPP_PUBLIC_BASE_URL + /auth/sso/callback` must all be the **same
+string**. In the default domain deployment the router/webapp pair derives both
+from `WEBAPP_DOMAIN`, so you only register that one URL at Authelia. Keycloak
+is analogous: a confidential client with a "Group Membership" mapper adding
+`groups` to the ID token, `client_secret_post` for the auth method, and the
+same redirect URI.
+
 ## 10. Phasing
 
 1. **Router RP** — discovery + `oidc/login` + `oidc/callback`, JWKS
