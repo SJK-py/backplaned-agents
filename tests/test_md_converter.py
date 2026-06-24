@@ -251,3 +251,103 @@ def test_webpage_fallback_decodes_non_utf8_page(monkeypatch) -> None:
         return out.content
 
     assert "안녕하세요 세계" in asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# Conversion isolation: a crash / hang / OOM in the worker must surface as a
+# clean UpstreamError (→ failed result + log), never a silent agent death.
+# The _worker_argv seam lets us swap the real worker for a fast stand-in.
+# ---------------------------------------------------------------------------
+
+
+def _fake_worker(monkeypatch, mod, script: str) -> None:
+    """Point `_convert_isolated` at a throwaway `python -c <script>` instead of
+    the real worker module. The script gets (in_path, out_path) as argv[1:3]."""
+    import sys
+
+    def _argv(in_path: str, out_path: str) -> list:
+        return [sys.executable, "-c", script, in_path, out_path]
+
+    monkeypatch.setattr(mod, "_worker_argv", _argv)
+
+
+def _agent_mod():
+    import sys
+
+    return sys.modules["bp_agents.agents.md_converter.agent"]
+
+
+def test_convert_isolated_success(monkeypatch) -> None:
+    """Happy path: the worker writes Markdown to out_path; the parent reads it
+    back verbatim."""
+    mod = _agent_mod()
+    _fake_worker(
+        monkeypatch, mod,
+        "import sys; open(sys.argv[2], 'w', encoding='utf-8')"
+        ".write('# converted ok')",
+    )
+    out = asyncio.run(mod._convert_isolated("/in/does-not-matter"))
+    assert out == "# converted ok"
+
+
+def test_convert_isolated_timeout_raises_upstream(monkeypatch) -> None:
+    """A worker that overruns the budget is killed and surfaced as a clean,
+    visible error — not a hang."""
+    from bp_sdk.errors import UpstreamError
+
+    mod = _agent_mod()
+    monkeypatch.setattr(mod._settings, "md_convert_timeout_s", 0.2)
+    _fake_worker(monkeypatch, mod, "import time; time.sleep(30)")
+
+    async def _drive() -> None:
+        await mod._convert_isolated("/in/x")
+
+    try:
+        asyncio.run(_drive())
+        raise AssertionError("expected UpstreamError")
+    except UpstreamError as exc:
+        assert "timed out" in str(exc)
+
+
+def test_convert_isolated_signal_death_raises_upstream(monkeypatch) -> None:
+    """A worker killed by a signal (e.g. SIGKILL from the OOM-killer) → a
+    negative return code → an OOM-flavoured UpstreamError, not silence."""
+    from bp_sdk.errors import UpstreamError
+
+    mod = _agent_mod()
+    _fake_worker(
+        monkeypatch, mod,
+        "import os, signal; os.kill(os.getpid(), signal.SIGKILL)",
+    )
+
+    async def _drive() -> None:
+        await mod._convert_isolated("/in/x")
+
+    try:
+        asyncio.run(_drive())
+        raise AssertionError("expected UpstreamError")
+    except UpstreamError as exc:
+        assert "out of memory or was killed" in str(exc)
+
+
+def test_convert_isolated_nonzero_exit_raises_upstream(monkeypatch) -> None:
+    """A worker that exits non-zero (a conversion error) → UpstreamError; the
+    stderr reason is logged, not leaked onto the wire."""
+    from bp_sdk.errors import UpstreamError
+
+    mod = _agent_mod()
+    _fake_worker(
+        monkeypatch, mod,
+        "import sys; print('ValueError: bad pdf', file=sys.stderr); sys.exit(3)",
+    )
+
+    async def _drive() -> None:
+        await mod._convert_isolated("/in/x")
+
+    try:
+        asyncio.run(_drive())
+        raise AssertionError("expected UpstreamError")
+    except UpstreamError as exc:
+        assert "could not convert" in str(exc)
+        # The raw stderr reason must NOT appear in the user-facing message.
+        assert "bad pdf" not in str(exc)

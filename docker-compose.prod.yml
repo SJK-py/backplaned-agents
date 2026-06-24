@@ -533,6 +533,15 @@ services:
       SUITE_MD_OCR_MODEL: ${SUITE_MD_OCR_MODEL:-}
       SUITE_MD_OCR_BASE_URL: ${SUITE_MD_OCR_BASE_URL:-}
       SUITE_MD_OCR_PROMPT: ${SUITE_MD_OCR_PROMPT:-}
+      # Conversion runs in an isolated child process; these bound it so a
+      # pathological document fails one task cleanly instead of OOM-killing
+      # the agent with no trace. See deploy/.env.prod.example.
+      SUITE_MD_CONVERT_TIMEOUT_S: ${SUITE_MD_CONVERT_TIMEOUT_S:-120}
+      SUITE_MD_CONVERT_MEM_LIMIT_MB: ${SUITE_MD_CONVERT_MEM_LIMIT_MB:-0}
+    # Bound total memory so the cgroup OOM-killer targets the ballooning
+    # conversion worker (the child), leaving the parent agent up to report the
+    # failure. Without a cap a huge PDF could exhaust host memory.
+    mem_limit: ${MD_CONVERTER_MEM_LIMIT:-2g}
     volumes: [md_converter_state:/state]
 
   config:
