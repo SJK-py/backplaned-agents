@@ -1,15 +1,30 @@
-{# Upload form. Needs `session_id`, `scope` (session|persist), `label`.
-   Multipart; HTMX adds the X-CSRF-Token header (the middleware doesn't
-   parse a csrf field out of multipart bodies). #}
-<form hx-post="/files/{{ session_id }}" hx-encoding="multipart/form-data"
-      class="flex flex-wrap items-center gap-2">
-  {% include "_partials/csrf.html" %}
-  <input type="hidden" name="scope" value="{{ scope }}" />
-  <input type="file" name="file" required
-         class="text-sm text-brand-700 file:mr-2 file:rounded file:border-0
-                file:bg-brand-900 file:px-3 file:py-1 file:text-white" />
-  <button type="submit"
-          class="rounded bg-brand-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700">
+{# Upload zone: click to choose OR drag & drop (one or more files). Needs
+   `session_id`, `scope` (session|persist), `label`. Uploads each file to
+   POST /files/{session_id} via fetch with the X-CSRF-Token header (the same
+   token HTMX uses; the middleware doesn't parse a csrf field from multipart),
+   then reloads the pane. The `dropUpload` Alpine component is defined in
+   files/stash.html. #}
+<div x-data="dropUpload('{{ session_id }}', '{{ scope }}')"
+     @dragover.prevent="dragging = true"
+     @dragenter.prevent="dragging = true"
+     @dragleave.prevent="dragging = false"
+     @drop.prevent="onDrop($event)"
+     :class="dragging ? 'border-brand-700 bg-brand-50' : 'border-brand-500/30 bg-white'"
+     class="rounded-md border-2 border-dashed px-4 py-6 text-center transition-colors"
+     :aria-busy="busy">
+  {# Hidden native picker, opened by the button below. #}
+  <input type="file" name="file" multiple x-ref="input" @change="onPick($event)"
+         class="sr-only" aria-hidden="true" tabindex="-1" />
+
+  <button type="button" @click="pick()" :disabled="busy"
+          class="rounded bg-brand-900 px-3 py-1.5 text-sm font-medium text-white
+                 hover:bg-brand-700 disabled:opacity-50">
     {{ label }}
   </button>
-</form>
+
+  <p class="mt-2 text-xs text-brand-500" x-show="!busy && !error">
+    or drag &amp; drop files here
+  </p>
+  <p class="mt-2 text-xs text-brand-600" x-show="busy" x-text="progress"></p>
+  <p class="mt-2 text-xs text-red-600" x-show="error" x-text="error" x-cloak></p>
+</div>

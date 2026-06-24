@@ -236,6 +236,11 @@ def test_stash_view_lists_both_scopes(suite_db_url: str) -> None:
     assert "report.md" in html and "data.csv" in html  # session scope
     assert "persist/notes.txt" in html  # persistent scope
     assert 'href="/files/ses_1/report.md"' in html  # download link
+    # Drag-and-drop upload zone present for both scopes (session + persist).
+    assert html.count("dropUpload('ses_1', 'session')") == 1
+    assert html.count("dropUpload('ses_1', 'persist')") == 1
+    assert "drag &amp; drop files here" in html
+    assert "Alpine.data('dropUpload'" in html  # component registered once
 
 
 def test_stash_upload_posts_to_upstream(suite_db_url: str) -> None:

@@ -40,3 +40,66 @@
   </div>
 </div>
 {% endblock %}
+
+{% block scripts_extra %}
+<script>
+  // Drag-and-drop / click upload for the file stash. Posts each selected file
+  // to the existing POST /files/{session_id} endpoint (one request per file,
+  // multipart) with the X-CSRF-Token header, then reloads the pane on the
+  // matching tab. Used by files/_upload.html (session + persist scopes).
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('dropUpload', (sessionId, scope) => ({
+      dragging: false,
+      busy: false,
+      error: '',
+      progress: '',
+      pick() { this.$refs.input.click(); },
+      onDrop(e) {
+        this.dragging = false;
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length) this.upload(files);
+      },
+      onPick(e) {
+        const files = e.target.files;
+        if (files && files.length) this.upload(files);
+      },
+      async upload(fileList) {
+        const files = Array.from(fileList);
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        const csrf = meta ? meta.content : '';
+        this.busy = true;
+        this.error = '';
+        try {
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            this.progress = `Uploading ${file.name} (${i + 1}/${files.length})…`;
+            const body = new FormData();
+            body.append('file', file);
+            body.append('scope', scope);
+            body.append('csrf_token', csrf);
+            const res = await fetch(`/files/${sessionId}`, {
+              method: 'POST',
+              headers: { 'X-CSRF-Token': csrf },
+              body,
+            });
+            if (!res.ok) {
+              this.error = res.status === 413
+                ? `“${file.name}” is too large (max 50 MB).`
+                : `Upload failed for “${file.name}”. Please retry.`;
+              this.busy = false;
+              this.progress = '';
+              return;
+            }
+          }
+          // All uploaded — reload to show the new files on this tab.
+          window.location = `/files/${sessionId}?tab=${scope === 'persist' ? 'persist' : 'session'}`;
+        } catch (err) {
+          this.error = 'Upload failed. Please check your connection and retry.';
+          this.busy = false;
+          this.progress = '';
+        }
+      },
+    }));
+  });
+</script>
+{% endblock %}
