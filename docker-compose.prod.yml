@@ -318,6 +318,25 @@ services:
       CUSTOM_LLM_API_KEY_1: ${CUSTOM_LLM_API_KEY_1:-}
       CUSTOM_LLM_API_KEY_2: ${CUSTOM_LLM_API_KEY_2:-}
       CUSTOM_LLM_API_KEY_3: ${CUSTOM_LLM_API_KEY_3:-}
+      # OIDC / SSO for the webapp (optional; OFF by default — see
+      # docs/design/oidc-webapp.md). The router is the OIDC relying party. To
+      # enable, set in deploy/.env.prod: OIDC_ENABLED=true, OIDC_ISSUER (the
+      # OP's https base), OIDC_CLIENT_ID, OIDC_CLIENT_SECRET. The redirect
+      # allowlist defaults to the webapp's own callback (derived from
+      # WEBAPP_DOMAIN), so it matches what the webapp sends out-of-the-box;
+      # override OIDC_ALLOWED_REDIRECT_URIS (a JSON array) for a non-default
+      # topology (e.g. bare-IP mode). Register the SAME callback at the OP.
+      ROUTER_OIDC_ENABLED: "${OIDC_ENABLED:-false}"
+      ROUTER_OIDC_ISSUER: "${OIDC_ISSUER:-}"
+      ROUTER_OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-}"
+      ROUTER_OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
+      ROUTER_OIDC_SCOPES: "${OIDC_SCOPES:-openid email profile groups}"
+      ROUTER_OIDC_ALLOWED_REDIRECT_URIS: "${OIDC_ALLOWED_REDIRECT_URIS:-[\"https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}/auth/sso/callback\"]}"
+      ROUTER_OIDC_JIT_PROVISIONING: "${OIDC_JIT_PROVISIONING:-true}"
+      ROUTER_OIDC_DEFAULT_LEVEL: "${OIDC_DEFAULT_LEVEL:-tier1}"
+      ROUTER_OIDC_GROUP_TO_LEVEL: "${OIDC_GROUP_TO_LEVEL:-{}}"
+      ROUTER_OIDC_ALLOWED_GROUPS: "${OIDC_ALLOWED_GROUPS:-[]}"
+      ROUTER_OIDC_AUTO_LINK_BY_VERIFIED_EMAIL: "${OIDC_AUTO_LINK_BY_VERIFIED_EMAIL:-false}"
     volumes:
       # Operator preset overlay (see ROUTER_LLM_PRESET_OVERLAY_PATH above),
       # read-only. The committed deploy/presets.custom.jsonc (copied from the
@@ -418,6 +437,14 @@ services:
       # Serve the self-hosted stylesheet (built into the image) — NOT the
       # Tailwind Play CDN. Required in prod (the config validator enforces it).
       WEBAPP_USE_BUILT_CSS: "true"
+      # SSO (OIDC) — frontend half; the router (above) runs the actual flow.
+      # The single OIDC_ENABLED switch drives both. PUBLIC_BASE_URL builds the
+      # redirect_uri (<base>/auth/sso/callback) and defaults to the webapp's
+      # own edge domain, so it matches the router's redirect allowlist by
+      # construction. Set OIDC_ENABLED=true (+ the router's OIDC_* creds) in
+      # deploy/.env.prod to turn it on.
+      WEBAPP_SSO_ENABLED: "${OIDC_ENABLED:-false}"
+      WEBAPP_PUBLIC_BASE_URL: "${WEBAPP_PUBLIC_BASE_URL:-https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}}"
     # Fronted by the edge proxy (HTTPS + SSE); not published directly.
     networks: [edge, agents, suite]
     volumes: [webapp_state:/state]
