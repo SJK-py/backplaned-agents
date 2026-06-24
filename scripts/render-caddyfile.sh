@@ -18,6 +18,7 @@
 #   WEBAPP_DOMAIN      browser-channel host             (domain, both)
 #   EDGE_SCHEME        https | http                     (domain origin scheme)
 #   PUBLIC_IP          bare-IP identity (IPv4 literal)  (ip, both)
+#   ROUTER_HTTPS_PORT  router + admin https port for the IP (ip, both; default 443)
 #   WEBAPP_HTTPS_PORT  webapp's own https port for the IP (ip, both; default 8443)
 #
 # Invariants this enforces (matching prod.sh's prompts):
@@ -35,6 +36,7 @@ set -euo pipefail
 
 EDGE_MODE="${EDGE_MODE:-domain}"
 EDGE_SCHEME="${EDGE_SCHEME:-https}"
+ROUTER_HTTPS_PORT="${ROUTER_HTTPS_PORT:-443}"
 WEBAPP_HTTPS_PORT="${WEBAPP_HTTPS_PORT:-8443}"
 
 die() { echo "render-caddyfile: $*" >&2; exit 1; }
@@ -58,10 +60,12 @@ fi
 if [[ $want_ip -eq 1 ]]; then
     [[ "${PUBLIC_IP:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         || die "PUBLIC_IP must be an IPv4 literal for EDGE_MODE=$EDGE_MODE (got '${PUBLIC_IP:-}')"
+    [[ "$ROUTER_HTTPS_PORT" =~ ^[0-9]+$ ]] \
+        || die "ROUTER_HTTPS_PORT must be numeric (got '$ROUTER_HTTPS_PORT')"
     [[ "$WEBAPP_HTTPS_PORT" =~ ^[0-9]+$ ]] \
         || die "WEBAPP_HTTPS_PORT must be numeric (got '$WEBAPP_HTTPS_PORT')"
-    [[ "$WEBAPP_HTTPS_PORT" != "443" ]] \
-        || die "WEBAPP_HTTPS_PORT must differ from 443 (the IP router's port) — use e.g. 8443"
+    [[ "$WEBAPP_HTTPS_PORT" != "$ROUTER_HTTPS_PORT" ]] \
+        || die "WEBAPP_HTTPS_PORT must differ from ROUTER_HTTPS_PORT ($ROUTER_HTTPS_PORT) — the router and webapp share the bare IP, so each needs its own port (e.g. 443 + 8443)"
 fi
 
 # Reverse-proxy bodies shared by the domain and IP site blocks. Tab-indented so
@@ -135,11 +139,15 @@ fi
 # Always https via the internal CA (see the header rationale). The webapp gets
 # its OWN https port because there is no app.<ip> hostname to virtual-host on.
 if [[ $want_ip -eq 1 ]]; then
+    # Router/admin address: omit the default :443 so the common case stays a
+    # clean https://<ip>; a custom port appears as https://<ip>:<port>.
+    router_ip_addr="https://$PUBLIC_IP"
+    [[ "$ROUTER_HTTPS_PORT" != "443" ]] && router_ip_addr="https://$PUBLIC_IP:$ROUTER_HTTPS_PORT"
     cat <<EOF
 
-https://$PUBLIC_IP {
+$router_ip_addr {
 	# Pin the internal CA — Let's Encrypt refuses to issue for an IP literal, so
-	# the default issuer would leave :443 certless.
+	# the default issuer would leave the port certless.
 	tls internal
 $(router_body)
 }

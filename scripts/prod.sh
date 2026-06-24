@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 OUT="${OUT:-deploy/.env.prod}"
 COMPOSE_FILE="docker-compose.prod.yml"
 BUNDLED_SEARXNG_URL="http://searxng:8080"
+DEFAULT_ROUTER_HTTPS_PORT="443"    # router + admin port identity for bare-IP LAN
 DEFAULT_WEBAPP_HTTPS_PORT="8443"   # webapp's port identity for bare-IP LAN
 # build_env always (re)generates the Caddyfile here and points
 # CADDYFILE_HOST_PATH (compose's caddy bind mount) at it — one code path for all
@@ -99,7 +100,7 @@ build_env() {
     # ALWAYS https (Caddy internal CA); only a DOMAIN can be served over http
     # (TLS terminated upstream).
     PUBLIC_DOMAIN=""; WEBAPP_DOMAIN=""; EDGE_SCHEME=https
-    PUBLIC_IP=""; WEBAPP_HTTPS_PORT=""
+    PUBLIC_IP=""; ROUTER_HTTPS_PORT=""; WEBAPP_HTTPS_PORT=""
 
     if [[ "$EDGE_MODE" == "domain" || "$EDGE_MODE" == "both" ]]; then
         echo
@@ -128,14 +129,17 @@ build_env() {
         # needs (see that script's header / docs §9).
         echo
         echo "Bare-IP identity (LAN access, no DNS — always https via Caddy's internal CA):"
-        echo "  router + admin UI answer on https://<ip>; the webapp gets its own"
-        echo "  https port (no DNS for app.<ip>) at https://<ip>:<port>."
+        echo "  router + admin UI answer on https://<ip>:<router-port> (default 443); the"
+        echo "  webapp gets its own https port (no DNS for app.<ip>) at https://<ip>:<port>."
         ask PUBLIC_IP "Bare IP (e.g. 192.168.1.50)" ""
         [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "invalid IPv4 address: $PUBLIC_IP" >&2; exit 1; }
-        ask WEBAPP_HTTPS_PORT "Webapp HTTPS port (separate from the router's 443)" "$DEFAULT_WEBAPP_HTTPS_PORT"
-        [[ "$WEBAPP_HTTPS_PORT" =~ ^[0-9]+$ && "$WEBAPP_HTTPS_PORT" != "443" ]] \
-            || { echo "webapp HTTPS port must be numeric and != 443: $WEBAPP_HTTPS_PORT" >&2; exit 1; }
+        ask ROUTER_HTTPS_PORT "Router + admin HTTPS port" "$DEFAULT_ROUTER_HTTPS_PORT"
+        [[ "$ROUTER_HTTPS_PORT" =~ ^[0-9]+$ ]] \
+            || { echo "router HTTPS port must be numeric: $ROUTER_HTTPS_PORT" >&2; exit 1; }
+        ask WEBAPP_HTTPS_PORT "Webapp HTTPS port (separate from the router's $ROUTER_HTTPS_PORT)" "$DEFAULT_WEBAPP_HTTPS_PORT"
+        [[ "$WEBAPP_HTTPS_PORT" =~ ^[0-9]+$ && "$WEBAPP_HTTPS_PORT" != "$ROUTER_HTTPS_PORT" ]] \
+            || { echo "webapp HTTPS port must be numeric and != $ROUTER_HTTPS_PORT: $WEBAPP_HTTPS_PORT" >&2; exit 1; }
     fi
 
     # ROUTER_PUBLIC_URL — the canonical PUBLIC origin (always https, even when
@@ -316,8 +320,10 @@ build_env() {
         fi
         if [[ -n "$PUBLIC_IP" ]]; then
             echo "# Bare-IP identity — always https via Caddy's internal CA. The"
-            echo "# webapp gets its own published port (no DNS for app.<ip>)."
+            echo "# router/admin and webapp each get their own published port (no"
+            echo "# DNS for app.<ip>); the two ports must differ."
             echo "PUBLIC_IP=$PUBLIC_IP"
+            echo "ROUTER_HTTPS_PORT=$ROUTER_HTTPS_PORT"
             echo "WEBAPP_HTTPS_PORT=$WEBAPP_HTTPS_PORT"
         fi
         echo "# Canonical PUBLIC origin (always https; the domain wins when present)."
@@ -415,7 +421,8 @@ build_env() {
     # CADDYFILE_HOST_PATH (written above) points compose's caddy mount here. The
     # committed deploy/Caddyfile remains the localhost default for a bare compose.
     EDGE_MODE="$EDGE_MODE" PUBLIC_DOMAIN="$PUBLIC_DOMAIN" WEBAPP_DOMAIN="$WEBAPP_DOMAIN" \
-        EDGE_SCHEME="$EDGE_SCHEME" PUBLIC_IP="$PUBLIC_IP" WEBAPP_HTTPS_PORT="$WEBAPP_HTTPS_PORT" \
+        EDGE_SCHEME="$EDGE_SCHEME" PUBLIC_IP="$PUBLIC_IP" \
+        ROUTER_HTTPS_PORT="$ROUTER_HTTPS_PORT" WEBAPP_HTTPS_PORT="$WEBAPP_HTTPS_PORT" \
         scripts/render-caddyfile.sh > "$CADDYFILE_GENERATED"
     # Invitation tokens are the ONE thing not written above: they're single-use
     # and minted fresh on every start/restart by refresh_invitations(), which is
@@ -431,9 +438,11 @@ build_env() {
             echo "        (domain: Caddy serves plain HTTP — TLS terminated upstream; clients still use https)"
     fi
     if [[ -n "$PUBLIC_IP" ]]; then
-        echo "  edge [bare IP]: admin/router=https://$PUBLIC_IP  webapp=https://$PUBLIC_IP:$WEBAPP_HTTPS_PORT"
+        local ROUTER_IP_ADDR="https://$PUBLIC_IP"
+        [[ "$ROUTER_HTTPS_PORT" != "443" ]] && ROUTER_IP_ADDR="https://$PUBLIC_IP:$ROUTER_HTTPS_PORT"
+        echo "  edge [bare IP]: admin/router=$ROUTER_IP_ADDR  webapp=https://$PUBLIC_IP:$WEBAPP_HTTPS_PORT"
         echo "        (https via Caddy's internal CA + default_sni — browsers warn until you trust"
-        echo "         Caddy's root CA; the webapp port $WEBAPP_HTTPS_PORT is published — open it on any firewall)"
+        echo "         Caddy's root CA; the published ports ($ROUTER_HTTPS_PORT + $WEBAPP_HTTPS_PORT) — open them on any firewall)"
     fi
     echo "  provider: $PROVIDER   tiers: lite=$PRESET_LITE balanced=$PRESET_BALANCED pro=$PRESET_PRO"
     [[ $GENERATED_PW -eq 1 ]] && echo "  generated admin password: $ADMIN_PW   (save it!)"

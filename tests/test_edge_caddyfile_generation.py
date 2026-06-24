@@ -111,6 +111,28 @@ def test_ip_mode_ignores_edge_scheme_and_never_serves_http() -> None:
     assert "http://10.0.0.5" not in out
 
 
+def test_ip_mode_router_https_port_defaults_to_bare_443() -> None:
+    # No ROUTER_HTTPS_PORT → the router/admin block stays a clean https://<ip>
+    # (the default :443 is omitted), unchanged from before the port was settable.
+    out = _render(EDGE_MODE="ip", PUBLIC_IP="192.168.1.50", WEBAPP_HTTPS_PORT="8443")
+    assert "https://192.168.1.50 {" in out
+    assert "https://192.168.1.50:443 {" not in out
+
+
+def test_ip_mode_custom_router_https_port_is_appended() -> None:
+    # A non-default ROUTER_HTTPS_PORT moves router/admin to https://<ip>:<port>;
+    # the webapp keeps its own distinct port.
+    out = _render(
+        EDGE_MODE="ip", PUBLIC_IP="192.168.1.50",
+        ROUTER_HTTPS_PORT="9443", WEBAPP_HTTPS_PORT="8443",
+    )
+    assert "https://192.168.1.50:9443 {" in out
+    assert "https://192.168.1.50:8443 {" in out
+    # The bare (default-443) router address must NOT appear when a port is set.
+    assert "https://192.168.1.50 {" not in out
+    assert "reverse_proxy @router router:8000" in out
+
+
 # --- both mode -------------------------------------------------------------
 
 
@@ -147,9 +169,28 @@ def test_ip_mode_requires_ipv4_literal() -> None:
     assert "PUBLIC_IP" in _render_fail(EDGE_MODE="ip", PUBLIC_IP="not-an-ip")
 
 
-def test_ip_webapp_port_must_differ_from_443() -> None:
+def test_ip_webapp_port_must_differ_from_default_router_443() -> None:
+    # With no ROUTER_HTTPS_PORT the router defaults to 443, so a 443 webapp port
+    # collides — same guarantee as before the router port became settable.
     err = _render_fail(EDGE_MODE="ip", PUBLIC_IP="192.168.1.50", WEBAPP_HTTPS_PORT="443")
     assert "443" in err
+
+
+def test_ip_router_and_webapp_ports_must_differ() -> None:
+    # Both ports custom but equal — the router and webapp share the bare IP, so
+    # they cannot land on the same port.
+    err = _render_fail(
+        EDGE_MODE="ip", PUBLIC_IP="192.168.1.50",
+        ROUTER_HTTPS_PORT="9443", WEBAPP_HTTPS_PORT="9443",
+    )
+    assert "ROUTER_HTTPS_PORT" in err
+
+
+def test_ip_router_https_port_must_be_numeric() -> None:
+    err = _render_fail(
+        EDGE_MODE="ip", PUBLIC_IP="192.168.1.50", ROUTER_HTTPS_PORT="nope",
+    )
+    assert "ROUTER_HTTPS_PORT" in err
 
 
 def test_domain_mode_requires_both_hostnames() -> None:
@@ -175,6 +216,15 @@ def test_compose_caddy_mounts_caddyfile_host_path_with_committed_fallback() -> N
     assert "${CADDYFILE_HOST_PATH:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro" in _COMPOSE
 
 
+def test_compose_publishes_router_and_webapp_https_ports() -> None:
+    # The bare-IP router/admin and webapp each get an operator-settable published
+    # port. The router default 443 dedupes with the literal 443:443 (so a default
+    # deploy still publishes a single 443); a custom value adds an extra port.
+    assert '- "443:443"' in _COMPOSE
+    assert '"${ROUTER_HTTPS_PORT:-443}:${ROUTER_HTTPS_PORT:-443}"' in _COMPOSE
+    assert '"${WEBAPP_HTTPS_PORT:-8443}:${WEBAPP_HTTPS_PORT:-8443}"' in _COMPOSE
+
+
 def test_compose_router_public_url_is_overridable_with_legacy_fallback() -> None:
     # prod.sh sets ROUTER_PUBLIC_URL explicitly (domain or IP); the fallback
     # keeps a legacy env / bare compose up working off PUBLIC_DOMAIN.
@@ -188,6 +238,13 @@ def test_prod_sh_always_generates_caddyfile_and_writes_wiring_vars() -> None:
     assert 'CADDYFILE_GENERATED="./deploy/Caddyfile.generated"' in _PROD
     assert 'echo "EDGE_MODE=$EDGE_MODE"' in _PROD
     assert 'echo "CADDYFILE_HOST_PATH=$CADDYFILE_GENERATED"' in _PROD
+
+
+def test_prod_sh_records_and_passes_router_https_port() -> None:
+    # The bare-IP router/admin port is prompted, written to the env file, and
+    # threaded into the generator alongside the webapp port.
+    assert 'echo "ROUTER_HTTPS_PORT=$ROUTER_HTTPS_PORT"' in _PROD
+    assert 'ROUTER_HTTPS_PORT="$ROUTER_HTTPS_PORT"' in _PROD
 
 
 def test_generated_caddyfile_is_gitignored() -> None:
