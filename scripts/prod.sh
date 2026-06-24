@@ -24,6 +24,9 @@ cd "$(dirname "$0")/.."
 
 OUT="${OUT:-deploy/.env.prod}"
 COMPOSE_FILE="docker-compose.prod.yml"
+# Compose override layered on ONLY for EDGE_MODE=ip: drops the base file's
+# domain ports (80/443) so caddy publishes just the dedicated bare-IP ports.
+IP_PORTS_OVERRIDE="deploy/compose.ip-ports.yml"
 BUNDLED_SEARXNG_URL="http://searxng:8080"
 DEFAULT_ROUTER_HTTPS_PORT="443"    # router + admin port identity for bare-IP LAN
 DEFAULT_WEBAPP_HTTPS_PORT="8443"   # webapp's port identity for bare-IP LAN
@@ -559,6 +562,15 @@ fi
 
 # Resolve compose args once (base + auto profiles from the env file).
 CARGS=(-f "$COMPOSE_FILE" --env-file "$OUT")
+# Pure bare-IP edge: layer the override that publishes ONLY the dedicated ports
+# (ROUTER_HTTPS_PORT + WEBAPP_HTTPS_PORT), dropping the unused domain 80/443.
+# `both` keeps 80/443 (it serves the domain too); `domain` never had IP ports.
+if [[ "$(env_val EDGE_MODE)" == "ip" ]]; then
+    CARGS+=(-f "$IP_PORTS_OVERRIDE")
+    echo "  (bare-IP edge: dropping domain ports 80/443; publishing only" \
+         "${ROUTER_HTTPS_PORT:-$(env_val ROUTER_HTTPS_PORT)} +" \
+         "${WEBAPP_HTTPS_PORT:-$(env_val WEBAPP_HTTPS_PORT)})"
+fi
 if [[ "$(env_searxng_url)" == "$BUNDLED_SEARXNG_URL" ]]; then
     CARGS+=(--profile search)
     echo "  (search profile auto-enabled: SUITE_SEARXNG_URL=$BUNDLED_SEARXNG_URL)"

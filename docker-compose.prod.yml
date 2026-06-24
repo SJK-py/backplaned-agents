@@ -123,6 +123,13 @@ services:
     # router's :-443 default dedupes with the literal 443:443 above (the common
     # case stays a single 443 listener); a custom value publishes an extra port
     # while 443 still fronts the domain identity. Harmless when unused.
+    #
+    # PURE bare-IP (EDGE_MODE=ip): the generated Caddyfile listens ONLY on the
+    # two dedicated ports — no `:80` block, and `:443` only if the 443 default is
+    # kept — so 80/443 here are dead surface (and collide with a host-level
+    # reverse proxy that wants them). prod.sh drops them by layering
+    # deploy/compose.ip-ports.yml (which `!override`s this list down to just the
+    # two IP ports) when EDGE_MODE=ip. `both` and a bare `up` keep 80/443.
     ports:
       - "80:80"
       - "443:443"

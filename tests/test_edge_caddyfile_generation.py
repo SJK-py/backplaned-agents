@@ -21,6 +21,7 @@ _REPO = pathlib.Path(__file__).resolve().parent.parent
 _RENDER = _REPO / "scripts" / "render-caddyfile.sh"
 _PROD = (_REPO / "scripts" / "prod.sh").read_text()
 _COMPOSE = (_REPO / "docker-compose.prod.yml").read_text()
+_IP_PORTS_OVERRIDE = (_REPO / "deploy" / "compose.ip-ports.yml").read_text()
 _GITIGNORE = (_REPO / ".gitignore").read_text()
 
 
@@ -249,3 +250,25 @@ def test_prod_sh_records_and_passes_router_https_port() -> None:
 
 def test_generated_caddyfile_is_gitignored() -> None:
     assert "deploy/Caddyfile.generated" in _GITIGNORE
+
+
+def test_ip_ports_override_publishes_only_the_dedicated_ports() -> None:
+    # Pure bare-IP mode has no domain identity, so the generated Caddyfile never
+    # binds :80 (and binds :443 only if the 443 default is kept). The override
+    # `!override`s caddy's ports down to just the two dedicated bare-IP ports —
+    # dropping the base file's 80/443 so they don't sit on the host for nothing
+    # (or collide with a host-level reverse proxy).
+    assert "ports: !override" in _IP_PORTS_OVERRIDE
+    assert '"${ROUTER_HTTPS_PORT:-443}:${ROUTER_HTTPS_PORT:-443}"' in _IP_PORTS_OVERRIDE
+    assert '"${WEBAPP_HTTPS_PORT:-8443}:${WEBAPP_HTTPS_PORT:-8443}"' in _IP_PORTS_OVERRIDE
+    # The override must NOT re-introduce the domain ports.
+    assert '"80:80"' not in _IP_PORTS_OVERRIDE
+    assert '"443:443"' not in _IP_PORTS_OVERRIDE
+
+
+def test_prod_sh_layers_ip_ports_override_only_for_ip_mode() -> None:
+    # prod.sh adds the override via `-f` ONLY when EDGE_MODE=ip; `both` keeps the
+    # base 80/443 (it serves the domain too) and a bare `up` is unaffected.
+    assert 'IP_PORTS_OVERRIDE="deploy/compose.ip-ports.yml"' in _PROD
+    assert '[[ "$(env_val EDGE_MODE)" == "ip" ]]' in _PROD
+    assert 'CARGS+=(-f "$IP_PORTS_OVERRIDE")' in _PROD
