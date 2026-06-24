@@ -37,10 +37,10 @@
 
   {% block head_extra %}{% endblock %}
 </head>
-<body class="app-min-h bg-brand-50 text-brand-900 antialiased">
+<body class="app-h overflow-hidden bg-brand-50 text-brand-900 antialiased">
 
 {% if request.session.get("access_token") %}
-  <div class="flex app-min-h"
+  <div class="flex app-h"
        x-data="{ drawer: false, collapsed: localStorage.getItem('bp_sb') === '1',
                  setCollapsed(v) { this.collapsed = v; localStorage.setItem('bp_sb', v ? '1' : '0'); } }">
     <!-- Backdrop: tap to close the mobile drawer. -->
@@ -53,14 +53,18 @@
                    text-brand-50 shadow hover:bg-brand-700"
             aria-label="Show sidebar">&#9776;</button>
 
-    <!-- Sidebar: drawer on mobile, collapsible on desktop. Hosts the session list. -->
+    <!-- Sidebar: drawer on mobile, fixed full-height rail on desktop. Stays
+         `fixed` (out of flow) at all sizes — `inset-y-0` pins it to the
+         viewport height so it never stretches with tall content, and the main
+         pane reserves room with `md:ml-64` (below) instead of the sidebar
+         taking a flex column. Hosts the session list. -->
     <aside class="w-64 shrink-0 bg-brand-900 text-brand-50 flex-col
                   fixed inset-y-0 left-0 z-20 transform transition-transform"
            :class="{
              'flex translate-x-0': drawer,
              'hidden -translate-x-full': !drawer,
              'md:hidden': collapsed,
-             'md:flex md:sticky md:top-0 md:h-screen md:translate-x-0': !collapsed
+             'md:flex md:translate-x-0': !collapsed
            }">
       <div class="px-4 py-4 border-b border-brand-700/50 flex items-center justify-between">
         <a href="/" class="text-lg font-semibold tracking-wide">backplaned</a>
@@ -112,19 +116,26 @@
       </div>
     </aside>
 
-    <!-- Main content -->
-    <div class="flex-1 flex flex-col min-w-0">
+    <!-- Main content. `md:ml-64` reserves room for the fixed desktop sidebar
+         (dropped when it's collapsed); mobile has no offset (the drawer
+         overlays). Column-flex so the inner <main> can be the scroll area. -->
+    <div class="flex-1 flex flex-col min-w-0 min-h-0"
+         :class="{ 'md:ml-64': !collapsed }">
       <header class="md:hidden flex items-center gap-3 px-4 py-3 bg-brand-900 text-brand-50">
         <button @click="drawer = true" aria-label="Open menu">&#9776;</button>
         <span class="font-semibold">backplaned</span>
       </header>
-      <main class="flex-1 p-6 md:p-8 max-w-6xl mx-auto w-full">
+      <!-- The ONLY scroll container in the authed shell: the page itself never
+           scrolls (body is app-h + overflow-hidden), so long pages scroll here
+           while the sidebar stays put, and the chat view (h-full content) fills
+           it exactly so its own message list scrolls instead. -->
+      <main class="flex-1 min-h-0 overflow-y-auto p-6 md:p-8 max-w-6xl mx-auto w-full">
         {% block content %}{% endblock %}
       </main>
     </div>
   </div>
 {% else %}
-  <main class="app-min-h flex items-center justify-center p-6">
+  <main class="app-h overflow-y-auto flex items-center justify-center p-6">
     {% block unauth_content %}{% endblock %}
   </main>
 {% endif %}
