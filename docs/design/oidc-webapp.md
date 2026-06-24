@@ -274,6 +274,18 @@ IdP side (Authelia ≥ 4.39 `configuration.yml`; the OIDC schema moved across
 `claims_policies` bits are shown — `hmac_secret` and the issuer `jwks` signing
 key are configured per the Authelia OIDC guide.
 
+> **Why `claims_policies` is required (and where it went).** Since **v4.39.0**
+> Authelia mints a **minimal id_token** — only the spec-required claims — and
+> serves `email`/`groups`/`name` from the **UserInfo endpoint** by default. The
+> router reads claims from the **id_token** and does not call UserInfo, so you
+> must opt those claims back into the token: a `claims_policies` entry whose
+> `id_token:` list includes them, referenced from the client via
+> `claims_policy`. Without it, login by `sub` still works but `groups`→level
+> and verified-email features are inert. This config key is **new in 4.39.0**
+> — if you can't find it, you're likely on older docs / an older Authelia
+> (`authelia --version`), where claims are delivered differently. Reference:
+> [Authelia — OpenID Connect 1.0 Claims](https://www.authelia.com/integration/openid-connect/openid-connect-1.0-claims/).
+
 ```yaml
 identity_providers:
   oidc:
