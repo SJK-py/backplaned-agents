@@ -181,10 +181,14 @@ def test_ocr_configured_builds_plugin_client(monkeypatch) -> None:
 
     mod._make_markitdown()
 
-    # Client built from the OCR-specific credentials (secret unwrapped).
+    # Client built from the OCR-specific credentials (secret unwrapped) and
+    # bounded so a slow OCR endpoint can't hang the conversion (SDK defaults
+    # are 600s × 2 retries).
     assert client_kwargs == {
         "api_key": "sk-test",
         "base_url": "https://oai.example/v1",
+        "timeout": 60.0,
+        "max_retries": 1,
     }
     # Plugin enabled and pointed at the vision model + custom prompt.
     assert md_kwargs["enable_plugins"] is True

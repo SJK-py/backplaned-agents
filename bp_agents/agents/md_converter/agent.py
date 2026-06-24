@@ -120,6 +120,10 @@ def _ocr_llm_client():  # -> openai.OpenAI | None (lazy import)
         api_key=_settings.md_ocr_api_key.get_secret_value(),
         # None → the OpenAI SDK's default endpoint; set for Azure/vLLM/etc.
         base_url=_settings.md_ocr_base_url or None,
+        # Bound the per-image OCR call: the SDK default (600s × 2 retries) lets
+        # one slow/unreachable endpoint hang the whole conversion silently.
+        timeout=_settings.md_ocr_timeout_s,
+        max_retries=_settings.md_ocr_max_retries,
     )
     _ocr_client_box.append(client)
     return client
