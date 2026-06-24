@@ -418,6 +418,15 @@ build_env() {
         echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
         [[ -n "$BRAVE_KEY" ]] && echo "SUITE_BRAVE_API_KEY=$BRAVE_KEY"
         [[ -n "$KAGI_KEY" ]] && echo "SUITE_KAGI_API_KEY=$KAGI_KEY"
+        echo
+        echo "# --- md_converter LLM-vision OCR (optional) ---"
+        echo "# Set KEY + MODEL to OCR images embedded in PDF/DOCX/PPTX/XLSX (and"
+        echo "# scanned PDFs). Dedicated OpenAI-compatible provider, separate from the"
+        echo "# router's presets. Leave empty to keep image handling metadata-only."
+        echo "# SUITE_MD_OCR_API_KEY="
+        echo "# SUITE_MD_OCR_MODEL=gpt-4o"
+        echo "# SUITE_MD_OCR_BASE_URL="
+        echo "# SUITE_MD_OCR_PROMPT="
     } > "$OUT"
     chmod 600 "$OUT"
     # Always (re)generate the Caddyfile for this mode — one code path; the env's
