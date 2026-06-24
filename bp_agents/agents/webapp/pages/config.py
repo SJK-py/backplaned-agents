@@ -15,6 +15,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
+from bp_agents.agents.webapp.pages._common import ensure_user_config
 from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.config_edit import (
     PRESET_FIELDS,
@@ -128,6 +129,9 @@ async def config_view(
     user_id = session_user_id(request)
     if pool is None or not user_id:
         raise HTTPException(status_code=404)
+    # Self-heal a missing user_config (web/OIDC accounts not seeded by the
+    # chatbot reconcile) so reads/saves below actually work.
+    await ensure_user_config(request)
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, user_id)
     preset_choices = _preset_choices(request)
@@ -215,6 +219,9 @@ async def config_save(request: Request) -> HTMLResponse:
     user_id = session_user_id(request)
     if pool is None or not user_id:
         raise HTTPException(status_code=404)
+    # Ensure the row exists first, else the UPDATE below patches zero rows and
+    # the save silently does nothing (web/OIDC accounts start without it).
+    await ensure_user_config(request)
     form = await request.form()
     preset_choices = _preset_choices(request)
 

@@ -18,6 +18,7 @@ from bp_agents.agents.webapp.auth import (
     is_authenticated,
     store_login,
 )
+from bp_agents.agents.webapp.pages._common import ensure_user_config
 from bp_agents.agents.webapp.upstream import UpstreamError
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,9 @@ async def login_submit(
         )
     store_login(request, login_response=body, email=email)
     request.session["auth_kind"] = "password"
+    # Seed the suite-side user_config for first-time web accounts (no-op if it
+    # already exists) — otherwise config reads/saves silently no-op.
+    await ensure_user_config(request)
     return RedirectResponse(url=_safe_next(next), status_code=303)
 
 
@@ -238,6 +242,9 @@ async def sso_callback(
     # The TokenPair carries no email; SSO display falls back to user_id.
     store_login(request, login_response=body, email="")
     request.session["auth_kind"] = "oidc"
+    # OIDC accounts are provisioned router-side only; seed their suite-side
+    # user_config here (idempotent) so config + the agents work.
+    await ensure_user_config(request)
     return RedirectResponse(
         url=_safe_next(flow.get("next") or "/"), status_code=303
     )
