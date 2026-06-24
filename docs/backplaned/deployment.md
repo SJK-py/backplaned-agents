@@ -45,8 +45,9 @@ TLS termination, the WebSocket upgrade on `/v1/agent`, and routing the admin UI 
 | `PUBLIC_DOMAIN` | (domain/both) router HTTP API (`/v1/*`), health, metrics, OpenAPI, **admin UI** (`/admin/*`); bare `/` → `/admin/login` | `localhost` |
 | `WEBAPP_DOMAIN` | (domain/both) the **browser channel** (webapp) — login at `/`, `/chat/*`, `/files/*` | `app.${PUBLIC_DOMAIN}` |
 | `EDGE_SCHEME` | (domain/both) scheme Caddy serves; set `http` when **TLS is terminated upstream** (Cloudflare Tunnel / LB) — see [§9](#9-edge--reverse-proxy-caddy) | `https` |
-| `PUBLIC_IP` | (ip/both) bare-IP identity — router + admin on `https://<ip>`, **always** Caddy internal-CA TLS | — |
-| `WEBAPP_HTTPS_PORT` | (ip/both) the webapp's **own** published https port on the IP (no DNS for `app.<ip>`) | `8443` |
+| `PUBLIC_IP` | (ip/both) bare-IP identity — router + admin on `https://<ip>:${ROUTER_HTTPS_PORT}`, **always** Caddy internal-CA TLS | — |
+| `ROUTER_HTTPS_PORT` | (ip/both) router + admin's published https port on the IP; the default shares the existing `443` listener | `443` |
+| `WEBAPP_HTTPS_PORT` | (ip/both) the webapp's **own** published https port on the IP (no DNS for `app.<ip>`); must differ from `ROUTER_HTTPS_PORT` | `8443` |
 | `ROUTER_PUBLIC_URL` | canonical public origin (always https); the domain when present, else the IP | `https://${PUBLIC_DOMAIN}` |
 | `CADDYFILE_HOST_PATH` | bind-mount source for Caddy's config — `prod.sh` sets it to the generated file | `./deploy/Caddyfile` |
 
@@ -192,8 +193,9 @@ identities at once** — a domain *and* a bare IP — each with the right TLS.
     Its **own identity** because it serves from `/`, which would collide with the
     router's `/admin` — Caddy routes the two by `Host` header on the shared `:443`.
   - **`EDGE_SCHEME`** — `https` (Caddy terminates TLS) or `http` (TLS upstream).
-- **`ip`** — a bare-IP identity (LAN, no DNS): router + admin on `https://<ip>`,
-  webapp on its own port `https://<ip>:${WEBAPP_HTTPS_PORT}` (default `8443`).
+- **`ip`** — a bare-IP identity (LAN, no DNS): router + admin on
+  `https://<ip>:${ROUTER_HTTPS_PORT}` (default `443`), webapp on its own port
+  `https://<ip>:${WEBAPP_HTTPS_PORT}` (default `8443`) — the two must differ.
   **Always https** via Caddy's internal CA (see the bare-IP row below).
 - **`both`** — serve the domain **and** the bare IP simultaneously (e.g. a public
   domain via a Cloudflare Tunnel *and* direct LAN access by IP). All of the above
@@ -207,12 +209,15 @@ even when `EDGE_SCHEME=http`, since the *public* scheme stays HTTPS.
 > **hostname** that's free (`bp.example.com` + `app.bp.example.com`). With a
 > **bare IP** there's no `app.<ip>` to resolve, so the webapp takes a **port
 > identity** on the same IP (`https://<ip>:8443`) and the `caddy` service
-> publishes `WEBAPP_HTTPS_PORT` (default `8443`). In **`both`** mode the domain
-> router and the IP router *share* `:443` — Caddy serves the Let's Encrypt /
-> domain cert by SNI and the IP's internal-CA cert when the client sends no SNI
-> (the global `default_sni <ip>`). The webapp can't be path-mounted under the
-> router (no mount-prefix support), so a second name or a second port is the
-> only option.
+> publishes `WEBAPP_HTTPS_PORT` (default `8443`). The bare-IP router/admin gets
+> its own published port too — `ROUTER_HTTPS_PORT` (default `443`); the default
+> shares the existing `:443` listener, and a custom value publishes an extra
+> port while `:443` still fronts the domain. In **`both`** mode the domain
+> router and the (default-port) IP router *share* `:443` — Caddy serves the
+> Let's Encrypt / domain cert by SNI and the IP's internal-CA cert when the
+> client sends no SNI (the global `default_sni <ip>`). The webapp can't be
+> path-mounted under the router (no mount-prefix support), so a second name or a
+> second port is the only option.
 
 ### Choosing the hostnames — access modes
 
@@ -222,7 +227,7 @@ Caddy decides how to provision TLS **from the site address itself**:
 | --- | --- | --- | --- |
 | **Local only** (single box, a trial) | `domain`; `localhost` / `app.localhost` (the defaults) | local auto-self-signed (trusted by the host's browsers via Caddy's local CA) | this machine only — `https://localhost`, `https://app.localhost` |
 | **LAN — by hostname** (preferred) | `domain`; a LAN-resolvable name **and** its `app.` sub, e.g. `bp.lan` / `app.bp.lan` | Caddy's **internal CA** (not public names → no ACME) | any LAN device — **browsers warn until you install Caddy's root CA** (below) |
-| **LAN — by bare IP** | `ip`; `PUBLIC_IP=192.168.1.50`, `WEBAPP_HTTPS_PORT=8443` | Caddy's **internal CA** | any LAN device — router at `https://<ip>`, **webapp at `https://<ip>:8443`** (open that port on any firewall) |
+| **LAN — by bare IP** | `ip`; `PUBLIC_IP=192.168.1.50`, `ROUTER_HTTPS_PORT=443`, `WEBAPP_HTTPS_PORT=8443` | Caddy's **internal CA** | any LAN device — router at `https://<ip>` (or `:${ROUTER_HTTPS_PORT}`), **webapp at `https://<ip>:8443`** (open the published ports on any firewall) |
 | **Public** (internet) | `domain`; a real domain whose DNS points here, e.g. `bp.example.com` / `app.example.com` | **automatic Let's Encrypt** (ACME HTTP/TLS challenge) | anywhere — publicly-trusted cert, no warnings |
 | **Public domain + LAN IP** | `both`; the domain pair **and** `PUBLIC_IP` (often with `EDGE_SCHEME=http` for a tunnel) | per-identity (domain: ACME/upstream; IP: internal CA) | both at once — see [Serving HTTP at the origin](#serving-http-at-the-origin-tls-terminated-upstream) |
 
@@ -239,7 +244,9 @@ Notes:
 - **LAN by bare IP:** when you can't add DNS, choose `EDGE_MODE=ip` and set
   `PUBLIC_IP=<ip>`; the webapp gets `https://<ip>:${WEBAPP_HTTPS_PORT}` (default
   `8443`). The `caddy` service publishes that port; **open it on the host
-  firewall** so LAN clients can reach it. The router stays on `https://<ip>`.
+  firewall** so LAN clients can reach it. The router stays on `https://<ip>`
+  unless you set `ROUTER_HTTPS_PORT` (default `443`) — then it moves to
+  `https://<ip>:${ROUTER_HTTPS_PORT}` and that port is published too.
   A bare IP is **always https** via the internal CA — the generated Caddyfile
   pins `tls internal` (Let's Encrypt won't issue for an IP literal) and adds a
   global `default_sni <ip>` (an IP client sends no SNI, and behind Docker NAT
@@ -314,6 +321,7 @@ PUBLIC_DOMAIN=bp.example.com
 WEBAPP_DOMAIN=app.example.com
 EDGE_SCHEME=http                 # origin is plain HTTP; the tunnel does TLS
 PUBLIC_IP=192.168.1.50
+ROUTER_HTTPS_PORT=443            # router/admin on the IP (shares the :443 listener)
 WEBAPP_HTTPS_PORT=8443
 ROUTER_PUBLIC_URL=https://bp.example.com
 ```
