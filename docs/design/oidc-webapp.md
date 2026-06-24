@@ -269,27 +269,35 @@ that motivate this.
 
 ### 9.1 Example wiring — Authelia
 
-IdP side (Authelia ≥ 4.39 `configuration.yml`; the OIDC schema moved across
-4.38→4.39, so check your version's docs). Only the `clients` /
-`claims_policies` bits are shown — `hmac_secret` and the issuer `jwks` signing
-key are configured per the Authelia OIDC guide.
+IdP side (Authelia `configuration.yml`). The OIDC claims schema changed at
+4.39 (see the version note below), so the exact keys depend on your version.
+Only the `clients` / `claims_policies` bits are shown — `hmac_secret` and the
+issuer `jwks` signing key are configured per the Authelia OIDC guide.
 
-> **Why `claims_policies` is required (and where it went).** Since **v4.39.0**
-> Authelia mints a **minimal id_token** — only the spec-required claims — and
-> serves `email`/`groups`/`name` from the **UserInfo endpoint** by default. The
-> router reads claims from the **id_token** and does not call UserInfo, so you
-> must opt those claims back into the token: a `claims_policies` entry whose
-> `id_token:` list includes them, referenced from the client via
-> `claims_policy`. Without it, login by `sub` still works but `groups`→level
-> and verified-email features are inert. This config key is **new in 4.39.0**
-> — if you can't find it, you're likely on older docs / an older Authelia
-> (`authelia --version`), where claims are delivered differently. Reference:
+> **How email/groups reach the id_token differs by Authelia version**
+> (`authelia --version`). The router reads `email`/`groups` from the
+> **id_token** — it does not call UserInfo — and the two Authelia generations
+> deliver id_token claims differently:
+>
+> - **≤ 4.38** — granting the `email` / `groups` **scopes** already puts those
+>   claims in the id_token. There is **no** `claims_policies` / `claims_policy`;
+>   adding either fails with *"configuration key not expected."* Use the client
+>   block below **without** the two lines marked `4.39+`.
+> - **≥ 4.39.0** — the default id_token is **minimal** (those claims moved to
+>   UserInfo). You must opt them back in: define a `claims_policies` entry whose
+>   `id_token:` lists the claims and reference it from the client via
+>   `claims_policy` (both lines marked `4.39+` below).
+>
+> Either way, login by `sub` works without these claims — they're only needed
+> for `groups`→level and verified-email features. Ref:
 > [Authelia — OpenID Connect 1.0 Claims](https://www.authelia.com/integration/openid-connect/openid-connect-1.0-claims/).
 
 ```yaml
 identity_providers:
   oidc:
-    # Put email/groups INTO the id_token (the router doesn't call /userinfo).
+    # 4.39+ ONLY: copies email/groups INTO the id_token (the router doesn't
+    # call /userinfo). OMIT this whole block on Authelia <= 4.38 — there the
+    # `scopes` on the client already deliver them in the id_token.
     claims_policies:
       backplaned:
         id_token: ['email', 'email_verified', 'groups']
@@ -305,7 +313,7 @@ identity_providers:
         require_pkce: true
         pkce_challenge_method: 'S256'                 # the router always uses S256
         token_endpoint_auth_method: 'client_secret_post'
-        claims_policy: 'backplaned'
+        claims_policy: 'backplaned'                   # 4.39+ ONLY — omit on <= 4.38
         redirect_uris:
           - 'https://app.example.com/auth/sso/callback'
         scopes: ['openid', 'email', 'profile', 'groups']
