@@ -26,12 +26,19 @@ from bp_protocol.frames import (
     FileFetchFrame,
     FileManageFrame,
     FileResultFrame,
+    FileStatEntry,
     FileStoreFrame,
     FileUploadGrantFrame,
     FileUploadRequestFrame,
     ListFileRequest,
+    StatFileRequest,
     WriteFileRequest,
 )
+
+# Public alias — agents read `.name` / `.byte_size` / `.mime_type` /
+# `.created_at` off the metadata returned by `FileStash.stat` /
+# `list_detailed`.
+FileStat = FileStatEntry
 
 if TYPE_CHECKING:
     from bp_sdk.context import TaskContext
@@ -239,6 +246,41 @@ class FileStash:
             )
         )
         return res.names or []
+
+    async def list_detailed(
+        self,
+        *,
+        persistent: bool = False,
+        query: str | None = None,
+        stored_after: Any | None = None,
+    ) -> list[FileStat]:
+        """Like `list`, but each entry carries metadata (name, byte_size,
+        mime_type, created_at) — so the caller (or a model) can see file
+        TYPE and SIZE without a per-file `stat`. Newest first."""
+        res = await self._round_trip(
+            FileManageFrame(
+                **self._store_frame_base(),
+                command=ListFileRequest(
+                    persistent=persistent, query=query,
+                    stored_after=stored_after, detail=True,
+                ),
+            )
+        )
+        return res.entries or []
+
+    async def stat(self, name: str) -> FileStat:
+        """Metadata for one stash file by NAME (`{filename}` or
+        `persist/{filename}`): size, mime type, created_at. Raises
+        `FileStoreError("not_found")` when the name is unbound (or
+        `invalid_filename` for a malformed name)."""
+        res = await self._round_trip(
+            FileManageFrame(
+                **self._store_frame_base(),
+                command=StatFileRequest(name=name),
+            )
+        )
+        assert res.stat is not None
+        return res.stat
 
     async def delete(self, name: str) -> int:
         """Delete a name (or a `*`-glob). Returns the count removed."""

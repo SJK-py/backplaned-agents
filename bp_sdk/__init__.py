@@ -46,7 +46,7 @@ from bp_sdk.errors import (
     UpstreamError,
 )
 from bp_sdk.file_tools import dispatch_file_tool, file_tools, is_file_tool
-from bp_sdk.files import FileStash, FileStoreError
+from bp_sdk.files import FileStash, FileStat, FileStoreError
 from bp_sdk.llm import (
     LlmCallError,
     LlmDelta,
@@ -98,6 +98,7 @@ __all__ = [
     "document_part",
     "image_part",
     "FileStash",
+    "FileStat",
     "FileStoreError",
     "dispatch_file_tool",
     "file_tools",

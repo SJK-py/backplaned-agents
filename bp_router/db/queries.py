@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from bp_protocol.types import TaskPriority, TaskState
 from bp_router.db.models import (
     AgentRow,
+    FileEntryRow,
     FileNameRow,
     FileRow,
     InvitationRow,
@@ -844,6 +845,54 @@ class Scope:
             stored_after,
         )
         return [FileNameRow.model_validate(dict(r)) for r in rows]
+
+    async def stat_file_name(
+        self, scope: str, filename: str
+    ) -> FileEntryRow | None:
+        """Metadata for one name — the directory row joined to its blob's
+        `mime_type`. None when the name is unbound (the JOIN is INNER, but
+        a name always points at a live blob)."""
+        user_id = self._require_user()
+        row = await self._conn.fetchrow(
+            """
+            SELECT fn.filename, fn.byte_size, fn.created_at, f.mime_type
+            FROM file_names fn
+            JOIN files f ON f.file_id = fn.file_id AND f.user_id = fn.user_id
+            WHERE fn.user_id = $1 AND fn.scope = $2 AND fn.filename = $3
+            """,
+            user_id,
+            scope,
+            filename,
+        )
+        return FileEntryRow.model_validate(dict(row)) if row else None
+
+    async def list_file_entries(
+        self,
+        scope: str,
+        *,
+        query: str | None = None,
+        stored_after: datetime | None = None,
+    ) -> list[FileEntryRow]:
+        """`list_file_names` with each row's blob `mime_type` joined in —
+        the `detail=True` projection. Same filter/order semantics."""
+        user_id = self._require_user()
+        like = f"%{_like_escape(query)}%" if query is not None else None
+        rows = await self._conn.fetch(
+            r"""
+            SELECT fn.filename, fn.byte_size, fn.created_at, f.mime_type
+            FROM file_names fn
+            JOIN files f ON f.file_id = fn.file_id AND f.user_id = fn.user_id
+            WHERE fn.user_id = $1 AND fn.scope = $2
+              AND ($3::text IS NULL OR fn.filename ILIKE $3 ESCAPE '\')
+              AND ($4::timestamptz IS NULL OR fn.created_at > $4)
+            ORDER BY fn.created_at DESC
+            """,
+            user_id,
+            scope,
+            like,
+            stored_after,
+        )
+        return [FileEntryRow.model_validate(dict(r)) for r in rows]
 
     async def delete_file_name(self, scope: str, filename: str) -> int:
         """Delete one directory row by exact name. Returns the count

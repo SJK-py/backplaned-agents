@@ -25,6 +25,7 @@ from bp_protocol.frames import (
     FileFetchFrame,
     FileManageFrame,
     FileResultFrame,
+    FileStatEntry,
     FileStoreFrame,
     FileUploadGrantFrame,
     FileUploadRequestFrame,
@@ -38,6 +39,7 @@ from bp_protocol.frames import (
     PongFrame,
     ProgressFrame,
     ResultFrame,
+    StatFileRequest,
     WriteFileRequest,
 )
 from bp_protocol.types import TaskState
@@ -1528,13 +1530,52 @@ async def _handle_file_manage(
         cmd = frame.command
 
         if isinstance(cmd, ListFileRequest):
+            scope = _scope_for(cmd.persistent, session_id)
+            if cmd.detail:
+                erows = await sq.list_file_entries(
+                    scope, query=cmd.query, stored_after=cmd.stored_after
+                )
+                entries = [
+                    FileStatEntry(
+                        name=_display_name(cmd.persistent, r.filename),
+                        byte_size=r.byte_size,
+                        mime_type=r.mime_type,
+                        created_at=r.created_at,
+                    )
+                    for r in erows
+                ]
+                await entry.outbox.put(_file_result(frame, entries=entries))
+                return
             rows = await sq.list_file_names(
-                _scope_for(cmd.persistent, session_id),
-                query=cmd.query,
-                stored_after=cmd.stored_after,
+                scope, query=cmd.query, stored_after=cmd.stored_after,
             )
             names = [_display_name(cmd.persistent, r.filename) for r in rows]
             await entry.outbox.put(_file_result(frame, names=names))
+            return
+
+        if isinstance(cmd, StatFileRequest):
+            parsed = _split_stash_name(cmd.name)
+            if parsed is None:
+                await entry.outbox.put(
+                    _file_result(frame, error="invalid_filename")
+                )
+                return
+            persistent, bare = parsed
+            row = await sq.stat_file_name(_scope_for(persistent, session_id), bare)
+            if row is None:
+                await entry.outbox.put(_file_result(frame, error="not_found"))
+                return
+            await entry.outbox.put(
+                _file_result(
+                    frame,
+                    stat=FileStatEntry(
+                        name=_display_name(persistent, row.filename),
+                        byte_size=row.byte_size,
+                        mime_type=row.mime_type,
+                        created_at=row.created_at,
+                    ),
+                )
+            )
             return
 
         if isinstance(cmd, DeleteFileRequest):

@@ -163,9 +163,17 @@ plain HTTP itself. URL is one-shot / short-lived for security.
 Carries a discriminated `command` object:
 
   * **`ListFileRequest`** `{ persistent: bool=false, query: str|null,
-    stored_after: datetime|null }` → reply lists names in the
-    chosen scope (filtered). `persist` listing returns
-    `persist/{filename}` forms.
+    stored_after: datetime|null, detail: bool=false }` → reply lists
+    names in the chosen scope (filtered). `persist` listing returns
+    `persist/{filename}` forms. With `detail=true` the reply carries
+    `entries` (each `{ name, byte_size, mime_type, created_at }`,
+    directory row JOINed to its blob's mime) instead of bare `names`,
+    so a caller/model sees type + size without a per-file `stat`.
+  * **`StatFileRequest`** `{ name }` — metadata for ONE name (`{filename}`
+    or `persist/{filename}`): reply `stat` = `{ name, byte_size,
+    mime_type, created_at }`, or `error="not_found"`. Read-only; the
+    same single-row lookup `FileFetch` uses, JOINed to the blob for
+    `mime_type`.
   * **`DeleteFileRequest`** `{ filename }` — `{filename}` or
     `persist/{filename}`; `*` glob allowed (e.g. `draft_*`).
     Deletes directory rows (blob GC is deferred to the sweep).
