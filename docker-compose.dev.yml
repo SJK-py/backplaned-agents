@@ -66,8 +66,8 @@ services:
   # the default). Off by default; enable with `--profile search` and point
   # SUITE_SEARXNG_URL at http://localhost:8888 (or an external Brave-API-
   # compatible endpoint). For the hosted backends set SUITE_WEB_SEARCH_BACKEND
-  # to brave/kagi + the matching SUITE_BRAVE_API_KEY / SUITE_KAGI_API_KEY in
-  # .env — no extra container needed.
+  # to brave/kagi/exa + the matching SUITE_BRAVE_API_KEY / SUITE_KAGI_API_KEY /
+  # SUITE_EXA_API_KEY in .env — no extra container needed.
   searxng:
     image: searxng/searxng:latest
     container_name: bp-searxng
