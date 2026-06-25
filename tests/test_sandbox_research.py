@@ -11,6 +11,8 @@ import pytest
 
 from bp_agents.agents.research.web import (
     BRAVE_CONTEXT_URL,
+    EXA_CONTENTS_URL,
+    EXA_SEARCH_URL,
     KAGI_EXTRACT_URL,
     KAGI_SEARCH_URL,
     html_fetch,
@@ -684,3 +686,113 @@ def test_web_search_handler_always_policy_content_ranks(monkeypatch) -> None:
         assert out.index("http://cat") < out.index("http://dog")
 
     asyncio.run(_drive())
+
+
+# --------------------------------------------------------------------------- #
+# exa backend (search + /contents fetch)
+# --------------------------------------------------------------------------- #
+
+
+def test_web_search_exa_backend() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return {"results": [
+                {"title": "Cats", "url": "http://x", "highlights": ["meow", "purr"]},
+            ]}
+
+        out = await web_search(
+            "cats",
+            settings=SuiteSettings(
+                web_search_backend="exa", exa_api_key="k", exa_search_type="fast"
+            ),
+            count=5, include_domains=["arxiv.org"], exclude_domains=["pinterest.com"],
+            max_age_hours=24, request_json=_request,
+        )
+        assert captured["url"] == EXA_SEARCH_URL
+        assert captured["headers"]["x-api-key"] == "k"
+        # type comes from settings; content options nest under `contents`.
+        assert captured["json"]["type"] == "fast"
+        assert captured["json"]["numResults"] == 5
+        assert captured["json"]["contents"] == {"highlights": True}
+        assert captured["json"]["includeDomains"] == ["arxiv.org"]
+        assert captured["json"]["excludeDomains"] == ["pinterest.com"]
+        assert captured["json"]["maxAgeHours"] == 24
+        # Highlights are the per-result snippet.
+        assert "Cats" in out and "http://x" in out and "meow" in out and "purr" in out
+
+    asyncio.run(_drive())
+
+
+def test_web_search_exa_falls_back_when_key_missing() -> None:
+    async def _drive() -> None:
+        out = await web_search(
+            "x", settings=SuiteSettings(web_search_backend="exa", searxng_url=None)
+        )
+        assert "not configured" in out
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_exa_contents_text() -> None:
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["url"] = url
+            captured["json"] = json
+            return {"results": [{"url": "http://a", "text": "the page body"}]}
+
+        out = await html_fetch(
+            None, urls=["http://a"], truncate=5000,
+            settings=SuiteSettings(web_search_backend="exa", exa_api_key="k"),
+            request_json=_request,
+        )
+        assert captured["url"] == EXA_CONTENTS_URL
+        # On /contents, content options are TOP-LEVEL (not nested in `contents`).
+        assert captured["json"]["text"] == {"maxCharacters": 5000}
+        assert "summary" not in captured["json"]
+        assert "## http://a" in out and "the page body" in out
+
+    asyncio.run(_drive())
+
+
+def test_html_fetch_exa_extract_query_uses_native_summary() -> None:
+    # extract_query on Exa → request a query-focused summary server-side; our
+    # own lite-preset distillation must NOT run.
+    async def _drive() -> None:
+        captured: dict = {}
+
+        async def _request(method, url, *, params=None, json=None, headers=None, timeout):
+            captured["json"] = json
+            return {"results": [{"url": "http://a", "summary": "just the answer"}]}
+
+        llm = _StubLlm()
+        out = await html_fetch(
+            _Ctx(llm=llm), urls=["http://a"], extract_query="what is X?",
+            settings=SuiteSettings(web_search_backend="exa", exa_api_key="k"),
+            request_json=_request,
+        )
+        assert captured["json"]["summary"] == {"query": "what is X?"}
+        assert "text" not in captured["json"]
+        assert "just the answer" in out
+        # Exa distilled server-side — no extra LLM round-trip on our side.
+        assert llm.calls == []
+
+    asyncio.run(_drive())
+
+
+def test_exa_search_tool_schema() -> None:
+    tools = {
+        t.spec.name: t
+        for t in make_web_tools(SuiteSettings(web_search_backend="exa", exa_api_key="k"))
+    }
+    props = tools["web_search"].spec.parameters["properties"]
+    assert {"query", "count", "include_domains", "exclude_domains", "max_age_hours"} <= set(props)
+    assert props["count"]["maximum"] == 20
+    # Exa has no deep_web_search tool (that's SearXNG-only).
+    assert "deep_web_search" not in tools
