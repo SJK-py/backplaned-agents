@@ -80,6 +80,31 @@ class SuiteSettings(BaseSettings):
     a backstop. Embeddings stay system-managed (not exposed)."""
 
     # ------------------------------------------------------------------
+    # multimodal vision sidecar ([../docs/design/multimodal-vision-sidecar.md])
+    # ------------------------------------------------------------------
+
+    default_preset_multimodal: str = ""
+    """Router preset for a separate VISION model that reads image/PDF files
+    on behalf of a TEXT-ONLY chat preset. Empty (default) → no sidecar:
+    `read_file` feeds files to the agent's own model, which must then be
+    multimodal. Set to a router preset name (e.g. `gemini_flash_vision`) to
+    let a text-only reasoning preset (one listed in `text_only_presets`)
+    read images/PDFs — `read_file` routes those through THIS preset and
+    returns text, so the main model never needs to be multimodal. The value
+    is a router preset, so the vision call inherits the router's
+    retry/fallback/tier-gate/secret/metrics machinery."""
+
+    text_only_presets: list[str] = []
+    """Preset names the operator declares NOT multimodal-capable. When a
+    turn runs on one of these AND `default_preset_multimodal` is set,
+    `read_file` gains an optional `purpose` arg and routes image/PDF reads
+    through the vision preset (returning text) instead of feeding raw bytes
+    to the text-only model. Empty (default) → the sidecar never engages.
+    Keys on the RESOLVED preset name, so mixed tiers each behave correctly
+    (a text-only orchestrator preset alongside a multimodal `pro` preset).
+    Set `default_preset_multimodal` too, or this is inert (logged)."""
+
+    # ------------------------------------------------------------------
     # chatbot channel (Telegram)
     # ------------------------------------------------------------------
 

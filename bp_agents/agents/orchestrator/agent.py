@@ -31,6 +31,7 @@ from bp_agents.common import (
     make_current_time_tool,
     make_recall_tool_history_tool,
     make_send_file_tool,
+    multimodal_preset_for,
     persist_tool_exchanges,
     run_llm_loop,
     text_output,
@@ -184,10 +185,15 @@ async def run_orchestrator_message(
     )
     destinations = _l1_destinations(ctx)
     extra = [_hand_off_spec(destinations)] if destinations else []
+    mm_preset = multimodal_preset_for(
+        configured=settings.default_preset_multimodal,
+        text_only=settings.text_only_presets, preset=preset,
+    )
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset, local_tools=local_tools,
         extra_tools=extra, terminal_tools={_HAND_OFF_TOOL} if extra else None,
-        file_tools="full", detail_chars=settings.verbose_detail_chars,
+        file_tools="full", multimodal_preset=mm_preset,
+        detail_chars=settings.verbose_detail_chars,
     )
 
     hand_off = next(
@@ -210,7 +216,7 @@ async def run_orchestrator_message(
             return await _run_hand_off_fallback(
                 ctx, pool, messages, hand_off, preset=preset,
                 local_tools=local_tools, outbound=outbound,
-                context_tokens=context_tokens,
+                context_tokens=context_tokens, settings=settings,
             )
         # The delegate produces the terminal Result; the router drops
         # this (now non-active) agent's Result.
@@ -293,6 +299,7 @@ async def _run_hand_off_fallback(
     local_tools: LocalToolset,
     outbound: list[str],
     context_tokens: int,
+    settings: SuiteSettings,
 ) -> AgentOutput:
     """F1 fallback: the elected hand-off couldn't be admitted, so answer the
     turn directly. The loop left a dangling `hand_off` tool_call (it's a
@@ -308,6 +315,10 @@ async def _run_hand_off_fallback(
     resp = await run_llm_loop(
         ctx, messages=messages, preset=preset, local_tools=local_tools,
         file_tools="full",
+        multimodal_preset=multimodal_preset_for(
+            configured=settings.default_preset_multimodal,
+            text_only=settings.text_only_presets, preset=preset,
+        ),
     )
     async with pool.acquire() as conn:
         await persist_tool_exchanges(
@@ -348,6 +359,10 @@ async def run_orchestrator_subagent(
         ctx, messages=messages, preset=preset,
         local_tools=LocalToolset([make_current_time_tool(timezone)]),
         file_tools="full",
+        multimodal_preset=multimodal_preset_for(
+            configured=settings.default_preset_multimodal,
+            text_only=settings.text_only_presets, preset=preset,
+        ),
     )
     return text_output(resp.text)
 
@@ -461,6 +476,10 @@ async def run_orchestrator_cron_message(
             [make_current_time_tool(timezone), make_send_file_tool(outbound)]
         ),
         file_tools="full",
+        multimodal_preset=multimodal_preset_for(
+            configured=settings.default_preset_multimodal,
+            text_only=settings.text_only_presets, preset=preset,
+        ),
     )
 
     # Decide whether to report (the channel's apply step uses this for

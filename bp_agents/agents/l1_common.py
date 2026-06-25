@@ -37,6 +37,7 @@ from bp_agents.common import (
     estimate_context_tokens,
     make_recall_tool_history_tool,
     make_send_file_tool,
+    multimodal_preset_for,
     persist_tool_exchanges,
     run_llm_loop,
     text_output,
@@ -187,10 +188,15 @@ async def run_subagent(
     ]
     timezone = cfg.timezone if cfg else settings.default_timezone
     local = await _local_tools(ctx, settings, config, timezone)
+    preset = _preset(cfg, settings, config.preset_field)
     resp = await run_llm_loop(
         ctx, messages=messages,
-        preset=_preset(cfg, settings, config.preset_field), local_tools=local,
+        preset=preset, local_tools=local,
         file_tools=config.file_tools,
+        multimodal_preset=multimodal_preset_for(
+            configured=settings.default_preset_multimodal,
+            text_only=settings.text_only_presets, preset=preset,
+        ),
     )
     return text_output(resp.text)
 
@@ -259,11 +265,17 @@ async def run_delegated_turn(
     if not first_turn:
         extra_specs.append(END_DELEGATION_SPEC)
         terminal.add(END_DELEGATION_TOOL)
+    preset = _preset(cfg, settings, config.preset_field)
     resp = await run_llm_loop(
         ctx, messages=messages,
-        preset=_preset(cfg, settings, config.preset_field), local_tools=local,
+        preset=preset, local_tools=local,
         extra_tools=extra_specs or None, terminal_tools=terminal or None,
-        file_tools=config.file_tools, detail_chars=settings.verbose_detail_chars,
+        file_tools=config.file_tools,
+        multimodal_preset=multimodal_preset_for(
+            configured=settings.default_preset_multimodal,
+            text_only=settings.text_only_presets, preset=preset,
+        ),
+        detail_chars=settings.verbose_detail_chars,
     )
 
     end_call = next(
