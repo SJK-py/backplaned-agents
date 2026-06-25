@@ -51,34 +51,57 @@ can't pair a strong text reasoner with a cheap vision model.
     system (retries, fallback, tier-gating, secret resolution,
     metrics) — infrastructure we should reuse, not reinvent.
 
-## 3. Recommended design — a vision sidecar on the recovery seam
+## 3. Recommended design — a config-gated vision sidecar at `read_file`
 
-Add an operator-configured **multimodal preset** and, when an image/PDF
-can't be fed to the main model, transcribe it through that preset in a
+Two operator settings declare (a) a **multimodal preset** and (b) which
+presets are **text-only**. When a turn's preset is text-only and an
+image/PDF is read, transcribe it through the multimodal preset in a
 **self-contained sub-`generate`** and feed the resulting **text** back to
-the main model. The main reasoning model never needs to be multimodal.
+the main model — with the **intent authored by the main model** (§3.2).
+The main reasoning model never needs to be multimodal.
 
-### 3.1 Configuration (reuse presets, not raw creds)
+### 3.1 Configuration — two settings, config-driven gating
 
-One new suite setting, mirroring the existing tier defaults:
+Two new suite settings:
 
 ```python
 # bp_agents/settings.py
-default_preset_multimodal: str = ""   # env: SUITE_DEFAULT_PRESET_MULTIMODAL
+default_preset_multimodal: str = ""       # env: SUITE_DEFAULT_PRESET_MULTIMODAL
+text_only_presets: list[str] = []         # env: SUITE_TEXT_ONLY_PRESETS
 ```
 
-  * **Empty (default) → today's behaviour exactly**: file_ref straight to
-    the main model; if it can't ingest it, strip-and-note as now.
-  * **Set to a preset name** → the sidecar is active. The value is a
-    **router preset** (e.g. `gemini_flash_vision`), *not* raw creds:
+  * **`default_preset_multimodal`** — the vision preset the sidecar uses.
+    A **router preset name** (e.g. `gemini_flash_vision`), *not* raw creds:
     the sub-call goes through `ctx.llm.generate(preset=...)`, so it
-    inherits the router's retry/fallback/tier-gate/secret/metrics
-    machinery for free. (This is strictly better than the `md_ocr_*`
-    raw-creds shape, which only exists because of the sync-library
-    constraint.)
+    inherits the router's retry/fallback/tier-gate/secret/metrics machinery
+    for free. (Strictly better than the `md_ocr_*` raw-creds shape, which
+    only exists because of MarkItDown's sync-library constraint.)
+  * **`text_only_presets`** — the presets the operator declares
+    **not multimodal-capable**. The gate keys on the **resolved preset
+    name** of the turn, so heterogeneous tiers (a text-only orchestrator
+    preset, a multimodal `pro` preset, user-selected overrides via
+    `selectable_presets_*`) each get the right `read_file` independently —
+    no single "current preset" assumption.
+
+**The gate.** For a given turn the vision proxy engages iff
+`default_preset_multimodal` is set **AND** the turn's resolved preset ∈
+`text_only_presets` **AND** the file is image/PDF. All three matter:
+
+  * Either var unset / list empty → **today's behaviour exactly** (plain
+    `read_file` → `file_ref`; a multimodal model ingests it natively).
+  * The mime clause keeps a text-only model's `read_file` on a `.txt` /
+    `.json` from burning a vision call — the router already resolves those
+    to plain text parts (`attachments.py:118`). *(Dependency: a suite-side
+    mime/stat lookup on the stash file; verify `ctx.files` exposes one.)*
+
+This is **deterministic** — capability is declared, not discovered by a
+provider 400. That's the key win over a reactive trigger, and it lets the
+tool surface itself honestly (§3.3): the model only sees the `purpose` arg
+when the proxy is actually active.
+
   * Later, a per-user `preset_multimodal` `user_config` column +
-    `selectable_presets_multimodal`, exactly paralleling the existing
-    chat-tier preset plumbing. Out of scope for phase 1.
+    `selectable_presets_multimodal`, paralleling the existing chat-tier
+    preset plumbing. Out of scope for phase 1.
 
 ### 3.2 The core risk — perception decoupled from intent
 
@@ -124,26 +147,38 @@ model.** Three consequences:
      user-attached images too (they land in the stash with a name the
      model can `read_file` against).
 
-### 3.3 Two seams, honestly distinguished
+### 3.3 Config-driven tool building + two seams
 
-  * **Intentful `read_file` (PRIMARY, high quality).** Intercept
-    `read_file` in the suite loop (`_dispatch_tool_call`,
-    `bp_agents/common/loop.py:84`) — *not* in `bp_sdk`'s
-    `dispatch_file_tool`, which has no `ctx.llm` / preset access. When a
-    vision preset is configured and the file is image/PDF, run the vision
-    sub-call (image + purpose + ambient context + faithfulness prompt) and
-    return its text as the tool result; otherwise fall through to the
-    normal `file_ref`. Intent is present, so this is where quality lives.
-    The optional `purpose` arg is added to the `read_file` spec only when a
-    vision preset is configured (no prompt clutter when the main model is
-    multimodal).
-  * **Reactive recovery seam (SAFETY NET, degraded).** Subagent-returned
-    or user-attached images reach the main model with **no authored
-    intent**. Hooking `_generate_resilient` (`loop.py:205`) to transcribe
-    instead of strip keeps the model from going *blind*, but with only
-    ambient context the pass is weaker. Frame it as "don't be blind," not
-    "be great" — and rely on the model escalating to an intentful
-    `read_file(purpose=…)` on the same stash file when it needs specifics.
+The gate (§3.1) is known at **tool-build time**: the agent computes one
+flag per turn —
+
+```python
+proxy = bool(settings.default_preset_multimodal) and preset in settings.text_only_presets
+```
+
+— and passes it into `run_llm_loop`. That flag drives **separate tool
+building** and the dispatch route:
+
+  * **Intentful `read_file` (PRIMARY, high quality).** When `proxy` is
+    true the loop advertises the **intent-carrying** `read_file` spec (the
+    optional `purpose` arg appears *only* here — no prompt clutter when the
+    main model is multimodal) and intercepts its dispatch in
+    `_dispatch_tool_call` (`bp_agents/common/loop.py:84`) — *not* in
+    `bp_sdk`'s `dispatch_file_tool`, which has no `ctx.llm` / preset
+    access. For an image/PDF stash file it runs the vision sub-call (image
+    + purpose + ambient context + faithfulness prompt) and returns its
+    text; a text/other file falls through to the normal `file_ref`. When
+    `proxy` is false the plain `read_file` is built and nothing changes.
+    `bp_sdk` stays the generic fallback; the suite owns the routing.
+  * **Proactive safety net (degraded, for context-less images).**
+    Subagent-returned and user-attached images reach the main model with
+    **no authored intent**. Because `proxy` already tells us the preset is
+    text-only, the loop can transcribe any `file_ref` in the outgoing
+    messages **before** the call (in `_generate_resilient`, `loop.py:205`)
+    rather than waiting for a 400 — non-blind, but with ambient context
+    only, so it's weaker. Frame it as "don't be blind," not "be great";
+    the model escalates via an intentful `read_file(purpose=…)` on the same
+    stash file when it needs specifics. (Phase 2 — §5.)
 
 ```python
 async def _transcribe_file_ref(ctx, name, *, preset, purpose, context) -> str:
@@ -191,17 +226,22 @@ sidecar over a router-side or per-call model switch.
 
 ## 4. Cost & correctness notes
 
-  * **Latency.** The intentful `read_file` path is *proactive* — no 400,
-    one vision sub-call in place of the file_ref. The reactive safety net
-    pays one extra 400 per file-bearing turn on a text-only main model
-    before it transcribes; never for a multimodal main model (no 400, no
-    sidecar, zero overhead — full backwards-compat).
+  * **Latency.** Both paths are *proactive* (the gate is config-driven, not
+    400-discovered): one vision sub-call substitutes for the file_ref, no
+    rejected round-trip. A multimodal main model (preset ∉
+    `text_only_presets`) never enters the sidecar — zero overhead, full
+    backwards-compat.
   * **`task_id` is present** on the sub-call (`ctx.llm.generate` threads
     `ctx.task_id`), which the router requires to resolve a `file_ref`
     (`attachments.py` scope derivation). The vision preset's file scope is
     the same task, so the sub-call can read the same stash file.
-  * **Text files & reference types are untouched** — they never 400, so
-    they never enter the sidecar. No wasted vision calls on `.txt`/`.json`.
+  * **Text files & reference types are untouched** — the mime clause routes
+    only image/PDF through the vision preset; text resolves to plain text
+    parts as today. No wasted vision calls on `.txt`/`.json`.
+  * **Misconfiguration.** `text_only_presets` non-empty but
+    `default_preset_multimodal` unset → the proxy can't engage; log a
+    startup warning rather than silently feeding images to a text-only
+    model.
   * The vision preset's own `min_user_level` is enforced by the router, so
     a low-tier user can't reach a premium vision model through the back
     door.
@@ -212,19 +252,21 @@ Reordered from the first draft: because intent is what makes the proxy
 usable (§3.2), the **intentful `read_file` path leads**, and the
 context-less reactive seam follows as a safety net.
 
-1. **Phase 1 — intentful `read_file` (the primary path).**
-   `default_preset_multimodal` setting + a `purpose` arg on `read_file`
-   (advertised only when the preset is set) + the vision sub-call
+1. **Phase 1 — intentful `read_file` (the primary path).** The two
+   settings (`default_preset_multimodal`, `text_only_presets`) + the
+   `proxy` flag threaded into `run_llm_loop` + the intent-carrying
+   `read_file` spec (advertised only when `proxy`) + the vision sub-call
    (`_transcribe_file_ref`, faithfulness prompt, ambient context)
    intercepted in `_dispatch_tool_call` for image/PDF stash files.
    Requires a suite-side mime lookup on the stash file (verify `ctx.files`
    exposes one; if not, add a lightweight stat). Unset → byte-for-byte
    current behaviour.
-2. **Phase 2 — reactive safety net.** Wire the same helper into
-   `_generate_resilient` so subagent-returned / user-attached images that
-   reach the main model without an authored intent are transcribed (with
-   ambient context only) instead of stripped. Degraded but non-blind;
-   the model escalates via an intentful `read_file(purpose=…)`.
+2. **Phase 2 — proactive safety net.** Reuse the helper in
+   `_generate_resilient`: when `proxy` is set, transcribe any `file_ref`
+   in the outgoing messages (subagent-returned / user-attached images that
+   carry no authored intent) before the call, with ambient context only.
+   Degraded but non-blind; the model escalates via an intentful
+   `read_file(purpose=…)`.
 3. **Phase 3 — caching + per-user.** Cache a file's transcription in the
    stash keyed by `(name, purpose)` so repeat reads are free; add the
    `preset_multimodal` user_config column + `selectable_presets_multimodal`,
@@ -249,21 +291,28 @@ context-less reactive seam follows as a safety net.
 
 ## 7. Surface summary (phase 1)
 
-  * `bp_agents/settings.py` — `default_preset_multimodal: str = ""`.
-  * `bp_sdk/file_tools.py` — optional `purpose` arg on the `read_file`
-    spec (the plain `dispatch_file_tool` ignores it; the suite loop reads
-    it). Advertise it only when a vision preset is configured.
-  * `bp_agents/common/loop.py` — `_transcribe_file_ref(...)` (vision
-    sub-call + faithfulness prompt + ambient-context block); intercept
-    `read_file` for image/PDF stash files in `_dispatch_tool_call` when the
-    preset is set, else fall through to the normal `file_ref`. Thread the
-    preset + recent-turn context in via `run_llm_loop` (it already has
-    `ctx` and `preset`).
+  * `bp_agents/settings.py` — `default_preset_multimodal: str = ""` and
+    `text_only_presets: list[str] = []`.
+  * `bp_sdk/file_tools.py` — `file_tools(..., read_file_intent: bool=False)`
+    toggles an optional `purpose` arg on the `read_file` spec (the plain
+    `dispatch_file_tool` ignores it; the suite loop reads it).
+  * The agents (orchestrator / `l1_common`) compute
+    `proxy = bool(default_preset_multimodal) and preset in text_only_presets`
+    and pass it + the vision preset + recent-turn context into
+    `run_llm_loop`.
+  * `bp_agents/common/loop.py` — when `proxy`: build the intent-carrying
+    `read_file` spec, and in `_dispatch_tool_call` (`loop.py:84`) intercept
+    `read_file` for image/PDF stash files → `_transcribe_file_ref(...)`
+    (vision sub-call + faithfulness prompt + ambient-context block); else
+    fall through to the normal `file_ref`.
   * `_VISION_FAITHFULNESS_PROMPT` — verbatim transcription, preserve
     structure, report absence, flag uncertainty, no guessing.
-  * Tests — a fake `ctx.llm` asserting: configured + image → `read_file`
-    returns the sub-call's text and the sub-call received the `purpose`;
-    text file → no sub-call (plain `file_ref`); unset → today's behaviour.
+  * Tests — a fake `ctx.llm` asserting: preset ∈ `text_only_presets` +
+    image → `read_file` returns the sub-call's text and the sub-call
+    received the `purpose`; text file → no sub-call (plain `file_ref`);
+    preset ∉ list, or vision preset unset → today's behaviour (intent arg
+    absent).
   * Docs — note in `docs/agent-suite/` that a text-only chat preset can be
-    paired with `SUITE_DEFAULT_PRESET_MULTIMODAL` for image/PDF reading,
-    and that quality depends on the model's `purpose`.
+    paired with `SUITE_DEFAULT_PRESET_MULTIMODAL` +
+    `SUITE_TEXT_ONLY_PRESETS` for image/PDF reading, and that quality
+    depends on the model's `purpose`.
