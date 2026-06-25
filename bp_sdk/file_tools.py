@@ -28,7 +28,7 @@ from bp_sdk.llm import Message, ToolCall, ToolSpec
 if TYPE_CHECKING:
     from bp_sdk.files import FileStash
 
-_READ_ONLY = ("list_session_file", "list_persist_file", "read_file")
+_READ_ONLY = ("list_session_file", "list_persist_file", "stat_file", "read_file")
 _MUTATING = ("write_file", "delete_file", "copy_file")
 
 Bundle = Literal["read_only", "full"]
@@ -62,16 +62,30 @@ _SPECS: dict[str, ToolSpec] = {
     "list_session_file": _spec(
         "list_session_file",
         "List files in the current session's stash (ephemeral — cleared "
-        "when the session ends). Returns their names.",
+        "when the session ends). Returns each file's name, size, and type.",
         dict(_QUERY_PROP),
         [],
     ),
     "list_persist_file": _spec(
         "list_persist_file",
         "List files in the user-wide persistent stash (names are prefixed "
-        "`persist/`). Returns their names.",
+        "`persist/`). Returns each file's name, size, and type.",
         dict(_QUERY_PROP),
         [],
+    ),
+    "stat_file": _spec(
+        "stat_file",
+        "Get a stash file's metadata — size, type (MIME), and when it was "
+        "stored — WITHOUT reading its contents. Use this to check how large "
+        "a file is or what kind it is before deciding whether/how to read it.",
+        {
+            "name": {
+                "type": "string",
+                "description": "File name, e.g. 'chart.png' or "
+                "'persist/report.pdf'.",
+            }
+        },
+        ["name"],
     ),
     "read_file": _spec(
         "read_file",
@@ -175,13 +189,47 @@ async def dispatch_file_tool(files: FileStash, call: ToolCall) -> Message:
     )
 
 
+def _human_size(n: int) -> str:
+    """Compact human size: 0 B / 12.3 KB / 4.5 MB. Model-friendly so the
+    file's heft is obvious at a glance."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"  # unreachable
+
+
+def _entry_view(entry: Any) -> dict[str, Any]:
+    """Render a `FileStat` for the model: name + human size + type."""
+    return {
+        "name": entry.name,
+        "size": _human_size(entry.byte_size),
+        "type": entry.mime_type or "unknown",
+    }
+
+
 async def _run(
     files: FileStash, name: str, args: dict[str, Any]
 ) -> str | dict[str, Any] | list[dict[str, Any]]:
     if name == "list_session_file":
-        return {"files": await files.list(persistent=False, query=args.get("query"))}
+        entries = await files.list_detailed(persistent=False, query=args.get("query"))
+        return {"files": [_entry_view(e) for e in entries]}
     if name == "list_persist_file":
-        return {"files": await files.list(persistent=True, query=args.get("query"))}
+        entries = await files.list_detailed(persistent=True, query=args.get("query"))
+        return {"files": [_entry_view(e) for e in entries]}
+    if name == "stat_file":
+        fname = args.get("name")
+        if not fname:
+            return {"error": "stat_file requires a 'name'"}
+        entry = await files.stat(fname)
+        return {
+            "name": entry.name,
+            "size": _human_size(entry.byte_size),
+            "bytes": entry.byte_size,
+            "type": entry.mime_type or "unknown",
+            "stored_at": entry.created_at.isoformat(),
+        }
     if name == "read_file":
         fname = args.get("name")
         if not fname:

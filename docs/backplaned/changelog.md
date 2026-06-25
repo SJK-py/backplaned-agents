@@ -20,6 +20,35 @@
 
 ## 2026-06-25
 
+> The router-managed file store gains **metadata access**: a `stat` command for
+> one file and a `detail` flag on `list`, so an agent (and the model it drives)
+> can see a stash file's type and size without reading it. Additive protocol
+> fields only — wire-compatible with peers that predate it.
+
+### Added — `StatFileRequest` + detailed `list` on the named file store
+
+- **What (`bp_protocol/frames.py`):** new `StatFileRequest{name}` file command
+  + `FileStatEntry{name, byte_size, mime_type, created_at}`. `ListFileRequest`
+  gains `detail: bool=false`; `FileResultFrame` gains optional `stat` +
+  `entries`. All new fields are optional/additive, so a peer on the old shape is
+  unaffected.
+- **What (`bp_router`):** `Scope.stat_file_name` / `Scope.list_file_entries`
+  (`db/queries.py`) JOIN the `file_names` directory row to its `files` blob for
+  `mime_type` (`byte_size` + `created_at` are already on the directory row),
+  user-scoped exactly like `resolve_file_name` / `list_file_names`; new
+  `FileEntryRow` model. `dispatch._handle_file_manage` gains a `stat` branch
+  (resolve → `not_found`) and a `detail` branch for list.
+- **What (`bp_sdk`):** `FileStash.stat(name) -> FileStat` and
+  `list_detailed(...) -> [FileStat]` (`files.py`); `FileStat` re-exported from
+  `bp_sdk`. `list()` is unchanged (still returns names) for back-compat. The
+  `file_tools` bundle adds a `stat_file` tool, and `list_session_file` /
+  `list_persist_file` now return each file's name + human size + type.
+- **Why:** the suite's text-only vision sidecar (and the model itself) need a
+  file's type/size before deciding whether/how to read it; the directory
+  previously exposed only names.
+
+## 2026-06-25
+
 > Preset catalogue re-sync becomes **pinned-field**: operators keep control of
 > the fields the catalogue doesn't pin. No migration; behaviour change to the
 > every-boot upsert, a trim of the bundled catalogue, and a `scripts/prod.sh`

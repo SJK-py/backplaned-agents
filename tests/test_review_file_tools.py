@@ -12,10 +12,14 @@ surfaced as `{"error": code}` so the model can recover.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
+from bp_protocol.frames import FileStatEntry
 from bp_sdk.files import FileStoreError
+
+_NOW = datetime(2026, 1, 2, tzinfo=UTC)
 
 
 class _FakeStash:
@@ -26,11 +30,20 @@ class _FakeStash:
         self.calls: list[tuple] = []
         self._raise = raise_code
 
-    async def list(self, *, persistent=False, query=None):  # type: ignore[no-untyped-def]
-        self.calls.append(("list", persistent, query))
+    async def list_detailed(self, *, persistent=False, query=None):  # type: ignore[no-untyped-def]
+        self.calls.append(("list_detailed", persistent, query))
         if self._raise:
             raise FileStoreError(self._raise)
-        return ["a.txt", "b.png"]
+        return [
+            FileStatEntry(name="a.txt", byte_size=12, mime_type="text/plain", created_at=_NOW),
+            FileStatEntry(name="b.png", byte_size=2048, mime_type="image/png", created_at=_NOW),
+        ]
+
+    async def stat(self, name):  # type: ignore[no-untyped-def]
+        self.calls.append(("stat", name))
+        if self._raise:
+            raise FileStoreError(self._raise)
+        return FileStatEntry(name=name, byte_size=2048, mime_type="image/png", created_at=_NOW)
 
     async def write(self, filename, text, *, persistent=False):  # type: ignore[no-untyped-def]
         self.calls.append(("write", filename, text, persistent))
@@ -75,6 +88,7 @@ def test_read_only_bundle_names() -> None:
     assert [t.name for t in file_tools("read_only")] == [
         "list_session_file",
         "list_persist_file",
+        "stat_file",
         "read_file",
     ]
 
@@ -87,6 +101,7 @@ def test_full_bundle_adds_mutating_tools() -> None:
     assert names == [
         "list_session_file",
         "list_persist_file",
+        "stat_file",
         "read_file",
         "write_file",
         "delete_file",
@@ -153,8 +168,12 @@ def test_list_session_file_lists_session_scope() -> None:
     msg = asyncio.run(
         dispatch_file_tool(stash, _call("list_session_file", query="a"))
     )
-    assert msg.content == {"files": ["a.txt", "b.png"]}
-    assert stash.calls == [("list", False, "a")]
+    # Enriched: each entry carries name + human size + type.
+    assert msg.content == {"files": [
+        {"name": "a.txt", "size": "12 B", "type": "text/plain"},
+        {"name": "b.png", "size": "2.0 KB", "type": "image/png"},
+    ]}
+    assert stash.calls == [("list_detailed", False, "a")]
 
 
 def test_list_persist_file_lists_persist_scope() -> None:
@@ -163,7 +182,7 @@ def test_list_persist_file_lists_persist_scope() -> None:
 
     stash = _FakeStash()
     asyncio.run(dispatch_file_tool(stash, _call("list_persist_file")))
-    assert stash.calls == [("list", True, None)]
+    assert stash.calls == [("list_detailed", True, None)]
 
 
 def test_read_file_missing_name_is_soft_error() -> None:
