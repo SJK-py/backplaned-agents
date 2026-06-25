@@ -33,6 +33,8 @@ from bp_router.db.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     import asyncpg
 
 logger = logging.getLogger(__name__)
@@ -2987,6 +2989,26 @@ async def insert_llm_preset(
     return LlmPresetRow.model_validate(dict(row))
 
 
+# Columns the catalogue re-sync may overwrite on conflict, in INSERT order.
+# `name` is the conflict key (never in the SET); `managed`/`created_at`/
+# `created_by` are sync-managed separately. A column is overwritten only when
+# the catalogue entry PINNED it (see `pinned` below).
+_MANAGED_UPSERT_COLUMNS = (
+    "description",
+    "provider",
+    "concrete_model",
+    "api_key_ref",
+    "api_key",
+    "base_url",
+    "min_user_level",
+    "default_temperature",
+    "default_max_tokens",
+    "default_provider_options",
+    "fallback_preset",
+    "max_retries",
+)
+
+
 async def upsert_managed_preset(
     conn: asyncpg.Connection,
     *,
@@ -3003,6 +3025,7 @@ async def upsert_managed_preset(
     base_url: str | None = None,
     fallback_preset: str | None = None,
     max_retries: int = 0,
+    pinned: AbstractSet[str] | None = None,
 ) -> None:
     """Insert-or-update a CATALOGUE-owned preset (managed = TRUE). Used by
     the boot-time catalogue sync (`LlmService.load_presets_from_db`).
@@ -3012,16 +3035,27 @@ async def upsert_managed_preset(
     left untouched (the `WHERE llm_presets.managed` guard makes the upsert a
     no-op for it). `created_by` stays NULL for managed rows.
 
-    EXCEPTION — `min_user_level` is operator-owned: it is set on the initial
-    INSERT (from the catalogue/overlay) but NOT touched on conflict, so a tier
-    gate an operator set on a managed preset (e.g. via the admin UI) survives
-    the every-boot re-sync. Equivalent to "if the DB value differs from the
-    catalogue's, the operator's value wins" — preserving the existing value
-    covers both that case and the no-op same-value case. Consequence: a
-    catalogue/overlay change to `min_user_level` only reaches presets that
-    don't exist yet; for an existing one, change it in the admin UI."""
+    PINNED-FIELD UPDATE — `pinned` is the set of fields the catalogue entry
+    actually LISTED (`Preset.specified_fields`). On conflict, only those
+    columns are overwritten; a column NOT in `pinned` keeps its existing DB
+    value, so an operator's edit to an omitted field (tier gate, sampling
+    defaults, description, ...) survives the every-boot re-sync. The INSERT
+    still writes every column, so a freshly-created preset gets the passed
+    values (defaults for omitted fields). `pinned=None` means "overwrite all"
+    (legacy behaviour, used by direct callers/tests)."""
+    if pinned is None:
+        cols = _MANAGED_UPSERT_COLUMNS
+    else:
+        cols = tuple(c for c in _MANAGED_UPSERT_COLUMNS if c in pinned)
+    # managed/updated_at are always refreshed, so the SET is never empty even
+    # when an entry pins nothing overwritable (only the required name/provider/
+    # concrete_model, which are always pinned anyway).
+    set_clause = ",\n            ".join(
+        [f"{c} = EXCLUDED.{c}" for c in cols]
+        + ["managed = TRUE", "updated_at = now()"]
+    )
     await conn.execute(
-        """
+        f"""
         INSERT INTO llm_presets
             (name, description, provider, concrete_model, api_key_ref, api_key,
              base_url, min_user_level, default_temperature, default_max_tokens,
@@ -3030,21 +3064,7 @@ async def upsert_managed_preset(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                 TRUE, NULL)
         ON CONFLICT (name) DO UPDATE SET
-            description = EXCLUDED.description,
-            provider = EXCLUDED.provider,
-            concrete_model = EXCLUDED.concrete_model,
-            api_key_ref = EXCLUDED.api_key_ref,
-            api_key = EXCLUDED.api_key,
-            base_url = EXCLUDED.base_url,
-            -- min_user_level intentionally NOT updated: operator-owned, so an
-            -- operator's tier gate survives the re-sync (see docstring).
-            default_temperature = EXCLUDED.default_temperature,
-            default_max_tokens = EXCLUDED.default_max_tokens,
-            default_provider_options = EXCLUDED.default_provider_options,
-            fallback_preset = EXCLUDED.fallback_preset,
-            max_retries = EXCLUDED.max_retries,
-            managed = TRUE,
-            updated_at = now()
+            {set_clause}
         WHERE llm_presets.managed
         """,
         name,

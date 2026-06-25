@@ -18,6 +18,51 @@
 
 ---
 
+## 2026-06-25
+
+> Preset catalogue re-sync becomes **pinned-field**: operators keep control of
+> the fields the catalogue doesn't pin. No migration; behaviour change to the
+> every-boot upsert plus a trim of the bundled catalogue.
+
+### Changed — catalogue re-sync overwrites only the fields an entry lists
+
+- **What:** `upsert_managed_preset` (`bp_router/db/queries.py`) now takes a
+  `pinned` set and builds its `ON CONFLICT DO UPDATE SET` from it — only the
+  columns a catalogue entry actually listed are overwritten on re-sync; an
+  omitted field keeps its existing DB value. The INSERT still writes every
+  column (defaults for omitted fields), so first-creation is unchanged.
+  `pinned=None` preserves the legacy overwrite-all behaviour for direct callers.
+- **What:** `Preset` gains a non-comparing `specified_fields` (populated by
+  `load_catalog` from the raw JSONC keys; empty for DB-built presets).
+  `LlmService.load_presets_from_db` threads it as `pinned`, so a field an
+  operator edits in the admin UI survives the every-boot re-sync **unless** the
+  catalogue/overlay entry lists (pins) it. Supersedes the previous
+  `min_user_level`-only carve-out — the tier gate is now just one of the
+  operator-owned-by-default fields.
+- **Why:** operators want to set the tier gate, sampling defaults, etc. on a
+  catalogue-managed preset and have it stick, while the catalogue stays the
+  source of truth for model identity + credential. Presence in the JSONC is the
+  signal: list a field to pin it, omit it to leave it operator-owned.
+
+### Removed — `description` / `default_provider_options` from the bundled catalogue
+
+- **What:** the bundled `presets_catalog.jsonc` entries are trimmed to
+  `name` / `provider` / `concrete_model` / `api_key_ref`; `description` and the
+  embedding presets' `default_provider_options` (`{"output_dimensionality":
+  1536}`) are dropped. With the dimension no longer pinned, the Gemini default
+  embedding model emits its **native** vector width.
+- **Why:** keeps the catalogue minimal (model identity + credential) and lets
+  the embedding dimension be set at deploy time rather than hardcoded.
+- **CAVEAT (follow-up pending):** `scripts/prod.sh` still hardcodes
+  `SUITE_EMBEDDING_DIM=1536`. Until it derives the dimension per provider, a
+  fresh Gemini deploy can emit a width that mismatches `SUITE_EMBEDDING_DIM` →
+  KB/memory writes fail. Set `SUITE_EMBEDDING_DIM` to the model's native width
+  (or re-pin `output_dimensionality` via the overlay) until that lands.
+- **Verified:** `tests/test_preset_catalog_resync.py` (pinned overwrite +
+  omitted-field preservation, against real Postgres),
+  `tests/test_llm_preset_catalog.py` (presence capture),
+  `tests/test_llm_embed_dimensions.py` (embedding presets no longer pin a width).
+
 ## 2026-06-22
 
 > Platform (`bp_router`) surface of webapp SSO. The webapp/BFF halves

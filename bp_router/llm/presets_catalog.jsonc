@@ -4,9 +4,20 @@
 // `llm_presets` table on EVERY router startup: each is upserted and marked
 // `managed`, and any managed preset dropped from this file is pruned. It is
 // also the in-memory fallback before the DB load. Admin-created presets (added
-// via the webUI / admin API) are never touched by the sync — editing a managed
-// preset through the UI is transient (overwritten on the next boot), so to
-// change one permanently, edit this file (or an operator overlay).
+// via the webUI / admin API) are never touched by the sync.
+//
+// ── PINNED-FIELD RE-SYNC: only the fields you list here are overwritten ─────
+// The re-sync overwrites ONLY the fields a preset entry actually LISTS; any
+// field you OMIT is left to operator control (whatever the admin UI / DB
+// holds survives the re-sync). So a field present here is "pinned" to the
+// catalogue (re-applied every boot); a field absent here is operator-owned.
+// That is why most entries below carry only provider / concrete_model /
+// api_key_ref — the model identity + credential are pinned, while sampling
+// defaults, the tier gate (`min_user_level`), description, etc. are left for
+// operators to set durably in the admin UI. On a preset's FIRST creation,
+// omitted fields take their defaults (see the `Preset` dataclass). To pin a
+// field instead, just add it to the entry. (An explicit JSON `null` counts as
+// present → pins the column to NULL.)
 //
 // This file is JSONC: `//` line comments and `/* ... */` block comments are
 // allowed (and stripped before parsing); trailing commas are NOT. Point a
@@ -16,37 +27,28 @@
 //   Required: name, provider, concrete_model
 //   Credential: api_key_ref OR inline api_key (both default ""; a keyless
 //             local endpoint needs neither, an empty ref calls 401)
-//   Optional: description, min_user_level (default "*"), default_temperature,
-//             default_max_tokens, default_provider_options,
-//             base_url, fallback_preset, max_retries
+//   Optional (omit unless you want to PIN it): description,
+//             min_user_level (default "*"), default_temperature,
+//             default_max_tokens, default_provider_options, base_url,
+//             fallback_preset, max_retries
 //
 // NAMING: preset `name` must match ^[a-z][a-z0-9_-]{0,63}$ (the DB CHECK
 // constraint) — so dots are NOT allowed and versions use `-` (e.g.
 // `gemini-2-5-pro`). `concrete_model` is the real upstream identifier the
 // provider SDK sees and KEEPS its dotted form (e.g. `gemini-2.5-pro`).
-//
-// `min_user_level` defaults to "*" (any tier) to preserve no-gate behaviour.
-// It is OPERATOR-OWNED: the value here seeds a preset on first creation, but
-// the every-boot re-sync does NOT overwrite it — so a tier gate an operator
-// sets on a managed preset (e.g. via the admin UI) survives. The value here
-// therefore only reaches presets that don't exist yet; to re-gate an existing
-// one, change it in the admin UI (other fields stay catalogue-owned).
 [
   // ===================== Gemini family =====================
   {
     "name": "default",
     "provider": "gemini",
     "concrete_model": "gemini-3.5-flash",
-    "api_key_ref": "env://GEMINI_API_KEY",
-    "description": "Default fast Gemini model. Open to all tiers."
+    "api_key_ref": "env://GEMINI_API_KEY"
   },
   {
     "name": "default_embedding",
     "provider": "gemini",
     "concrete_model": "gemini-embedding-2",
-    "api_key_ref": "env://GEMINI_API_KEY",
-    "description": "Default embedding model (Gemini). Open to all tiers.",
-    "default_provider_options": { "output_dimensionality": 1536 }
+    "api_key_ref": "env://GEMINI_API_KEY"
   },
   {
     "name": "gemini",
@@ -92,13 +94,15 @@
     "api_key_ref": "env://GEMINI_API_KEY"
   },
   // Gemini embeddings ride the same provider adapter — its `embed()` uses
-  // `concrete_model`, so no separate embeddings provider is needed.
+  // `concrete_model`, so no separate embeddings provider is needed. The output
+  // vector width is NOT pinned here: with no `output_dimensionality` in
+  // provider_options the model emits its native dimension. The deployment must
+  // set SUITE_EMBEDDING_DIM to match (scripts/prod.sh derives it per provider).
   {
     "name": "gemini-embedding-2",
     "provider": "gemini",
     "concrete_model": "gemini-embedding-2",
-    "api_key_ref": "env://GEMINI_API_KEY",
-    "default_provider_options": { "output_dimensionality": 1536 }
+    "api_key_ref": "env://GEMINI_API_KEY"
   },
 
   // ===================== Anthropic / Claude family =====================
@@ -106,8 +110,7 @@
     "name": "claude",
     "provider": "anthropic",
     "concrete_model": "claude-sonnet-4-6",
-    "api_key_ref": "env://ANTHROPIC_API_KEY",
-    "description": "General-purpose Claude (Sonnet). Open to all tiers."
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
     "name": "claude-opus",

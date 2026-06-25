@@ -7,17 +7,23 @@
 //   - a new `name` is added,
 //   - base order is preserved; overlay-only names are appended.
 //
-// ── WHEN IT'S APPLIED: EVERY boot, not just the first ──────────────────────
+// ── WHEN IT'S APPLIED: EVERY boot, and only the fields you LIST ────────────
 // The overlay (and the bundled catalogue) is re-synced into the `llm_presets`
 // table on EVERY router startup. Each entry is upserted and marked `managed`;
-// any managed preset dropped from the catalogue + overlay is pruned. So:
-//   - Editing THIS file DOES retroactively change an already-seeded
-//     deployment — the change lands on the next router restart.
-//   - This is the DURABLE way to customise a catalogue preset. Editing a
-//     catalogue-managed preset through the admin UI is transient — the next
-//     boot's re-sync overwrites it. Set it here instead.
-//   - Admin-CREATED presets (added via /admin, `managed = FALSE`) are never
-//     touched by the sync; they're independent of this file.
+// any managed preset dropped from the catalogue + overlay is pruned.
+//
+// PINNED-FIELD RE-SYNC: an entry overwrites ONLY the fields it actually LISTS.
+//   - A field you LIST is "pinned" — re-applied (and re-overwritten) every
+//     boot. This is the DURABLE way to fix a value across the fleet.
+//   - A field you OMIT is operator-owned — whatever the admin UI / DB holds
+//     for it survives the re-sync (it is NOT reset to a default).
+// So the usual split: pin model identity + credential (provider,
+// concrete_model, api_key_ref) here, and leave policy fields (min_user_level,
+// sampling defaults, description) OUT so operators tune them in the admin UI
+// durably. Pin a policy field too only when you want it fixed everywhere.
+//   - Editing THIS file changes a seeded deployment on the next restart, for
+//     the fields it lists. Admin-CREATED presets (added via /admin,
+//     `managed = FALSE`) are never touched by the sync.
 // (This file's path is wired via ROUTER_LLM_PRESET_OVERLAY_PATH — set in
 // docker-compose.prod.yml to /app/deploy/presets.custom.jsonc. Pointing a
 // deployment at a different BASE catalogue instead uses
@@ -81,13 +87,9 @@
 //                       "admin"   / "service"  exact-match that level,
 //                       "tierN"   this tier OR stricter (lower N is stricter).
 //                     Callers below the bar get PresetNotAllowedError.
-//                     OPERATOR-OWNED — unlike every other field, the value
-//                     here seeds a preset only on first creation; the
-//                     every-boot re-sync does NOT overwrite it, so a tier gate
-//                     set in the admin UI on a catalogue-managed preset
-//                     survives. To re-gate an EXISTING preset, change it in the
-//                     admin UI; the value here won't move it. (Lets operators
-//                     gate any preset — embedding presets included — durably.)
+//                     Like all policy fields: OMIT to let operators set the gate
+//                     per preset in the admin UI (durably — including embedding
+//                     presets); LIST it to pin one gate across the fleet.
 //
 //   description        (default null) Free text shown in the admin UI. Handy
 //                     to record intent ("cheap bulk summariser", "EU-only").
@@ -102,10 +104,14 @@
 //                     it's model-specific. null → the provider's own default.
 //
 //   default_provider_options (default {}) Provider-specific knobs as a JSON
-//                     object, e.g. Gemini embeddings:
-//                       { "output_dimensionality": 1536 }
+//                     object, e.g. an embedding width:
+//                       { "output_dimensionality": 1536 }  // Gemini
+//                       { "dimensions": 1536 }             // OpenAI(-compatible)
 //                     NOTE: a call-time provider_options REPLACES this dict
-//                     wholesale — it does NOT deep-merge.
+//                     wholesale — it does NOT deep-merge. The bundled embedding
+//                     presets no longer pin a width (the model emits its native
+//                     dimension); if you pin one here, set SUITE_EMBEDDING_DIM
+//                     to match or KB/memory writes fail.
 //
 //   fallback_preset   (default null) Name of the next preset to try once this
 //                     one has exhausted max_retries+1 attempts. null → surface
@@ -173,9 +179,10 @@
 //     "api_key": "sk-...",
 //     "base_url": "https://api.deepseek.com/v1"
 //   }
-// Example D — tune a built-in catalogue preset durably (cap tokens, add a
-//             fallback). Editing these fields in the admin UI would be wiped on
-//             the next boot; set them here and they're re-applied every boot:
+// Example D — pin extra fields on a built-in catalogue preset (cap tokens, add
+//             a fallback) durably. The listed fields are re-applied every boot,
+//             so they override any admin-UI edit; min_user_level is OMITTED
+//             here, so operators still set the tier gate per deployment:
 //   {
 //     "name": "claude-opus",
 //     "provider": "anthropic",
@@ -186,10 +193,7 @@
 //     "max_retries": 2,
 //     "description": "Opus with a token cap; falls back to Sonnet."
 //   }
-//   NOTE on the tier gate: min_user_level is OPERATOR-OWNED (see its field
-//   entry above), so for an EXISTING preset like claude-opus, set the gate in
-//   the admin UI — a value put here only takes effect when the preset is first
-//   created. (For a brand-new preset added via this overlay, min_user_level
-//   here DOES apply, since the first insert seeds it.)
+//   (Add "min_user_level": "tier1" to the entry too if you instead want to pin
+//   the gate fleet-wide — then it overrides the admin UI on every boot.)
 [
 ]

@@ -93,6 +93,37 @@ def test_custom_path_round_trip(tmp_path) -> None:
     assert presets[0].min_user_level == "tier1"
 
 
+def test_specified_fields_records_pinned_keys(tmp_path) -> None:
+    """`load_catalog` records exactly the keys each JSONC entry listed in
+    `Preset.specified_fields` — the boot re-sync overwrites only those columns.
+    An explicit `null` still counts as present (pins the column to null)."""
+    cat = tmp_path / "pin.jsonc"
+    cat.write_text(
+        '[{"name": "p", "provider": "openai", "concrete_model": "m", '
+        '"api_key_ref": "env://K", "min_user_level": "tier1", '
+        '"default_max_tokens": null}]',
+        encoding="utf-8",
+    )
+    [p] = load_catalog(cat)
+    assert p.specified_fields == frozenset({
+        "name", "provider", "concrete_model", "api_key_ref",
+        "min_user_level", "default_max_tokens",
+    })
+    # Omitted optional fields are absent (so the re-sync leaves them alone).
+    assert "description" not in p.specified_fields
+    assert "default_temperature" not in p.specified_fields
+
+
+def test_bundled_minimal_presets_pin_only_identity_and_credential() -> None:
+    """The trimmed bundled catalogue pins only model identity + credential on
+    its plain presets, leaving policy fields (tier gate, sampling, description)
+    operator-owned. `default` is one such minimal preset."""
+    presets = {p.name: p for p in default_presets()}
+    assert presets["default"].specified_fields == frozenset({
+        "name", "provider", "concrete_model", "api_key_ref",
+    })
+
+
 def test_unknown_key_fails_loud(tmp_path) -> None:
     cat = tmp_path / "bad.jsonc"
     cat.write_text(

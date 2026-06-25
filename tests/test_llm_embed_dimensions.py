@@ -78,8 +78,11 @@ def test_openai_embed_passes_dimensions() -> None:
     assert adapter._client.embeddings.calls[0]["kwargs"] == {"dimensions": 512}
 
 
-def test_default_embedding_preset_requests_1536() -> None:
+def test_default_embedding_preset_does_not_pin_output_dimensionality() -> None:
+    """The bundled embedding presets no longer pin `output_dimensionality`:
+    the model emits its native vector width and the deployment sets
+    SUITE_EMBEDDING_DIM to match (scripts/prod.sh derives it per provider).
+    Pinning a width would re-impose it on every boot."""
     presets = {p.name: p for p in default_presets()}
-    assert presets["default_embedding"].default_provider_options == {
-        "output_dimensionality": 1536
-    }
+    assert presets["default_embedding"].default_provider_options == {}
+    assert presets["gemini-embedding-2"].default_provider_options == {}
