@@ -18,15 +18,18 @@ Two design decisions made up-front:
    as the ACL evaluator: `*` admits any, `admin`/`service` are exact
    matches, `tierN` is "this tier or stricter" (lower number).
 
-3. **Catalogue re-sync** — the service loads a JSONC catalogue
-   (`presets_catalog.jsonc`, or the operator's
-   `Settings.llm_preset_catalog_path`, plus an optional overlay) via
-   `default_presets()` and re-syncs it into the `llm_presets` DB table on
-   EVERY boot: catalogue-managed rows are upserted, names dropped from the
-   catalogue are pruned, and admin-created presets are left untouched. So an
-   admin-UI edit to a catalogue-managed preset is transient (overwritten on
-   the next boot) — durable customisation goes in the catalogue/overlay file.
-   Keeping it in a commentable file makes it easy to maintain as models change.
+3. **Catalogue re-sync (pinned-field upsert)** — the service loads a JSONC
+   catalogue (`presets_catalog.jsonc`, or the operator's
+   `Settings.llm_preset_catalog_path`, plus an optional overlay) and re-syncs
+   it into the `llm_presets` DB table on EVERY boot: managed rows are upserted,
+   names dropped from the catalogue are pruned, and admin-created presets are
+   left untouched. The upsert overwrites ONLY the fields each entry actually
+   lists (tracked per preset via `Preset.specified_fields`); a field OMITTED
+   from the entry keeps whatever the DB holds, so operator edits to it (the
+   tier gate, sampling defaults, description, ...) survive the re-sync. A field
+   LISTED in the entry is "pinned" — re-applied every boot. On a preset's first
+   creation, omitted fields take their dataclass defaults. Keeping the
+   catalogue in a commentable file makes it easy to maintain as models change.
 """
 
 from __future__ import annotations
@@ -89,6 +92,15 @@ class Preset:
     base_url: str | None = None
     fallback_preset: str | None = None
     max_retries: int = 0
+    # Catalogue-load metadata: the field names LITERALLY present in the source
+    # JSONC object (populated by `load_catalog`; empty for presets built from
+    # DB rows). The boot re-sync overwrites only these "pinned" columns on an
+    # existing managed row, leaving omitted fields under operator control.
+    # `compare=False`/`repr=False` keep it invisible to the rest of the system,
+    # which treats a Preset purely as a value.
+    specified_fields: frozenset[str] = field(
+        default_factory=frozenset, compare=False, repr=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +283,10 @@ def walk_fallback_chain(
 BUNDLED_CATALOG_PATH = Path(__file__).with_name("presets_catalog.jsonc")
 
 # The `Preset` fields a catalogue entry may set (keys outside this set are a
-# typo → load fails loud rather than silently ignoring them).
-_PRESET_FIELD_NAMES = frozenset(f.name for f in fields(Preset))
+# typo → load fails loud rather than silently ignoring them). `specified_fields`
+# is load-metadata, NOT a catalogue key — excluded so a JSONC entry can't set it
+# (and so it isn't mistaken for an unknown key).
+_PRESET_FIELD_NAMES = frozenset(f.name for f in fields(Preset)) - {"specified_fields"}
 
 
 def strip_jsonc_comments(text: str) -> str:
@@ -345,7 +359,10 @@ def load_catalog(path: str | Path | None = None) -> list[Preset]:
                 f"({entry.get('name', '?')!r}) has unknown keys: {sorted(unknown)}"
             )
         try:
-            presets.append(Preset(**entry))
+            # `specified_fields` records which keys this entry actually set, so
+            # the boot re-sync overwrites only those columns (pinned-field
+            # upsert); omitted fields stay under operator control.
+            presets.append(Preset(**entry, specified_fields=frozenset(entry)))
         except TypeError as exc:  # missing a required field
             raise ValueError(
                 f"preset catalogue {src} entry #{idx} "

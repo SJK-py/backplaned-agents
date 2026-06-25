@@ -33,6 +33,8 @@ from bp_router.db.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     import asyncpg
 
 logger = logging.getLogger(__name__)
@@ -2987,6 +2989,26 @@ async def insert_llm_preset(
     return LlmPresetRow.model_validate(dict(row))
 
 
+# Columns the catalogue re-sync may overwrite on conflict, in INSERT order.
+# `name` is the conflict key (never in the SET); `managed`/`created_at`/
+# `created_by` are sync-managed separately. A column is overwritten only when
+# the catalogue entry PINNED it (see `pinned` below).
+_MANAGED_UPSERT_COLUMNS = (
+    "description",
+    "provider",
+    "concrete_model",
+    "api_key_ref",
+    "api_key",
+    "base_url",
+    "min_user_level",
+    "default_temperature",
+    "default_max_tokens",
+    "default_provider_options",
+    "fallback_preset",
+    "max_retries",
+)
+
+
 async def upsert_managed_preset(
     conn: asyncpg.Connection,
     *,
@@ -3003,6 +3025,7 @@ async def upsert_managed_preset(
     base_url: str | None = None,
     fallback_preset: str | None = None,
     max_retries: int = 0,
+    pinned: AbstractSet[str] | None = None,
 ) -> None:
     """Insert-or-update a CATALOGUE-owned preset (managed = TRUE). Used by
     the boot-time catalogue sync (`LlmService.load_presets_from_db`).
@@ -3010,9 +3033,29 @@ async def upsert_managed_preset(
     On a name conflict the row is overwritten ONLY when it is already
     managed: an admin-created preset (managed = FALSE) sharing the name is
     left untouched (the `WHERE llm_presets.managed` guard makes the upsert a
-    no-op for it). `created_by` stays NULL for managed rows."""
+    no-op for it). `created_by` stays NULL for managed rows.
+
+    PINNED-FIELD UPDATE — `pinned` is the set of fields the catalogue entry
+    actually LISTED (`Preset.specified_fields`). On conflict, only those
+    columns are overwritten; a column NOT in `pinned` keeps its existing DB
+    value, so an operator's edit to an omitted field (tier gate, sampling
+    defaults, description, ...) survives the every-boot re-sync. The INSERT
+    still writes every column, so a freshly-created preset gets the passed
+    values (defaults for omitted fields). `pinned=None` means "overwrite all"
+    (legacy behaviour, used by direct callers/tests)."""
+    if pinned is None:
+        cols = _MANAGED_UPSERT_COLUMNS
+    else:
+        cols = tuple(c for c in _MANAGED_UPSERT_COLUMNS if c in pinned)
+    # managed/updated_at are always refreshed, so the SET is never empty even
+    # when an entry pins nothing overwritable (only the required name/provider/
+    # concrete_model, which are always pinned anyway).
+    set_clause = ",\n            ".join(
+        [f"{c} = EXCLUDED.{c}" for c in cols]
+        + ["managed = TRUE", "updated_at = now()"]
+    )
     await conn.execute(
-        """
+        f"""
         INSERT INTO llm_presets
             (name, description, provider, concrete_model, api_key_ref, api_key,
              base_url, min_user_level, default_temperature, default_max_tokens,
@@ -3021,20 +3064,7 @@ async def upsert_managed_preset(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                 TRUE, NULL)
         ON CONFLICT (name) DO UPDATE SET
-            description = EXCLUDED.description,
-            provider = EXCLUDED.provider,
-            concrete_model = EXCLUDED.concrete_model,
-            api_key_ref = EXCLUDED.api_key_ref,
-            api_key = EXCLUDED.api_key,
-            base_url = EXCLUDED.base_url,
-            min_user_level = EXCLUDED.min_user_level,
-            default_temperature = EXCLUDED.default_temperature,
-            default_max_tokens = EXCLUDED.default_max_tokens,
-            default_provider_options = EXCLUDED.default_provider_options,
-            fallback_preset = EXCLUDED.fallback_preset,
-            max_retries = EXCLUDED.max_retries,
-            managed = TRUE,
-            updated_at = now()
+            {set_clause}
         WHERE llm_presets.managed
         """,
         name,

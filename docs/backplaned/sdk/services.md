@@ -71,11 +71,19 @@ list is a **commentable JSONC catalogue** —
 as models change. The catalogue is re-synced into the table on **every
 boot** (catalogue-managed rows upserted, dropped names pruned) and is the
 in-memory fallback; admin-created presets are never touched by the sync.
-A catalogue/overlay edit therefore lands on the next restart — an admin-UI
-edit to a catalogue-managed preset is transient (overwritten on re-sync).
+The re-sync is **pinned-field**: each entry overwrites only the fields it
+actually **lists** (tracked via `Preset.specified_fields`). A field the entry
+**omits** keeps whatever the DB holds, so an operator's edit to it survives;
+a field the entry **lists** is re-applied every boot. So a catalogue/overlay
+edit to a listed field lands on the next restart, while an admin-UI edit to a
+field the catalogue omits persists. Most bundled entries pin only
+provider / concrete_model / api_key_ref, leaving policy fields operator-owned.
 
 **Tier gate.** Each preset carries a `min_user_level` that gates
-which callers may use it. The grammar matches ACL rules:
+which callers may use it. The bundled catalogue does not pin it (it defaults to
+`*`), so it is operator-owned per the pinned-field rule above: set the gate in
+the admin UI and it survives the re-sync; pin it in the catalogue/overlay entry
+only to fix it fleet-wide. The grammar matches ACL rules:
 
 | Required | Admits |
 | --- | --- |

@@ -18,6 +18,79 @@
 
 ---
 
+## 2026-06-25
+
+> Preset catalogue re-sync becomes **pinned-field**: operators keep control of
+> the fields the catalogue doesn't pin. No migration; behaviour change to the
+> every-boot upsert, a trim of the bundled catalogue, and a `scripts/prod.sh`
+> rework that generates the operator overlay and pins the embedding width.
+
+### Changed — catalogue re-sync overwrites only the fields an entry lists
+
+- **What:** `upsert_managed_preset` (`bp_router/db/queries.py`) now takes a
+  `pinned` set and builds its `ON CONFLICT DO UPDATE SET` from it — only the
+  columns a catalogue entry actually listed are overwritten on re-sync; an
+  omitted field keeps its existing DB value. The INSERT still writes every
+  column (defaults for omitted fields), so first-creation is unchanged.
+  `pinned=None` preserves the legacy overwrite-all behaviour for direct callers.
+- **What:** `Preset` gains a non-comparing `specified_fields` (populated by
+  `load_catalog` from the raw JSONC keys; empty for DB-built presets).
+  `LlmService.load_presets_from_db` threads it as `pinned`, so a field an
+  operator edits in the admin UI survives the every-boot re-sync **unless** the
+  catalogue/overlay entry lists (pins) it. Supersedes the previous
+  `min_user_level`-only carve-out — the tier gate is now just one of the
+  operator-owned-by-default fields.
+- **Why:** operators want to set the tier gate, sampling defaults, etc. on a
+  catalogue-managed preset and have it stick, while the catalogue stays the
+  source of truth for model identity + credential. Presence in the JSONC is the
+  signal: list a field to pin it, omit it to leave it operator-owned.
+
+### Removed — `description` / `default_provider_options` from the bundled catalogue
+
+- **What:** the bundled `presets_catalog.jsonc` entries are trimmed to
+  `name` / `provider` / `concrete_model` / `api_key_ref`; `description` and the
+  embedding presets' `default_provider_options` (`{"output_dimensionality":
+  1536}`) are dropped. With the dimension no longer pinned, the Gemini default
+  embedding model emits its **native** vector width.
+- **Why:** keeps the catalogue minimal (model identity + credential) and lets
+  the embedding dimension be set at deploy time rather than hardcoded.
+- **CAVEAT (resolved by the `scripts/prod.sh` change below):** with the width
+  no longer pinned in the bundled catalogue, `SUITE_EMBEDDING_DIM` must match
+  whatever `default_embedding` emits or KB/memory writes fail; `prod.sh` now
+  asks for the width, pins it on `default_embedding`, and writes the same value
+  to `SUITE_EMBEDDING_DIM`.
+- **Verified:** `tests/test_preset_catalog_resync.py` (pinned overwrite +
+  omitted-field preservation, against real Postgres),
+  `tests/test_llm_preset_catalog.py` (presence capture),
+  `tests/test_llm_embed_dimensions.py` (embedding presets no longer pin a width).
+
+### Changed — `scripts/prod.sh` generates the overlay + asks the embedding width
+
+- **What:** for a hosted provider (Anthropic / Gemini / OpenAI), `prod.sh` now
+  GENERATES `deploy/presets.custom.jsonc`, repointing `default` at the chosen
+  provider's balanced model and `default_embedding` at its embedding model — so
+  a single-provider deploy no longer secretly depends on the bundled `default`
+  (Gemini). Anthropic (no embeddings) uses OpenAI's `text-embedding-3-small`
+  (prompts for `OPENAI_API_KEY`).
+- **What:** the concrete models are read FROM the catalogue **by alias** (a new
+  `catalog_field` awk helper), not hardcoded in `prod.sh` — `default` takes the
+  balanced tier alias's model (`claude` / `gemini` / `gpt`) and
+  `default_embedding` the embedding alias's. Two friendly embedding aliases were
+  added to `presets_catalog.jsonc` for this: `gemini-embedding` and
+  `gpt-embedding`. The models stay in sync as the catalogue moves.
+- **What:** `prod.sh` asks for the embedding vector width (default 1536), PINS
+  it on `default_embedding`'s `default_provider_options` (Gemini
+  `output_dimensionality` / OpenAI `dimensions`) so the model emits exactly that
+  width, AND writes the same number to `SUITE_EMBEDDING_DIM` — the two can no
+  longer drift.
+- **What:** the generator is clobber-safe — it writes the real overlay only when
+  the file is absent, an unmodified `.example` seed, or a prior prod.sh output
+  (marked by a sentinel header); a hand-edited overlay is left untouched and the
+  suggestion goes to `deploy/presets.custom.jsonc.generated` to merge.
+- **Why:** closes the embedding-dimension gap from the catalogue trim and makes
+  a hosted-provider deploy self-contained, while preserving the operator's
+  hand-edited overlay.
+
 ## 2026-06-22
 
 > Platform (`bp_router`) surface of webapp SSO. The webapp/BFF halves

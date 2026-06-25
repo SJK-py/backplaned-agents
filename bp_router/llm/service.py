@@ -318,10 +318,14 @@ class LlmService:
         whole sync runs in a SINGLE transaction, so a CHECK-constraint
         failure on any one preset can't leave the table half-synced.
 
-        Customisation of catalogue presets is expected via the operator
-        overlay JSONC (see `default_presets_with_overlay`); edits to managed
-        presets through the admin UI are transient — overwritten on the next
-        boot.
+        The re-sync is a PINNED-FIELD upsert: each preset overwrites only the
+        fields its catalogue entry actually lists (`Preset.specified_fields`).
+        A field OMITTED from the entry keeps whatever the DB holds, so operator
+        edits to it (the tier gate, sampling defaults, description, ...) survive
+        the re-sync; only the fields the catalogue pins (typically provider /
+        concrete_model / api_key_ref) are re-applied every boot. Pin a field by
+        adding it to the catalogue/overlay entry (see
+        `queries.upsert_managed_preset`).
 
         Fallback cycles raise `PresetCycleError` — surfaced from the admin
         API as 400 on save, and logged + ignored here (so an
@@ -357,6 +361,9 @@ class LlmService:
                     default_provider_options=p.default_provider_options or None,
                     fallback_preset=p.fallback_preset,
                     max_retries=p.max_retries,
+                    # Overwrite only the fields this entry pinned; omitted
+                    # fields stay under operator control on an existing row.
+                    pinned=p.specified_fields,
                 )
 
         rows = await queries.list_llm_presets(conn)

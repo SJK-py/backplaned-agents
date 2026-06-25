@@ -161,9 +161,10 @@ class Settings(BaseSettings):
     Unlike `llm_preset_catalog_path` (which replaces the catalogue wholesale),
     the overlay keeps the built-ins and only lists overrides/additions. Missing
     file → ignored; malformed → loud at boot. Re-applied on EVERY boot like the
-    base catalogue, so editing it durably customises a catalogue preset (an
-    admin-UI edit to a managed preset is overwritten on the next boot; set the
-    fields here instead). Wired in prod to deploy/presets.custom.jsonc."""
+    base catalogue, with the same pinned-field rule: an entry overwrites only
+    the fields it LISTS, so listing a field here pins it durably (re-applied
+    every boot, overriding admin-UI edits), while a field left OUT stays under
+    operator control. Wired in prod to deploy/presets.custom.jsonc."""
 
     max_request_body_bytes: int = Field(default=64 * 1024, ge=1024)  # 64 KiB
     """Per-request HTTP body cap enforced by `BodySizeLimitMiddleware`

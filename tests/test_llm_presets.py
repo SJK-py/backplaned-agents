@@ -330,7 +330,7 @@ def test_default_presets_cover_known_aliases() -> None:
         # Gemini
         "default", "default_embedding", "gemini", "gemini-2-5-pro",
         "gemini-3-5-flash", "gemini-3-1-flash-lite", "gemini-3-1-pro",
-        "gemini-lite", "gemini-pro", "gemini-embedding-2",
+        "gemini-lite", "gemini-pro", "gemini-embedding-2", "gemini-embedding",
         # Anthropic
         "claude", "claude-opus", "claude-opus-4-8",
         "claude-sonnet", "claude-sonnet-4-6",
@@ -340,7 +340,7 @@ def test_default_presets_cover_known_aliases() -> None:
         "gpt-5-4", "gpt-5-4-mini", "gpt-5-4-nano", "gpt-5", "gpt-5-mini",
         "gpt-5-nano", "gpt-4-1", "gpt-nano", "gpt-pro",
         # Embeddings
-        "text-embedding-3-small", "text-embedding-3-large",
+        "text-embedding-3-small", "text-embedding-3-large", "gpt-embedding",
     }
     missing = expected - names
     assert not missing, f"missing default presets: {missing}"
