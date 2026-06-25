@@ -1,6 +1,8 @@
 {# The pending assistant bubble: connects to the SSE stream, appends each
    `progress` event into the activity strip, swaps the `result` event into
-   the answer slot, and closes on `done`. #}
+   the answer slot, and closes on `done`. The Stop button lives inside the
+   result slot, so the `result` event (answer or "Stopped") replaces it —
+   clicking it cancels the in-flight turn (parity with the /stop command). #}
 <div class="flex justify-start my-2"
      hx-ext="sse"
      sse-connect="/chat/{{ session_id }}/stream/{{ turn_id }}"
@@ -12,6 +14,13 @@
       </summary>
       <div class="px-2 py-1 space-y-0.5" sse-swap="progress" hx-swap="beforeend"></div>
     </details>
-    <div sse-swap="result"></div>
+    <div sse-swap="result">
+      <button type="button"
+              hx-post="/chat/{{ session_id }}/stop"
+              hx-swap="none"
+              class="rounded border border-brand-500/20 px-3 py-1 text-xs text-brand-700 hover:bg-brand-50">
+        Stop
+      </button>
+    </div>
   </div>
 </div>

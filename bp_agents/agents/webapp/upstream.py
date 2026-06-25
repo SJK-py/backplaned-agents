@@ -58,6 +58,15 @@ class UpstreamClient:
             return None
         return resp.json()
 
+    # -- tasks ---------------------------------------------------------
+
+    async def cancel_task(self, *, access_token: str, task_id: str) -> None:
+        """Cancel an in-flight router task (the webapp Stop button — parity
+        with the chatbot `/stop` command)."""
+        await self.request(
+            "POST", f"/v1/tasks/{task_id}/cancel", access_token=access_token
+        )
+
     # -- auth ----------------------------------------------------------
 
     async def login(self, *, email: str, password: str) -> dict[str, Any]:

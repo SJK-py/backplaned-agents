@@ -98,6 +98,9 @@ def create_app(
     # POST that records a turn to the SSE GET that streams it. Bounded so a
     # tab that never opens the stream can't grow it without limit.
     app.state.turns = {}
+    # session_id → in-flight router task_id, set while a turn streams so the
+    # Stop button (POST /chat/{sid}/stop) can cancel it (parity with /stop).
+    app.state.active_turns = {}
 
     app.state.templates = Jinja2Templates(directory=str(_here() / "templates"))
     app.state.templates.env.filters["dt"] = _dt_filter

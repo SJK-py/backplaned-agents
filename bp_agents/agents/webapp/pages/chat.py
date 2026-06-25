@@ -42,6 +42,7 @@ from bp_agents.channel import (
 )
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
+from bp_protocol.types import TaskStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -121,6 +122,24 @@ async def chat_undelegate(session_id: str, request: Request) -> Response:
     return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
 
 
+@router.post("/chat/{session_id}/stop")
+async def chat_stop(session_id: str, request: Request) -> Response:
+    """Cancel the session's in-flight turn — the webapp's Stop button, parity
+    with the chatbot `/stop` command. The router cancel surfaces to the
+    streaming turn as a terminal CANCELLED result (rendered "Stopped")."""
+    info = await _owned_session(request, session_id)
+    if info is None:
+        raise HTTPException(status_code=404)
+    task_id = request.app.state.active_turns.get(session_id)
+    if task_id:
+        # Best-effort: a race where the turn just finished is a no-op.
+        with contextlib.suppress(Exception):
+            await request.app.state.upstream.cancel_task(
+                access_token=request.session["access_token"], task_id=task_id
+            )
+    return Response(status_code=204)
+
+
 @router.post("/chat/{session_id}", response_class=HTMLResponse)
 async def chat_send(
     session_id: str, request: Request, message: str = Form(...)
@@ -188,6 +207,8 @@ async def chat_stream(
             if lp:
                 await queue.put(("progress", _row(progress_producer(pf), lp)))
 
+        active = request.app.state.active_turns
+
         async def _run() -> None:
             reply = ""
             try:
@@ -195,7 +216,14 @@ async def chat_stream(
                     dest, mode = await core.route(session_id)
                     await core.record_user_turn(session_id, dest, text)
                     task_id = await core.spawn(user_id, session_id, dest, mode, text)
+                    # Track the in-flight task so POST /stop can cancel it.
+                    active[session_id] = task_id
                     result = await core.await_result(task_id, on_progress=on_progress)
+                    # A Stop (router cancel) comes back as a terminal CANCELLED
+                    # result — acknowledge it without recording an answer turn.
+                    if getattr(result, "status", None) is TaskStatus.CANCELLED:
+                        await queue.put(("result", _answer(None, "_Stopped._", [])))
+                        return
                     reply = (result.output.content if result.output else "") or ""
                     files = list(result.output.files) if result.output else []
                     ctx = await core.after_result(session_id, dest, result)
@@ -213,6 +241,7 @@ async def chat_stream(
                     _answer(None, "Sorry — something went wrong handling that.", []),
                 ))
             finally:
+                active.pop(session_id, None)
                 await queue.put(("done", ""))
 
         task = asyncio.create_task(_run())
