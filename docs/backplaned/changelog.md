@@ -72,6 +72,12 @@
   a single-provider deploy no longer secretly depends on the bundled `default`
   (Gemini). Anthropic (no embeddings) uses OpenAI's `text-embedding-3-small`
   (prompts for `OPENAI_API_KEY`).
+- **What:** the concrete models are read FROM the catalogue **by alias** (a new
+  `catalog_field` awk helper), not hardcoded in `prod.sh` — `default` takes the
+  balanced tier alias's model (`claude` / `gemini` / `gpt`) and
+  `default_embedding` the embedding alias's. Two friendly embedding aliases were
+  added to `presets_catalog.jsonc` for this: `gemini-embedding` and
+  `gpt-embedding`. The models stay in sync as the catalogue moves.
 - **What:** `prod.sh` asks for the embedding vector width (default 1536), PINS
   it on `default_embedding`'s `default_provider_options` (Gemini
   `output_dimensionality` / OpenAI `dimensions`) so the model emits exactly that

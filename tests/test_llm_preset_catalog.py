@@ -124,6 +124,20 @@ def test_bundled_minimal_presets_pin_only_identity_and_credential() -> None:
     })
 
 
+def test_embedding_aliases_resolve_to_expected_models() -> None:
+    """The friendly embedding aliases scripts/prod.sh reads (to fill the
+    generated default_embedding) point at the right provider + model."""
+    presets = {p.name: p for p in default_presets()}
+    assert (presets["gemini-embedding"].provider,
+            presets["gemini-embedding"].concrete_model) == (
+        "gemini", "gemini-embedding-2")
+    assert (presets["gpt-embedding"].provider,
+            presets["gpt-embedding"].concrete_model) == (
+        "openai-embeddings", "text-embedding-3-small")
+    # api_key_ref is what prod.sh strips to derive the embedding key var.
+    assert presets["gpt-embedding"].api_key_ref == "env://OPENAI_API_KEY"
+
+
 def test_unknown_key_fails_loud(tmp_path) -> None:
     cat = tmp_path / "bad.jsonc"
     cat.write_text(

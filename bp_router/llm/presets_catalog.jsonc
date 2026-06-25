@@ -105,6 +105,14 @@
     "concrete_model": "gemini-embedding-2",
     "api_key_ref": "env://GEMINI_API_KEY"
   },
+  // Friendly embedding alias (points at the current Gemini embedding model).
+  // scripts/prod.sh reads this preset's model when generating default_embedding.
+  {
+    "name": "gemini-embedding",
+    "provider": "gemini",
+    "concrete_model": "gemini-embedding-2",
+    "api_key_ref": "env://GEMINI_API_KEY"
+  },
 
   // ===================== Anthropic / Claude family =====================
   {
@@ -234,6 +242,15 @@
   // ===================== OpenAI embeddings (separate adapter) =====================
   {
     "name": "text-embedding-3-small",
+    "provider": "openai-embeddings",
+    "concrete_model": "text-embedding-3-small",
+    "api_key_ref": "env://OPENAI_API_KEY"
+  },
+  // Friendly embedding alias (points at the current OpenAI embedding model).
+  // scripts/prod.sh reads this preset's model when generating default_embedding
+  // (also the embedding backend for an Anthropic deploy — no Anthropic embeds).
+  {
+    "name": "gpt-embedding",
     "provider": "openai-embeddings",
     "concrete_model": "text-embedding-3-small",
     "api_key_ref": "env://OPENAI_API_KEY"
