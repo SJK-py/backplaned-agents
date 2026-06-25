@@ -96,8 +96,9 @@
   // Gemini embeddings ride the same provider adapter — its `embed()` uses
   // `concrete_model`, so no separate embeddings provider is needed. The output
   // vector width is NOT pinned here: with no `output_dimensionality` in
-  // provider_options the model emits its native dimension. The deployment must
-  // set SUITE_EMBEDDING_DIM to match (scripts/prod.sh derives it per provider).
+  // provider_options the model emits its native dimension. A deployment pins a
+  // width on `default_embedding` via the overlay and matches SUITE_EMBEDDING_DIM
+  // to it — scripts/prod.sh asks for the width and writes both.
   {
     "name": "gemini-embedding-2",
     "provider": "gemini",

@@ -80,9 +80,9 @@ def test_openai_embed_passes_dimensions() -> None:
 
 def test_default_embedding_preset_does_not_pin_output_dimensionality() -> None:
     """The bundled embedding presets no longer pin `output_dimensionality`:
-    the model emits its native vector width and the deployment sets
-    SUITE_EMBEDDING_DIM to match (scripts/prod.sh derives it per provider).
-    Pinning a width would re-impose it on every boot."""
+    the model emits its native vector width and the deployment sets the width
+    instead (scripts/prod.sh asks for it, pins it on `default_embedding` in the
+    generated overlay, and matches SUITE_EMBEDDING_DIM to it)."""
     presets = {p.name: p for p in default_presets()}
     assert presets["default_embedding"].default_provider_options == {}
     assert presets["gemini-embedding-2"].default_provider_options == {}

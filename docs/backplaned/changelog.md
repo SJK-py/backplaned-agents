@@ -22,7 +22,8 @@
 
 > Preset catalogue re-sync becomes **pinned-field**: operators keep control of
 > the fields the catalogue doesn't pin. No migration; behaviour change to the
-> every-boot upsert plus a trim of the bundled catalogue.
+> every-boot upsert, a trim of the bundled catalogue, and a `scripts/prod.sh`
+> rework that generates the operator overlay and pins the embedding width.
 
 ### Changed — catalogue re-sync overwrites only the fields an entry lists
 
@@ -53,15 +54,36 @@
   embedding model emits its **native** vector width.
 - **Why:** keeps the catalogue minimal (model identity + credential) and lets
   the embedding dimension be set at deploy time rather than hardcoded.
-- **CAVEAT (follow-up pending):** `scripts/prod.sh` still hardcodes
-  `SUITE_EMBEDDING_DIM=1536`. Until it derives the dimension per provider, a
-  fresh Gemini deploy can emit a width that mismatches `SUITE_EMBEDDING_DIM` →
-  KB/memory writes fail. Set `SUITE_EMBEDDING_DIM` to the model's native width
-  (or re-pin `output_dimensionality` via the overlay) until that lands.
+- **CAVEAT (resolved by the `scripts/prod.sh` change below):** with the width
+  no longer pinned in the bundled catalogue, `SUITE_EMBEDDING_DIM` must match
+  whatever `default_embedding` emits or KB/memory writes fail; `prod.sh` now
+  asks for the width, pins it on `default_embedding`, and writes the same value
+  to `SUITE_EMBEDDING_DIM`.
 - **Verified:** `tests/test_preset_catalog_resync.py` (pinned overwrite +
   omitted-field preservation, against real Postgres),
   `tests/test_llm_preset_catalog.py` (presence capture),
   `tests/test_llm_embed_dimensions.py` (embedding presets no longer pin a width).
+
+### Changed — `scripts/prod.sh` generates the overlay + asks the embedding width
+
+- **What:** for a hosted provider (Anthropic / Gemini / OpenAI), `prod.sh` now
+  GENERATES `deploy/presets.custom.jsonc`, repointing `default` at the chosen
+  provider's balanced model and `default_embedding` at its embedding model — so
+  a single-provider deploy no longer secretly depends on the bundled `default`
+  (Gemini). Anthropic (no embeddings) uses OpenAI's `text-embedding-3-small`
+  (prompts for `OPENAI_API_KEY`).
+- **What:** `prod.sh` asks for the embedding vector width (default 1536), PINS
+  it on `default_embedding`'s `default_provider_options` (Gemini
+  `output_dimensionality` / OpenAI `dimensions`) so the model emits exactly that
+  width, AND writes the same number to `SUITE_EMBEDDING_DIM` — the two can no
+  longer drift.
+- **What:** the generator is clobber-safe — it writes the real overlay only when
+  the file is absent, an unmodified `.example` seed, or a prior prod.sh output
+  (marked by a sentinel header); a hand-edited overlay is left untouched and the
+  suggestion goes to `deploy/presets.custom.jsonc.generated` to merge.
+- **Why:** closes the embedding-dimension gap from the catalogue trim and makes
+  a hosted-provider deploy self-contained, while preserving the operator's
+  hand-edited overlay.
 
 ## 2026-06-22
 
