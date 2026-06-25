@@ -358,16 +358,18 @@ build_env() {
 
     # --- Web search backend (research agent) --------------------------------
     # Pick the backend, then its config: searxng (bundled/external/none),
-    # brave (LLM-Context API key), or kagi (FastGPT + Extract API key).
-    # brave/kagi run an LLM under the hood; with no key research falls back to
-    # SearXNG. Only the bundled SearXNG auto-adds the compose `search` profile.
-    WEB_BACKEND="searxng"; SEARXNG_URL=""; BRAVE_KEY=""; KAGI_KEY=""
+    # brave (LLM-Context API key), kagi (FastGPT + Extract API key), or exa
+    # (neural /search + /contents API key). brave/kagi/exa run a service under
+    # the hood; with no key research falls back to SearXNG. Only the bundled
+    # SearXNG auto-adds the compose `search` profile.
+    WEB_BACKEND="searxng"; SEARXNG_URL=""; BRAVE_KEY=""; KAGI_KEY=""; EXA_KEY=""
     echo
     echo "Web search backend for the research agent:"
     echo "  1) SearXNG (self-hosted metasearch)"
     echo "  2) Brave  (LLM-Context API — needs a Brave API key)"
     echo "  3) Kagi   (FastGPT + Extract — needs a Kagi API key)"
-    ask WEB_BACKEND_CHOICE "Choose 1-3" "1"
+    echo "  4) Exa    (neural search + contents — needs an Exa API key)"
+    ask WEB_BACKEND_CHOICE "Choose 1-4" "1"
     case "${WEB_BACKEND_CHOICE,,}" in
         1|searxng|"")
             WEB_BACKEND="searxng"
@@ -395,6 +397,10 @@ build_env() {
             WEB_BACKEND="kagi"
             ask KAGI_KEY "Kagi API key (FastGPT + Extract)" ""
             [[ -z "$KAGI_KEY" ]] && echo "  WARNING: empty key — research falls back to SearXNG." ;;
+        4|exa)
+            WEB_BACKEND="exa"
+            ask EXA_KEY "Exa API key (x-api-key)" ""
+            [[ -z "$EXA_KEY" ]] && echo "  WARNING: empty key — research falls back to SearXNG." ;;
         *) echo "invalid backend choice: $WEB_BACKEND_CHOICE" >&2; exit 1 ;;
     esac
 
@@ -529,8 +535,8 @@ build_env() {
         echo "# SUITE_KAKAO_R2_SECRET_ACCESS_KEY="
         echo
         echo "# --- Web search (research agent) ---"
-        echo "# Backend: searxng | brave | kagi. brave/kagi use the API key below;"
-        echo "# an unset key falls back to SearXNG (logged)."
+        echo "# Backend: searxng | brave | kagi | exa. brave/kagi/exa use the API key"
+        echo "# below; an unset key falls back to SearXNG (logged)."
         echo "SUITE_WEB_SEARCH_BACKEND=$WEB_BACKEND"
         if [[ "$SEARXNG_URL" == "$BUNDLED_SEARXNG_URL" ]]; then
             echo "# bundled SearXNG — prod.sh auto-adds '--profile search' on start/restart."
@@ -544,6 +550,7 @@ build_env() {
         echo "SUITE_SEARXNG_URL=$SEARXNG_URL"
         [[ -n "$BRAVE_KEY" ]] && echo "SUITE_BRAVE_API_KEY=$BRAVE_KEY"
         [[ -n "$KAGI_KEY" ]] && echo "SUITE_KAGI_API_KEY=$KAGI_KEY"
+        [[ -n "$EXA_KEY" ]] && echo "SUITE_EXA_API_KEY=$EXA_KEY"
         echo
         echo "# --- md_converter LLM-vision OCR (optional) ---"
         echo "# Set KEY + MODEL to OCR images embedded in PDF/DOCX/PPTX/XLSX (and"

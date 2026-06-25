@@ -13,6 +13,9 @@
   plus contextual collections (direct answer / weather up top, related
   questions / searches and infoboxes below), and routes `html_fetch` through
   Kagi's Extract API.
+* `exa` — Exa's neural `/search` (`SUITE_EXA_API_KEY`); returns query-relevant
+  highlight excerpts per result, and routes `html_fetch` through Exa's
+  `/contents` (an `extract_query` becomes Exa's own query-focused summary).
 
 The chosen backend's key must be set; if it isn't, the suite falls back to
 SearXNG with a logged warning. `html_fetch` returns Markdown (or raw HTML for
@@ -63,6 +66,10 @@ BRAVE_CONTEXT_URL = "https://api.search.brave.com/res/v1/llm/context"
 KAGI_SEARCH_URL = "https://kagi.com/api/v1/search"
 KAGI_EXTRACT_URL = "https://kagi.com/api/v1/extract"
 _KAGI_EXTRACT_MAX_URLS = 10  # Kagi Extract accepts 1-10 pages per call.
+
+EXA_SEARCH_URL = "https://api.exa.ai/search"
+EXA_CONTENTS_URL = "https://api.exa.ai/contents"
+_EXA_MAX_COUNT = 20
 
 # Kagi Search API: `data` is keyed by collection name; the `workflow` request
 # field decides which collection is the primary result list.
@@ -156,6 +163,12 @@ def _resolve_backend(settings: SuiteSettings) -> str:
         logger.warning(
             "web_search_backend_key_missing",
             extra={"event": "web_search_backend_key_missing", "backend": "kagi"},
+        )
+        return "searxng"
+    if backend == "exa" and not settings.exa_api_key:
+        logger.warning(
+            "web_search_backend_key_missing",
+            extra={"event": "web_search_backend_key_missing", "backend": "exa"},
         )
         return "searxng"
     return backend
@@ -342,6 +355,43 @@ async def _kagi_search(
     return "\n\n".join(blocks)
 
 
+async def _exa_search(
+    query: str, *, settings: SuiteSettings, count: int,
+    include_domains: list[str] | None, exclude_domains: list[str] | None,
+    max_age_hours: int | None, request_json: ApiRequester | None,
+) -> str:
+    """Exa neural /search with query-relevant highlights as the per-result
+    snippet. `type` is fixed by `exa_search_type` (a config mechanism knob)."""
+    request = request_json or _default_request_json
+    count = min(max(count, 1), _EXA_MAX_COUNT)
+    body: dict[str, Any] = {
+        "query": query,
+        "type": settings.exa_search_type or "auto",
+        "numResults": count,
+        "contents": {"highlights": True},
+    }
+    if include_domains:
+        body["includeDomains"] = include_domains
+    if exclude_domains:
+        body["excludeDomains"] = exclude_domains
+    if max_age_hours is not None:
+        body["maxAgeHours"] = max_age_hours
+    headers = {"x-api-key": settings.exa_api_key.get_secret_value()}
+    data = await request(
+        "POST", EXA_SEARCH_URL,
+        json=body, headers=headers, timeout=settings.web_fetch_timeout_s,
+    )
+    results = (data.get("results") or [])[:count]
+    if not results:
+        return f"No results for {query!r}."
+    blocks = []
+    for i, r in enumerate(results):
+        highlights = r.get("highlights") or []
+        body_txt = "\n".join(h for h in highlights if h)
+        blocks.append(f"{i + 1}. {r.get('title', '')}\n{r.get('url', '')}\n{body_txt}")
+    return "\n\n".join(blocks)
+
+
 async def web_search(
     query: str, *, settings: SuiteSettings, count: int = _DEFAULT_COUNT,
     time_range: str | None = None, language: str | None = None,
@@ -350,6 +400,8 @@ async def web_search(
     kind: str | None = None, time_after: str | None = None,
     time_before: str | None = None, time_relative: str | None = None,
     region: str | None = None, file_type: str | None = None,
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None, max_age_hours: int | None = None,
     get_json: JsonGetter | None = None, request_json: ApiRequester | None = None,
 ) -> str:
     backend = _resolve_backend(settings)
@@ -365,6 +417,12 @@ async def web_search(
             time_after=time_after, time_before=time_before,
             time_relative=time_relative, region=region, file_type=file_type,
             request_json=request_json,
+        )
+    if backend == "exa":
+        return await _exa_search(
+            query, settings=settings, count=count,
+            include_domains=include_domains, exclude_domains=exclude_domains,
+            max_age_hours=max_age_hours, request_json=request_json,
         )
     return await _searxng_search(
         query, settings=settings, count=count, time_range=time_range,
@@ -401,6 +459,39 @@ async def _kagi_extract_pairs(
             f"[Couldn't extract: {item.get('error') or 'unknown error'}]"
         )
         pairs.append((url, body))
+    return pairs
+
+
+async def _exa_contents_pairs(
+    urls: list[str], *, truncate: int, settings: SuiteSettings,
+    summary_query: str | None, request_json: ApiRequester | None,
+) -> list[tuple[str, str]]:
+    """Fetch clean content for `urls` via Exa's /contents, returning
+    `(url, content)` pairs. With `summary_query` set, Exa returns a
+    query-focused summary per page (server-side distillation — no extra LLM
+    call on our side); otherwise it returns capped page text. Note: on
+    /contents the content options are TOP-LEVEL (unlike /search, where they
+    nest under `contents`)."""
+    request = request_json or _default_request_json
+    body: dict[str, Any] = {"urls": urls}
+    if summary_query:
+        body["summary"] = {"query": summary_query}
+    else:
+        body["text"] = {"maxCharacters": truncate}
+    headers = {"x-api-key": settings.exa_api_key.get_secret_value()}
+    data = await request(
+        "POST", EXA_CONTENTS_URL,
+        json=body, headers=headers, timeout=settings.web_fetch_timeout_s,
+    )
+    results = data.get("results") or []
+    pairs: list[tuple[str, str]] = []
+    for r in results:
+        url = r.get("url", "")
+        if summary_query:
+            content = (r.get("summary") or "").strip() or "[No summary returned.]"
+        else:
+            content = (r.get("text") or "").strip() or "[No content extracted.]"
+        pairs.append((url, content))
     return pairs
 
 
@@ -474,10 +565,22 @@ async def html_fetch(
     # back down), so the fetch cap is the extract budget rather than `truncate`.
     fetch_cap = settings.web_extract_fetch_chars if extracting else truncate
     fetch_cap = min(max(fetch_cap, 0), _CONTENT_CAP)
+    backend = _resolve_backend(settings)
+
+    # Exa (non-raw): /contents returns final content in one call — capped text,
+    # or a query-focused summary when extracting (Exa distills server-side, so
+    # we skip our own lite-preset distillation pass below).
+    if not raw and backend == "exa":
+        pairs = await _exa_contents_pairs(
+            urls, truncate=fetch_cap, settings=settings,
+            summary_query=extract_query if extracting else None,
+            request_json=request_json,
+        )
+        return _join_blocks(pairs, headered=True) or "No content extracted."
 
     # Gather (url, body) for every URL, backend-appropriately. Kagi (non-raw)
     # batches through Kagi Extract; everything else fetches per URL.
-    kagi = not raw and _resolve_backend(settings) == "kagi"
+    kagi = not raw and backend == "kagi"
     if kagi:
         pairs = await _kagi_extract_pairs(
             urls, truncate=fetch_cap, settings=settings, request_json=request_json,
@@ -614,6 +717,43 @@ def _search_tool_schema(backend: str) -> tuple[str, dict[str, Any]]:
                 "required": ["query"],
             },
         )
+    if backend == "exa":
+        return (
+            "Web search via Exa's neural search: returns the most relevant "
+            "results (title, url) each with query-relevant highlight excerpts.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "count": {
+                        "type": "integer",
+                        "description": (
+                            f"Number of results (1-{_EXA_MAX_COUNT}, "
+                            f"default {_DEFAULT_COUNT})."
+                        ),
+                        "minimum": 1, "maximum": _EXA_MAX_COUNT,
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict results to these domains, e.g. ['arxiv.org'].",
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Drop results from these domains.",
+                    },
+                    "max_age_hours": {
+                        "type": "integer",
+                        "description": (
+                            "Freshness: livecrawl pages whose cached content is "
+                            "older than this many hours (0 = always livecrawl)."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        )
     return (
         "Search the web. Returns top results (title, url, snippet).",
         {
@@ -712,6 +852,9 @@ def make_web_tools(
             time_relative=args.get("time_relative"),
             region=args.get("region"),
             file_type=args.get("file_type"),
+            include_domains=args.get("include_domains"),
+            exclude_domains=args.get("exclude_domains"),
+            max_age_hours=args.get("max_age_hours"),
         )
 
     async def _deep_search(ctx: TaskContext, args: dict[str, Any]) -> str:
@@ -747,6 +890,11 @@ def make_web_tools(
     )
     if backend == "kagi":
         fetch_desc += " (Markdown is extracted via Kagi's Extract API.)"
+    elif backend == "exa":
+        fetch_desc += (
+            " (Content comes from Exa's /contents API; extract_query returns "
+            "Exa's own query-focused summary.)"
+        )
 
     tools = [
         LocalTool(

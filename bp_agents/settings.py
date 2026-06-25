@@ -296,17 +296,26 @@ class SuiteSettings(BaseSettings):
     # ------------------------------------------------------------------
 
     web_search_backend: str = "searxng"
-    """Which backend `web_search` (and, for Kagi, `html_fetch`) uses:
-    `searxng` (default), `brave`, or `kagi`. The chosen backend's API key must
-    be set — if it isn't, the suite falls back to SearXNG with a logged warning.
-    `brave` uses Brave's LLM-Context API and `kagi` uses Kagi's FastGPT, so for
-    those backends `web_search` returns LLM-grounded context/answer text rather
-    than a plain list of links."""
+    """Which backend `web_search` (and, for Kagi/Exa, `html_fetch`) uses:
+    `searxng` (default), `brave`, `kagi`, or `exa`. The chosen backend's API key
+    must be set — if it isn't, the suite falls back to SearXNG with a logged
+    warning. `brave` uses Brave's LLM-Context API and `kagi` uses Kagi's
+    FastGPT, so for those backends `web_search` returns LLM-grounded
+    context/answer text rather than a plain list of links. `exa` uses Exa's
+    neural `/search` (query-relevant highlights) and routes `html_fetch`
+    through Exa's `/contents`."""
     brave_api_key: SecretStr | None = None
     """`X-Subscription-Token` for Brave's LLM-Context API (web_search_backend=brave)."""
     kagi_api_key: SecretStr | None = None
     """Bearer token for Kagi's FastGPT (search) and Extract (fetch) APIs
     (web_search_backend=kagi)."""
+    exa_api_key: SecretStr | None = None
+    """`x-api-key` for Exa's /search + /contents APIs (web_search_backend=exa)."""
+    exa_search_type: str = "auto"
+    """Exa search `type`: `auto` (default, balanced), `fast`, or `instant`.
+    Fixed by config rather than chosen per-query by the model — a search
+    *mechanism* knob, like the backend itself. (Exa's slow `deep*` synthesis
+    types are out of scope; the deep_reasoning agent covers that need.)"""
 
     searxng_url: str | None = None
     """Brave-API-compatible search endpoint (e.g. a SearXNG instance).
