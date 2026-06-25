@@ -1,7 +1,10 @@
 # On-demand recall of past tool results
 
-> **Status: proposal.** Review of the "let an agent re-read its own
-> previous tool turns" idea, plus a concrete plan. No code landed yet.
+> **Status: implemented.** The "let an agent re-read its own previous
+> tool turns" idea, the plan, and what landed. Persistence +
+> `recall_tool_history(count, skip)` live in
+> `bp_agents/common/tool_history.py`, wired into the orchestrator and
+> delegated l1 turns; query in `queries.recent_tool_exchanges`.
 
 ## 1. The idea under review
 
@@ -210,12 +213,13 @@ bounded by `min(count, MAX_RECALL) * PER_RESULT_CHARS`, capped again by
 
 ## 6. Open questions
 
-  * **Multimodal / `file_ref` results.** A `read_file` tool result is a
-    `file_ref` part, not text ([sessions.md] §2). Decision needed for
-    what the `tool_result` row stores: recommend the file **name** plus a
-    marker, so recall returns "file result — re-open with `read_file`"
-    rather than a dead serialization. The file bytes stay in the stash,
-    addressable by name.
+  * **Multimodal / `file_ref` results** *(resolved).* A `read_file` tool
+    result is a `file_ref` part, not text ([sessions.md] §2).
+    `_result_text` stores the file **name** plus a marker, so recall
+    returns `[file result: <name> — re-open with read_file]` rather than
+    a dead serialization. The bytes stay in the stash, addressable by
+    name; recall hands back a usable pointer, not the (already-elsewhere)
+    content.
   * **Failed tool results.** Already rendered to text by
     `_failed_tool_text` before they hit `messages`, so they persist and
     recall cleanly as-is.
@@ -223,6 +227,16 @@ bounded by `min(count, MAX_RECALL) * PER_RESULT_CHARS`, capped again by
     session's `session_history` grows. Recall only ever reads the tail
     (`LIMIT`), so this is a storage/GC question, not a context one —
     punt to existing history retention.
+  * **Cross-episode bleed on l1 threads** *(known, accepted).* Recall is
+    thread-scoped by `(session_id, agent_id)` and ignores `incumbent`. On
+    a delegate thread, `end_delegation` demotes the whole episode; a later
+    delegation to the same specialist reuses that `agent_id`, so recall
+    *could* surface tool rows from a prior episode. Left as-is: those rows
+    are still the same specialist's own past work for the same user, and
+    bounding recall to the incumbent window would defeat the primary use
+    case (recalling detail from turns that were *summarized out* — i.e.
+    no longer incumbent). The orchestrator (l0) thread is continuous, so
+    it's unaffected.
 
 ## 7. Alternatives considered
 
