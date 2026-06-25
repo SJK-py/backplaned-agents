@@ -20,6 +20,7 @@ Two halves close that gap ([agent-tool-history-recall.md]):
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,14 @@ MAX_RECALL = 10
 PER_RESULT_CHARS = 2_000
 PER_ARGS_CHARS = 300
 TOTAL_RECALL_CHARS = 8_000
+
+# The recall tool is itself a tool, so its own exchange gets persisted like
+# any other. Persisting the FULL digest would echo results the model already
+# pulled — a later recall would re-surface them, duplicated and bloated. So a
+# recall exchange is stored as a short marker (`_recall_marker`) instead of
+# its rendered output: the breadcrumb survives, the duplication doesn't.
+RECALL_TOOL_NAME = "recall_tool_history"
+_RECALL_LABEL_RE = re.compile(r"\[\d+ exchanges? back\]")
 
 
 @dataclass
@@ -108,6 +117,30 @@ def extract_tool_exchanges(messages: list[Message]) -> list[ToolExchange]:
     return exchanges
 
 
+def _recall_marker(result: str) -> str:
+    """The stored result for a `recall_tool_history` exchange — a short
+    breadcrumb instead of the rendered digest, so a later recall doesn't
+    re-surface (duplicated, bloated) the results this call already pulled.
+    Counts the entries actually returned from the digest's `[N back]`
+    labels."""
+    n = len(_RECALL_LABEL_RE.findall(result))
+    if n == 0:
+        return "(recalled earlier tool history — nothing matched.)"
+    return (
+        f"(recalled {n} earlier tool exchange{'s' if n != 1 else ''} — "
+        "content was shown in that turn's context, not re-stored here.)"
+    )
+
+
+def _storable_result(ex: ToolExchange) -> str:
+    """What goes in the `tool_result` row: the recall tool's own output is
+    replaced by a marker (see `_recall_marker`); every other tool stores
+    its real result."""
+    if ex.name == RECALL_TOOL_NAME:
+        return _recall_marker(ex.result)
+    return ex.result
+
+
 async def persist_tool_exchanges(
     conn: asyncpg.Connection,
     *,
@@ -121,7 +154,10 @@ async def persist_tool_exchanges(
     `incumbent=false`, `hidden=true`: never reloaded into context, never
     rendered, available only via the recall tool. Returns the exchange
     count. Call inside the same `pool.acquire()` block that writes the
-    terminal assistant row."""
+    terminal assistant row.
+
+    A `recall_tool_history` exchange is stored as a marker, not its digest
+    (`_storable_result`), so recall is not self-amplifying."""
     exchanges = extract_tool_exchanges(messages)
     for ex in exchanges:
         await queries.append_history(
@@ -132,7 +168,7 @@ async def persist_tool_exchanges(
         )
         await queries.append_history(
             conn, session_id=session_id, agent_id=agent_id,
-            role="tool_result", message=ex.result,
+            role="tool_result", message=_storable_result(ex),
             incumbent=False, hidden=True,
         )
     return len(exchanges)
@@ -232,7 +268,7 @@ def make_recall_tool_history_tool(
 
     return LocalTool(
         spec=ToolSpec(
-            name="recall_tool_history",
+            name=RECALL_TOOL_NAME,
             description=(
                 "Re-read the FULL results of your own earlier tool calls in "
                 "this conversation — detail that isn't kept in your visible "

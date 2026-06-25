@@ -116,6 +116,33 @@ def test_extract_flattens_file_ref_result() -> None:
 
 
 # --------------------------------------------------------------------------
+# recall is not self-amplifying: its own exchange stores a marker
+# --------------------------------------------------------------------------
+
+def test_recall_exchange_stored_as_marker_not_digest() -> None:
+    digest = (
+        "[2 exchanges back] web_search({}) →\n" + "H" * 5000 + "\n\n"
+        "[1 exchange back] read_file({}) →\nbody"
+    )
+    ex = th.ToolExchange(name="recall_tool_history", args={"count": 2}, result=digest)
+    stored = th._storable_result(ex)
+    assert "recalled 2 earlier tool exchanges" in stored
+    assert "H" * 50 not in stored  # the digest body is NOT re-stored
+    assert len(stored) < 200
+
+    # a normal tool keeps its real result
+    other = th.ToolExchange(name="web_search", args={}, result="hits-and-more")
+    assert th._storable_result(other) == "hits-and-more"
+
+    # empty recall → "nothing matched", not a count
+    empty = th.ToolExchange(
+        name="recall_tool_history", args={},
+        result="No earlier tool calls in this conversation to recall.",
+    )
+    assert "nothing matched" in th._storable_result(empty)
+
+
+# --------------------------------------------------------------------------
 # paging query (pairing + skip + limit)
 # --------------------------------------------------------------------------
 
