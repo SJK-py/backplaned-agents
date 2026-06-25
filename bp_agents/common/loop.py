@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.progress import emit_loop_progress, relay_subagent_progress
@@ -51,6 +52,119 @@ def _failed_tool_text(tool_name: str, child: ResultFrame) -> str:
     return f"The {tool_name} call did not succeed ({detail})."
 
 
+# The vision sidecar's system prompt — faithfulness first. A confidently
+# hallucinating proxy is worse than a blocked read, so it must transcribe
+# verbatim, preserve structure, report ABSENCE of asked-for content, and
+# flag uncertainty instead of guessing
+# ([../docs/design/multimodal-vision-sidecar.md] §3.2).
+_VISION_SYSTEM = (
+    "You are a vision model reading a file on behalf of a text-only "
+    "assistant that cannot see it. Transcribe and describe the file "
+    "FAITHFULLY: copy all text verbatim (numbers, URLs, labels, code "
+    "exactly as written), preserve structure (render tables as Markdown), "
+    "and describe relevant visual layout. If the information the goal asks "
+    "for is NOT present in the file, say so explicitly. Flag anything "
+    "illegible or uncertain — never guess or invent content. Your reply is "
+    "the assistant's only window onto this file."
+)
+
+
+def _is_visual_file(name: str) -> bool:
+    """True for a stash name whose extension maps to an image or PDF — the
+    files that need a multimodal model. Extension-based (the agent-side
+    `FileStash` exposes no mime), which covers the overwhelming majority;
+    an extension-less image falls through to the normal path."""
+    mime, _ = mimetypes.guess_type(name)
+    return bool(mime) and (mime.startswith("image/") or mime == "application/pdf")
+
+
+def _last_user_text(messages: list[Message], *, limit: int = 1000) -> str:
+    """The most recent `user` turn's text, trimmed — ambient context handed
+    to the vision model so it knows the task even when `purpose` is thin."""
+    for msg in reversed(messages):
+        if msg.role != "user":
+            continue
+        c = msg.content
+        if isinstance(c, str):
+            return c[-limit:]
+        if isinstance(c, list):
+            text = "\n".join(
+                p["text"] for p in c
+                if isinstance(p, dict) and isinstance(p.get("text"), str)
+            )
+            return text[-limit:]
+    return ""
+
+
+async def _vision_read_file(
+    ctx: TaskContext,
+    tool_call: ToolCall,
+    *,
+    preset: str,
+    vision_context: str,
+) -> Message | None:
+    """Read an image/PDF `read_file` call through the separate vision
+    `preset` and return its TEXT as the tool result, so a text-only main
+    model never sees raw bytes ([multimodal-vision-sidecar.md] §3.3).
+
+    Returns `None` when the file isn't image/PDF — the caller then falls
+    through to the normal `file_ref` path (a text file resolves to a text
+    part the main model reads directly; no vision call wasted). The vision
+    call is a SELF-CONTAINED one-shot generate (its own messages, no tool
+    history), so it never entangles the main loop's reasoning-block /
+    tool_call_id round-trip across providers."""
+    args = tool_call.args or {}
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return Message.tool_response(
+            tool_call_id=tool_call.id, name=tool_call.name,
+            response={"error": "read_file requires a 'name'"},
+        )
+    if not _is_visual_file(name):
+        return None  # not image/PDF — let the normal file dispatch handle it
+    purpose = str(args.get("purpose") or "").strip()
+    goal = purpose or "Read this file and report all of its content."
+    ctx_block = (
+        f"\n\nTask context (for relevance):\n{vision_context}"
+        if vision_context else ""
+    )
+    user_parts: list[dict[str, Any]] = [
+        {"text": f"Goal: {goal}{ctx_block}"},
+        ctx.files.llm_ref(name),
+    ]
+    try:
+        resp = await ctx.llm.generate(
+            [
+                Message(role="system", content=_VISION_SYSTEM),
+                Message(role="user", content=user_parts),
+            ],
+            preset=preset,
+        )
+    except (asyncio.CancelledError, CancellationError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface as a result the model can act on
+        logger.warning(
+            "vision_read_failed",
+            extra={"event": "vision_read_failed", "preset": preset,
+                   "error": type(exc).__name__},
+        )
+        return Message.tool_response(
+            tool_call_id=tool_call.id, name=tool_call.name,
+            response=(
+                f"[Could not read '{name}' with the vision model: {exc}. "
+                "Tell the user the file couldn't be read, or try again.]"
+            ),
+        )
+    text = (resp.text or "").strip() or "(the vision model returned no text)"
+    header = f"[Contents of '{name}', read by the vision model" + (
+        f" for: {purpose}]" if purpose else "]"
+    )
+    return Message.tool_response(
+        tool_call_id=tool_call.id, name=tool_call.name,
+        response=f"{header}\n{text}",
+    )
+
+
 async def _dispatch_tool_call(
     ctx: TaskContext,
     tool_call: ToolCall,
@@ -58,6 +172,8 @@ async def _dispatch_tool_call(
     *,
     file_tools_enabled: bool = False,
     forward_subagent_progress: bool = True,
+    multimodal_preset: str | None = None,
+    vision_context: str = "",
 ) -> Message:
     """Route one model tool call to a local tool, a file-store tool, or a
     peer agent, and return the tool-response `Message`. A peer-call failure
@@ -82,6 +198,17 @@ async def _dispatch_tool_call(
         if local_tools is not None and local_tools.has(tool_call.name):
             return await local_tools.dispatch(ctx, tool_call)
         if file_tools_enabled and is_file_tool(tool_call.name):
+            # Vision sidecar: a text-only model's read_file on an image/PDF is
+            # transcribed to text by a separate vision preset instead of being
+            # fed as raw bytes ([multimodal-vision-sidecar.md]). Non-visual
+            # files (and an unset sidecar) fall through to the normal path.
+            if multimodal_preset and tool_call.name == "read_file":
+                vision_msg = await _vision_read_file(
+                    ctx, tool_call, preset=multimodal_preset,
+                    vision_context=vision_context,
+                )
+                if vision_msg is not None:
+                    return vision_msg
             return await dispatch_file_tool(ctx.files, tool_call)
         if tool_call.name.startswith("call_"):
             if forward_subagent_progress:
@@ -262,6 +389,7 @@ async def run_llm_loop(
     extra_tools: list[ToolSpec] | None = None,
     terminal_tools: set[str] | None = None,
     file_tools: str | None = None,
+    multimodal_preset: str | None = None,
     detail_chars: int = 100,
 ) -> LlmResponse:
     """Run the tool-calling loop until the model returns no tool calls
@@ -288,12 +416,25 @@ async def run_llm_loop(
     stash files. `read_file` shows a file to the model multimodally (the
     bytes attach on the next turn, router-resolved). Only file-capable
     agents (those with `ctx.files`) should pass it.
+
+    `multimodal_preset` (when set) turns on the **vision sidecar** for
+    `read_file` ([../docs/design/multimodal-vision-sidecar.md]): the agent
+    passes its configured vision preset here only when the turn's own
+    preset is text-only, so `read_file` advertises an optional `purpose`
+    arg and routes image/PDF reads through `multimodal_preset` (returning
+    text) instead of feeding raw bytes the text-only model can't ingest.
     """
     peer_specs = peer_tool_specs(ctx) if use_peer_tools else []
     local_specs = local_tools.specs() if local_tools is not None else []
-    file_specs = sdk_file_tools(file_tools) if file_tools else []
+    proxy_on = bool(multimodal_preset) and bool(file_tools)
+    file_specs = (
+        sdk_file_tools(file_tools, read_file_intent=proxy_on) if file_tools else []
+    )
     tools = peer_specs + local_specs + file_specs + (extra_tools or [])
     terminal = terminal_tools or set()
+    # Ambient context for the vision sidecar — computed once; the current
+    # user turn so the vision model knows the task even with a thin `purpose`.
+    vision_context = _last_user_text(messages) if proxy_on else ""
 
     resp: LlmResponse | None = None
     for round_idx in range(max_rounds):
@@ -349,6 +490,8 @@ async def run_llm_loop(
             result_msg = await _dispatch_tool_call(
                 ctx, tc, local_tools, file_tools_enabled=bool(file_tools),
                 forward_subagent_progress=forward_subagent_progress,
+                multimodal_preset=multimodal_preset if proxy_on else None,
+                vision_context=vision_context,
             )
             messages.append(result_msg)
             if emit_progress:

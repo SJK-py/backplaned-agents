@@ -1,8 +1,19 @@
 # A separate, configurable multimodal model for reading files
 
-> **Status: proposal.** Review of "let a text-only agent model read
-> images/PDFs by configuring a separate multimodal model via env var,"
-> plus a recommended design. No code landed yet.
+> **Status: Phase 1 implemented.** `SUITE_DEFAULT_PRESET_MULTIMODAL` +
+> `SUITE_TEXT_ONLY_PRESETS`, the intent-carrying `read_file`, and the
+> vision sub-call routing live in `bp_agents/common/loop.py`
+> (`_vision_read_file`), gated by `common.multimodal_preset_for` and wired
+> into the orchestrator + l1 turns. Phases 2–3 (proactive safety net for
+> context-less images; caching + per-user preset) are not built yet.
+>
+> **Realized mime gate:** `FileStash` exposes no mime to the agent, so
+> `_is_visual_file` gates on the name's **extension**
+> (`mimetypes.guess_type`) — image/* or PDF route to the vision preset,
+> everything else (incl. extension-less files) falls through to the normal
+> `file_ref` path. Covers the overwhelming majority; an extension-less
+> image would reach a text-only model unread (Phase 2's safety net, or a
+> richer `FileStash.stat`, would close that).
 
 ## 1. The gap today
 

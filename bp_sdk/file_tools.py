@@ -126,13 +126,56 @@ _SPECS: dict[str, ToolSpec] = {
 }
 
 
-def file_tools(bundle: Bundle = "read_only") -> list[ToolSpec]:
+# Optional `purpose` arg, added to `read_file` only when the caller opts in
+# (`read_file_intent=True`). It lets the model state WHAT it needs from a
+# file, which a suite-side vision sidecar threads to a separate multimodal
+# model reading image/PDF files on a text-only model's behalf
+# ([../docs/design/multimodal-vision-sidecar.md]). The plain
+# `dispatch_file_tool` ignores it; only the suite loop reads it.
+_PURPOSE_PROP = {
+    "purpose": {
+        "type": "string",
+        "description": (
+            "Optional but recommended: what you need from this file — e.g. "
+            "'the total due and the due date', 'what the error dialog says', "
+            "'transcribe the handwriting'. For an image/PDF read by a "
+            "separate vision model this focuses the extraction; if you omit "
+            "it the whole file is read. Ignored for plain text files."
+        ),
+    }
+}
+
+
+def _read_file_spec(with_intent: bool) -> ToolSpec:
+    """The `read_file` spec, optionally carrying the `purpose` arg."""
+    base = _SPECS["read_file"]
+    if not with_intent:
+        return base
+    props = dict(base.parameters["properties"])
+    props.update(_PURPOSE_PROP)
+    return ToolSpec(
+        name=base.name,
+        description=base.description,
+        parameters={
+            "type": "object",
+            "properties": props,
+            "required": list(base.parameters["required"]),
+        },
+    )
+
+
+def file_tools(
+    bundle: Bundle = "read_only", *, read_file_intent: bool = False
+) -> list[ToolSpec]:
     """Ready-made file-store `ToolSpec`s for an LLM agent.
 
     `read_only` (default) → `list_session_file`, `list_persist_file`,
     `read_file`. `full` adds the MUTATING `write_file`, `delete_file`,
     `copy_file` — only expose it when the workflow genuinely needs the
     model to change the stash.
+
+    `read_file_intent` adds an optional `purpose` arg to `read_file`
+    (the suite enables it when a vision sidecar is active for the turn).
     """
     if bundle == "read_only":
         names = _READ_ONLY
@@ -140,7 +183,10 @@ def file_tools(bundle: Bundle = "read_only") -> list[ToolSpec]:
         names = _READ_ONLY + _MUTATING
     else:
         raise ValueError(f"unknown file_tools bundle: {bundle!r}")
-    return [_SPECS[n] for n in names]
+    return [
+        _read_file_spec(read_file_intent) if n == "read_file" else _SPECS[n]
+        for n in names
+    ]
 
 
 def is_file_tool(name: str) -> bool:

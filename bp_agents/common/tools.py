@@ -95,6 +95,23 @@ class LocalToolset:
         )
 
 
+def multimodal_preset_for(
+    *, configured: str, text_only: list[str], preset: str | None
+) -> str | None:
+    """The vision preset to use for THIS turn, or `None` when the sidecar
+    must not engage ([../docs/design/multimodal-vision-sidecar.md] §3.1).
+
+    Engages only when a vision preset is `configured` AND the turn's
+    resolved `preset` is declared text-only — so a multimodal main preset
+    is never sent through the proxy, and mixed tiers each behave
+    correctly. Pure (no settings import) so it's trivially testable; the
+    agents pass `settings.default_preset_multimodal` / `text_only_presets`
+    in."""
+    if configured and preset is not None and preset in text_only:
+        return configured
+    return None
+
+
 def peer_tool_specs(
     ctx: TaskContext, *, for_user_level: str | None = None
 ) -> list[ToolSpec]:
