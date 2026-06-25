@@ -106,17 +106,21 @@ Add to `db/queries.py`:
 
 ```python
 async def recent_tool_exchanges(
-    conn, *, session_id, agent_id, limit
+    conn, *, session_id, agent_id, limit, skip=0
 ) -> list[SessionHistoryRow]:
-    """The most recent `tool_call`/`tool_result` rows for ONE agent's
-    thread, newest first, capped at ~2*limit rows (limit exchanges).
-    Scoped to (session_id, agent_id) — never another agent or session.
-    Tool rows are write-once and never demoted, so `incumbent` is
-    ignored here."""
+    """A page of `tool_call`/`tool_result` rows for ONE agent's thread,
+    newest first: the `limit` exchanges starting `skip` exchanges back
+    from the newest. Scoped to (session_id, agent_id) — never another
+    agent or session. Tool rows are write-once and never demoted, so
+    `incumbent` is ignored here."""
 ```
 
-`ORDER BY id DESC LIMIT 2*limit`, then re-sort ascending in Python and
-group into call→result pairs.
+Group rows into call→result **exchanges** first (a row pair), then page
+over exchanges — `OFFSET skip LIMIT limit` on the exchange sequence,
+newest first — and re-sort ascending in Python for the digest. Paging on
+exchanges (not raw rows) keeps `skip`/`limit` counting the same unit the
+model reasons about, and avoids splitting a call from its result across a
+page boundary.
 
 ### 4.3 The local tool
 
@@ -130,18 +134,36 @@ construction, matching the existing injection pattern):
 ```python
 def make_recall_tool_history_tool(pool, *, session_id, agent_id) -> LocalTool:
     name = "recall_tool_history"
-    # arg: {"count": int}  (1..MAX_RECALL, default small)
+    # args: {"count": int, "skip": int}
+    #   count: how many exchanges to return (1..MAX_RECALL, default small)
+    #   skip:  how many newer exchanges to skip first (>=0, default 0)
 ```
 
-  * **One argument**, `count` — number of most-recent prior exchanges to
-    return. Clamp to `[1, MAX_RECALL]` (e.g. 10) rather than erroring.
+  * **Two arguments**, both plain ints:
+    * `count` — number of prior exchanges to return. Clamp to
+      `[1, MAX_RECALL]` (e.g. 10) rather than erroring.
+    * `skip` — how many of the most-recent exchanges to skip before
+      returning `count` (default `0`). Clamp to `>= 0`. This is the
+      **paging** knob: the model first calls `count=1` (newest prior
+      exchange); if the detail it needs is further back, it re-calls
+      `count=1, skip=1` to step to the next-older exchange **without
+      re-receiving the one it already saw**. So a model can walk
+      backwards through its tool history a page at a time, never
+      duplicating output it already has in context.
+  * Paging is stable within a turn: tool rows are persisted only at turn
+    end (§4.1), so no new prior-turn exchange appears mid-turn to shift
+    the window under successive `skip` calls.
+  * When `skip` runs past the oldest exchange, return a short "no older
+    tool history" note (not an error) so the model knows it has reached
+    the start.
   * Returns a compact, **truncated** text digest, newest-last so it reads
-    chronologically:
+    chronologically. Label each entry by its absolute position back from
+    now (`skip`-aware) so the model can compute the next `skip`:
 
     ```
-    [3 turns ago] web_search(query="…") →
+    [3 exchanges back] web_search(query="…") →
       <result, truncated to PER_RESULT_CHARS with an …(+N chars) marker>
-    [2 turns ago] read_file(name="report.csv") →
+    [2 exchanges back] read_file(name="report.csv") →
       (file result — re-open with read_file to view)
     …
     ```
@@ -154,8 +176,11 @@ def make_recall_tool_history_tool(pool, *, session_id, agent_id) -> LocalTool:
 
 The omission exists to prevent bloat; a naive "dump the last N full
 results" re-creates exactly that, since a single `web_search` or
-`read_file` result can be huge. The single count arg is the right
-*ergonomics* but needs bounding so it cannot blow context:
+`read_file` result can be huge. The `count`/`skip` args are the right
+*ergonomics* — and `skip` actively helps, letting the model fetch one
+small page at a time instead of a big `count` to reach an older
+exchange — but they still need bounding so a single call cannot blow
+context:
 
   * **`MAX_RECALL`** caps the count (clamp, don't error).
   * **`PER_RESULT_CHARS`** truncates each result with a `…(+N more)`
@@ -203,10 +228,11 @@ bounded by `min(count, MAX_RECALL) * PER_RESULT_CHARS`, capped again by
 
   * **Index-then-fetch (two steps).** First call returns a cheap manifest
     (`[{ordinal, tool, when, size, snippet}]`); a second call fetches one
-    ordinal in full. Strictly less bloat, but two tools / two round-trips
-    — it fights the user's "keep it one simple argument" goal. The
-    single truncating tool gets ~80% of the benefit; keep the manifest as
-    a documented future extension if truncation proves too lossy.
+    ordinal in full. Strictly less bloat, but two tools / two round-trips.
+    `count`/`skip` paging already covers most of what the manifest would
+    buy — the model walks older exchanges a small page at a time without
+    duplicating output — so keep the manifest as a documented future
+    extension only if per-result truncation proves too lossy.
   * **Keyword/semantic search over past results.** More powerful, much
     more surface (embedding or FTS over tool rows). Overkill for the
     "I summarised away a detail" case the count tool already covers.
@@ -221,13 +247,17 @@ bounded by `min(count, MAX_RECALL) * PER_RESULT_CHARS`, capped again by
    (`incumbent=false`, `hidden=true`); call it where the terminal
    `assistant` row is written in `l1_common` and the orchestrator. Decide
    the `file_ref` serialization (§6).
-2. **Query.** `queries.recent_tool_exchanges(...)` (§4.2) + a unit test
-   asserting thread scoping and newest-first ordering.
+2. **Query.** `queries.recent_tool_exchanges(...)` with `limit`/`skip`
+   (§4.2) + a unit test asserting thread scoping, newest-first ordering,
+   and that `skip` pages without overlap.
 3. **Tool.** `make_recall_tool_history_tool(...)` in `common/tools.py`
-   with the three caps (§4.4); register it on l0 + l1 toolsets.
+   with the `count`/`skip` args and the three caps (§4.4); register it on
+   l0 + l1 toolsets.
 4. **Tests.** Round-trip: run a turn that calls a tool, start a new turn,
    call `recall_tool_history`, assert it returns the prior exchange
-   truncated and excludes the current turn; assert clamp/budget behaviour.
+   truncated and excludes the current turn; assert `count=1, skip=1`
+   returns the next-older exchange with no overlap; assert clamp/budget
+   and the "no older tool history" boundary.
 5. **Docs.** Note the tool in `docs/agent-suite/sessions.md` §2.1 (the
    one exception to "tool rows never reloaded" — they re-enter only by
    explicit model request) and in the agent tool reference.
