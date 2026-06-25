@@ -194,6 +194,15 @@ context:
     `metadata.context_tokens`, which can trigger post-turn summarization
     ([sessions.md] §3) — acceptable and self-correcting, but worth noting
     so recall isn't treated as free.
+  * **Recall is not self-amplifying.** `recall_tool_history` is itself a
+    tool, so its own exchange is persisted like any other — but storing
+    the rendered digest would echo results the call already pulled, so a
+    *later* recall would re-surface them, duplicated and growing each
+    time. `persist_tool_exchanges` therefore stores a recall exchange as a
+    short marker (`recalled N earlier tool exchange(s) …`), not its
+    output. The breadcrumb survives; the duplication doesn't. (The full
+    digest is still live in the turn that asked for it — only the
+    *persisted* copy is collapsed.)
 
 These caps are the reason count-based recall is safe: worst case is
 bounded by `min(count, MAX_RECALL) * PER_RESULT_CHARS`, capped again by
