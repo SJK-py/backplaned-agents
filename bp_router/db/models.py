@@ -184,6 +184,18 @@ class FileNameRow(_Row):
     updated_at: datetime
 
 
+class FileEntryRow(_Row):
+    """A directory row joined to its blob's `mime_type` — the `stat` /
+    detailed-`list` projection. `byte_size` + `created_at` come from the
+    `file_names` directory; `mime_type` from the `files` blob (null when
+    the blob was stored without one)."""
+
+    filename: str
+    byte_size: int
+    mime_type: str | None = None
+    created_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # ACL / audit / invitations
 # ---------------------------------------------------------------------------

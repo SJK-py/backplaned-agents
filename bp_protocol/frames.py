@@ -730,6 +730,21 @@ class ListFileRequest(BaseModel):
     persistent: bool = False
     query: str | None = None
     stored_after: datetime | None = None
+    # When True the router replies with `entries` (name + size + mime +
+    # created_at) instead of bare `names`, so the agent/model can see file
+    # type and size without a per-file `stat`. Default False keeps the
+    # lighter names-only reply (and the wire shape) for existing callers.
+    detail: bool = False
+    model_config = {"extra": "forbid"}
+
+
+class StatFileRequest(BaseModel):
+    """Fetch metadata (size, mime type, created_at) for ONE stash file by
+    name (`{filename}` or `persist/{filename}`). Replies `FileResult` with
+    `stat` set, or `error="not_found"` when the name is unbound."""
+
+    kind: Literal["stat"] = "stat"
+    name: str
     model_config = {"extra": "forbid"}
 
 
@@ -757,9 +772,23 @@ class WriteFileRequest(BaseModel):
 
 
 FileCommand = Annotated[
-    ListFileRequest | DeleteFileRequest | CopyFileRequest | WriteFileRequest,
+    ListFileRequest | DeleteFileRequest | CopyFileRequest | WriteFileRequest
+    | StatFileRequest,
     Field(discriminator="kind"),
 ]
+
+
+class FileStatEntry(BaseModel):
+    """Metadata for one stash file — the `stat` reply and each row of a
+    detailed `list`. `name` is the caller-facing display name (the
+    `persist/` prefix re-attached for persistent files); `mime_type` may
+    be null for an older blob that was stored without one."""
+
+    name: str
+    byte_size: int
+    mime_type: str | None = None
+    created_at: datetime
+    model_config = {"extra": "forbid"}
 
 
 class FileManageFrame(_FrameBase):
@@ -787,7 +816,10 @@ class FileResultFrame(_FrameBase):
         stored name (post-dedup). Reference THIS, never the
         requested name.
       * `fetch_url` + `fetch_token` + `fetch_expires_at` → FileFetch.
-      * `names` → ListFile: matching stash names (newest first).
+      * `names` → ListFile (default): matching stash names (newest first).
+      * `entries` → ListFile with `detail=True`: same order, each with
+        size + mime + created_at.
+      * `stat` → StatFile: metadata for the one requested name.
       * `deleted_count` → DeleteFile: directory rows removed.
     """
 
@@ -799,6 +831,8 @@ class FileResultFrame(_FrameBase):
     fetch_token: str | None = None
     fetch_expires_at: datetime | None = None
     names: list[str] | None = None
+    entries: list[FileStatEntry] | None = None
+    stat: FileStatEntry | None = None
     deleted_count: int | None = None
 
 
