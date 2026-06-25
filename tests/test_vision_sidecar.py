@@ -11,7 +11,7 @@ import asyncio
 
 from bp_agents.common import loop as loop_mod
 from bp_agents.common import multimodal_preset_for
-from bp_sdk import ToolCall, file_tools
+from bp_sdk import FileStoreError, ToolCall, file_tools
 
 # --------------------------------------------------------------------------
 # config gating
@@ -56,13 +56,16 @@ def test_read_file_intent_arg_toggle() -> None:
 # mime gating
 # --------------------------------------------------------------------------
 
-def test_is_visual_file() -> None:
-    assert loop_mod._is_visual_file("chart.png")
-    assert loop_mod._is_visual_file("photo.JPG")
-    assert loop_mod._is_visual_file("persist/report.pdf")
-    assert not loop_mod._is_visual_file("notes.txt")
-    assert not loop_mod._is_visual_file("data.json")
-    assert not loop_mod._is_visual_file("noext")
+def test_is_visual() -> None:
+    # authoritative mime wins
+    assert loop_mod._is_visual("image/png", "chart")  # no extension, mime says image
+    assert loop_mod._is_visual("application/pdf", "doc")
+    assert not loop_mod._is_visual("text/plain", "weird.png")  # mime overrides ext
+    # extension fallback when mime is unknown
+    assert loop_mod._is_visual(None, "photo.JPG")
+    assert loop_mod._is_visual(None, "persist/report.pdf")
+    assert not loop_mod._is_visual(None, "notes.txt")
+    assert not loop_mod._is_visual(None, "noext")
 
 
 # --------------------------------------------------------------------------
@@ -86,23 +89,94 @@ class _FakeLlm:
         return _Resp()
 
 
+class _FakeStat:
+    def __init__(self, mime: str | None) -> None:
+        self.mime_type = mime
+
+
 class _FakeFiles:
+    """`stat` reports a mime guessed from the name (override via `mimes`),
+    or raises `FileStoreError` for names in `missing`."""
+
+    def __init__(self, *, mimes: dict | None = None, missing: tuple = ()) -> None:
+        self._mimes = mimes or {}
+        self._missing = missing
+        self.stat_calls: list[str] = []
+
     def llm_ref(self, name, *, as_=None):
         return {"file_ref": {"name": name}}
 
     async def list(self, **kw):
         return []
 
+    async def stat(self, name):
+        self.stat_calls.append(name)
+        if name in self._missing:
+            raise FileStoreError("not_found")
+        if name in self._mimes:
+            return _FakeStat(self._mimes[name])
+        import mimetypes
+        return _FakeStat(mimetypes.guess_type(name)[0])
+
 
 class _FakeCtx:
-    def __init__(self, llm: _FakeLlm) -> None:
+    def __init__(self, llm: _FakeLlm, files: _FakeFiles | None = None) -> None:
         self.llm = llm
-        self.files = _FakeFiles()
+        self.files = files or _FakeFiles()
         self.task_id = "task_1"
 
 
 def _call(name: str, args: dict) -> ToolCall:
     return ToolCall(id="tc1", name=name, args=args)
+
+
+# --------------------------------------------------------------------------
+# authoritative gate: the stash `stat` mime decides, not the extension
+# --------------------------------------------------------------------------
+
+def test_gate_uses_stat_mime_over_extension() -> None:
+    async def _drive() -> None:
+        # name LOOKS like an image but the stash says it's text → NOT routed
+        files = _FakeFiles(mimes={"weird.png": "text/plain"})
+        ctx = _FakeCtx(_FakeLlm(), files)
+        msg = await loop_mod._dispatch_tool_call(
+            ctx, _call("read_file", {"name": "weird.png"}),
+            None, file_tools_enabled=True, multimodal_preset="vision",
+        )
+        assert files.stat_calls == ["weird.png"]
+        assert ctx.llm.calls == []  # no vision call
+        assert msg.content == [{"file_ref": {"name": "weird.png"}}]
+
+    asyncio.run(_drive())
+
+
+def test_gate_falls_back_to_extension_when_mime_unknown() -> None:
+    async def _drive() -> None:
+        # extension-less in mime terms (stat returns None) but a real image ext
+        files = _FakeFiles(mimes={"shot.png": None})
+        ctx = _FakeCtx(_FakeLlm(text="a chart"), files)
+        msg = await loop_mod._dispatch_tool_call(
+            ctx, _call("read_file", {"name": "shot.png"}),
+            None, file_tools_enabled=True, multimodal_preset="vision",
+        )
+        assert len(ctx.llm.calls) == 1  # routed via extension fallback
+        assert "a chart" in msg.content
+
+    asyncio.run(_drive())
+
+
+def test_stat_not_found_falls_through_to_normal_dispatch() -> None:
+    async def _drive() -> None:
+        files = _FakeFiles(missing=("ghost.png",))
+        ctx = _FakeCtx(_FakeLlm(), files)
+        msg = await loop_mod._dispatch_tool_call(
+            ctx, _call("read_file", {"name": "ghost.png"}),
+            None, file_tools_enabled=True, multimodal_preset="vision",
+        )
+        assert ctx.llm.calls == []  # no vision call
+        assert msg.content == [{"file_ref": {"name": "ghost.png"}}]
+
+    asyncio.run(_drive())
 
 
 # --------------------------------------------------------------------------

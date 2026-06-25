@@ -24,6 +24,7 @@ from bp_agents.common.tools import LocalToolset, peer_tool_specs
 from bp_protocol.types import TaskStatus
 from bp_sdk import (
     CancellationError,
+    FileStoreError,
     LlmCallError,
     Message,
     UpstreamError,
@@ -69,13 +70,13 @@ _VISION_SYSTEM = (
 )
 
 
-def _is_visual_file(name: str) -> bool:
-    """True for a stash name whose extension maps to an image or PDF — the
-    files that need a multimodal model. Extension-based (the agent-side
-    `FileStash` exposes no mime), which covers the overwhelming majority;
-    an extension-less image falls through to the normal path."""
-    mime, _ = mimetypes.guess_type(name)
-    return bool(mime) and (mime.startswith("image/") or mime == "application/pdf")
+def _is_visual(mime: str | None, name: str) -> bool:
+    """Whether a file needs a multimodal model (image or PDF). Authoritative
+    when `mime` is known — the stash `stat`'s `mime_type` — and falls back to
+    the name's extension for an older blob stored without a mime, so an
+    extension-less but correctly-typed image is still caught."""
+    m = mime or mimetypes.guess_type(name)[0] or ""
+    return m.startswith("image/") or m == "application/pdf"
 
 
 def _last_user_text(messages: list[Message], *, limit: int = 1000) -> str:
@@ -107,12 +108,17 @@ async def _vision_read_file(
     `preset` and return its TEXT as the tool result, so a text-only main
     model never sees raw bytes ([multimodal-vision-sidecar.md] §3.3).
 
-    Returns `None` when the file isn't image/PDF — the caller then falls
-    through to the normal `file_ref` path (a text file resolves to a text
-    part the main model reads directly; no vision call wasted). The vision
-    call is a SELF-CONTAINED one-shot generate (its own messages, no tool
-    history), so it never entangles the main loop's reasoning-block /
-    tool_call_id round-trip across providers."""
+    The image/PDF gate is AUTHORITATIVE: it `stat`s the file for its real
+    `mime_type` (extension fallback for an older mime-less blob), so an
+    extension-less or mislabelled image is still routed correctly.
+
+    Returns `None` when the file isn't image/PDF, or when `stat` reports it
+    unbound — the caller then falls through to the normal `read_file` path
+    (a text file resolves to a text part the main model reads directly; a
+    missing name surfaces the usual error). The vision call is a
+    SELF-CONTAINED one-shot generate (its own messages, no tool history),
+    so it never entangles the main loop's reasoning-block / tool_call_id
+    round-trip across providers."""
     args = tool_call.args or {}
     name = str(args.get("name") or "").strip()
     if not name:
@@ -120,7 +126,17 @@ async def _vision_read_file(
             tool_call_id=tool_call.id, name=tool_call.name,
             response={"error": "read_file requires a 'name'"},
         )
-    if not _is_visual_file(name):
+    # Authoritative type from the stash; on a glitch, fall back to extension.
+    mime: str | None = None
+    try:
+        mime = (await ctx.files.stat(name)).mime_type
+    except (asyncio.CancelledError, CancellationError):
+        raise
+    except FileStoreError:
+        return None  # not_found / invalid_filename → normal dispatch surfaces it
+    except Exception:  # noqa: BLE001 — stat glitch: degrade to the extension gate
+        logger.debug("vision stat failed; using extension gate", exc_info=True)
+    if not _is_visual(mime, name):
         return None  # not image/PDF — let the normal file dispatch handle it
     purpose = str(args.get("purpose") or "").strip()
     goal = purpose or "Read this file and report all of its content."

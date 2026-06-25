@@ -7,13 +7,15 @@
 > into the orchestrator + l1 turns. Phases 2–3 (proactive safety net for
 > context-less images; caching + per-user preset) are not built yet.
 >
-> **Realized mime gate:** `FileStash` exposes no mime to the agent, so
-> `_is_visual_file` gates on the name's **extension**
-> (`mimetypes.guess_type`) — image/* or PDF route to the vision preset,
-> everything else (incl. extension-less files) falls through to the normal
-> `file_ref` path. Covers the overwhelming majority; an extension-less
-> image would reach a text-only model unread (Phase 2's safety net, or a
-> richer `FileStash.stat`, would close that).
+> **Mime gate (authoritative):** `_vision_read_file` `stat`s the file for
+> its real `mime_type` (via `FileStash.stat`) and gates on that — image/*
+> or PDF route to the vision preset, everything else falls through to the
+> normal `file_ref` path. It falls back to the name's extension only when
+> the blob has no stored mime, so an extension-less or mislabelled image is
+> still caught. If `stat` reports the name unbound it falls through, so the
+> normal `read_file` surfaces the usual `not_found`. (Earlier this gated on
+> the extension alone; the `stat` command — `router-managed-file-store.md`
+> §4.3 — made the authoritative check possible.)
 
 ## 1. The gap today
 
