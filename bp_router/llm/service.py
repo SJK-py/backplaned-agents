@@ -321,7 +321,9 @@ class LlmService:
         Customisation of catalogue presets is expected via the operator
         overlay JSONC (see `default_presets_with_overlay`); edits to managed
         presets through the admin UI are transient — overwritten on the next
-        boot.
+        boot. The one EXCEPTION is `min_user_level`: it is operator-owned, so a
+        tier gate set on a managed preset survives the re-sync (see
+        `queries.upsert_managed_preset`).
 
         Fallback cycles raise `PresetCycleError` — surfaced from the admin
         API as 400 on save, and logged + ignored here (so an

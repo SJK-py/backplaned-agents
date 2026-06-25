@@ -72,10 +72,16 @@ as models change. The catalogue is re-synced into the table on **every
 boot** (catalogue-managed rows upserted, dropped names pruned) and is the
 in-memory fallback; admin-created presets are never touched by the sync.
 A catalogue/overlay edit therefore lands on the next restart — an admin-UI
-edit to a catalogue-managed preset is transient (overwritten on re-sync).
+edit to a catalogue-managed preset is transient (overwritten on re-sync) —
+**except `min_user_level`**, which is operator-owned (see the tier gate below).
 
 **Tier gate.** Each preset carries a `min_user_level` that gates
-which callers may use it. The grammar matches ACL rules:
+which callers may use it. Unlike the other fields, it is **operator-owned**:
+the catalogue/overlay value seeds a preset on first creation, but the
+every-boot re-sync does **not** overwrite it, so a tier gate an operator sets
+on a managed preset (e.g. via the admin UI) survives. To re-gate an existing
+preset, change it in the admin UI — a new catalogue/overlay value only reaches
+presets that don't exist yet. The grammar matches ACL rules:
 
 | Required | Admits |
 | --- | --- |

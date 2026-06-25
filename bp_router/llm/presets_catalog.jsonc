@@ -25,9 +25,12 @@
 // `gemini-2-5-pro`). `concrete_model` is the real upstream identifier the
 // provider SDK sees and KEEPS its dotted form (e.g. `gemini-2.5-pro`).
 //
-// `min_user_level` defaults to "*" (any tier) to preserve no-gate behaviour;
-// tighten per preset durably here or in an operator overlay (an admin-UI edit
-// to a catalogue-managed preset is overwritten on the next boot's re-sync).
+// `min_user_level` defaults to "*" (any tier) to preserve no-gate behaviour.
+// It is OPERATOR-OWNED: the value here seeds a preset on first creation, but
+// the every-boot re-sync does NOT overwrite it — so a tier gate an operator
+// sets on a managed preset (e.g. via the admin UI) survives. The value here
+// therefore only reaches presets that don't exist yet; to re-gate an existing
+// one, change it in the admin UI (other fields stay catalogue-owned).
 [
   // ===================== Gemini family =====================
   {

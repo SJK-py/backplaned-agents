@@ -20,11 +20,14 @@
 {% if managed %}
   <div class="mb-4 rounded border border-amber-500/30 bg-amber-50 px-3 py-2 text-sm text-amber-800">
     <strong>Catalogue-managed preset.</strong> This preset is defined in the
-    JSONC preset catalogue and re-synced on every router startup, so changes
-    saved here are <strong>transient</strong> — they'll be overwritten on the
-    next restart. To change it permanently, set the fields in the operator
-    overlay (<code>deploy/presets.custom.jsonc</code>, which wins on a name
-    collision and is re-applied every boot) or edit the bundled catalogue.
+    JSONC preset catalogue and re-synced on every router startup, so most
+    changes saved here are <strong>transient</strong> — they'll be overwritten
+    on the next restart. The <strong>exception is the access level</strong>
+    (<code>min_user_level</code>): a tier gate you set here is operator-owned
+    and <strong>survives</strong> the re-sync. To change the other fields
+    permanently, set them in the operator overlay
+    (<code>deploy/presets.custom.jsonc</code>, which wins on a name collision
+    and is re-applied every boot) or edit the bundled catalogue.
   </div>
 {% endif %}
 

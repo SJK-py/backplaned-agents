@@ -3,8 +3,9 @@
 `upsert_managed_preset` + `delete_stale_managed_presets` keep the
 catalogue-owned (`managed = TRUE`) rows in lock-step with the JSONC
 catalogue on every startup, while leaving admin-created presets
-(`managed = FALSE`) untouched. These tests pin that contract end-to-end
-against a real Postgres (skip when no DB)."""
+(`managed = FALSE`) untouched. The one carve-out is `min_user_level`,
+which is operator-owned and preserved across re-syncs. These tests pin
+that contract end-to-end against a real Postgres (skip when no DB)."""
 from __future__ import annotations
 
 import asyncio
@@ -57,6 +58,48 @@ def test_upsert_marks_managed_and_overwrites_on_resync(test_db_url: str) -> None
             assert row.description == "v2"
             assert row.concrete_model == "gemini-3.5-flash"
             assert row.managed is True
+        finally:
+            await conn.execute("DELETE FROM llm_presets WHERE name = $1", name)
+            await conn.close()
+
+    asyncio.run(_drive())
+
+
+def test_resync_preserves_operator_min_user_level(test_db_url: str) -> None:
+    """`min_user_level` is operator-owned: a re-sync overwrites the other
+    catalogue fields of a managed preset but leaves an operator-set tier gate
+    intact, so the gate survives across boots."""
+
+    async def _drive() -> None:
+        conn = await _connect(test_db_url)
+        name = f"gate_{uuid.uuid4().hex[:8]}"
+        try:
+            # Seed the managed preset open to all tiers (catalogue value).
+            await queries.upsert_managed_preset(
+                conn, name=name, description="v1", provider="anthropic",
+                concrete_model="claude-sonnet-4-6", api_key_ref="env://X",
+                min_user_level="*", default_temperature=None,
+                default_max_tokens=None, default_provider_options=None,
+            )
+            # Operator tightens the gate via the admin path (row stays managed).
+            await queries.update_llm_preset(
+                conn, name, fields={"min_user_level": "tier1"}
+            )
+
+            # Re-sync: catalogue still says "*" and bumps the model. The model
+            # is overwritten; the operator's tier gate is preserved.
+            await queries.upsert_managed_preset(
+                conn, name=name, description="v2", provider="anthropic",
+                concrete_model="claude-opus-4-8", api_key_ref="env://X",
+                min_user_level="*", default_temperature=None,
+                default_max_tokens=None, default_provider_options=None,
+            )
+            row = await queries.get_llm_preset(conn, name)
+            assert row is not None
+            assert row.managed is True
+            assert row.concrete_model == "claude-opus-4-8"  # catalogue-owned
+            assert row.description == "v2"                   # catalogue-owned
+            assert row.min_user_level == "tier1"             # operator-owned
         finally:
             await conn.execute("DELETE FROM llm_presets WHERE name = $1", name)
             await conn.close()

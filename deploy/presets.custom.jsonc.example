@@ -81,6 +81,13 @@
 //                       "admin"   / "service"  exact-match that level,
 //                       "tierN"   this tier OR stricter (lower N is stricter).
 //                     Callers below the bar get PresetNotAllowedError.
+//                     OPERATOR-OWNED — unlike every other field, the value
+//                     here seeds a preset only on first creation; the
+//                     every-boot re-sync does NOT overwrite it, so a tier gate
+//                     set in the admin UI on a catalogue-managed preset
+//                     survives. To re-gate an EXISTING preset, change it in the
+//                     admin UI; the value here won't move it. (Lets operators
+//                     gate any preset — embedding presets included — durably.)
 //
 //   description        (default null) Free text shown in the admin UI. Handy
 //                     to record intent ("cheap bulk summariser", "EU-only").
@@ -166,19 +173,23 @@
 //     "api_key": "sk-...",
 //     "base_url": "https://api.deepseek.com/v1"
 //   }
-// Example D — tune a built-in catalogue preset durably (tier-gate it + cap
-//             tokens, with a fallback). Editing these fields in the admin UI
-//             would be wiped on the next boot; set them here so they persist:
+// Example D — tune a built-in catalogue preset durably (cap tokens, add a
+//             fallback). Editing these fields in the admin UI would be wiped on
+//             the next boot; set them here and they're re-applied every boot:
 //   {
 //     "name": "claude-opus",
 //     "provider": "anthropic",
 //     "concrete_model": "claude-opus-4-8",
 //     "api_key_ref": "env://ANTHROPIC_API_KEY",
-//     "min_user_level": "tier1",
 //     "default_max_tokens": 4096,
 //     "fallback_preset": "claude-sonnet",
 //     "max_retries": 2,
-//     "description": "Opus, restricted to tier1+; falls back to Sonnet."
+//     "description": "Opus with a token cap; falls back to Sonnet."
 //   }
+//   NOTE on the tier gate: min_user_level is OPERATOR-OWNED (see its field
+//   entry above), so for an EXISTING preset like claude-opus, set the gate in
+//   the admin UI — a value put here only takes effect when the preset is first
+//   created. (For a brand-new preset added via this overlay, min_user_level
+//   here DOES apply, since the first insert seeds it.)
 [
 ]

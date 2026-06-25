@@ -3010,7 +3010,16 @@ async def upsert_managed_preset(
     On a name conflict the row is overwritten ONLY when it is already
     managed: an admin-created preset (managed = FALSE) sharing the name is
     left untouched (the `WHERE llm_presets.managed` guard makes the upsert a
-    no-op for it). `created_by` stays NULL for managed rows."""
+    no-op for it). `created_by` stays NULL for managed rows.
+
+    EXCEPTION — `min_user_level` is operator-owned: it is set on the initial
+    INSERT (from the catalogue/overlay) but NOT touched on conflict, so a tier
+    gate an operator set on a managed preset (e.g. via the admin UI) survives
+    the every-boot re-sync. Equivalent to "if the DB value differs from the
+    catalogue's, the operator's value wins" — preserving the existing value
+    covers both that case and the no-op same-value case. Consequence: a
+    catalogue/overlay change to `min_user_level` only reaches presets that
+    don't exist yet; for an existing one, change it in the admin UI."""
     await conn.execute(
         """
         INSERT INTO llm_presets
@@ -3027,7 +3036,8 @@ async def upsert_managed_preset(
             api_key_ref = EXCLUDED.api_key_ref,
             api_key = EXCLUDED.api_key,
             base_url = EXCLUDED.base_url,
-            min_user_level = EXCLUDED.min_user_level,
+            -- min_user_level intentionally NOT updated: operator-owned, so an
+            -- operator's tier gate survives the re-sync (see docstring).
             default_temperature = EXCLUDED.default_temperature,
             default_max_tokens = EXCLUDED.default_max_tokens,
             default_provider_options = EXCLUDED.default_provider_options,
