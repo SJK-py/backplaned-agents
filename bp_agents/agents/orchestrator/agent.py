@@ -29,7 +29,9 @@ from bp_agents.common import (
     compose_system_prompt,
     estimate_context_tokens,
     make_current_time_tool,
+    make_recall_tool_history_tool,
     make_send_file_tool,
+    persist_tool_exchanges,
     run_llm_loop,
     text_output,
     user_config_note,
@@ -172,7 +174,13 @@ async def run_orchestrator_message(
 
     outbound: list[str] = []
     local_tools = LocalToolset(
-        [make_current_time_tool(timezone), make_send_file_tool(outbound)]
+        [
+            make_current_time_tool(timezone),
+            make_send_file_tool(outbound),
+            make_recall_tool_history_tool(
+                pool, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID
+            ),
+        ]
     )
     destinations = _l1_destinations(ctx)
     extra = [_hand_off_spec(destinations)] if destinations else []
@@ -209,6 +217,13 @@ async def run_orchestrator_message(
         return AgentOutput()
 
     async with pool.acquire() as conn:
+        # Persist this turn's tool exchanges (recall-only; never reloaded)
+        # before the assistant row, so a later turn can re-read their full
+        # results via `recall_tool_history`.
+        await persist_tool_exchanges(
+            conn, session_id=ctx.session_id,
+            agent_id=ORCHESTRATOR_AGENT_ID, messages=messages,
+        )
         await queries.append_history(
             conn,
             session_id=ctx.session_id,
@@ -295,6 +310,10 @@ async def _run_hand_off_fallback(
         file_tools="full",
     )
     async with pool.acquire() as conn:
+        await persist_tool_exchanges(
+            conn, session_id=ctx.session_id,
+            agent_id=ORCHESTRATOR_AGENT_ID, messages=messages,
+        )
         await queries.append_history(
             conn,
             session_id=ctx.session_id,

@@ -122,6 +122,45 @@ def test_suite_db_round_trips(suite_db_url: str) -> None:
                 )
                 assert [r.role for r in reload2] == ["assistant"]
 
+                # --- recent_tool_exchanges: paging + thread scoping ---
+                for k in range(1, 4):  # 3 exchanges on the orchestrator thread
+                    await queries.append_history(
+                        conn, session_id="ses_1", agent_id="orchestrator",
+                        role="tool_call", message=f'{{"name": "t{k}"}}',
+                        incumbent=False, hidden=True,
+                    )
+                    await queries.append_history(
+                        conn, session_id="ses_1", agent_id="orchestrator",
+                        role="tool_result", message=f"res-{k}",
+                        incumbent=False, hidden=True,
+                    )
+                # a different thread's exchange must never leak in
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="computer_use",
+                    role="tool_call", message='{"name": "leak"}',
+                    incumbent=False, hidden=True,
+                )
+                await queries.append_history(
+                    conn, session_id="ses_1", agent_id="computer_use",
+                    role="tool_result", message="LEAK", incumbent=False, hidden=True,
+                )
+                # newest first; newest is exchange 3
+                page = await queries.recent_tool_exchanges(
+                    conn, session_id="ses_1", agent_id="orchestrator", limit=1
+                )
+                assert len(page) == 1 and page[0][1].message == "res-3"
+                # skip pages to the next-older with no overlap
+                page = await queries.recent_tool_exchanges(
+                    conn, session_id="ses_1", agent_id="orchestrator", limit=2, skip=1
+                )
+                assert [p[1].message for p in page] == ["res-1", "res-2"]
+                # scoped to the thread — the computer_use LEAK never appears
+                page = await queries.recent_tool_exchanges(
+                    conn, session_id="ses_1", agent_id="orchestrator", limit=10
+                )
+                assert all("LEAK" not in p[1].message for p in page)
+                assert len(page) == 3
+
                 # --- platform mappings: upsert + resolve + re-bind ---
                 await queries.upsert_platform_mapping(
                     conn, platform="telegram", chat_id="tg-42", user_id="usr_a"

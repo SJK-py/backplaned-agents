@@ -35,7 +35,9 @@ from bp_agents.common import (
     LocalToolset,
     compose_system_prompt,
     estimate_context_tokens,
+    make_recall_tool_history_tool,
     make_send_file_tool,
+    persist_tool_exchanges,
     run_llm_loop,
     text_output,
     user_config_note,
@@ -246,6 +248,9 @@ async def run_delegated_turn(
     outbound: list[str] = []
     local = await _local_tools(ctx, settings, config, timezone) or LocalToolset()
     local.add(make_send_file_tool(outbound))
+    local.add(make_recall_tool_history_tool(
+        pool, session_id=ctx.session_id, agent_id=config.agent_id
+    ))
 
     # Terminal tools: end_delegation (subsequent turns only) + any
     # agent-specific ones (e.g. plan_mode), offered on every turn.
@@ -301,6 +306,12 @@ async def run_delegated_turn(
             return await config.on_extra_terminal(ctx, extra_call, pool, settings)
 
     async with pool.acquire() as conn:
+        # Recall-only tool rows (never reloaded) so a later delegated turn
+        # can re-read this turn's full tool results via `recall_tool_history`.
+        await persist_tool_exchanges(
+            conn, session_id=ctx.session_id,
+            agent_id=config.agent_id, messages=messages,
+        )
         await queries.append_history(
             conn, session_id=ctx.session_id, agent_id=config.agent_id,
             role="assistant", message=resp.text,

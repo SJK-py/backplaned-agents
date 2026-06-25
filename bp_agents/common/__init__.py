@@ -29,6 +29,10 @@ from bp_agents.common.prompts import (
     compose_system_prompt,
     user_config_note,
 )
+from bp_agents.common.tool_history import (
+    make_recall_tool_history_tool,
+    persist_tool_exchanges,
+)
 from bp_agents.common.tools import (
     LocalTool,
     LocalToolset,
@@ -50,8 +54,10 @@ __all__ = [
     "estimate_context_tokens",
     "estimate_tokens",
     "make_current_time_tool",
+    "make_recall_tool_history_tool",
     "make_send_file_tool",
     "peer_tool_specs",
+    "persist_tool_exchanges",
     "run_llm_loop",
     "text_output",
     "user_config_note",

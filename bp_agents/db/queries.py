@@ -268,6 +268,66 @@ async def reload_incumbent(
     return [SessionHistoryRow.model_validate(dict(r)) for r in rows]
 
 
+async def recent_tool_exchanges(
+    conn: asyncpg.Connection,
+    *,
+    session_id: str,
+    agent_id: str,
+    limit: int,
+    skip: int = 0,
+) -> list[tuple[SessionHistoryRow, SessionHistoryRow]]:
+    """A page of past `tool_call`/`tool_result` exchanges for ONE agent's
+    thread — the recall tool's read side ([agent-tool-history-recall.md]).
+
+    Returns up to `limit` (call, result) pairs, **newest-last**, starting
+    `skip` exchanges back from the most recent. Scoped to
+    `(session_id, agent_id)` — never another agent or session. Tool rows
+    are write-once and never demoted, so `incumbent` is ignored.
+
+    Pairing is done on whole exchanges (a `tool_call` row followed by its
+    `tool_result` row) so `skip`/`limit` count the unit the model reasons
+    about and a page never splits a call from its result. We over-fetch
+    the tail by id (a small margin past `2*(skip+limit)` rows) so the
+    requested page is always fully covered even if a stray row sits on the
+    truncation boundary."""
+    if limit <= 0:
+        return []
+    skip = max(0, skip)
+    fetch_rows = 2 * (skip + limit) + 4
+    rows = await conn.fetch(
+        """
+        SELECT * FROM (
+            SELECT * FROM session_history
+            WHERE session_id = $1 AND agent_id = $2
+              AND role IN ('tool_call', 'tool_result')
+            ORDER BY id DESC
+            LIMIT $3
+        ) s
+        ORDER BY id ASC
+        """,
+        session_id,
+        agent_id,
+        fetch_rows,
+    )
+    parsed = [SessionHistoryRow.model_validate(dict(r)) for r in rows]
+    # Greedy pair: a `tool_call` opens an exchange, the next `tool_result`
+    # closes it. A boundary orphan (an unpaired result at the window's
+    # oldest edge) is dropped — the over-fetch margin keeps the page whole.
+    exchanges: list[tuple[SessionHistoryRow, SessionHistoryRow]] = []
+    pending: SessionHistoryRow | None = None
+    for row in parsed:
+        if row.role == "tool_call":
+            pending = row
+        elif row.role == "tool_result" and pending is not None:
+            exchanges.append((pending, row))
+            pending = None
+    # `exchanges` is ascending (newest last). Drop the `skip` newest, then
+    # take the newest `limit` of what remains.
+    if skip:
+        exchanges = exchanges[: max(0, len(exchanges) - skip)]
+    return exchanges[-limit:]
+
+
 async def demote_incumbent_through(
     conn: asyncpg.Connection,
     *,

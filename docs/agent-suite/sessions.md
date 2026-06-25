@@ -46,6 +46,8 @@ context = system_prompt(general + user-config note + active summary)
 
 `tool_call` / `tool_result` rows are **never reloaded** — the live loop holds the full tool sequence in memory; the persisted tool rows exist for render + audit. **Therefore the terminal `AgentOutput.content` must be self-contained** for the next turn (or surface the outcome as a named file).
 
+> **One opt-in exception — `recall_tool_history`.** Stateful turns persist their `tool_call`/`tool_result` rows (`incumbent=false`, `hidden=true`) via `common.tool_history.persist_tool_exchanges`. They still never enter the automatic reload; instead the orchestrator and delegated l1 turns carry a `recall_tool_history(count, skip)` local tool the model calls to re-read its OWN thread's earlier tool results on demand — paging back with `skip`, capped per-result and in total so recall can't re-bloat context. The default stays "self-contained content"; recall is the escape hatch when a prior detail wasn't carried forward. See [`../design/agent-tool-history-recall.md`](../design/agent-tool-history-recall.md).
+
 ### 2.2 The `(incumbent, hidden)` matrix
 
 `incumbent` is a firm rule; `hidden` is a UX choice where marked `*`.
