@@ -287,12 +287,13 @@ services:
       ROUTER_JWT_SECRET: ${ROUTER_JWT_SECRET:?openssl rand -base64 32}
       ROUTER_ADMIN_SESSION_SECRET: ${ROUTER_ADMIN_SESSION_SECRET:?openssl rand -base64 32}
       ROUTER_METRICS_TOKEN: ${ROUTER_METRICS_TOKEN:?required in prod}
-      # Optional operator preset overlay, merged OVER the bundled catalogue at
-      # first-boot seed (custom wins on a name collision; new names added). Copy
+      # Optional operator preset overlay, merged OVER the bundled catalogue
+      # (custom wins on a name collision; new names added). Copy
       # deploy/presets.custom.jsonc.example → deploy/presets.custom.jsonc and
-      # edit it; it's gitignored and mounted read-only below. Only consulted
-      # when seeding an empty llm_presets table — after that presets are
-      # admin-managed in the DB. An empty array (the example default) is a no-op.
+      # edit it; it's gitignored and mounted read-only below. Re-synced on
+      # EVERY boot, so editing it durably customises a catalogue preset — an
+      # admin-UI edit to a managed preset is overwritten on the next boot.
+      # An empty array (the example default) is a no-op.
       ROUTER_LLM_PRESET_OVERLAY_PATH: /app/deploy/presets.custom.jsonc
       ROUTER_FILE_STORE: s3
       # file_store_options is parsed as JSON (pydantic-settings).

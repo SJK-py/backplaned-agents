@@ -150,18 +150,20 @@ class Settings(BaseSettings):
     table (and as the in-memory fallback). Unset → the catalogue bundled with
     the package (`bp_router/llm/presets_catalog.jsonc`). Set it to keep a
     deployment's model list in a commentable file outside the package, so it
-    can be updated as models change without editing source. Only consulted on
-    first boot (empty table) and as the pre-DB fallback; once seeded, presets
-    live in the DB and are admin-managed."""
+    can be updated as models change without editing source. Re-synced into the
+    `llm_presets` table on EVERY boot (catalogue-managed rows are upserted,
+    rows dropped from the catalogue are pruned) and used as the pre-DB
+    fallback; admin-CREATED presets are never touched by the sync."""
 
     llm_preset_overlay_path: str | None = None
     """Path to an OPTIONAL operator preset overlay (JSONC), merged OVER the base
-    catalogue at seed time — a custom entry wins on a name collision, new names
-    are added. Unlike `llm_preset_catalog_path` (which replaces the catalogue
-    wholesale), the overlay keeps the built-ins and only lists overrides/
-    additions. Missing file → ignored; malformed → loud at boot. Like all
-    seeding, consulted only on first boot (empty table); after that presets are
-    admin-managed. Wired in prod to deploy/presets.custom.jsonc."""
+    catalogue — a custom entry wins on a name collision, new names are added.
+    Unlike `llm_preset_catalog_path` (which replaces the catalogue wholesale),
+    the overlay keeps the built-ins and only lists overrides/additions. Missing
+    file → ignored; malformed → loud at boot. Re-applied on EVERY boot like the
+    base catalogue, so editing it durably customises a catalogue preset (an
+    admin-UI edit to a managed preset is overwritten on the next boot; set the
+    fields here instead). Wired in prod to deploy/presets.custom.jsonc."""
 
     max_request_body_bytes: int = Field(default=64 * 1024, ge=1024)  # 64 KiB
     """Per-request HTTP body cap enforced by `BodySizeLimitMiddleware`

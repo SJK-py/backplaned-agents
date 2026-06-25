@@ -18,12 +18,15 @@ Two design decisions made up-front:
    as the ACL evaluator: `*` admits any, `admin`/`service` are exact
    matches, `tierN` is "this tier or stricter" (lower number).
 
-3. **Default-seed fallback** — on first startup the database is empty;
-   the service seeds it from `default_presets()`, which loads a JSONC
-   catalogue (`presets_catalog.jsonc`, or the operator's
-   `Settings.llm_preset_catalog_path`). After that, presets live in the
-   `llm_presets` DB table and are admin-managed via the webUI. Keeping the
-   catalogue in a commentable file makes it easy to maintain as models change.
+3. **Catalogue re-sync** — the service loads a JSONC catalogue
+   (`presets_catalog.jsonc`, or the operator's
+   `Settings.llm_preset_catalog_path`, plus an optional overlay) via
+   `default_presets()` and re-syncs it into the `llm_presets` DB table on
+   EVERY boot: catalogue-managed rows are upserted, names dropped from the
+   catalogue are pruned, and admin-created presets are left untouched. So an
+   admin-UI edit to a catalogue-managed preset is transient (overwritten on
+   the next boot) — durable customisation goes in the catalogue/overlay file.
+   Keeping it in a commentable file makes it easy to maintain as models change.
 """
 
 from __future__ import annotations
@@ -357,14 +360,15 @@ def _load_catalog_cached(path: str | None) -> tuple[Preset, ...]:
 
 
 def default_presets(path: str | Path | None = None) -> list[Preset]:
-    """Built-in presets seeded into an empty `llm_presets` table on first
-    startup (and the in-memory fallback before the DB load). Loaded from a
+    """Built-in presets re-synced into the `llm_presets` table on every boot
+    (and the in-memory fallback before the DB load). Loaded from a
     JSONC catalogue — the bundled `presets_catalog.jsonc` when `path` is
     None, else the operator-supplied file. The result is cached per path.
 
     Default `min_user_level="*"` (any tier) preserves the prior no-gate
-    behaviour. Operators tighten via the admin webUI after seeding, or by
-    editing the catalogue before first boot.
+    behaviour. Operators tighten a catalogue preset durably by setting it in
+    the catalogue/overlay file (an admin-webUI edit to a managed preset is
+    overwritten on the next boot's re-sync).
     """
     return list(_load_catalog_cached(str(path) if path is not None else None))
 
@@ -390,8 +394,10 @@ def default_presets_with_overlay(
     the whole built-in list. Overlay-only names are appended. Order: base
     order preserved, overlay-new names appended in overlay order.
 
-    Like the base seed, this is consulted only on first boot (empty table) and
-    as the pre-DB fallback — once seeded, presets are admin-managed."""
+    Like the base catalogue, this is re-synced into the table on every boot and
+    is the pre-DB fallback — so an admin-UI edit to a catalogue-managed preset
+    is overwritten on the next boot; durable customisation belongs in the
+    overlay (an admin-CREATED preset, by contrast, is never touched)."""
     base = default_presets(catalog_path)
     if overlay_path is None:
         return base
