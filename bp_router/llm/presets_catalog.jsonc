@@ -26,7 +26,8 @@
 // provider SDK sees and KEEPS its dotted form (e.g. `gemini-2.5-pro`).
 //
 // `min_user_level` defaults to "*" (any tier) to preserve no-gate behaviour;
-// tighten per preset via the admin UI (or here, before first seed).
+// tighten per preset durably here or in an operator overlay (an admin-UI edit
+// to a catalogue-managed preset is overwritten on the next boot's re-sync).
 [
   // ===================== Gemini family =====================
   {

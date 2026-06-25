@@ -68,9 +68,11 @@ existing agents using `model="..."` keep working unchanged. The seed
 list is a **commentable JSONC catalogue** —
 `bp_router/llm/presets_catalog.jsonc` (bundled), or the file named by
 `ROUTER_LLM_PRESET_CATALOG_PATH` — so the model list is easy to maintain
-as models change. The catalogue is only read on first boot (empty table)
-and as the in-memory fallback; once seeded, edits go through the admin
-surface, not the file.
+as models change. The catalogue is re-synced into the table on **every
+boot** (catalogue-managed rows upserted, dropped names pruned) and is the
+in-memory fallback; admin-created presets are never touched by the sync.
+A catalogue/overlay edit therefore lands on the next restart — an admin-UI
+edit to a catalogue-managed preset is transient (overwritten on re-sync).
 
 **Tier gate.** Each preset carries a `min_user_level` that gates
 which callers may use it. The grammar matches ACL rules:

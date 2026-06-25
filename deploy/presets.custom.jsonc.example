@@ -2,28 +2,112 @@
 //
 // Copy this file to `deploy/presets.custom.jsonc` (gitignored) and edit it to
 // override or add LLM presets WITHOUT editing the package. It is MERGED over
-// the bundled catalogue (bp_router/llm/presets_catalog.jsonc) at first-boot
-// seed:
+// the bundled catalogue (bp_router/llm/presets_catalog.jsonc):
 //   - a custom entry whose `name` collides with a built-in WINS (replaces it),
-//   - a new `name` is added.
+//   - a new `name` is added,
+//   - base order is preserved; overlay-only names are appended.
 //
-// Consulted ONLY when seeding an empty `llm_presets` table (first boot, or
-// after TRUNCATE llm_presets). After that, presets live in the DB and are
-// admin-managed via /admin — editing this file does NOT retroactively change
-// an already-seeded deployment.
+// ── WHEN IT'S APPLIED: EVERY boot, not just the first ──────────────────────
+// The overlay (and the bundled catalogue) is re-synced into the `llm_presets`
+// table on EVERY router startup. Each entry is upserted and marked `managed`;
+// any managed preset dropped from the catalogue + overlay is pruned. So:
+//   - Editing THIS file DOES retroactively change an already-seeded
+//     deployment — the change lands on the next router restart.
+//   - This is the DURABLE way to customise a catalogue preset. Editing a
+//     catalogue-managed preset through the admin UI is transient — the next
+//     boot's re-sync overwrites it. Set it here instead.
+//   - Admin-CREATED presets (added via /admin, `managed = FALSE`) are never
+//     touched by the sync; they're independent of this file.
+// (This file's path is wired via ROUTER_LLM_PRESET_OVERLAY_PATH — set in
+// docker-compose.prod.yml to /app/deploy/presets.custom.jsonc. Pointing a
+// deployment at a different BASE catalogue instead uses
+// ROUTER_LLM_PRESET_CATALOG_PATH.)
 //
-// JSONC: `//` and `/* */` comments allowed; NO trailing commas. Each entry
-// mirrors the `Preset` dataclass:
-//   Required: name, provider, concrete_model
-//   Credential: api_key_ref OR api_key (see below) — at least one in practice,
-//             though both default empty (a keyless local endpoint needs
-//             neither; a missing/empty ref resolves to empty and calls 401).
-//   Optional: description, min_user_level, default_temperature,
-//             default_max_tokens, default_provider_options, base_url,
-//             fallback_preset, max_retries
-//   provider ∈ gemini | anthropic | openai | openai-embeddings |
-//              openai-compatible | openai-compatible-embeddings
-//   name must match ^[a-z][a-z0-9_-]{0,63}$ (lowercase, no dots).
+// JSONC: `//` and `/* */` comments allowed; NO trailing commas. The result
+// after comment-stripping must be valid JSON. Each entry mirrors the `Preset`
+// dataclass (bp_router/llm/presets.py). An UNKNOWN key or a missing REQUIRED
+// field fails LOUD at boot (a typo'd override won't silently no-op).
+//
+// ══════════════════════════════════════════════════════════════════════════
+//  FIELD REFERENCE  (✱ = required; everything else is optional with the
+//                    default shown)
+// ══════════════════════════════════════════════════════════════════════════
+//
+// ✱ name              The preset key agents resolve via
+//                     ctx.llm.generate(preset="..."). Slug grammar
+//                     ^[a-z][a-z0-9_-]{0,63}$ — lowercase, digits, `-`/`_`,
+//                     ≤64 chars, NO dots (enforced by a DB CHECK constraint).
+//                     Versions use `-`: name "gemini-2-5-pro" →
+//                     concrete_model "gemini-2.5-pro".
+//
+// ✱ provider          Which adapter handles the call. One of:
+//                       gemini | anthropic | openai | openai-embeddings |
+//                       openai-compatible | openai-compatible-embeddings
+//                     The `-embeddings` variants are for embed() calls; the
+//                     `openai-compatible*` pair targets local/self-hosted
+//                     servers speaking the OpenAI API (vLLM, LM Studio,
+//                     llama.cpp-server, Ollama OpenAI-mode, TGI).
+//
+// ✱ concrete_model    The REAL upstream model id the provider SDK receives,
+//                     KEEPING its native form incl. dots (e.g. "gemini-2.5-pro",
+//                     "claude-sonnet-4-6", "gpt-5.5"). Unlike `name`, it is not
+//                     slug-constrained.
+//
+//   api_key_ref       (default "") INDIRECT credential reference resolved at
+//                     call time. Only the env://VAR scheme is wired: it reads
+//                     the router container's environment. See the API KEYS
+//                     section below. Empty + no inline api_key + a provider
+//                     that needs auth → the call 401s.
+//
+//   api_key           (default null) INLINE literal secret. Takes precedence
+//                     over api_key_ref when both are set. Stored PLAINTEXT in
+//                     the DB (masked only on admin read-back) and sits
+//                     plaintext in THIS file — see the caveat below.
+//
+//   base_url          (default null) Override the upstream endpoint.
+//                       - hosted providers (gemini/anthropic/openai/
+//                         openai-embeddings): OPTIONAL. Blank → the SDK's
+//                         official URL. Set → a third-party server speaking
+//                         that provider's API (MiniMax, Bedrock/Vertex mirrors,
+//                         LiteLLM / Portkey gateways, enterprise auth proxies).
+//                       - openai-compatible(-embeddings): REQUIRED — there is
+//                         no official default to fall back to.
+//                     Must be http:// or https://. SSRF-validated when saved
+//                     via the admin API.
+//
+//   min_user_level    (default "*") Tier gate checked against the caller's
+//                     level. Grammar ^(\*|admin|service|tier[0-9]+)$:
+//                       "*"       any caller (no gate),
+//                       "admin"   / "service"  exact-match that level,
+//                       "tierN"   this tier OR stricter (lower N is stricter).
+//                     Callers below the bar get PresetNotAllowedError.
+//
+//   description        (default null) Free text shown in the admin UI. Handy
+//                     to record intent ("cheap bulk summariser", "EU-only").
+//
+//   default_temperature (default null) Sampling temperature applied when the
+//                     call doesn't pass one. Range 0.0..2.0 (shared by
+//                     OpenAI/Anthropic/Gemini). null → the provider's own
+//                     default.
+//
+//   default_max_tokens (default null) Max output tokens when the call doesn't
+//                     pass one. Positive integer (≥ 1); no fixed upper bound —
+//                     it's model-specific. null → the provider's own default.
+//
+//   default_provider_options (default {}) Provider-specific knobs as a JSON
+//                     object, e.g. Gemini embeddings:
+//                       { "output_dimensionality": 1536 }
+//                     NOTE: a call-time provider_options REPLACES this dict
+//                     wholesale — it does NOT deep-merge.
+//
+//   fallback_preset   (default null) Name of the next preset to try once this
+//                     one has exhausted max_retries+1 attempts. null → surface
+//                     the error. Cycles are rejected at load time; a dangling
+//                     name is treated as terminal (no further fallback).
+//
+//   max_retries       (default 0) Retry attempts on THIS preset before walking
+//                     to fallback_preset. Integer 0..10 (capped to bound
+//                     worst-case latency).
 //
 // ── API KEYS: `api_key_ref` (preferred) vs `api_key` (inline) ──────────────
 // A preset gets its provider credential one of two ways:
@@ -81,6 +165,20 @@
 //     "concrete_model": "deepseek-chat",
 //     "api_key": "sk-...",
 //     "base_url": "https://api.deepseek.com/v1"
+//   }
+// Example D — tune a built-in catalogue preset durably (tier-gate it + cap
+//             tokens, with a fallback). Editing these fields in the admin UI
+//             would be wiped on the next boot; set them here so they persist:
+//   {
+//     "name": "claude-opus",
+//     "provider": "anthropic",
+//     "concrete_model": "claude-opus-4-8",
+//     "api_key_ref": "env://ANTHROPIC_API_KEY",
+//     "min_user_level": "tier1",
+//     "default_max_tokens": 4096,
+//     "fallback_preset": "claude-sonnet",
+//     "max_retries": 2,
+//     "description": "Opus, restricted to tier1+; falls back to Sonnet."
 //   }
 [
 ]

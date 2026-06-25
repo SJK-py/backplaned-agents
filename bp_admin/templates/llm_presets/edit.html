@@ -22,8 +22,9 @@
     <strong>Catalogue-managed preset.</strong> This preset is defined in the
     JSONC preset catalogue and re-synced on every router startup, so changes
     saved here are <strong>transient</strong> — they'll be overwritten on the
-    next restart. To change it permanently, edit the catalogue (or an operator
-    overlay).
+    next restart. To change it permanently, set the fields in the operator
+    overlay (<code>deploy/presets.custom.jsonc</code>, which wins on a name
+    collision and is re-applied every boot) or edit the bundled catalogue.
   </div>
 {% endif %}
 
