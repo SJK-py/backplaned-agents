@@ -35,6 +35,7 @@ def _fake_jwt(sub: str) -> str:
 class _FakeUpstream:
     def __init__(self, *, sub: str = "usr_a") -> None:
         self._sub = sub
+        self.cancels: list[tuple[str, str]] = []  # (access_token, task_id)
 
     async def login(self, *, email: str, password: str) -> dict:
         return {
@@ -44,6 +45,9 @@ class _FakeUpstream:
             "level": "tier1",
         }
 
+    async def cancel_task(self, *, access_token: str, task_id: str) -> None:
+        self.cancels.append((access_token, task_id))
+
     async def aclose(self) -> None:
         pass
 
@@ -52,11 +56,13 @@ class _ChatDispatcher:
     """Emits the given LoopProgress frames via on_progress, then a result."""
 
     def __init__(self, *, content: str, progress: list[dict],
-                 agent_id: str = "orchestrator", files: list[str] | None = None) -> None:
+                 agent_id: str = "orchestrator", files: list[str] | None = None,
+                 status: TaskStatus = TaskStatus.SUCCEEDED) -> None:
         self.content = content
         self.progress = progress
         self.agent_id = agent_id
         self.files = files or []
+        self.status = status
         self.spawns: list[tuple[str, str | None]] = []
 
     async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
@@ -70,10 +76,14 @@ class _ChatDispatcher:
                     agent_id=self.agent_id, trace_id="0" * 32, span_id="0" * 16,
                     task_id=task_id, event=lp["kind"], metadata={LOOP_PROGRESS_KEY: lp},
                 ))
+        # A cancelled task carries no output (mirrors a router-side /stop).
+        output = (
+            None if self.status is TaskStatus.CANCELLED
+            else AgentOutput(content=self.content, files=self.files)
+        )
         return ResultFrame(
             agent_id=self.agent_id, trace_id="0" * 32, span_id="0" * 16,
-            task_id=task_id, status=TaskStatus.SUCCEEDED, status_code=200,
-            output=AgentOutput(content=self.content, files=self.files),
+            task_id=task_id, status=self.status, status_code=200, output=output,
         )
 
 
@@ -250,3 +260,97 @@ def test_chat_stream_unknown_turn_is_404(suite_db_url: str) -> None:
             await pool.close()
 
     assert asyncio.run(_drive()) == 404
+
+
+def test_chat_stop_cancels_active_turn(suite_db_url: str) -> None:
+    """POST /stop cancels the session's in-flight router task (the Stop button,
+    parity with the chatbot /stop command)."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, list]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            up = _FakeUpstream()
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=up, pool=pool, core=core)
+            # Simulate a turn in flight for this session.
+            app.state.active_turns["ses_1"] = "tsk_live"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                r = await client.post(
+                    "/chat/ses_1/stop", headers={"X-CSRF-Token": token}
+                )
+            return r.status_code, up.cancels
+        finally:
+            await pool.close()
+
+    status, cancels = asyncio.run(_drive())
+    assert status == 204
+    assert cancels and cancels[0][1] == "tsk_live"
+
+
+def test_chat_stop_unowned_session_is_404(suite_db_url: str) -> None:
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, list]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            up = _FakeUpstream()
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=up, pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                r = await client.post(
+                    "/chat/ses_other/stop", headers={"X-CSRF-Token": token}
+                )
+            return r.status_code, up.cancels
+        finally:
+            await pool.close()
+
+    status, cancels = asyncio.run(_drive())
+    assert status == 404
+    assert cancels == []  # never reached the cancel call
+
+
+def test_chat_stream_cancelled_renders_stopped(suite_db_url: str) -> None:
+    """A turn that comes back CANCELLED (router-side stop) renders a clean
+    'Stopped' bubble rather than the generic error."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> str:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _ChatDispatcher(
+                content="ignored", progress=[], status=TaskStatus.CANCELLED
+            )
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                send = await client.post(
+                    "/chat/ses_1", data={"message": "go"},
+                    headers={"X-CSRF-Token": token},
+                )
+                turn_id = re.search(
+                    r'sse-connect="/chat/ses_1/stream/([^"]+)"', send.text
+                ).group(1)
+                stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
+                return stream.text
+        finally:
+            await pool.close()
+
+    text = asyncio.run(_drive())
+    assert "event: result" in text and "Stopped" in text
+    assert "something went wrong" not in text
