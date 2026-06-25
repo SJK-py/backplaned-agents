@@ -101,6 +101,15 @@ x-suite-agent: &suite-agent
     SUITE_SELECTABLE_PRESETS_PRO: ${SUITE_SELECTABLE_PRESETS_PRO:-[]}
     SUITE_SELECTABLE_PRESETS_BALANCED: ${SUITE_SELECTABLE_PRESETS_BALANCED:-[]}
     SUITE_SELECTABLE_PRESETS_LITE: ${SUITE_SELECTABLE_PRESETS_LITE:-[]}
+    # Vision sidecar: lets a TEXT-ONLY chat preset read image/PDF files via a
+    # separate multimodal preset. SUITE_DEFAULT_PRESET_MULTIMODAL is the vision
+    # preset name; SUITE_TEXT_ONLY_PRESETS is the JSON array of presets declared
+    # non-multimodal — when a turn runs on one of those AND a vision preset is
+    # set, read_file routes image/PDF reads through the vision preset (returning
+    # text). Both empty (default) → no sidecar; read_file feeds files to the
+    # agent's own model, which must then be multimodal.
+    SUITE_DEFAULT_PRESET_MULTIMODAL: ${SUITE_DEFAULT_PRESET_MULTIMODAL:-}
+    SUITE_TEXT_ONLY_PRESETS: ${SUITE_TEXT_ONLY_PRESETS:-[]}
     # Vector length the knowledge_base/memory agents bake into their LanceDB
     # table schema on first write (and frozen for the volume's life). MUST match
     # the embedding preset's output dimension — 1536 for the default Gemini
