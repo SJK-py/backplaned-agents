@@ -716,6 +716,17 @@ if [[ ! -f "$OVERLAY" && -f "$OVERLAY.example" ]]; then
     echo "  seeded $OVERLAY (empty overlay; edit it to override/add presets)."
 fi
 
+# Operator custom env (router + mcp_bridge env_file). Optional in compose
+# (required: false), but seed a comments-only copy from the .example so it's
+# discoverable — operators add KEY=value lines for secret refs (api_key_ref
+# env://…, OIDC secret, MCP server auth) without editing the compose file.
+CUSTOM_ENV="deploy/.env.prod.custom"
+if [[ ! -f "$CUSTOM_ENV" && -f "$CUSTOM_ENV.example" ]]; then
+    cp "$CUSTOM_ENV.example" "$CUSTOM_ENV"
+    chmod 600 "$CUSTOM_ENV"
+    echo "  seeded $CUSTOM_ENV (empty; add custom env vars / secret refs here)."
+fi
+
 # Resolve compose args once (base + auto profiles from the env file).
 CARGS=(-f "$COMPOSE_FILE" --env-file "$OUT")
 # Pure bare-IP edge: layer the override that publishes ONLY the dedicated ports
