@@ -129,6 +129,14 @@ def test_chunk_markdown_prefers_header_boundaries() -> None:
     assert "# Intro" in joined and "# Methods" in joined and "# Results" in joined
 
 
+def test_kb_store_name_documents_persist_prefix() -> None:
+    """The `store` tool schema must tell callers (research, orchestrator, …)
+    that `name` accepts a `persist/<file>` reference — otherwise they only ever
+    pass session-stash names."""
+    desc = KbStore.model_json_schema()["properties"]["name"].get("description", "")
+    assert "persist/" in desc
+
+
 def test_kb_store_retrieve_list_remove(tmp_path) -> None:
     async def _drive() -> None:
         store = KnowledgeStore(await connect(tmp_path, "usr_a"), embedding_dim=_DIM)

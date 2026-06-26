@@ -14,7 +14,7 @@ import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bp_agents.agents.knowledge_base.chunking import chunk_markdown
 from bp_agents.common import text_output
@@ -47,7 +47,14 @@ _META_SYSTEM = (
 
 
 class KbStore(BaseModel):
-    name: str
+    name: str = Field(
+        description=(
+            "Stash file name to ingest: '{filename}' (session stash) or "
+            "'persist/{filename}' (persistent stash — e.g. a document saved "
+            "across sessions). Non-Markdown files are converted to Markdown "
+            "first."
+        ),
+    )
     collection: str = "default"
     title: str | None = None
     tags: list[str] | None = None
