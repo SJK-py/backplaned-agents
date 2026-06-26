@@ -333,13 +333,16 @@ this path; only the ref shape changes:
 
 > **Exception — the `read_file` text window.** The above holds for the
 > multimodal feed path (images / PDFs ride a `file_ref`, router-resolved).
-> But the `read_file` *tool* now reads a TEXT file's bytes locally
-> (`read_bytes`, the §4.2 path) to return a bounded **character window**
-> (`max_chars` / `offset`, default first 20000 chars) as a plain text tool
-> result — so a large file is page-able and can't flood context. This is a
-> deliberate agent-side read for slicing, not an LLM-feed inline; images /
-> PDFs / non-UTF-8 files still return a `file_ref` and stay on the
-> router-resolved path. See `bp_sdk/file_tools.py` (`_read_file`).
+> But the `read_file` *tool* reads a TEXT file via the §4.2 local path
+> (`read` → temp copy) and slices a bounded **character window** off disk
+> with an incremental decoder (`max_chars` / `offset`, default first 20000
+> chars, hard cap 500000) — only the window is held in memory, so any size is
+> page-able and can't flood context. This is a deliberate agent-side read for
+> slicing, not an LLM-feed inline; images / PDFs / non-UTF-8 files still
+> return a `file_ref` and stay on the router-resolved path. See
+> `bp_sdk/file_tools.py` (`_read_file` / `_slice_text_file`). The file store
+> has no RANGE read, so each page re-downloads the blob — a range fetch is
+> future work.
 
 **Name resolution is scoped by an AUTHORITATIVE `(user_id,
 session_id)` the router DERIVES from the task row — never from

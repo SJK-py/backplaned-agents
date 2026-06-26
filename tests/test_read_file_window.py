@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +20,9 @@ ft = importlib.import_module("bp_sdk.file_tools")
 
 
 class _FakeFiles:
-    """Returns canned bytes for `read_bytes`; raises for names in `missing`."""
+    """`read` streams the canned bytes to a temp file and returns its Path
+    (mirroring `FileStash.read`, which the SDK slices off disk); raises for
+    names in `missing`."""
 
     def __init__(self, data: bytes = b"", *, missing: tuple = ()) -> None:
         self._data = data
@@ -27,11 +32,14 @@ class _FakeFiles:
     def llm_ref(self, name, *, as_=None):
         return {"file_ref": {"name": name}}
 
-    async def read_bytes(self, name):
+    async def read(self, name):
         self.read_calls.append(name)
         if name in self._missing:
             raise FileStoreError("not_found")
-        return self._data
+        fd, p = tempfile.mkstemp()
+        os.write(fd, self._data)
+        os.close(fd)
+        return Path(p)
 
 
 def _read(files, name, **args):
@@ -125,12 +133,6 @@ def test_non_utf8_text_falls_back_to_file_ref() -> None:
     assert content == [{"file_ref": {"name": "weird.txt"}}]
 
 
-def test_oversize_text_is_refused() -> None:
-    huge = b"a" * (ft._MAX_TEXT_READ_BYTES + 1)
-    content = _read(_FakeFiles(huge), "huge.txt")
-    assert "too large to read as text" in content["error"]
-
-
 def test_not_found_surfaces_error() -> None:
     content = _read(_FakeFiles(missing=("ghost.txt",)), "ghost.txt")
     assert content == {"error": "not_found"}
@@ -147,3 +149,34 @@ def test_missing_name_is_soft_error() -> None:
 def test_text_extensions_windowed(name: str) -> None:
     content = _read(_FakeFiles(b"abc"), name)
     assert content == f"File: {name} (characters 0–3 of 3)\n\nabc"
+
+
+# --------------------------------------------------------------------------
+# memory-safe slicing — multibyte across chunks, on-disk, temp cleanup
+# --------------------------------------------------------------------------
+
+def test_multibyte_window_is_char_accurate() -> None:
+    # non-ASCII (2-byte chars) spanning many 64 KiB decode chunks
+    text = "héllo wörld " * 10000  # ~120k chars
+    content = _read(_FakeFiles(text.encode("utf-8")), "u.txt", offset=5, max_chars=50)
+    body = content.split("\n\n", 1)[1].split("\n\n…", 1)[0]
+    assert body == text[5:55]
+    assert f"of {len(text)})" in content  # total is char count, not byte count
+
+
+def test_temp_copy_is_cleaned_up() -> None:
+    async def _drive() -> None:
+        files = _FakeFiles(b"hello")
+        returned: list = []
+        orig_read = files.read
+
+        async def _tracking_read(name):
+            p = await orig_read(name)
+            returned.append(p)
+            return p
+
+        files.read = _tracking_read
+        await dispatch_file_tool(files, ToolCall(id="1", name="read_file", args={"name": "s.txt"}))
+        assert returned and not returned[0].exists()  # sliced off disk then dropped
+
+    asyncio.run(_drive())

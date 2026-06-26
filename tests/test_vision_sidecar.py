@@ -8,6 +8,7 @@ are faked.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from bp_agents.common import loop as loop_mod
 from bp_agents.common import multimodal_preset_for
@@ -109,9 +110,15 @@ class _FakeFiles:
     async def list(self, **kw):
         return []
 
-    async def read_bytes(self, name):
-        # text files fall through to the SDK windowed read (read_file)
-        return b"hello from the text file"
+    async def read(self, name):
+        # text files fall through to the SDK windowed read (read_file), which
+        # slices off a local temp copy
+        import os
+        import tempfile
+        fd, p = tempfile.mkstemp()
+        os.write(fd, b"hello from the text file")
+        os.close(fd)
+        return Path(p)
 
     async def stat(self, name):
         self.stat_calls.append(name)

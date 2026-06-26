@@ -20,6 +20,8 @@ glob, so the `full` bundle is the sharpest edge.
 
 from __future__ import annotations
 
+import asyncio
+import codecs
 import mimetypes
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -38,13 +40,8 @@ Bundle = Literal["read_only", "full"]
 # pages with `offset`, so a large file can't flood context and a giant log is
 # reachable in chunks. Images/PDFs ignore these (shown whole via the router).
 _DEFAULT_READ_CHARS = 20_000   # returned when the model passes no max_chars
-_MAX_READ_CHARS = 200_000      # hard ceiling on one window (clamp, don't error)
-# Refuse to read a text file larger than ~one model context window — even SOTA
-# models top out around 1M tokens (≈ a few MiB of text), so a bigger file can
-# never be held and paging it would re-download megabytes per call. This mirrors
-# the router's own `llm_attachment_inline_max_bytes` default (5 MiB). Over this,
-# tell the model to search/extract the part it needs with another tool.
-_MAX_TEXT_READ_BYTES = 5 * 1024 * 1024  # 5 MiB
+_MAX_READ_CHARS = 500_000      # hard ceiling on one window (clamp, don't error)
+_READ_CHUNK_BYTES = 1 << 16    # 64 KiB streaming-decode chunk
 
 # Textual `application/*` types that decode as UTF-8 like `text/*` (mirrors the
 # router's `_is_text_mime`, so the SDK windowed-read and the router's text
@@ -323,6 +320,34 @@ def _entry_view(entry: Any) -> dict[str, Any]:
     }
 
 
+def _slice_text_file(path: Any, offset: int, max_chars: int) -> tuple[str, int, int]:
+    """Read a UTF-8 text file from disk and return `(window, start,
+    total_chars)` for the character range `[offset, offset+max_chars)`.
+
+    Streams the file in chunks with an incremental decoder, keeping only the
+    window (plus a 64 KiB buffer) in memory — so a multi-GB file slices
+    without ever being loaded whole. Raises `UnicodeDecodeError` if the bytes
+    aren't valid UTF-8 (the caller falls back to the `file_ref` path)."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    pos = 0            # chars decoded so far
+    want_hi = offset + max_chars
+    parts: list[str] = []
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(_READ_CHUNK_BYTES)
+            final = not chunk
+            text = decoder.decode(chunk, final)
+            n = len(text)
+            if n:
+                lo, hi = offset - pos, want_hi - pos  # window range within chunk
+                if hi > 0 and lo < n:
+                    parts.append(text[max(lo, 0):min(hi, n)])
+                pos += n
+            if final:
+                break
+    return "".join(parts), min(offset, pos), pos
+
+
 async def _read_file(
     files: FileStash, name: str, args: dict[str, Any]
 ) -> str | dict[str, Any] | list[dict[str, Any]]:
@@ -331,8 +356,10 @@ async def _read_file(
     A TEXT file (decided by extension) is read SDK-side and returned as a
     bounded CHARACTER window — `max_chars` (default 20000) from `offset`
     (default 0) — with a marker + the next `offset` when truncated, so a
-    large file can't flood context and is page-able. Anything else (image /
-    PDF / unknown type) returns a name `file_ref` the ROUTER resolves into
+    large file can't flood context and is page-able. The file is streamed off
+    a local temp copy and sliced incrementally (`_slice_text_file`), so even a
+    multi-GB file is read with bounded memory. Anything else (image / PDF /
+    unknown type) returns a name `file_ref` the ROUTER resolves into
     multimodal content on the next turn, unchanged. A file that looked like
     text by extension but isn't valid UTF-8 also falls back to `file_ref`.
 
@@ -345,25 +372,21 @@ async def _read_file(
     )
     offset = _clamp_int(args.get("offset"), default=0, lo=0, hi=None)
 
-    data = await files.read_bytes(name)
-    if len(data) > _MAX_TEXT_READ_BYTES:
-        return {
-            "error": (
-                f"'{name}' is {_human_size(len(data))} — too large to read as "
-                "text inline. Extract or filter the part you need with another "
-                "tool, then read that."
-            )
-        }
+    # `read` streams the blob to a local temp file (memory-safe download); we
+    # slice the window off disk and drop the copy so paging can't pile up.
+    path = await files.read(name)
     try:
-        text = data.decode("utf-8")
+        window, start, total = await asyncio.to_thread(
+            _slice_text_file, path, offset, max_chars
+        )
     except UnicodeDecodeError:
-        # Looked like text by extension but isn't UTF-8 — let the router
-        # decide (inline as a document, or a reference note).
-        return [files.llm_ref(name)]
+        return [files.llm_ref(name)]  # not UTF-8 → let the router decide
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    total = len(text)
-    start = min(offset, total)
-    window = text[start:start + max_chars]
     end = start + len(window)
     remaining = total - end
     header = f"File: {name} (characters {start}–{end} of {total})"
