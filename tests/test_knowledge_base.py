@@ -220,6 +220,24 @@ def test_kb_store_batches_embeddings(tmp_path) -> None:
     asyncio.run(_drive())
 
 
+def test_safe_embed_batch_caps_by_embedding_dim() -> None:
+    """The effective batch is bounded by the inline result-frame size, so a
+    high embedding_dim shrinks it below the configured chunk cap — keeping a
+    batch's vectors under the ~1 MiB WS frame cap (a 100×1536 result is ~3 MiB
+    and can't be received → the embed call hangs)."""
+    from bp_agents.agents.knowledge_base.agent import _safe_embed_batch
+
+    # Tiny dim → the configured cap wins unchanged.
+    assert _safe_embed_batch(100, 8) == 100
+    # dim 1536 → response budget binds, far below the configured 100.
+    b1536 = _safe_embed_batch(100, 1536)
+    assert 1 <= b1536 <= 30
+    # The resulting frame stays well under 1 MiB (~21 bytes per JSON float).
+    assert b1536 * 1536 * 21 < 1_000_000
+    # Higher dim → an even smaller batch.
+    assert _safe_embed_batch(100, 3072) < b1536
+
+
 def test_kb_store_generates_missing_metadata(tmp_path) -> None:
     async def _drive() -> None:
         store = KnowledgeStore(await connect(tmp_path, "usr_m"), embedding_dim=_DIM)

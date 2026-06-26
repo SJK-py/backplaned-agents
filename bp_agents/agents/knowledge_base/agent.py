@@ -187,16 +187,39 @@ async def _generate_metadata(
     return _parse_meta(resp.text)
 
 
+# An embedding RESULT rides inline in the LlmResultFrame (`vectors:
+# list[list[float]]`), and a JSON-serialized double is ~21 bytes (shortest
+# round-trip repr + comma). So a batch's result frame is ≈ batch × dim × ~21
+# bytes — at dim 1536 a 100-vector batch is ~3 MiB, which exceeds the ~1 MiB WS
+# frame cap (and the agent's 2 MiB receive ceiling): the router can't deliver
+# it, so the embed `await` hangs. The effective batch must therefore be bounded
+# by the RESPONSE size, not just the request (chunk) count.
+_EMBED_FLOAT_BYTES = 22  # measured ~20.8 for arbitrary doubles; rounded up
+_EMBED_RESULT_BUDGET_BYTES = 600 * 1024  # vectors per batch, kept under the 1 MiB cap
+
+
+def _safe_embed_batch(configured: int, embedding_dim: int) -> int:
+    """Effective embedding batch size: the configured chunk cap, further
+    bounded so one batch's inline result frame stays under the WS frame cap.
+    Scales inversely with `embedding_dim` (more dims → fewer vectors per
+    frame). Assumes the default ~1 MiB frame cap."""
+    by_response = max(
+        1, _EMBED_RESULT_BUDGET_BYTES // (embedding_dim * _EMBED_FLOAT_BYTES)
+    )
+    return max(1, min(configured, by_response))
+
+
 async def _embed_chunks(
     ctx: TaskContext, chunks: list[str], *, preset: str, batch_size: int
 ) -> list[list[float]]:
     """Embed `chunks` in bounded batches, returning vectors in chunk order.
 
     Embedding the whole document in one `ctx.llm.embed(chunks)` call sends every
-    chunk to the provider at once — which blows the provider's per-request
-    input/token limit (and the ~1 MiB WS frame cap, made worse by chunk
-    overlap) for a large document, failing the entire `store`. Batching caps
-    each request; batches run sequentially to keep the embedding load steady."""
+    chunk to the provider at once (blowing its per-request input/token limit)
+    AND brings every vector back in one result frame (blowing the WS frame cap)
+    — failing the entire `store` on a large document. Batching caps both the
+    request (chunk count) and the response (`batch_size` is pre-bounded by
+    `_safe_embed_batch`); batches run sequentially to keep load steady."""
     vectors: list[list[float]] = []
     for start in range(0, len(chunks), batch_size):
         batch = chunks[start:start + batch_size]
@@ -249,9 +272,8 @@ async def run_kb_store(
             description = gen.get("description")
     title = title or PurePosixPath(payload.name).stem
 
-    vectors = await _embed_chunks(
-        ctx, chunks, preset=preset, batch_size=settings.kb_embed_batch_size
-    )
+    batch = _safe_embed_batch(settings.kb_embed_batch_size, settings.embedding_dim)
+    vectors = await _embed_chunks(ctx, chunks, preset=preset, batch_size=batch)
     await store.store_document(
         collection=payload.collection, title=title,
         tags=tags or [], description=description or "",
