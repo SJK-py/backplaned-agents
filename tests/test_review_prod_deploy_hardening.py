@@ -143,3 +143,54 @@ def test_sandbox_state_dir_is_root_owned_not_the_10002_state() -> None:
         "Dockerfile.suite must `mkdir -p /sandbox-state && chmod 700 "
         "/sandbox-state` so the root sandbox owns a writable state dir"
     )
+
+
+# --- Operator custom env (env_file), scoped to the secret-ref resolvers -----
+
+
+def _custom_env_file(service: dict) -> bool:
+    """True if `service` loads deploy/.env.prod.custom as an OPTIONAL env_file."""
+    for entry in service.get("env_file", []) or []:
+        if isinstance(entry, dict) and entry.get("path", "").endswith(
+            "deploy/.env.prod.custom"
+        ):
+            # Must be optional so a deploy without the file still boots.
+            assert entry.get("required") is False, (
+                "the custom env_file must be required: false (skipped if absent)"
+            )
+            return True
+    return False
+
+
+def test_custom_env_file_wired_into_router_and_mcp_bridge_only() -> None:
+    """Operators inject custom env (e.g. a preset api_key_ref `env://…`) via
+    deploy/.env.prod.custom WITHOUT editing the compose file. It must reach the
+    only two services that resolve secret refs — router + mcp_bridge — and NOT
+    the suite agents or the UNTRUSTED sandbox (least privilege: don't hand
+    operator secrets to containers that never use them)."""
+    import yaml  # noqa: PLC0415
+
+    d = yaml.safe_load(_COMPOSE)
+    assert _custom_env_file(d["services"]["router"]), (
+        "router must load deploy/.env.prod.custom (it resolves api_key_ref / "
+        "OIDC secret refs)"
+    )
+    assert _custom_env_file(d["services"]["mcp_bridge"]), (
+        "mcp_bridge must load deploy/.env.prod.custom (it resolves MCP "
+        "auth_value_ref from its own env)"
+    )
+    # Must NOT leak into the untrusted sandbox or the channel/worker agents.
+    for svc in ("sandbox", "chatbot", "webapp", "orchestrator"):
+        assert not _custom_env_file(d["services"][svc]), (
+            f"{svc} must NOT load the operator custom env file (it never "
+            "resolves secret refs; least-privilege)"
+        )
+
+
+def test_custom_env_example_committed_and_real_file_gitignored() -> None:
+    assert (_REPO / "deploy/.env.prod.custom.example").is_file()
+    gitignore = (_REPO / ".gitignore").read_text()
+    assert "deploy/.env.prod.custom" in gitignore
+    # prod.sh seeds the real file from the example so it's discoverable.
+    prod_sh = (_REPO / "scripts/prod.sh").read_text()
+    assert 'CUSTOM_ENV="deploy/.env.prod.custom"' in prod_sh

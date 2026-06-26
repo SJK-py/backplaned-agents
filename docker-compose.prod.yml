@@ -284,6 +284,19 @@ services:
       postgres: {condition: service_healthy}
       valkey: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
+    # Operator-supplied custom env (optional). Inject ADDITIONAL vars into the
+    # router WITHOUT editing this file — e.g. a provider key referenced by a
+    # preset's api_key_ref `env://MY_PROVIDER_KEY`, or an OIDC secret `env://…`.
+    # The router is one of only two services that resolve secret refs (the other
+    # is mcp_bridge below); the suite agents and the untrusted sandbox never do,
+    # so we scope custom secrets HERE rather than passing them everywhere.
+    # Copy deploy/.env.prod.custom.example → deploy/.env.prod.custom and add
+    # KEY=value lines; it's gitignored and optional (skipped if absent). NOTE:
+    # vars already listed under `environment:` win over this file — use it for
+    # NEW names; configure the existing slots (GEMINI_API_KEY, …) via .env.prod.
+    env_file:
+      - path: deploy/.env.prod.custom
+        required: false
     environment:
       ROUTER_DEPLOYMENT_ENV: prod
       ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
@@ -323,18 +336,12 @@ services:
       # llm_presets table (admin-managed via /admin); a preset's
       # api_key_ref (e.g. env://GEMINI_API_KEY) resolves to one of these.
       # prod.sh fills in whichever provider you choose; the others
-      # stay empty (set one per provider you configure).
+      # stay empty (set one per provider you configure). For a CUSTOM /
+      # self-hosted provider, add your own var (e.g. env://MY_PROVIDER_KEY) to
+      # deploy/.env.prod.custom (see the env_file above) — no compose edit.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      # Generic passthrough slots for custom/self-hosted providers: reference
-      # them from a preset's api_key_ref (env://CUSTOM_LLM_API_KEY_1, ...). They
-      # reach the container with no compose edit — just set the value in
-      # deploy/.env.prod. (A keyless local endpoint needs no slot; pass an
-      # inline api_key dummy on the preset instead.)
-      CUSTOM_LLM_API_KEY_1: ${CUSTOM_LLM_API_KEY_1:-}
-      CUSTOM_LLM_API_KEY_2: ${CUSTOM_LLM_API_KEY_2:-}
-      CUSTOM_LLM_API_KEY_3: ${CUSTOM_LLM_API_KEY_3:-}
       # OIDC / SSO for the webapp (optional; OFF by default — see
       # docs/design/oidc-webapp.md). The router is the OIDC relying party. To
       # enable, set in deploy/.env.prod: OIDC_ENABLED=true, OIDC_ISSUER (the
@@ -646,6 +653,13 @@ services:
       suite-migrate: {condition: service_completed_successfully}
       bootstrap: {condition: service_completed_successfully}
     command: ["python", "-m", "bp_mcp_bridge"]
+    # Operator-supplied custom env (optional) — the bridge resolves an MCP
+    # server's `auth_value_ref` (env://VAR / secret://…) from ITS own env, so a
+    # stdio/SSE server credential lands here. Same file as the router uses
+    # (deploy/.env.prod.custom); gitignored and skipped if absent.
+    env_file:
+      - path: deploy/.env.prod.custom
+        required: false
     environment:
       BP_MCP_BRIDGE_ROUTER_URL: ws://router:8000/v1/agent
       BP_MCP_BRIDGE_ROUTER_ADMIN_URL: http://router:8000
