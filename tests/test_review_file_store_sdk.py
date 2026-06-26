@@ -142,6 +142,50 @@ def test_write_sends_write_command(tmp_path: Path) -> None:
     assert f.command.text == "hello"
 
 
+def test_write_large_payload_routes_over_http(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A write whose inline frame would exceed the negotiated cap streams the
+    bytes over HTTP via store() (FileStoreFrame) instead of an inline
+    FileManageFrame — so it never trips the router's payload-too-large close."""
+    sent: dict = {}
+
+    def reply(frame):  # type: ignore[no-untyped-def]
+        sent["frame"] = frame
+        return _result(frame, saved_name="big_1.md")
+
+    fs = _stash(reply, tmp_path)
+
+    async def _no_upload(*a, **k):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(fs, "_upload_blob", _no_upload)
+    big = "x" * 1_100_000  # > the 1 MiB default frame cap
+    saved = asyncio.run(fs.write("big.md", big, persistent=False))
+
+    assert saved == "big_1.md"
+    f = sent["frame"]
+    assert isinstance(f, FileStoreFrame)  # HTTP path, NOT inline FileManageFrame
+    assert f.byte_size == len(big.encode("utf-8"))
+    assert f.filename == "big.md"
+
+
+def test_write_threshold_follows_negotiated_cap(tmp_path: Path) -> None:
+    """The inline/HTTP boundary uses the router-negotiated WS cap, not a
+    hardcoded 1 MiB — a higher Welcome cap keeps a larger write inline."""
+    sent: dict = {}
+
+    def reply(frame):  # type: ignore[no-untyped-def]
+        sent["frame"] = frame
+        return _result(frame, saved_name="m.md")
+
+    fs = _stash(reply, tmp_path)
+    # Negotiated 8 MiB cap → a ~2 MiB write still fits one frame.
+    fs._dispatcher.transport.welcome = SimpleNamespace(
+        max_payload_bytes=8 * 1024 * 1024
+    )
+    asyncio.run(fs.write("m.md", "y" * 2_000_000))
+    assert isinstance(sent["frame"], FileManageFrame)  # inline, not HTTP
+
+
 def test_list_returns_names(tmp_path: Path) -> None:
     captured: dict = {}
 

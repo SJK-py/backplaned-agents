@@ -102,11 +102,15 @@ class Settings(BaseSettings):
     possibly long after the name was resolved) — hence generous and
     operator-raisable, unlike the upload token."""
 
-    max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1024)  # 25 MiB
-    """Hard cap on a single upload to `/v1/files`. Enforced mid-stream
-    so an attacker can't trickle gigabytes into RAM. Operators raise
-    this for video / model-weight workloads; presigned-URL uploads are
-    out of scope and have no router-side limit."""
+    max_upload_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)  # 50 MiB
+    """Hard cap on a single upload to `/v1/files` AND the agent-side
+    upload-with-grant / `FileStash.store` path (bytes that stream over HTTP,
+    NOT the WS frame). Enforced mid-stream so an attacker can't trickle
+    gigabytes into RAM. Distinct from `max_payload_bytes` (the ~1 MiB WS frame
+    cap): a large `write_file` / conversion output is routed over HTTP and
+    bounded HERE, not by the frame cap. Operators raise this for video /
+    model-weight workloads; presigned-URL uploads are out of scope and have no
+    router-side limit."""
 
     llm_attachment_inline_max_bytes: int = Field(
         default=5 * 1024 * 1024, ge=1024
