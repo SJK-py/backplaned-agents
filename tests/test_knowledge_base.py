@@ -130,11 +130,36 @@ def test_chunk_markdown_prefers_header_boundaries() -> None:
 
 
 def test_kb_store_name_documents_persist_prefix() -> None:
-    """The `store` tool schema must tell callers (research, orchestrator, …)
-    that `name` accepts a `persist/<file>` reference — otherwise they only ever
-    pass session-stash names."""
-    desc = KbStore.model_json_schema()["properties"]["name"].get("description", "")
-    assert "persist/" in desc
+    """The `store` tool must tell callers (research, orchestrator, …) that
+    `name` accepts a `persist/<file>` reference — verified end to end: the
+    field description survives into the actual tool spec the LLM is handed
+    (not just the raw payload schema)."""
+    from bp_agents.agents.knowledge_base.agent import agent
+    from bp_sdk.tools import build_tools
+
+    # 1) The description is on the payload model.
+    assert "persist/" in (
+        KbStore.model_json_schema()["properties"]["name"].get("description", "")
+    )
+
+    # 2) It propagates into the built tool (what the model actually receives).
+    info = agent.info
+    dest = {
+        info.agent_id: {
+            "accepts_schema": info.accepts_schema,
+            "non_tool_modes": info.non_tool_modes,
+            "description": info.description,
+            "mode_descriptions": getattr(info, "mode_descriptions", None),
+            "capabilities": info.capabilities,
+        }
+    }
+    fns = build_tools(dest, provider="openai")
+    store = next(
+        f["function"]
+        for f in fns
+        if f["function"]["name"] == "call_knowledge_base_store"
+    )
+    assert "persist/" in store["parameters"]["properties"]["name"].get("description", "")
 
 
 def test_kb_store_retrieve_list_remove(tmp_path) -> None:
