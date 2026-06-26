@@ -789,6 +789,18 @@ _CANCEL_SENTINEL = object()
 # unboundedly. Generous so legitimate burst-then-drain never trips.
 _LLM_STREAM_QUEUE_MAX = 1024
 
+# `embed()` auto-split tuning. An embedding result rides INLINE in the
+# LlmResultFrame (`vectors: list[list[float]]`); a JSON double is ~21 bytes
+# (measured ~20.8 for arbitrary doubles, rounded up). `embed` sizes each
+# sub-request so its result frame stays under a fraction of the negotiated
+# payload cap — the binding constraint, since a 100×1536-d result is ~3 MiB
+# (over the ~1 MiB cap → the router can't deliver it → the caller hangs).
+_DEFAULT_PAYLOAD_CAP = 1_048_576  # mirrors the router's default max_payload_bytes
+_EMBED_FLOAT_BYTES = 22
+_EMBED_FRAME_BUDGET_FRACTION = 0.6  # leave headroom for the frame envelope
+_EMBED_MAX_ASSUMED_DIM = 4096  # worst-case dim for sizing the FIRST batch
+_EMBED_INPUT_OVERHEAD = 8  # per-input JSON overhead (quotes/comma/escaping)
+
 
 class LlmServiceClient:
     """Per-task LLM facade. Routes calls over the agent's WebSocket.
@@ -1278,28 +1290,23 @@ class LlmServiceClient:
     # embed
     # ------------------------------------------------------------------
 
-    async def embed(
+    def _payload_cap(self) -> int:
+        """Router-negotiated WS frame cap in bytes (`WelcomeFrame.
+        max_payload_bytes`), falling back to the router default when no
+        Welcome is bound (in-proc transport / pre-handshake)."""
+        transport = getattr(self._dispatcher, "transport", None)
+        welcome = getattr(transport, "welcome", None)
+        cap = getattr(welcome, "max_payload_bytes", None)
+        return cap if isinstance(cap, int) and cap > 0 else _DEFAULT_PAYLOAD_CAP
+
+    async def _embed_once(
         self,
-        text: str | list[str],
+        text_list: list[str],
         *,
-        preset: str | None = None,
-        # `default` would route to the chat preset (Gemini), which
-        # raises NotImplementedError on `embed()`. The embeddings-shaped
-        # default points at the canonical embedding preset so an SDK
-        # call with no explicit name "just works".
-        model: str = "text-embedding-3-small",
-        retry: RetryPolicy | None = None,
+        preset: str | None,
+        model: str,
+        retry: RetryPolicy,
     ) -> list[list[float]]:
-        if self._ctx.cancel_token.cancelled:
-            raise CancellationError(self._ctx.cancel_token.reason or "cancelled")
-        if isinstance(text, str):
-            text_list = [text]
-        else:
-            text_list = list(text)
-
-        if retry is None:
-            retry = RetryPolicy()
-
         def _build_request() -> LlmRequestFrame:
             return LlmRequestFrame(
                 agent_id=self._agent_id,
@@ -1314,6 +1321,64 @@ class LlmServiceClient:
 
         result = await self._run_with_retry(_build_request, retry)
         return result.vectors
+
+    async def embed(
+        self,
+        text: str | list[str],
+        *,
+        preset: str | None = None,
+        # `default` would route to the chat preset (Gemini), which
+        # raises NotImplementedError on `embed()`. The embeddings-shaped
+        # default points at the canonical embedding preset so an SDK
+        # call with no explicit name "just works".
+        model: str = "text-embedding-3-small",
+        retry: RetryPolicy | None = None,
+    ) -> list[list[float]]:
+        """Embed one or many texts. A large input list is AUTO-SPLIT into
+        sub-requests so neither the request frame (input texts) nor the result
+        frame (vectors, which ride INLINE) exceeds the negotiated WS payload
+        cap. The result frame is the binding constraint: a vector is ≈ `dim`
+        floats × ~21 bytes, so e.g. 100 × 1536-d vectors ≈ 3 MiB — over the
+        ~1 MiB cap, which the router can't deliver, hanging the caller. Vectors
+        are returned in input order; a small call that already fits is a single
+        request (unchanged)."""
+        if self._ctx.cancel_token.cancelled:
+            raise CancellationError(self._ctx.cancel_token.reason or "cancelled")
+        if isinstance(text, str):
+            text_list = [text]
+        else:
+            text_list = list(text)
+        if not text_list:
+            return []
+        if retry is None:
+            retry = RetryPolicy()
+
+        budget = int(self._payload_cap() * _EMBED_FRAME_BUDGET_FRACTION)
+        out: list[list[float]] = []
+        # Result-side count cap. The embedding dim is unknown until the first
+        # response, so the FIRST batch assumes a worst-case dim (its result is
+        # guaranteed to fit); subsequent batches use the dim we actually saw.
+        max_by_result = max(1, budget // (_EMBED_MAX_ASSUMED_DIM * _EMBED_FLOAT_BYTES))
+        i, n = 0, len(text_list)
+        while i < n:
+            # Also bound the REQUEST frame by accumulated input-text bytes.
+            sub: list[str] = []
+            req_bytes = 0
+            while i < n and len(sub) < max_by_result:
+                tb = len(text_list[i].encode("utf-8")) + _EMBED_INPUT_OVERHEAD
+                if sub and req_bytes + tb > budget:
+                    break  # this input would overflow the request frame
+                sub.append(text_list[i])
+                req_bytes += tb
+                i += 1
+            vectors = await self._embed_once(
+                sub, preset=preset, model=model, retry=retry
+            )
+            out.extend(vectors)
+            if vectors:
+                dim = len(vectors[0]) or 1
+                max_by_result = max(1, budget // (dim * _EMBED_FLOAT_BYTES))
+        return out
 
     # ------------------------------------------------------------------
     # count_tokens

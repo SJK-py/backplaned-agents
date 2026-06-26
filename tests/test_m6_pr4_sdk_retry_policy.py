@@ -1150,3 +1150,58 @@ def test_stream_meta_deltas_do_not_count_as_first_delta() -> None:
     out = asyncio.run(_drive())
     assert [d.text for d in out] == ["recovered"]
     assert len(disp.transport.sent) == 2
+
+
+# ---------------------------------------------------------------------------
+# embed — auto-split so request/result frames fit the negotiated payload cap
+# ---------------------------------------------------------------------------
+
+
+def _install_embed_responder(disp: _FakeDispatcher, *, dim: int) -> None:
+    """Resolve each embed send with one `dim`-length vector per input text, so
+    the responder works for whatever sub-batches `embed` chooses to send."""
+    original_send = disp.transport.send
+
+    async def _send(frame: Any) -> None:
+        await original_send(frame)
+        resp = _ok_result(
+            kind="embed", vectors=[[0.01] * dim for _ in range(len(frame.text))]
+        ).model_copy(update={"ref_correlation_id": frame.correlation_id})
+        disp.pending_results.resolve(frame.correlation_id, resp)
+
+    disp.transport.send = _send  # type: ignore[method-assign]
+
+
+def test_embed_autosplits_under_payload_cap() -> None:
+    from types import SimpleNamespace
+
+    client, disp, _ctx = _make_client()
+    # Tiny negotiated cap → even modest batches must split.
+    disp.transport.welcome = SimpleNamespace(max_payload_bytes=2000)
+    _install_embed_responder(disp, dim=8)
+
+    inputs = [f"chunk-{i}" for i in range(40)]
+    vectors = asyncio.run(client.embed(inputs, preset="emb"))
+
+    # Every input embedded, exactly once, in order.
+    assert len(vectors) == 40
+    embed_sends = [f for f in disp.transport.sent if getattr(f, "kind", None) == "embed"]
+    assert len(embed_sends) > 1  # the list was split across requests
+    assert [t for f in embed_sends for t in f.text] == inputs
+    # Each batch's inline result frame stays within the budget (or the
+    # single-item floor for a lone oversized input).
+    budget = int(2000 * 0.6)
+    for f in embed_sends:
+        assert len(f.text) == 1 or len(f.text) * 8 * 22 <= budget
+
+
+def test_embed_single_request_when_it_fits() -> None:
+    client, disp, _ctx = _make_client()  # no welcome → default 1 MiB cap
+    _install_embed_responder(disp, dim=8)
+
+    vectors = asyncio.run(client.embed(["a", "b", "c"], preset="emb"))
+
+    assert len(vectors) == 3
+    embed_sends = [f for f in disp.transport.sent if getattr(f, "kind", None) == "embed"]
+    assert len(embed_sends) == 1  # small input → one request, unchanged
+    assert embed_sends[0].text == ["a", "b", "c"]
