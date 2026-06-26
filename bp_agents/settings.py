@@ -228,6 +228,13 @@ class SuiteSettings(BaseSettings):
     kb_overlap_len: int = Field(default=100, ge=0)
     """Markdown chunking bounds ([data-model.md] §2.1)."""
 
+    kb_embed_batch_size: int = Field(default=100, ge=1)
+    """Max chunks per embedding request in `store`. A document's chunks were
+    previously embedded in ONE call, which blows the provider's per-request
+    input/token limit (and the ~1 MiB WS frame cap) for large documents.
+    Batching bounds each request: 100 × `kb_max_chunk_len` (2000) ≈ 200k chars
+    worst case — well under both. Vectors are reassembled in chunk order."""
+
     kb_meta_head_chars: int = Field(default=8000, ge=0)
     kb_meta_tail_chars: int = Field(default=2000, ge=0)
     """Head/tail window fed to the LLM for `store` metadata generation

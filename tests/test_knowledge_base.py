@@ -65,6 +65,19 @@ class _StubLlm:
         return LlmResponse(text=json.dumps(self._meta))
 
 
+class _RecordingLlm(_StubLlm):
+    """Records the size of each embed batch so a test can assert that `store`
+    splits a document's chunks into bounded requests instead of one big call."""
+
+    def __init__(self, meta: dict | None = None) -> None:
+        super().__init__(meta)
+        self.batches: list[int] = []
+
+    async def embed(self, texts, *, preset=None):
+        self.batches.append(len(texts))
+        return [_kw_vec(t) for t in texts]
+
+
 class _StubPeers:
     """Stands in for md_converter — returns a converted `.md` stash file."""
 
@@ -171,6 +184,38 @@ def test_kb_store_retrieve_list_remove(tmp_path) -> None:
         assert "Removed 1" in removed.content
         listed2 = await run_kb_list(ctx, KbList(), settings=settings, store=store)
         assert "cats" not in listed2.content
+
+    asyncio.run(_drive())
+
+
+def test_kb_store_batches_embeddings(tmp_path) -> None:
+    """A document's chunks are embedded in bounded batches (≤ batch_size per
+    request), not one giant call — and the vectors still cover every chunk."""
+    async def _drive() -> None:
+        store = KnowledgeStore(await connect(tmp_path, "usr_b"), embedding_dim=_DIM)
+        # Tiny chunks + batch so a moderate doc clearly spans several requests.
+        settings = SuiteSettings(
+            embedding_dim=_DIM, kb_max_chunk_len=20, kb_min_chunk_len=10,
+            kb_overlap_len=0, kb_embed_batch_size=2,
+        )
+        body = (
+            b"alpha bravo charlie delta echo foxtrot golf hotel india juliet "
+            b"kilo lima mike november oscar papa quebec romeo sierra tango"
+        )
+        llm = _RecordingLlm()
+        ctx = _StubCtx("usr_b", _StubFiles({"doc.md": body}), llm)
+
+        out = await run_kb_store(
+            ctx, KbStore(name="doc.md"),
+            settings=settings, store=store, preset="emb",
+        )
+        assert llm.batches, "embed was never called"
+        # No batch exceeded the cap, and they tile the whole chunk set.
+        assert all(b <= 2 for b in llm.batches)
+        n_chunks = sum(llm.batches)
+        assert n_chunks > 2  # the doc really did split into multiple batches
+        assert len(llm.batches) == (n_chunks + 2 - 1) // 2  # ceil(n / batch_size)
+        assert f"({n_chunks} chunks)" in out.content
 
     asyncio.run(_drive())
 
