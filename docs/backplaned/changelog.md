@@ -20,6 +20,30 @@
 
 ## 2026-06-26
 
+> `ctx.llm.embed` now **auto-splits** a large input list so neither the request
+> nor the inline vectors result exceeds the WS payload cap — fixing a hang when
+> an agent embeds many chunks (the binding limit is the result frame, not the
+> request).
+
+### Fixed — `embed()` bounds request + result frames by the payload cap
+
+- **What (`bp_sdk/llm.py`):** an embedding result rides INLINE in
+  `LlmResultFrame.vectors`; at ~21 bytes/float a 100 × 1536-d batch is ~3 MiB,
+  over the ~1 MiB `max_payload_bytes` cap. The router has no outbound chunking,
+  so it can't deliver the frame and the caller's `embed()` hangs. `embed()` now
+  splits the input list into sub-requests sized so both the request frame
+  (input texts) and the result frame (vectors) stay under a fraction of the
+  router-negotiated cap. The embedding dim is unknown until the first response,
+  so the first batch assumes a worst-case dim (its result is guaranteed to fit)
+  and later batches use the dim actually returned. Vectors are returned in
+  input order; a call that already fits is a single request (unchanged).
+- **Why:** `knowledge_base.store` embeds a document's chunks; a large document
+  would otherwise hang the agent. Fixing it in the SDK covers every bulk-embed
+  caller (the suite keeps `kb_embed_batch_size` only as the provider
+  input/token-limit guard, a separate axis the byte budget can't see).
+
+## 2026-06-26
+
 > `read_file` gains **character windowing** for text files: a bounded slice
 > (default first 20000 chars) with a marker + next `offset`, so a large file
 > can't flood the model's context and is page-able. Images/PDFs unchanged.
