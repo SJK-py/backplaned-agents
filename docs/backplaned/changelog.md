@@ -20,6 +20,43 @@
 
 ## 2026-06-26
 
+> `read_file` gains **character windowing** for text files: a bounded slice
+> (default first 20000 chars) with a marker + next `offset`, so a large file
+> can't flood the model's context and is page-able. Images/PDFs unchanged.
+
+### Changed — `read_file` returns a bounded text window (SDK-side)
+
+- **What (`bp_sdk/file_tools.py`):** the `read_file` tool gains optional
+  `max_chars` (default 20000, hard-capped at 500000) + `offset` (default 0).
+  For a TEXT file (decided by extension), `dispatch_file_tool` streams the blob
+  to a local temp copy (`FileStash.read`) and slices the
+  `[offset, offset+max_chars)` CHARACTER window off disk with an incremental
+  UTF-8 decoder (`_slice_text_file`), so only the window is ever held in
+  memory — a multi-GB file slices without being loaded whole. Result is a plain
+  text part: `File: <name> (characters A–B of N)` plus a `…[K more characters —
+  call read_file again with offset=B]` marker when truncated. Previously it
+  always returned a name `file_ref` and the router inlined the WHOLE file
+  (bounded only by the ~5 MiB byte cap), which could overflow context with no
+  way to read a slice.
+- **What stays:** images / PDFs / unknown types still return a `file_ref`
+  (router-resolved, multimodal) — `max_chars`/`offset` are text-only. A file
+  that looked textual by extension but isn't valid UTF-8 falls back to the
+  `file_ref` path.
+- **No whole-file size cap:** because the window is sliced off disk with
+  bounded memory, a text file of any size is page-able — the `max_chars` window
+  (≤ 500000 chars) is the only bound on what reaches context. (An earlier
+  revision refused files over a byte cap; dropped — it defeated paging and the
+  window already bounds context.)
+- **Why:** the per-read window (`max_chars`) is the context guard; windowing
+  lets the model read big logs / CSVs / markdown in bounded, page-able chunks
+  instead of all-or-nothing.
+- **Limitation:** memory is bounded, but the file store has no RANGE read, so
+  the SDK still downloads the whole blob to disk per call — paging a large file
+  re-downloads it each page. A range fetch would make paging O(window); future
+  work.
+
+## 2026-06-26
+
 > A large `write_file` no longer dies on the WS frame cap: `FileStash.write`
 > now routes any payload that wouldn't fit one frame over the HTTP upload path
 > instead, and the upload ceiling rises 25 → 50 MiB. Lets agents (e.g. the
