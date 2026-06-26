@@ -20,6 +20,7 @@ glob, so the `full` bundle is the sharpest edge.
 
 from __future__ import annotations
 
+import mimetypes
 from typing import TYPE_CHECKING, Any, Literal
 
 from bp_sdk.files import FileStoreError
@@ -32,6 +33,55 @@ _READ_ONLY = ("list_session_file", "list_persist_file", "stat_file", "read_file"
 _MUTATING = ("write_file", "delete_file", "copy_file")
 
 Bundle = Literal["read_only", "full"]
+
+# read_file windowing (text files only) — the model reads a bounded slice and
+# pages with `offset`, so a large file can't flood context and a giant log is
+# reachable in chunks. Images/PDFs ignore these (shown whole via the router).
+_DEFAULT_READ_CHARS = 20_000   # returned when the model passes no max_chars
+_MAX_READ_CHARS = 200_000      # hard ceiling on one window (clamp, don't error)
+# Refuse to pull an enormous "text" blob into the agent just to slice it — over
+# this, tell the model to extract the part it needs with another tool.
+_MAX_TEXT_READ_BYTES = 20 * 1024 * 1024  # 20 MiB
+
+# Textual `application/*` types that decode as UTF-8 like `text/*` (mirrors the
+# router's `_is_text_mime`, so the SDK windowed-read and the router's text
+# classification agree on what counts as text).
+_TEXT_APP_MIMES = frozenset({
+    "application/json", "application/yaml", "application/x-yaml",
+    "application/xml", "application/javascript", "application/x-javascript",
+    "application/toml", "application/x-sh", "application/csv",
+    "application/x-csv", "application/x-ndjson",
+})
+
+
+def _is_textual_mime(mime: str | None) -> bool:
+    """True for a mime fed as UTF-8 text: any `text/*`, a small set of
+    textual `application/*`, and `+json`/`+xml`/`+yaml` suffixes."""
+    m = (mime or "").split(";", 1)[0].strip().lower()
+    return (
+        m.startswith("text/")
+        or m in _TEXT_APP_MIMES
+        or m.endswith(("+json", "+xml", "+yaml"))
+    )
+
+
+def _is_text_name(name: str) -> bool:
+    """Whether a stash NAME looks like a text file, by extension — the SDK
+    decides text-vs-binary here (no stat round-trip) so an image/PDF read
+    stays a one-shot `file_ref`. A mislabelled binary that slips through is
+    caught by the UTF-8 decode and falls back to the `file_ref` path."""
+    return _is_textual_mime(mimetypes.guess_type(name)[0])
+
+
+def _clamp_int(value: Any, *, default: int, lo: int, hi: int | None) -> int:
+    """Parse a tool arg into a bounded int (clamp, never error — a model
+    sometimes sends a string or an out-of-range number)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    n = max(lo, n)
+    return n if hi is None else min(n, hi)
 
 
 def _spec(
@@ -91,13 +141,28 @@ _SPECS: dict[str, ToolSpec] = {
         "read_file",
         "Show a stash file's content so you can read it. Pass any stash file "
         "name (`{filename}` or `persist/{filename}`); text, images, and "
-        "documents are all supported.",
+        "documents are all supported. A TEXT file returns a bounded window "
+        "(by default the first ~20000 characters) — if it's truncated the "
+        "result says how many characters remain and the `offset` to continue "
+        "from, so you can page through a large file. `max_chars` / `offset` "
+        "apply to text only; images and PDFs are always shown whole.",
         {
             "name": {
                 "type": "string",
                 "description": "File name to show, e.g. 'chart.png' or "
                 "'persist/report.pdf'.",
-            }
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Text only. Max characters to return in this "
+                "read (default 20000). Raise it to pull more at once.",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Text only. Character position to start from "
+                "(default 0) — pass the offset the previous read reported to "
+                "continue past a truncation.",
+            },
         },
         ["name"],
     ),
@@ -255,6 +320,58 @@ def _entry_view(entry: Any) -> dict[str, Any]:
     }
 
 
+async def _read_file(
+    files: FileStash, name: str, args: dict[str, Any]
+) -> str | dict[str, Any] | list[dict[str, Any]]:
+    """Resolve a `read_file` call.
+
+    A TEXT file (decided by extension) is read SDK-side and returned as a
+    bounded CHARACTER window — `max_chars` (default 20000) from `offset`
+    (default 0) — with a marker + the next `offset` when truncated, so a
+    large file can't flood context and is page-able. Anything else (image /
+    PDF / unknown type) returns a name `file_ref` the ROUTER resolves into
+    multimodal content on the next turn, unchanged. A file that looked like
+    text by extension but isn't valid UTF-8 also falls back to `file_ref`.
+
+    A `FileStoreError` (e.g. `not_found`) propagates to `dispatch_file_tool`,
+    which surfaces it as `{"error": code}`."""
+    if not _is_text_name(name):
+        return [files.llm_ref(name)]
+    max_chars = _clamp_int(
+        args.get("max_chars"), default=_DEFAULT_READ_CHARS, lo=1, hi=_MAX_READ_CHARS
+    )
+    offset = _clamp_int(args.get("offset"), default=0, lo=0, hi=None)
+
+    data = await files.read_bytes(name)
+    if len(data) > _MAX_TEXT_READ_BYTES:
+        return {
+            "error": (
+                f"'{name}' is {_human_size(len(data))} — too large to read as "
+                "text inline. Extract or filter the part you need with another "
+                "tool, then read that."
+            )
+        }
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        # Looked like text by extension but isn't UTF-8 — let the router
+        # decide (inline as a document, or a reference note).
+        return [files.llm_ref(name)]
+
+    total = len(text)
+    start = min(offset, total)
+    window = text[start:start + max_chars]
+    end = start + len(window)
+    remaining = total - end
+    header = f"File: {name} (characters {start}–{end} of {total})"
+    footer = (
+        f"\n\n…[{remaining} more characters — call read_file again "
+        f"with offset={end} to continue]"
+        if remaining > 0 else ""
+    )
+    return f"{header}\n\n{window}{footer}"
+
+
 async def _run(
     files: FileStash, name: str, args: dict[str, Any]
 ) -> str | dict[str, Any] | list[dict[str, Any]]:
@@ -280,8 +397,7 @@ async def _run(
         fname = args.get("name")
         if not fname:
             return {"error": "read_file requires a 'name'"}
-        # A name file_ref — resolved at the router on the next turn.
-        return [files.llm_ref(fname)]
+        return await _read_file(files, fname, args)
     if name == "write_file":
         fname = args.get("filename")
         text = args.get("text")

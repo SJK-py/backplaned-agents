@@ -109,6 +109,10 @@ class _FakeFiles:
     async def list(self, **kw):
         return []
 
+    async def read_bytes(self, name):
+        # text files fall through to the SDK windowed read (read_file)
+        return b"hello from the text file"
+
     async def stat(self, name):
         self.stat_calls.append(name)
         if name in self._missing:
@@ -214,10 +218,12 @@ def test_text_file_not_routed_through_vision() -> None:
             ctx, _call("read_file", {"name": "notes.txt"}),
             None, file_tools_enabled=True, multimodal_preset="vision",
         )
-        # a text file never hits the vision model — falls through to the
-        # normal file dispatch, which returns a file_ref part
+        # a text file never hits the vision model — it falls through to the
+        # normal file dispatch, which now returns a windowed TEXT read
         assert llm.calls == []
-        assert msg.content == [{"file_ref": {"name": "notes.txt"}}]
+        assert isinstance(msg.content, str)
+        assert msg.content.startswith("File: notes.txt")
+        assert "hello from the text file" in msg.content
 
     asyncio.run(_drive())
 

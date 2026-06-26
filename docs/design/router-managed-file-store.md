@@ -331,6 +331,16 @@ this path; only the ref shape changes:
 // after  (named store): {"file_ref": {"name": "chart.png",    "as": "image"}}
 ```
 
+> **Exception — the `read_file` text window.** The above holds for the
+> multimodal feed path (images / PDFs ride a `file_ref`, router-resolved).
+> But the `read_file` *tool* now reads a TEXT file's bytes locally
+> (`read_bytes`, the §4.2 path) to return a bounded **character window**
+> (`max_chars` / `offset`, default first 20000 chars) as a plain text tool
+> result — so a large file is page-able and can't flood context. This is a
+> deliberate agent-side read for slicing, not an LLM-feed inline; images /
+> PDFs / non-UTF-8 files still return a `file_ref` and stay on the
+> router-resolved path. See `bp_sdk/file_tools.py` (`_read_file`).
+
 **Name resolution is scoped by an AUTHORITATIVE `(user_id,
 session_id)` the router DERIVES from the task row — never from
 agent-asserted frame fields.** The router reads

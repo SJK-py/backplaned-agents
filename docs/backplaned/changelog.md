@@ -20,6 +20,34 @@
 
 ## 2026-06-26
 
+> `read_file` gains **character windowing** for text files: a bounded slice
+> (default first 20000 chars) with a marker + next `offset`, so a large file
+> can't flood the model's context and is page-able. Images/PDFs unchanged.
+
+### Changed — `read_file` returns a bounded text window (SDK-side)
+
+- **What (`bp_sdk/file_tools.py`):** the `read_file` tool gains optional
+  `max_chars` (default 20000, hard-capped at 200000) + `offset` (default 0).
+  For a TEXT file (decided by extension), `dispatch_file_tool` now reads the
+  bytes SDK-side, decodes UTF-8, and returns the `[offset, offset+max_chars)`
+  CHARACTER window as a plain text result — `File: <name> (characters A–B of
+  N)` plus a `…[K more characters — call read_file again with offset=B]` marker
+  when truncated. Previously it always returned a name `file_ref` and the
+  router inlined the WHOLE file (bounded only by the ~5 MiB byte cap), which
+  could overflow context with no way to read a slice.
+- **What stays:** images / PDFs / unknown types still return a `file_ref`
+  (router-resolved, multimodal) — `max_chars`/`offset` are text-only. A file
+  that looked textual by extension but isn't valid UTF-8 falls back to the
+  `file_ref` path; a text blob over 20 MiB is refused with a clear message.
+- **Why:** the byte cap is a transport guard, not a context guard — 5 MiB of
+  text is ~1.5M tokens. Windowing lets the model read big logs / CSVs / markdown
+  in bounded, page-able chunks instead of all-or-nothing.
+- **Limitation:** the SDK downloads the whole text blob to slice it (the file
+  store has no range read), so paging a very large file re-downloads it each
+  call; the 20 MiB ceiling bounds that.
+
+## 2026-06-26
+
 > A large `write_file` no longer dies on the WS frame cap: `FileStash.write`
 > now routes any payload that wouldn't fit one frame over the HTTP upload path
 > instead, and the upload ceiling rises 25 → 50 MiB. Lets agents (e.g. the
