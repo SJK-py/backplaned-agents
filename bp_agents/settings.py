@@ -229,11 +229,13 @@ class SuiteSettings(BaseSettings):
     """Markdown chunking bounds ([data-model.md] §2.1)."""
 
     kb_embed_batch_size: int = Field(default=100, ge=1)
-    """Max chunks per embedding request in `store`. A document's chunks were
-    previously embedded in ONE call, which blows the provider's per-request
-    input/token limit (and the ~1 MiB WS frame cap) for large documents.
-    Batching bounds each request: 100 × `kb_max_chunk_len` (2000) ≈ 200k chars
-    worst case — well under both. Vectors are reassembled in chunk order."""
+    """Max chunks per embedding request in `store` — the guard against the
+    embedding provider's per-request INPUT/TOKEN limit (e.g. OpenAI's 2048
+    inputs / ~300k tokens); 100 × `kb_max_chunk_len` (2000) ≈ 200k chars worst
+    case. The WS frame-size limit (a large vectors result frame) is handled
+    separately and globally by `ctx.llm.embed`, which auto-splits each request
+    so neither the request nor the inline result frame exceeds the payload cap.
+    Vectors are reassembled in chunk order."""
 
     kb_meta_head_chars: int = Field(default=8000, ge=0)
     kb_meta_tail_chars: int = Field(default=2000, ge=0)
