@@ -440,3 +440,48 @@ def test_chat_view_resumes_in_flight_bubble(suite_db_url: str) -> None:
     assert 'sse-connect="/chat/ses_1/stream"' in view
     assert 'hx-post="/chat/ses_1/stop"' in view  # the Stop button is back
     assert "go" in view  # the user message was recorded under the lock
+
+
+def test_chat_stream_resume_skips_seen_events(suite_db_url: str) -> None:
+    """An EventSource reconnect (carrying Last-Event-ID) must replay only
+    UNSEEN events — otherwise the activity strip duplicates on every reconnect."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[str, str]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _ChatDispatcher(
+                content="the reply",
+                progress=[
+                    {"kind": "thinking", "round": 1},
+                    {"kind": "tool_call", "tool": "call_x", "round": 1},
+                ],
+            )
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                await client.post(
+                    "/chat/ses_1", data={"message": "go"},
+                    headers={"X-CSRF-Token": token},
+                )
+                first = (await client.get("/chat/ses_1/stream")).text
+                # Reconnect after having seen event id 2 (the two progress rows).
+                resumed = (await client.get(
+                    "/chat/ses_1/stream", headers={"Last-Event-ID": "2"}
+                )).text
+            return first, resumed
+        finally:
+            await pool.close()
+
+    first, resumed = asyncio.run(_drive())
+    # Events are id-tagged so the browser can resume.
+    assert "id: 1" in first and "id: 3" in first
+    assert first.count("event: progress") == 2
+    # The reconnect skips the two seen progress rows but still gets the result.
+    assert resumed.count("event: progress") == 0
+    assert "event: result" in resumed
