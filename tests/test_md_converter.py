@@ -179,7 +179,14 @@ def test_ocr_configured_builds_plugin_client(monkeypatch) -> None:
     fake_md.MarkItDown = _FakeMarkItDown
     monkeypatch.setitem(sys.modules, "markitdown", fake_md)
 
-    mod._make_markitdown()
+    # OCR is opt-in: even fully configured, ocr=False (the default) stays plain
+    # — no client built, no plugins. This is the fix for "OCR runs every time".
+    mod._make_markitdown(ocr=False)
+    assert client_kwargs == {}
+    assert md_kwargs == {}
+
+    # ocr=True engages the plugin with the bounded OCR client.
+    mod._make_markitdown(ocr=True)
 
     # Client built from the OCR-specific credentials (secret unwrapped) and
     # bounded so a slow OCR endpoint can't hang the conversion (SDK defaults
@@ -213,6 +220,35 @@ def test_ocr_key_without_model_stays_disabled(monkeypatch) -> None:
     monkeypatch.setattr(mod._settings, "md_ocr_model", None)
     mod._ocr_client_box.clear()
     assert mod._ocr_llm_client() is None
+
+
+def test_convert_forwards_ocr_flag(monkeypatch, tmp_path) -> None:
+    """run_convert threads the request's `ocr` flag to the isolated worker, and
+    defaults to OFF — OCR runs only when the caller asks, not on every call."""
+    import sys
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    captured: dict = {}
+
+    async def _fake_isolated(in_path: str, *, ocr: bool = False) -> str:
+        captured["ocr"] = ocr
+        return "# converted"
+
+    monkeypatch.setattr(mod, "_convert_isolated", _fake_isolated)
+    doc = tmp_path / "f.pdf"
+    doc.write_text("x")
+
+    def _run(payload: Convert) -> bool:
+        async def _drive() -> bool:
+            await run_convert(_Ctx(_StubFiles(doc)), payload)
+            return captured["ocr"]
+
+        return asyncio.run(_drive())
+
+    assert _run(Convert(name="f.pdf", output_type="content", ocr=True)) is True
+    assert _run(Convert(name="f.pdf", output_type="content", ocr=False)) is False
+    # Default is opt-out: a request that omits `ocr` does NOT OCR.
+    assert _run(Convert(name="f.pdf", output_type="content")) is False
 
 
 def test_decode_html_detects_non_utf8_charset() -> None:
@@ -269,7 +305,7 @@ def _fake_worker(monkeypatch, mod, script: str) -> None:
     the real worker module. The script gets (in_path, out_path) as argv[1:3]."""
     import sys
 
-    def _argv(in_path: str, out_path: str) -> list:
+    def _argv(in_path: str, out_path: str, ocr: bool) -> list:
         return [sys.executable, "-c", script, in_path, out_path]
 
     monkeypatch.setattr(mod, "_worker_argv", _argv)

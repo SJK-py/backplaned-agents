@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from bp_agents.common import text_output
 from bp_agents.common.urlsafe import safe_stream_get
@@ -78,6 +78,17 @@ def _fetch_reason(exc: Exception) -> str:
 class Convert(BaseModel):
     name: str
     output_type: str = "auto"  # file | content | auto
+    ocr: bool = Field(
+        default=False,
+        description=(
+            "Run vision OCR on images and scanned pages in the document, using "
+            "the server-configured OCR model. Set true ONLY for scanned PDFs or "
+            "image-based documents whose text isn't selectable — it is slower "
+            "and spends vision-model calls per image. Leave false (default) for "
+            "normal documents that already have a text layer. No effect when no "
+            "OCR backend is configured."
+        ),
+    )
 
 
 class Webpage(BaseModel):
@@ -129,15 +140,16 @@ def _ocr_llm_client():  # -> openai.OpenAI | None (lazy import)
     return client
 
 
-def _make_markitdown():  # -> markitdown.MarkItDown (lazy import)
-    """A MarkItDown instance, OCR-enabled when `SUITE_MD_OCR_*` is configured
-    and plain otherwise. With OCR on, the `markitdown-ocr` plugin registers
+def _make_markitdown(ocr: bool = False):  # -> markitdown.MarkItDown (lazy import)
+    """A MarkItDown instance. OCR is OPT-IN per request: it engages only when
+    `ocr=True` AND `SUITE_MD_OCR_*` is configured — otherwise a bare
+    `MarkItDown()`. With OCR on, the `markitdown-ocr` plugin registers
     vision-OCR converters (PDF/DOCX/PPTX/XLSX + scanned-PDF fallback) ahead of
-    the built-ins; with it off, behaviour is unchanged from a bare
-    `MarkItDown()`."""
+    the built-ins; that path is slower and spends a vision call per image, so
+    it must be asked for rather than run on every conversion."""
     from markitdown import MarkItDown  # noqa: PLC0415
 
-    client = _ocr_llm_client()
+    client = _ocr_llm_client() if ocr else None
     if client is None:
         return MarkItDown()
     kwargs = {
@@ -150,8 +162,8 @@ def _make_markitdown():  # -> markitdown.MarkItDown (lazy import)
     return MarkItDown(**kwargs)
 
 
-def _markitdown_file(path: str) -> str:
-    return _make_markitdown().convert(path).text_content
+def _markitdown_file(path: str, *, ocr: bool = False) -> str:
+    return _make_markitdown(ocr=ocr).convert(path).text_content
 
 
 def _markitdown_bytes(data: bytes, suffix: str) -> str:
@@ -161,12 +173,12 @@ def _markitdown_bytes(data: bytes, suffix: str) -> str:
         return _markitdown_file(tmp.name)
 
 
-def _worker_argv(in_path: str, out_path: str) -> list[str]:
+def _worker_argv(in_path: str, out_path: str, ocr: bool) -> list[str]:
     """argv for the isolated conversion worker. A seam so tests can swap in a
     stand-in command that simulates timeout / signal-death / non-zero exit."""
     return [
         sys.executable, "-m", "bp_agents.agents.md_converter._worker",
-        in_path, out_path,
+        in_path, out_path, "1" if ocr else "0",
     ]
 
 
@@ -182,20 +194,21 @@ def _rlimit_preexec(mem_bytes: int):
     return _apply
 
 
-async def _convert_isolated(in_path: str) -> str:
+async def _convert_isolated(in_path: str, *, ocr: bool = False) -> str:
     """Convert a file to Markdown in a bounded CHILD process.
 
     This is the fix for silent conversion deaths: a segfault / OOM-kill on a
     pathological document kills only the worker, and a hang is bounded by a
     timeout — both surface as a clean `UpstreamError` (→ failed result + log)
     instead of taking the shared agent down with no trace. On success the
-    worker's Markdown is read back from a temp file."""
+    worker's Markdown is read back from a temp file. `ocr` is forwarded to the
+    worker to enable per-image vision OCR for this conversion."""
     out_fd, out_path = tempfile.mkstemp(suffix=".md")
     os.close(out_fd)
     preexec = _rlimit_preexec(_settings.md_convert_mem_limit_mb * 1024 * 1024)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_worker_argv(in_path, out_path),
+            *_worker_argv(in_path, out_path, ocr),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             preexec_fn=preexec,
@@ -300,8 +313,9 @@ async def run_convert(ctx: TaskContext, payload: Convert) -> AgentOutput:
     path = await ctx.files.read(payload.name)
     # Convert in an isolated, bounded child process: a crash / OOM / hang on a
     # pathological document fails this one task cleanly instead of silently
-    # killing the shared agent (see `_convert_isolated`).
-    md = await _convert_isolated(str(path))
+    # killing the shared agent (see `_convert_isolated`). OCR is opt-in per
+    # request — only this call asks for it, not every conversion.
+    md = await _convert_isolated(str(path), ocr=payload.ocr)
 
     output_type = payload.output_type
     if output_type == "auto":
@@ -359,7 +373,8 @@ async def _default_fetch(url: str) -> bytes:
 @agent.handler(
     mode="convert",
     description="Convert an uploaded file (PDF, DOCX, spreadsheet, image, "
-    "…) to Markdown text.",
+    "…) to Markdown text. Pass ocr=true only for scanned/image-based "
+    "documents whose text isn't selectable (slower; needs an OCR backend).",
 )
 async def convert_mode(ctx: TaskContext, payload: Convert) -> AgentOutput:
     return await run_convert(ctx, payload)
