@@ -542,6 +542,12 @@ services:
       <<: *suite-env
       SUITE_AGENT: md_converter
       AGENT_INVITATION_TOKEN: ${MD_CONVERTER_INVITATION:?}
+      # Conversion backend: markitdown (default, local) or datalab (hosted
+      # Marker API — better on complex layouts/tables/math/scans). datalab needs
+      # SUITE_DATALAB_API_KEY; without it the agent falls back to markitdown.
+      SUITE_MD_BACKEND: ${SUITE_MD_BACKEND:-markitdown}
+      SUITE_DATALAB_API_KEY: ${SUITE_DATALAB_API_KEY:-}
+      SUITE_MD_DATALAB_MODE: ${SUITE_MD_DATALAB_MODE:-balanced}
       # LLM-vision OCR (markitdown-ocr plugin). Set KEY + MODEL to OCR images
       # embedded in PDF/DOCX/PPTX/XLSX (and full pages of scanned PDFs) via a
       # vision model — a DEDICATED OpenAI-compatible provider, separate from the

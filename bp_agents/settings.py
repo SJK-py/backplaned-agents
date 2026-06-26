@@ -394,6 +394,34 @@ class SuiteSettings(BaseSettings):
     rewards concentrated relevance while bounding long-page bias."""
 
     # ------------------------------------------------------------------
+    # md_converter — conversion backend (MarkItDown | Datalab)
+    #
+    # `convert` runs locally via MarkItDown by default. `datalab` instead
+    # uploads the file to Datalab's hosted Marker API (submit + poll), which
+    # handles complex layouts / tables / math / scanned docs far better — at
+    # the cost of a network round-trip and per-page billing. The Datalab path
+    # does its own layout analysis + OCR, so the request `ocr` flag is a no-op
+    # there (it only affects the MarkItDown path).
+    # ------------------------------------------------------------------
+
+    md_backend: str = "markitdown"
+    """Which engine `convert` uses: `markitdown` (default, local) or `datalab`
+    (hosted Marker API). `datalab` requires `datalab_api_key`; if that's unset
+    the agent falls back to markitdown with a logged warning (mirrors
+    `web_search_backend`)."""
+    datalab_api_key: SecretStr | None = None
+    """`X-API-Key` for Datalab's Convert API (`md_backend=datalab`). The gate,
+    with `md_backend`: unset → datalab disabled (falls back to markitdown)."""
+    md_datalab_mode: str = "balanced"
+    """Datalab processing mode: `fast` | `balanced` (recommended) | `accurate`
+    (best for scanned/complex docs). Defaults sensibly; rarely needs setting."""
+    md_datalab_base_url: str = "https://www.datalab.to"
+    """Datalab API base URL. Override only for a regional/self-hosted endpoint."""
+    md_datalab_timeout_s: float = Field(default=300.0, gt=0.0)
+    """Total budget (submit + poll) for a single Datalab conversion. Datalab is
+    an async ML pipeline; large/complex documents take tens of seconds."""
+
+    # ------------------------------------------------------------------
     # md_converter — LLM-vision OCR (markitdown-ocr plugin)
     #
     # MarkItDown's built-in converters do NOT OCR images embedded in

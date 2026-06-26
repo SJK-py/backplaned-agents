@@ -251,6 +251,133 @@ def test_convert_forwards_ocr_flag(monkeypatch, tmp_path) -> None:
     assert _run(Convert(name="f.pdf", output_type="content")) is False
 
 
+def test_datalab_backend_gating(monkeypatch) -> None:
+    """Datalab routing requires md_backend=datalab AND a key; a missing key
+    falls back to markitdown (mirrors web_search backend selection)."""
+    import sys
+
+    from pydantic import SecretStr
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    monkeypatch.setattr(mod._settings, "md_backend", "markitdown")
+    assert mod._datalab_backend_active() is False
+
+    monkeypatch.setattr(mod._settings, "md_backend", "datalab")
+    monkeypatch.setattr(mod._settings, "datalab_api_key", None)
+    assert mod._datalab_backend_active() is False  # no key → fall back
+
+    monkeypatch.setattr(mod._settings, "datalab_api_key", SecretStr("k"))
+    assert mod._datalab_backend_active() is True
+
+
+def test_convert_datalab_submit_poll_complete(monkeypatch, tmp_path) -> None:
+    """Datalab path: submit the file, poll request_check_url until complete,
+    return the markdown. Uses httpx MockTransport — no network."""
+    import sys
+
+    import httpx
+    from pydantic import SecretStr
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    monkeypatch.setattr(mod._settings, "datalab_api_key", SecretStr("secret-k"))
+    monkeypatch.setattr(mod, "_DATALAB_POLL_INTERVAL_S", 0.0)  # don't sleep in tests
+
+    state = {"polls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            assert request.headers["X-API-Key"] == "secret-k"
+            return httpx.Response(200, json={
+                "success": True,
+                "request_check_url": "https://www.datalab.to/api/v1/convert/REQ",
+            })
+        state["polls"] += 1
+        if state["polls"] == 1:
+            return httpx.Response(200, json={"status": "processing"})
+        return httpx.Response(200, json={
+            "status": "complete", "success": True, "markdown": "# Hello Datalab",
+        })
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.4 test")
+
+    async def _drive() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await mod._convert_datalab(str(f), filename="doc.pdf", client=client)
+
+    assert asyncio.run(_drive()) == "# Hello Datalab"
+    assert state["polls"] == 2  # processing, then complete
+
+
+def test_convert_datalab_failure_raises_upstream(monkeypatch, tmp_path) -> None:
+    """A failed Datalab job surfaces as UpstreamError (→ failed result the
+    model can relay), not a silent empty conversion."""
+    import sys
+
+    import httpx
+    from pydantic import SecretStr
+
+    from bp_sdk.errors import UpstreamError
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    monkeypatch.setattr(mod._settings, "datalab_api_key", SecretStr("k"))
+    monkeypatch.setattr(mod, "_DATALAB_POLL_INTERVAL_S", 0.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={
+                "success": True,
+                "request_check_url": "https://www.datalab.to/api/v1/convert/REQ",
+            })
+        return httpx.Response(200, json={"status": "failed", "error": "corrupt pdf"})
+
+    f = tmp_path / "d.pdf"
+    f.write_bytes(b"x")
+
+    async def _drive() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await mod._convert_datalab(str(f), filename="d.pdf", client=client)
+
+    try:
+        asyncio.run(_drive())
+        raise AssertionError("expected UpstreamError")
+    except UpstreamError as exc:
+        assert "Datalab conversion failed" in str(exc)
+
+
+def test_run_convert_routes_to_datalab(monkeypatch, tmp_path) -> None:
+    """When the Datalab backend is active, run_convert routes there and does
+    NOT spawn the MarkItDown worker."""
+    import sys
+
+    mod = sys.modules["bp_agents.agents.md_converter.agent"]
+    monkeypatch.setattr(mod, "_datalab_backend_active", lambda: True)
+    called: dict = {}
+
+    async def _fake_dl(path: str, *, filename: str, client=None) -> str:
+        called["datalab"] = filename
+        return "# datalab markdown"
+
+    async def _fake_iso(path: str, *, ocr: bool = False) -> str:
+        called["isolated"] = True
+        return "# nope"
+
+    monkeypatch.setattr(mod, "_convert_datalab", _fake_dl)
+    monkeypatch.setattr(mod, "_convert_isolated", _fake_iso)
+    doc = tmp_path / "f.pdf"
+    doc.write_text("x")
+
+    async def _drive():
+        return await run_convert(
+            _Ctx(_StubFiles(doc)), Convert(name="f.pdf", output_type="content")
+        )
+
+    out = asyncio.run(_drive())
+    assert "datalab markdown" in out.content
+    assert called.get("datalab") == "f.pdf"
+    assert "isolated" not in called  # MarkItDown worker NOT used
+
+
 def test_decode_html_detects_non_utf8_charset() -> None:
     """The fallback decode must honour the page's charset — a naive UTF-8
     decode mangles EUC-KR/CP949 Korean pages into replacement chars."""
