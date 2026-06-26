@@ -33,7 +33,13 @@ from bp_protocol.frames import (
     ListFileRequest,
     StatFileRequest,
     WriteFileRequest,
+    serialize_frame,
 )
+
+# Router-negotiated WS frame cap (WelcomeFrame.max_payload_bytes) is the real
+# ceiling for an inline write; this mirrors the router's default for the rare
+# case no Welcome is bound yet (in-proc transport / pre-handshake).
+_DEFAULT_FRAME_CAP = 1_048_576  # 1 MiB
 
 # Public alias — agents read `.name` / `.byte_size` / `.mime_type` /
 # `.created_at` off the metadata returned by `FileStash.stat` /
@@ -167,6 +173,15 @@ class FileStash:
         assert res.saved_name is not None
         return res.saved_name
 
+    def _inline_frame_cap(self) -> int:
+        """The router-negotiated WS payload cap in bytes. A write whose frame
+        would exceed this can't ride the frame channel, so it goes over HTTP
+        instead. Falls back to the router default when no Welcome is bound."""
+        transport = getattr(self._dispatcher, "transport", None)
+        welcome = getattr(transport, "welcome", None)
+        cap = getattr(welcome, "max_payload_bytes", None)
+        return cap if isinstance(cap, int) and cap > 0 else _DEFAULT_FRAME_CAP
+
     async def write(
         self,
         filename: str,
@@ -175,19 +190,33 @@ class FileStash:
         persistent: bool = False,
         dedup: str = "append_count",
     ) -> str:
-        """Write a text file inline (no upload round-trip). Returns
-        the saved name."""
-        res = await self._round_trip(
-            FileManageFrame(
-                **self._store_frame_base(),
-                command=WriteFileRequest(
-                    filename=filename, text=text, persistent=persistent,
-                    dedup=dedup,  # type: ignore[arg-type]
-                ),
-            )
+        """Write a text file, picking the transport by size. A payload that
+        fits the negotiated WS frame cap is written INLINE in one frame (a
+        single round-trip, no upload grant); a larger one is streamed over HTTP
+        via `store` — so a big write succeeds instead of tripping the router's
+        payload-too-large socket close (the SDK's pre-send guard covers spawn
+        frames, not file writes, so an oversize inline write would otherwise
+        hard-close the socket). Returns the saved name."""
+        frame = FileManageFrame(
+            **self._store_frame_base(),
+            command=WriteFileRequest(
+                filename=filename, text=text, persistent=persistent,
+                dedup=dedup,  # type: ignore[arg-type]
+            ),
         )
-        assert res.saved_name is not None
-        return res.saved_name
+        # Measure the ACTUAL serialized frame (envelope + JSON escaping) against
+        # the negotiated cap — the same bytes the router size-checks on receive,
+        # so the routing decision matches its accept/reject exactly.
+        if len(serialize_frame(frame).encode("utf-8")) <= self._inline_frame_cap():
+            res = await self._round_trip(frame)
+            assert res.saved_name is not None
+            return res.saved_name
+        # Too big for one frame → stream the UTF-8 bytes over HTTP.
+        mime = mimetypes.guess_type(filename)[0] or "text/plain"
+        return await self.store(
+            text.encode("utf-8"), filename=filename, mime_type=mime,
+            persistent=persistent, dedup=dedup,
+        )
 
     # ------------------------------------------------------------------
     # Read a name → local bytes (agent-side; NOT the LLM-feed path)
