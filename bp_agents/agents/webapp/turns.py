@@ -44,10 +44,14 @@ class TurnRunner:
         self.task_id: str | None = None
         self.done = asyncio.Event()
         self.task: asyncio.Task | None = None
-        # Replayable (event, data) log (progress rows + the result) and the set
-        # of live subscriber queues.
-        self._backlog: list[tuple[str, str]] = []
-        self._subs: set[asyncio.Queue[tuple[str, str]]] = set()
+        # Replayable `(seq, event, data)` log (progress rows + the result) and
+        # the set of live subscriber queues. Each event carries a monotonic
+        # `seq` emitted as the SSE `id:`, so a reconnecting EventSource (which
+        # sends `Last-Event-ID`) replays only events it hasn't seen — otherwise
+        # every reconnect re-appends the whole backlog (duplicate messages).
+        self._seq = 0
+        self._backlog: list[tuple[int, str, str]] = []
+        self._subs: set[asyncio.Queue[tuple[int | None, str, str]]] = set()
 
     # -- rendering -------------------------------------------------------
 
@@ -64,30 +68,36 @@ class TurnRunner:
 
     # -- pub/sub ---------------------------------------------------------
 
-    def subscribe(self) -> asyncio.Queue[tuple[str, str]]:
-        """A new subscriber queue, pre-loaded with the backlog (and a closing
-        `done` if the turn already finished)."""
-        q: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-        for item in self._backlog:
-            q.put_nowait(item)
+    def subscribe(self, *, after: int = 0) -> asyncio.Queue[tuple[int | None, str, str]]:
+        """A new subscriber queue, pre-loaded with backlog events newer than
+        `after` (the client's `Last-Event-ID`; 0 = a fresh connection replays
+        everything), and a closing `done` if the turn already finished."""
+        q: asyncio.Queue[tuple[int | None, str, str]] = asyncio.Queue()
+        for seq, event, data in self._backlog:
+            if seq > after:
+                q.put_nowait((seq, event, data))
         if self.done.is_set():
-            q.put_nowait(("done", ""))
+            q.put_nowait((None, "done", ""))
         self._subs.add(q)
         return q
 
-    def unsubscribe(self, q: asyncio.Queue[tuple[str, str]]) -> None:
+    def unsubscribe(self, q: asyncio.Queue[tuple[int | None, str, str]]) -> None:
         self._subs.discard(q)
 
     def _publish(self, event: str, data: str) -> None:
         # `done` isn't backlogged — it's derived from `self.done` on subscribe.
-        self._backlog.append((event, data))
+        self._seq += 1
+        item = (self._seq, event, data)
+        self._backlog.append(item)
         for q in self._subs:
-            q.put_nowait((event, data))
+            q.put_nowait(item)
 
     def _finish(self) -> None:
+        # `done` is a control event — no `id:`, so it never advances the
+        # client's Last-Event-ID (and isn't replayed on reconnect).
         self.done.set()
         for q in self._subs:
-            q.put_nowait(("done", ""))
+            q.put_nowait((None, "done", ""))
 
     # -- execution -------------------------------------------------------
 

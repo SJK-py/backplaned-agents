@@ -190,6 +190,9 @@ async def chat_stream(session_id: str, request: Request) -> Response:
     if info is None:
         return Response(status_code=404)
     runner = request.app.state.active_turns.get(session_id)
+    # On an EventSource auto-reconnect the browser sends the last id it saw;
+    # replay only newer events so reconnects don't duplicate the activity strip.
+    after = _last_event_id(request)
 
     async def _gen():  # noqa: ANN202
         if runner is None:
@@ -197,13 +200,13 @@ async def chat_stream(session_id: str, request: Request) -> Response:
             # the answer is in history and renders on the page itself.
             yield _sse("done", "")
             return
-        # Subscribe: replay buffered progress + the result, then follow live.
-        # Unsubscribing on disconnect does NOT cancel the turn.
-        queue = runner.subscribe()
+        # Subscribe: replay buffered progress + the result (after `after`), then
+        # follow live. Unsubscribing on disconnect does NOT cancel the turn.
+        queue = runner.subscribe(after=after)
         try:
             while True:
-                kind, data = await queue.get()
-                yield _sse(kind, data)
+                seq, kind, data = await queue.get()
+                yield _sse(kind, data, seq=seq)
                 if kind == "done":
                     break
         finally:
@@ -216,10 +219,22 @@ async def chat_stream(session_id: str, request: Request) -> Response:
     )
 
 
-def _sse(event: str, data: str) -> str:
-    """One SSE event. Each line of `data` becomes its own `data:` field
-    (SSE concatenates them with newlines), so multi-line HTML is safe."""
-    out = f"event: {event}\n"
+def _last_event_id(request: Request) -> int:
+    """The `Last-Event-ID` the browser replays on an SSE reconnect (0 when
+    absent / unparseable — a fresh connection, replay everything)."""
+    try:
+        return int(request.headers.get("last-event-id") or 0)
+    except ValueError:
+        return 0
+
+
+def _sse(event: str, data: str, *, seq: int | None = None) -> str:
+    """One SSE event. A monotonic `id:` (when present) lets a reconnecting
+    EventSource resume via `Last-Event-ID`. Each line of `data` becomes its own
+    `data:` field (SSE concatenates them with newlines), so multi-line HTML is
+    safe."""
+    out = f"id: {seq}\n" if seq is not None else ""
+    out += f"event: {event}\n"
     for line in data.split("\n"):
         out += f"data: {line}\n"
     return out + "\n"
