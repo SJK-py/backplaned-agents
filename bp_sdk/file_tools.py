@@ -39,9 +39,12 @@ Bundle = Literal["read_only", "full"]
 # reachable in chunks. Images/PDFs ignore these (shown whole via the router).
 _DEFAULT_READ_CHARS = 20_000   # returned when the model passes no max_chars
 _MAX_READ_CHARS = 200_000      # hard ceiling on one window (clamp, don't error)
-# Refuse to pull an enormous "text" blob into the agent just to slice it — over
-# this, tell the model to extract the part it needs with another tool.
-_MAX_TEXT_READ_BYTES = 20 * 1024 * 1024  # 20 MiB
+# Refuse to read a text file larger than ~one model context window — even SOTA
+# models top out around 1M tokens (≈ a few MiB of text), so a bigger file can
+# never be held and paging it would re-download megabytes per call. This mirrors
+# the router's own `llm_attachment_inline_max_bytes` default (5 MiB). Over this,
+# tell the model to search/extract the part it needs with another tool.
+_MAX_TEXT_READ_BYTES = 5 * 1024 * 1024  # 5 MiB
 
 # Textual `application/*` types that decode as UTF-8 like `text/*` (mirrors the
 # router's `_is_text_mime`, so the SDK windowed-read and the router's text

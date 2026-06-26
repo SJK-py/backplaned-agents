@@ -38,13 +38,16 @@
 - **What stays:** images / PDFs / unknown types still return a `file_ref`
   (router-resolved, multimodal) — `max_chars`/`offset` are text-only. A file
   that looked textual by extension but isn't valid UTF-8 falls back to the
-  `file_ref` path; a text blob over 20 MiB is refused with a clear message.
-- **Why:** the byte cap is a transport guard, not a context guard — 5 MiB of
-  text is ~1.5M tokens. Windowing lets the model read big logs / CSVs / markdown
-  in bounded, page-able chunks instead of all-or-nothing.
+  `file_ref` path; a text blob over 5 MiB (≈ one model context window; mirrors
+  the router's `llm_attachment_inline_max_bytes`) is refused with a message
+  pointing the model at search/extract instead.
+- **Why:** the per-read window (`max_chars`) is the context guard; windowing
+  lets the model read big logs / CSVs / markdown in bounded, page-able chunks
+  instead of all-or-nothing, and the whole-file cap keeps it from paging a file
+  larger than it could ever hold.
 - **Limitation:** the SDK downloads the whole text blob to slice it (the file
-  store has no range read), so paging a very large file re-downloads it each
-  call; the 20 MiB ceiling bounds that.
+  store has no range read), so paging a large file re-downloads it each call;
+  the 5 MiB ceiling bounds that.
 
 ## 2026-06-26
 
