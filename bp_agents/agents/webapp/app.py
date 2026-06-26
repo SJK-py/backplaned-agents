@@ -94,12 +94,11 @@ def create_app(
     app.state.pool = pool
     app.state.core = core
     app.state.suite_settings = suite_settings
-    # turn_id → pending {session_id, user_id, text}; handed off from the
-    # POST that records a turn to the SSE GET that streams it. Bounded so a
-    # tab that never opens the stream can't grow it without limit.
-    app.state.turns = {}
-    # session_id → in-flight router task_id, set while a turn streams so the
-    # Stop button (POST /chat/{sid}/stop) can cancel it (parity with /stop).
+    # session_id → in-flight TurnRunner (webapp.turns). Set while a turn runs
+    # DETACHED from the SSE connection, so closing the stream (navigating away)
+    # doesn't kill it: the SSE subscribes/replays, the chat view rebuilds the
+    # pending bubble on reload, and POST /chat/{sid}/stop cancels via the
+    # runner's router task_id.
     app.state.active_turns = {}
 
     app.state.templates = Jinja2Templates(directory=str(_here() / "templates"))
