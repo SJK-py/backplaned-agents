@@ -18,6 +18,46 @@
 
 ---
 
+## 2026-06-26
+
+> A large `write_file` no longer dies on the WS frame cap: `FileStash.write`
+> now routes any payload that wouldn't fit one frame over the HTTP upload path
+> instead, and the upload ceiling rises 25 → 50 MiB. Lets agents (e.g. the
+> suite's `md_converter`) write multi-MiB Markdown without tripping a
+> payload-too-large socket close.
+
+### Fixed — `FileStash.write` streams oversize payloads over HTTP
+
+- **What (`bp_sdk/files.py`):** `write()` previously inlined the whole text in a
+  single `FileManageFrame`, so a payload over `max_payload_bytes` (~1 MiB)
+  couldn't be written — and failed HARD, because the transport's pre-send
+  `FrameTooLargeError` guard only covers `NewTaskFrame` (spawn/delegate), not
+  file writes: the oversize frame reached the router and tripped its
+  `1009 payload_too_large` socket close, dropping the connection + in-flight
+  state. `write()` is now size-aware: it measures the actual serialized frame
+  against the **router-negotiated** cap (`transport.welcome.max_payload_bytes`,
+  falling back to the 1 MiB default) — the exact bytes the router size-checks on
+  receive — and, when it won't fit, streams the UTF-8 bytes over HTTP via
+  `store()` (the upload-with-grant path). Small writes are unchanged (one inline
+  round-trip). The frame cap itself is deliberately NOT raised — bulk goes over
+  HTTP rather than enlarging frames (which would force lockstep
+  `ws_max_*`/proxy raises and head-of-line-block the multiplexed socket).
+- **Why:** the suite's `md_converter` writes converted Markdown via
+  `ctx.files.write`; a conversion over ~1 MiB (large/scanned PDFs, the Datalab
+  backend's 200 MiB / 7k-page inputs) would otherwise 1009-disconnect the agent
+  instead of saving the file. Centralising the fix in `write()` also covers the
+  `write_file` tool and every other caller without touching them.
+
+### Changed — `max_upload_bytes` default 25 → 50 MiB
+
+- **What (`bp_router/settings.py`):** raised the single-upload ceiling (the
+  `/v1/files` HTTP endpoint AND the agent `store` / upload-with-grant path —
+  bytes that stream over HTTP, enforced mid-stream) from 25 to 50 MiB, with the
+  docstring clarifying it's distinct from the ~1 MiB WS frame cap and is what
+  now bounds a large `write_file` / conversion output (routed over HTTP).
+- **Why:** give the over-HTTP write path real headroom for large conversion
+  outputs now that `write()` routes there.
+
 ## 2026-06-25
 
 > The router-managed file store gains **metadata access**: a `stat` command for
