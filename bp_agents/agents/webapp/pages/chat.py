@@ -2,18 +2,21 @@
 
 The webapp as a real `ChannelCore` frontend ([webapp.md] §4):
 
-  - `GET  /chat/{sid}`              — history (active thread) + input.
-  - `POST /chat/{sid}`             — record a turn, return the user bubble +
-                                      a pending bubble that SSE-connects to…
-  - `GET  /chat/{sid}/stream/{tid}` — …this stream: run the turn under the
-                                      session lock, forwarding each
-                                      `LoopProgress` as an SSE `progress`
-                                      event and the answer as `result`.
-  - `GET  /files/{sid}/{name}`     — resolve a produced file NAME → bytes.
+  - `GET  /chat/{sid}`        — history + input; if a turn is in flight, also
+                                the live pending bubble (Stop + reconnecting
+                                SSE) so it RESUMES when the user navigates back.
+  - `POST /chat/{sid}`        — record a turn, start it as a DETACHED background
+                                runner, and return the user bubble + a pending
+                                bubble that SSE-subscribes to that runner.
+  - `GET  /chat/{sid}/stream` — subscribe to the session's in-flight turn:
+                                replay buffered progress, follow live, then the
+                                answer. Closing the stream does NOT cancel it.
+  - `POST /chat/{sid}/stop`   — cancel the in-flight turn (parity with /stop).
+  - `GET  /files/{sid}/{name}`— resolve a produced file NAME → bytes.
 
-The turn runs as a task while the SSE generator drains a progress queue,
-so rows stream as they happen. Delegation/summarization/memory all live
-in `ChannelCore` — identical to the Telegram bot.
+The turn runs detached from any single connection (`webapp.turns`), so a
+navigation that drops the SSE leaves it running; the agent persists the answer
+regardless, and the view rebuilds the pending bubble while it runs.
 """
 
 from __future__ import annotations
@@ -21,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response
@@ -34,22 +36,12 @@ from bp_agents.agents.webapp.pages._common import (
     ensure_user_config,
 )
 from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
-from bp_agents.channel import (
-    ORCHESTRATOR_AGENT_ID,
-    agent_tag,
-    progress_producer,
-    render_progress_line,
-)
-from bp_agents.common.progress import LOOP_PROGRESS_KEY
+from bp_agents.agents.webapp.turns import TurnRunner, register_turn
+from bp_agents.channel import ORCHESTRATOR_AGENT_ID, agent_tag
 from bp_agents.db import queries
-from bp_protocol.types import TaskStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Cap the pending-turn registry so a tab that POSTs but never opens the
-# stream can't grow it without bound (oldest dropped).
-_MAX_PENDING_TURNS = 512
 
 
 @router.get("/chat/{session_id}", response_class=HTMLResponse)
@@ -77,6 +69,10 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
 
     core = request.app.state.core
     delegatable = sorted(core.delegatable_agents) if core is not None else []
+    # If a turn is still running for this session, render the live pending
+    # bubble (Stop + reconnecting SSE) so it resumes after a navigation.
+    runner = request.app.state.active_turns.get(session_id)
+    in_flight = runner is not None and not runner.done.is_set()
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -84,6 +80,7 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
         {
             "session_id": session_id,
             "history": history,
+            "in_flight": in_flight,
             "delegated_to": info.delegated_to,
             "delegatable": delegatable,
             "chat_channel_label": (
@@ -126,16 +123,16 @@ async def chat_undelegate(session_id: str, request: Request) -> Response:
 async def chat_stop(session_id: str, request: Request) -> Response:
     """Cancel the session's in-flight turn — the webapp's Stop button, parity
     with the chatbot `/stop` command. The router cancel surfaces to the
-    streaming turn as a terminal CANCELLED result (rendered "Stopped")."""
+    running turn as a terminal CANCELLED result (rendered "Stopped")."""
     info = await _owned_session(request, session_id)
     if info is None:
         raise HTTPException(status_code=404)
-    task_id = request.app.state.active_turns.get(session_id)
-    if task_id:
+    runner = request.app.state.active_turns.get(session_id)
+    if runner is not None and runner.task_id:
         # Best-effort: a race where the turn just finished is a no-op.
         with contextlib.suppress(Exception):
             await request.app.state.upstream.cancel_task(
-                access_token=request.session["access_token"], task_id=task_id
+                access_token=request.session["access_token"], task_id=runner.task_id
             )
     return Response(status_code=204)
 
@@ -145,7 +142,8 @@ async def chat_send(
     session_id: str, request: Request, message: str = Form(...)
 ) -> HTMLResponse:
     info = await _owned_session(request, session_id)
-    if info is None:
+    core = request.app.state.core
+    if info is None or core is None:
         raise HTTPException(status_code=404)
     text = message.strip()
     if not text:
@@ -155,96 +153,53 @@ async def chat_send(
     # read real presets instead of a missing row.
     await ensure_user_config(request)
 
-    turns: dict[str, dict] = request.app.state.turns
-    if len(turns) >= _MAX_PENDING_TURNS:
-        # Drop the oldest pending entry (insertion-ordered dict).
-        turns.pop(next(iter(turns)), None)
-    turn_id = secrets.token_urlsafe(8)
-    turns[turn_id] = {
-        "session_id": session_id,
-        "user_id": session_user_id(request),
-        "text": text,
-    }
-
     env = request.app.state.templates.env
+    active = request.app.state.active_turns
+    pending_html = env.get_template("chat/_pending.html").render(session_id=session_id)
+
+    existing = active.get(session_id)
+    if existing is not None and not existing.done.is_set():
+        # A turn is already running for this session (the UI replaces the input
+        # with the pending bubble, so this is rare). Re-attach rather than
+        # starting a duplicate; the typed text is dropped.
+        logger.info(
+            "webapp_turn_already_active",
+            extra={"event": "webapp_turn_already_active", "bp.session_id": session_id},
+        )
+        return HTMLResponse(pending_html)
+
+    # Start the turn DETACHED from this request, so closing the SSE (e.g.
+    # navigating away) doesn't kill it. The runner records the user turn under
+    # the session lock; the optimistic user bubble below covers the live page.
+    runner = TurnRunner(
+        session_id=session_id, user_id=session_user_id(request),
+        text=text, core=core, env=env,
+    )
+    register_turn(active, runner)
+    runner.task = asyncio.create_task(runner.run())
+
     user_html = env.get_template("chat/_message.html").render(
         role="user", content=text, tag="", files=[]
-    )
-    pending_html = env.get_template("chat/_pending.html").render(
-        session_id=session_id, turn_id=turn_id
     )
     return HTMLResponse(user_html + pending_html)
 
 
-@router.get("/chat/{session_id}/stream/{turn_id}")
-async def chat_stream(
-    session_id: str, turn_id: str, request: Request
-) -> Response:
-    core = request.app.state.core
-    pending = request.app.state.turns.pop(turn_id, None)
-    if core is None or pending is None or pending["session_id"] != session_id:
+@router.get("/chat/{session_id}/stream")
+async def chat_stream(session_id: str, request: Request) -> Response:
+    info = await _owned_session(request, session_id)
+    if info is None:
         return Response(status_code=404)
-    user_id: str = pending["user_id"]
-    text: str = pending["text"]
-    env = request.app.state.templates.env
-
-    def _row(agent_id: str | None, lp: dict) -> str:
-        return env.get_template("chat/_progress_row.html").render(
-            line=f"{agent_tag(agent_id)}{render_progress_line(lp)}"
-        )
-
-    def _answer(agent_id: str | None, content: str, files: list[str]) -> str:
-        return env.get_template("chat/_message.html").render(
-            role="assistant", content=content or "(no response)",
-            tag=agent_tag(agent_id), files=files, session_id=session_id,
-        )
+    runner = request.app.state.active_turns.get(session_id)
 
     async def _gen():  # noqa: ANN202
-        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-
-        async def on_progress(pf: Any) -> None:
-            lp = (getattr(pf, "metadata", None) or {}).get(LOOP_PROGRESS_KEY)
-            if lp:
-                await queue.put(("progress", _row(progress_producer(pf), lp)))
-
-        active = request.app.state.active_turns
-
-        async def _run() -> None:
-            reply = ""
-            try:
-                async with core.session_lock(session_id):
-                    dest, mode = await core.route(session_id)
-                    await core.record_user_turn(session_id, dest, text)
-                    task_id = await core.spawn(user_id, session_id, dest, mode, text)
-                    # Track the in-flight task so POST /stop can cancel it.
-                    active[session_id] = task_id
-                    result = await core.await_result(task_id, on_progress=on_progress)
-                    # A Stop (router cancel) comes back as a terminal CANCELLED
-                    # result — acknowledge it without recording an answer turn.
-                    if getattr(result, "status", None) is TaskStatus.CANCELLED:
-                        await queue.put(("result", _answer(None, "_Stopped._", [])))
-                        return
-                    reply = (result.output.content if result.output else "") or ""
-                    files = list(result.output.files) if result.output else []
-                    ctx = await core.after_result(session_id, dest, result)
-                    await core.maybe_summarize(session_id, dest, ctx)
-                core.fire_memory_add(user_id, session_id, text, reply)
-                core.fire_name_session(user_id, session_id, text)
-                await queue.put(("result", _answer(result.agent_id, reply, files)))
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "webapp_turn_failed",
-                    extra={"event": "webapp_turn_failed", "bp.session_id": session_id},
-                )
-                await queue.put((
-                    "result",
-                    _answer(None, "Sorry — something went wrong handling that.", []),
-                ))
-            finally:
-                active.pop(session_id, None)
-                await queue.put(("done", ""))
-
-        task = asyncio.create_task(_run())
+        if runner is None:
+            # No in-flight turn (already finished + cleaned up). Close at once;
+            # the answer is in history and renders on the page itself.
+            yield _sse("done", "")
+            return
+        # Subscribe: replay buffered progress + the result, then follow live.
+        # Unsubscribing on disconnect does NOT cancel the turn.
+        queue = runner.subscribe()
         try:
             while True:
                 kind, data = await queue.get()
@@ -252,10 +207,7 @@ async def chat_stream(
                 if kind == "done":
                     break
         finally:
-            if not task.done():
-                task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            runner.unsubscribe(queue)
 
     return StreamingResponse(
         _gen(),

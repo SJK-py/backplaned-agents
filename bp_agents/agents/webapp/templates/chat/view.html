@@ -76,6 +76,11 @@
         No messages yet — say hello.
       </p>
     {% endfor %}
+    {% if in_flight %}
+      {# A turn is still running (the user navigated back mid-turn): re-attach
+         the pending bubble so the Stop button + progress resume. #}
+      {% include "chat/_pending.html" %}
+    {% endif %}
   </div>
 
   <form class="mt-3 flex gap-2"

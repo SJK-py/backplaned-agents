@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import re
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -211,10 +212,9 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
                     headers={"X-CSRF-Token": token},
                 )
                 assert send.status_code == 200, send.text[:300]
-                m = re.search(r'sse-connect="/chat/ses_1/stream/([^"]+)"', send.text)
-                assert m, send.text
-                turn_id = m.group(1)
-                stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
+                # The pending bubble subscribes to the session's in-flight turn.
+                assert 'sse-connect="/chat/ses_1/stream"' in send.text
+                stream = await client.get("/chat/ses_1/stream")
                 stream_text = stream.text
             # The user turn was recorded by the channel.
             async with pool.acquire() as conn:
@@ -241,7 +241,32 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
     assert "do the thing" in messages
 
 
-def test_chat_stream_unknown_turn_is_404(suite_db_url: str) -> None:
+def test_chat_stream_no_active_turn_closes(suite_db_url: str) -> None:
+    """Subscribing with nothing in flight (e.g. the turn already finished)
+    closes the stream at once — the answer is in history on the page."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, str]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/chat/ses_1/stream")
+            return r.status_code, r.text
+        finally:
+            await pool.close()
+
+    status, text = asyncio.run(_drive())
+    assert status == 200
+    assert "event: done" in text and "event: progress" not in text
+
+
+def test_chat_stream_unowned_session_is_404(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
 
     async def _drive() -> int:
@@ -254,7 +279,7 @@ def test_chat_stream_unknown_turn_is_404(suite_db_url: str) -> None:
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
-                r = await client.get("/chat/ses_1/stream/nope")
+                r = await client.get("/chat/ses_other/stream")
             return r.status_code
         finally:
             await pool.close()
@@ -274,8 +299,11 @@ def test_chat_stop_cancels_active_turn(suite_db_url: str) -> None:
             up = _FakeUpstream()
             core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
             app = _build_app(upstream=up, pool=pool, core=core)
-            # Simulate a turn in flight for this session.
-            app.state.active_turns["ses_1"] = "tsk_live"
+            # Simulate a turn in flight for this session (a runner with its
+            # router task spawned but not yet done).
+            app.state.active_turns["ses_1"] = SimpleNamespace(
+                task_id="tsk_live", done=asyncio.Event()
+            )
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -339,14 +367,11 @@ def test_chat_stream_cancelled_renders_stopped(suite_db_url: str) -> None:
             ) as client:
                 await _login(client)
                 token = await _csrf(client)
-                send = await client.post(
+                await client.post(
                     "/chat/ses_1", data={"message": "go"},
                     headers={"X-CSRF-Token": token},
                 )
-                turn_id = re.search(
-                    r'sse-connect="/chat/ses_1/stream/([^"]+)"', send.text
-                ).group(1)
-                stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
+                stream = await client.get("/chat/ses_1/stream")
                 return stream.text
         finally:
             await pool.close()
@@ -354,3 +379,64 @@ def test_chat_stream_cancelled_renders_stopped(suite_db_url: str) -> None:
     text = asyncio.run(_drive())
     assert "event: result" in text and "Stopped" in text
     assert "something went wrong" not in text
+
+
+class _BlockingDispatcher:
+    """Holds the turn open until released — lets a test observe an in-flight
+    turn (the runner is mid-await) before it completes."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+        return "tsk_block"
+
+    async def await_root_result(self, task_id, *, timeout_s=None, on_progress=None, **kw):
+        self.started.set()
+        await self.release.wait()
+        return ResultFrame(
+            agent_id="orchestrator", trace_id="0" * 32, span_id="0" * 16,
+            task_id=task_id, status=TaskStatus.SUCCEEDED, status_code=200,
+            output=AgentOutput(content="late answer", files=[]),
+        )
+
+
+def test_chat_view_resumes_in_flight_bubble(suite_db_url: str) -> None:
+    """Navigating back to the chat mid-turn re-renders the pending bubble (Stop
+    button + reconnecting SSE) — the turn survives the dropped connection."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> str:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _BlockingDispatcher()
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                # Start a turn; it blocks mid-flight (detached from any stream).
+                await client.post(
+                    "/chat/ses_1", data={"message": "go"},
+                    headers={"X-CSRF-Token": token},
+                )
+                await asyncio.wait_for(disp.started.wait(), timeout=5)
+                # "Navigate back": a fresh page load while the turn runs.
+                view = (await client.get("/chat/ses_1")).text
+                # Let the turn finish and drain its task before teardown.
+                disp.release.set()
+                runner = app.state.active_turns["ses_1"]
+                await asyncio.wait_for(runner.task, timeout=5)
+            return view
+        finally:
+            await pool.close()
+
+    view = asyncio.run(_drive())
+    # The reloaded view re-attaches the live bubble: a reconnecting SSE + Stop.
+    assert 'sse-connect="/chat/ses_1/stream"' in view
+    assert 'hx-post="/chat/ses_1/stop"' in view  # the Stop button is back
+    assert "go" in view  # the user message was recorded under the lock
