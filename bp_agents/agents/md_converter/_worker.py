@@ -11,10 +11,12 @@ into a clean failed result.
 
 Usage (invoked by `agent._convert_isolated`, not by hand):
 
-    python -m bp_agents.agents.md_converter._worker <in_path> <out_path>
+    python -m bp_agents.agents.md_converter._worker <in_path> <out_path> [ocr]
 
-Reads <in_path>, writes the Markdown (UTF-8) to <out_path>, exits 0. Any
-conversion error prints a one-line reason to stderr and exits 3.
+`ocr` is "1" to enable per-image vision OCR for this conversion, "0" (or
+omitted) to skip it. Reads <in_path>, writes the Markdown (UTF-8) to
+<out_path>, exits 0. Any conversion error prints a one-line reason to stderr
+and exits 3.
 """
 
 from __future__ import annotations
@@ -23,16 +25,17 @@ import sys
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: _worker <in_path> <out_path>", file=sys.stderr)
+    if len(argv) not in (3, 4):
+        print("usage: _worker <in_path> <out_path> [ocr]", file=sys.stderr)
         return 2
     in_path, out_path = argv[1], argv[2]
+    ocr = len(argv) == 4 and argv[3] == "1"
     # Import here (not at module top) so a missing optional dependency or a
     # MarkItDown import failure surfaces as a worker error the parent can
     # report — not an import-time crash before argv is even parsed.
     from bp_agents.agents.md_converter.agent import _markitdown_file  # noqa: PLC0415
 
-    text = _markitdown_file(in_path)
+    text = _markitdown_file(in_path, ocr=ocr)
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return 0
