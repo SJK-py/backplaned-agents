@@ -187,6 +187,23 @@ async def _generate_metadata(
     return _parse_meta(resp.text)
 
 
+async def _embed_chunks(
+    ctx: TaskContext, chunks: list[str], *, preset: str, batch_size: int
+) -> list[list[float]]:
+    """Embed `chunks` in bounded batches, returning vectors in chunk order.
+
+    Embedding the whole document in one `ctx.llm.embed(chunks)` call sends every
+    chunk to the provider at once — which blows the provider's per-request
+    input/token limit (and the ~1 MiB WS frame cap, made worse by chunk
+    overlap) for a large document, failing the entire `store`. Batching caps
+    each request; batches run sequentially to keep the embedding load steady."""
+    vectors: list[list[float]] = []
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start:start + batch_size]
+        vectors.extend(await ctx.llm.embed(batch, preset=preset))
+    return vectors
+
+
 async def run_kb_store(
     ctx: TaskContext,
     payload: KbStore,
@@ -232,7 +249,9 @@ async def run_kb_store(
             description = gen.get("description")
     title = title or PurePosixPath(payload.name).stem
 
-    vectors = await ctx.llm.embed(chunks, preset=preset)
+    vectors = await _embed_chunks(
+        ctx, chunks, preset=preset, batch_size=settings.kb_embed_batch_size
+    )
     await store.store_document(
         collection=payload.collection, title=title,
         tags=tags or [], description=description or "",
