@@ -177,6 +177,8 @@ File / webpage → Markdown (MarkItDown). **Not hidden** — `convert` is a usef
 
 `auto` ⇒ content if ≤2k chars else file; `content` over 100k force-truncates. `webpage` fetch capped at 5 MB (env-configurable). `non_tool_modes`: `[webpage]`.
 
+**Conversion backend (`SUITE_MD_BACKEND`).** `convert` runs locally via **MarkItDown** (default, in a bounded subprocess) or, when `SUITE_MD_BACKEND=datalab` + `SUITE_DATALAB_API_KEY` are set, via **Datalab's hosted Marker API** (submit + poll over HTTP; stronger on complex layouts, tables, math, and scanned documents, at a network round-trip + per-page cost). `datalab` without a key falls back to markitdown with a logged warning. Datalab does its own layout analysis + OCR, so the request `ocr` flag and `SUITE_MD_OCR_*` apply only to the markitdown backend. `webpage` always uses MarkItDown.
+
 **LLM-vision OCR (optional, opt-in).** With `SUITE_MD_OCR_API_KEY` + `SUITE_MD_OCR_MODEL` set, the `markitdown-ocr` plugin can OCR images embedded in PDF/DOCX/PPTX/XLSX files — plus full-page OCR for scanned PDFs — inlining the extracted text. OCR is **per-request**: it runs only when a `convert` call passes `ocr=true` (the model should set it for scanned/image-based documents whose text isn't selectable), NOT on every conversion — the OCR converter is slower and spends a vision call per image. OCR uses its OWN OpenAI-Chat-Completions-compatible provider (key/model/`SUITE_MD_OCR_BASE_URL`/`SUITE_MD_OCR_PROMPT` + the `SUITE_MD_OCR_TIMEOUT_S`/`_MAX_RETRIES` bounds), separate from the router's presets, because MarkItDown needs a synchronous `llm_client` that can't ride the frame channel. `ocr=true` with no backend configured is a no-op (plain conversion).
 
 ---

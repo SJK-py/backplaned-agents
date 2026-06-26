@@ -1,9 +1,14 @@
-"""md_converter agent — file / webpage → Markdown via MarkItDown.
+"""md_converter agent — file / webpage → Markdown.
 
 `convert` reads a stash file and returns Markdown (inline content for
 small results, or a stored `.md` stash name for large ones — `auto`
 decides on a threshold). `webpage` fetches a URL and converts the HTML.
-MarkItDown is synchronous, so conversions run in `asyncio.to_thread`.
+
+`convert` has two backends (`SUITE_MD_BACKEND`): `markitdown` (default,
+local — runs in a bounded subprocess) or `datalab` (Datalab's hosted
+Marker API — submit + poll over HTTP; better on complex layouts / tables
+/ math / scans). MarkItDown is synchronous, so the local path runs off the
+event loop; the Datalab path is plain async network I/O.
 
 When `SUITE_MD_OCR_*` is configured, conversions additionally run the
 `markitdown-ocr` plugin: a vision LLM OCRs images embedded in
@@ -18,12 +23,14 @@ from __future__ import annotations
 import asyncio
 import html as _html
 import logging
+import mimetypes
 import os
 import re
 import sys
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import httpx
 from pydantic import BaseModel, Field
@@ -309,13 +316,97 @@ def _html_to_text(raw_html: str) -> str:
     return _normalize(_strip_tags(text))
 
 
+# How often to poll Datalab's request_check_url. Datalab jobs take tens of
+# seconds; 2s keeps latency low without hammering the API.
+_DATALAB_POLL_INTERVAL_S = 2.0
+
+
+def _datalab_backend_active() -> bool:
+    """True when `convert` should route to Datalab. `md_backend=datalab` plus a
+    key enables it; the key is the gate — if `md_backend=datalab` but the key
+    is unset, fall back to MarkItDown with a warning (mirrors web_search)."""
+    if _settings.md_backend.lower() != "datalab":
+        return False
+    if _settings.datalab_api_key is None:
+        logger.warning(
+            "datalab_backend_no_key",
+            extra={"event": "datalab_backend_no_key"},  # → falls back to markitdown
+        )
+        return False
+    return True
+
+
+async def _convert_datalab(
+    path: str, *, filename: str, client: httpx.AsyncClient | None = None
+) -> str:
+    """Convert a file to Markdown via Datalab's hosted Convert API: submit the
+    file, then poll `request_check_url` until complete. Pure network I/O (no
+    local parsing), so it runs in the handler — no subprocess isolation needed.
+    Any failure surfaces as `UpstreamError` (→ failed result the model can
+    relay). `client` is injectable for tests."""
+    api_key = _settings.datalab_api_key.get_secret_value()  # type: ignore[union-attr]
+    base = _settings.md_datalab_base_url.rstrip("/")
+    submit_url = f"{base}/api/v1/convert"
+    headers = {"X-API-Key": api_key}
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    # Read the bytes off-thread so a large upload doesn't block the event loop.
+    data = await asyncio.to_thread(Path(path).read_bytes)
+
+    own_client = client is None
+    client = client or httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
+    try:
+        try:
+            resp = await client.post(
+                submit_url, headers=headers,
+                files={"file": (filename, data, mime)},
+                data={"output_format": "markdown", "mode": _settings.md_datalab_mode},
+            )
+            resp.raise_for_status()
+            submit = resp.json()
+        except httpx.HTTPError as exc:
+            raise UpstreamError(f"Datalab submit failed: {_fetch_reason(exc)}") from exc
+        if submit.get("success") is False:
+            raise UpstreamError(f"Datalab rejected the file: {submit.get('error') or 'unknown error'}")
+        check_url = submit.get("request_check_url")
+        if not check_url:
+            raise UpstreamError("Datalab response missing request_check_url")
+
+        deadline = time.monotonic() + _settings.md_datalab_timeout_s
+        while time.monotonic() < deadline:
+            try:
+                r = await client.get(check_url, headers=headers)
+                r.raise_for_status()
+                result = r.json()
+            except httpx.HTTPError as exc:
+                raise UpstreamError(f"Datalab poll failed: {_fetch_reason(exc)}") from exc
+            status = result.get("status")
+            if status == "complete":
+                if result.get("success") is False:
+                    raise UpstreamError(f"Datalab conversion failed: {result.get('error') or 'unknown error'}")
+                return result.get("markdown") or ""
+            if status == "failed":
+                raise UpstreamError(f"Datalab conversion failed: {result.get('error') or 'unknown error'}")
+            await asyncio.sleep(_DATALAB_POLL_INTERVAL_S)
+        raise UpstreamError(
+            f"Datalab conversion timed out after {_settings.md_datalab_timeout_s:g}s"
+        )
+    finally:
+        if own_client:
+            await client.aclose()
+
+
 async def run_convert(ctx: TaskContext, payload: Convert) -> AgentOutput:
     path = await ctx.files.read(payload.name)
-    # Convert in an isolated, bounded child process: a crash / OOM / hang on a
-    # pathological document fails this one task cleanly instead of silently
-    # killing the shared agent (see `_convert_isolated`). OCR is opt-in per
-    # request — only this call asks for it, not every conversion.
-    md = await _convert_isolated(str(path), ocr=payload.ocr)
+    if _datalab_backend_active():
+        # Datalab handles layout/OCR natively; the request `ocr` flag (a
+        # MarkItDown-plugin concept) doesn't apply here.
+        md = await _convert_datalab(str(path), filename=payload.name)
+    else:
+        # Convert in an isolated, bounded child process: a crash / OOM / hang on
+        # a pathological document fails this one task cleanly instead of silently
+        # killing the shared agent (see `_convert_isolated`). OCR is opt-in per
+        # request — only this call asks for it, not every conversion.
+        md = await _convert_isolated(str(path), ocr=payload.ocr)
 
     output_type = payload.output_type
     if output_type == "auto":
