@@ -359,3 +359,79 @@ def test_stash_404_for_unowned_session(suite_db_url: str) -> None:
             await pool.close()
 
     assert asyncio.run(_drive()) == 404
+
+
+# ---------------------------------------------------------------------------
+# Bulk download (.zip) — whole-tab archive
+# ---------------------------------------------------------------------------
+
+
+def test_stash_download_archive_zips_session_tab(suite_db_url: str) -> None:
+    """GET /files/{sid}/download.zip?tab=session bundles every session file.
+    Also proves the route isn't shadowed by the `{name:path}` download route."""
+    import io  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    async def _drive() -> tuple[int, str, bytes]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/files/ses_1/download.zip?tab=session")
+            return r.status_code, r.headers.get("content-type", ""), r.content
+        finally:
+            await pool.close()
+
+    status, ctype, body = asyncio.run(_drive())
+    assert status == 200
+    assert "application/zip" in ctype
+    zf = zipfile.ZipFile(io.BytesIO(body))
+    assert set(zf.namelist()) == {"report.md", "data.csv"}
+    assert zf.read("report.md") == b"FILE-BYTES"
+
+
+def test_stash_download_archive_strips_persist_prefix(suite_db_url: str) -> None:
+    import io  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    async def _drive() -> bytes:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/files/ses_1/download.zip?tab=persist")
+            assert r.status_code == 200, r.status_code
+            return r.content
+        finally:
+            await pool.close()
+
+    zf = zipfile.ZipFile(io.BytesIO(asyncio.run(_drive())))
+    assert zf.namelist() == ["notes.txt"]  # "persist/" prefix dropped
+
+
+def test_stash_download_archive_empty_tab_is_404(suite_db_url: str) -> None:
+    async def _drive() -> int:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            up = _Upstream()
+            up.session_names = []  # nothing to bundle
+            app = _build_app(upstream=up, pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                r = await client.get("/files/ses_1/download.zip?tab=session")
+            return r.status_code
+        finally:
+            await pool.close()
+
+    assert asyncio.run(_drive()) == 404

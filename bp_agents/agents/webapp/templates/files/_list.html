@@ -1,5 +1,14 @@
-{# A stash file list. Needs `names` (list of display names) + `session_id`. #}
+{# A stash file list. Needs `names` (list of display names) + `session_id`;
+   `archive_tab` ("session"/"persist") enables the bulk .zip download. #}
 {% if names %}
+  {% if archive_tab %}
+    <div class="mb-2 flex justify-end">
+      <a href="/files/{{ session_id }}/download.zip?tab={{ archive_tab }}" download
+         class="rounded bg-brand-50 border border-brand-500/20 px-2 py-1 text-xs text-brand-700 hover:bg-brand-100">
+        ⬇ Download all (.zip)
+      </a>
+    </div>
+  {% endif %}
   <ul class="mb-4 divide-y divide-brand-500/10 rounded-md border border-brand-500/10 bg-white">
     {% for name in names %}
       <li class="flex items-center justify-between px-3 py-2 text-sm">

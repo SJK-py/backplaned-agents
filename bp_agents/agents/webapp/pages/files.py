@@ -9,8 +9,11 @@ alongside.
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import re
+import zipfile
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile
@@ -25,6 +28,9 @@ router = APIRouter()
 # Cap a single browser upload (the router enforces its own max; this just
 # avoids spooling an absurd body before the upstream rejects it).
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+# Bound concurrent resolve+fetch when bundling a stash into a .zip.
+_ARCHIVE_CONCURRENCY = 8
 
 
 def _content_disposition(filename: str) -> str:
@@ -120,6 +126,85 @@ async def stash_upload(
     tab = "persist" if persistent else "session"
     return Response(
         status_code=204, headers={"HX-Redirect": f"/files/{session_id}?tab={tab}"}
+    )
+
+
+@router.get("/files/{session_id}/download.zip")
+async def download_archive(
+    session_id: str, request: Request, tab: str = "session"
+) -> Response:
+    """Bundle every file in the chosen stash tab into one .zip — the user's own
+    token. Declared BEFORE the `{name:path}` download route so the literal
+    `download.zip` path isn't captured by it (a file actually named
+    `download.zip` is the only collision — vanishingly rare and benign)."""
+    info = await owned_session(request, session_id)
+    if info is None:
+        raise HTTPException(status_code=404)
+    persistent = tab == "persist"
+    upstream = request.app.state.upstream
+    access = request.session["access_token"]
+    try:
+        names = await upstream.list_names(
+            access_token=access,
+            session_id=None if persistent else session_id,
+            persistent=persistent,
+        )
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_stash_archive_list_failed",
+            extra={"event": "webapp_stash_archive_list_failed", "status_code": exc.status_code},
+        )
+        raise HTTPException(status_code=502) from exc
+    if not names:
+        raise HTTPException(status_code=404, detail="no files to download")
+
+    sem = asyncio.Semaphore(_ARCHIVE_CONCURRENCY)
+
+    async def _fetch(name: str) -> tuple[str, bytes] | None:
+        """`(arcname, bytes)` for one stash name, or None if it can't be read
+        (a single bad file is skipped rather than failing the whole archive)."""
+        async with sem:
+            try:
+                file_id = await upstream.resolve_named_file(
+                    access_token=access, session_id=session_id, name=name
+                )
+                if file_id is None:
+                    return None
+                data = await upstream.fetch_file(access_token=access, file_id=file_id)
+            except UpstreamError as exc:
+                logger.warning(
+                    "webapp_stash_archive_fetch_failed",
+                    extra={
+                        "event": "webapp_stash_archive_fetch_failed",
+                        "status_code": exc.status_code,
+                    },
+                )
+                return None
+        # Persist names list as `persist/<file>`; drop the prefix in the zip.
+        arcname = name[len("persist/"):] if name.startswith("persist/") else name
+        return arcname, data
+
+    fetched = await asyncio.gather(*(_fetch(n) for n in names))
+
+    buf = io.BytesIO()
+    seen: set[str] = set()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in fetched:
+            if item is None:
+                continue
+            arcname, data = item
+            if arcname in seen:  # names are unique per scope; guard anyway
+                continue
+            seen.add(arcname)
+            zf.writestr(arcname, data)
+    if not seen:
+        raise HTTPException(status_code=502, detail="could not read any files")
+
+    archive_name = f"{'persistent' if persistent else 'session'}-stash.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(archive_name)},
     )
 
 
