@@ -375,3 +375,45 @@ class McpServerRow(_Row):
     command: str | None = None
     args: list[str] = []
     env_refs: dict[str, str] = {}
+
+
+class CustomAgentRow(_Row):
+    """Admin-managed config for one operator-defined LLM-backed agent
+    bridged onto the backplane. PK `agent_id` is the full backplane id
+    (`custom_<slug>`); the `bp_mcp_bridge` supervisor turns each row into
+    one single-mode agent whose handler runs an LLM completion (system +
+    user prompt, the parameters substituted in) against `preset_name`.
+
+    `parameters` is a JSON list of `{name, description, required}`; every
+    param is type "string" (v1). The names are the single mode's
+    `accepts_schema` keys AND the `$name` substitution keys in the
+    prompts. `output_as_file` switches the handler from returning the
+    completion inline to writing it to the file store and returning a
+    ref. See `docs/design/mcp-bridge-custom-llm-agents.md`."""
+
+    agent_id: str
+    description: str
+    preset_name: str
+    system_prompt: str
+    user_prompt: str
+    parameters: list[dict[str, Any]] = []
+    groups: list[str] = []
+    capabilities: list[str] = []
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+    # v2 agent loop (all default off → single completion). When enabled the
+    # handler runs a bounded tool-use loop; `file_access` gives it the file-
+    # store tools (none/read_only/full) and `peer_tools_enabled` exposes the
+    # ACL-visible peer agents as tools.
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"  # none | read_only | full
+    peer_tools_enabled: bool = False
+    created_at: datetime
+    updated_at: datetime
+    created_by: str | None = None
+    # Transient onboarding handoff: an admin-minted short-TTL invitation the
+    # bridge consumes to onboard `custom_<slug>`, cleared once it connects.
+    pending_invitation_token: str | None = None
+    pending_invitation_expires_at: datetime | None = None

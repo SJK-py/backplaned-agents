@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from bp_protocol.types import TaskPriority, TaskState
 from bp_router.db.models import (
     AgentRow,
+    CustomAgentRow,
     FileEntryRow,
     FileNameRow,
     FileRow,
@@ -3450,3 +3451,177 @@ async def clear_mcp_pending_invitation(
         "pending_invitation_expires_at = NULL WHERE server_id = $1",
         server_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom agents (operator-defined LLM-backed agents)
+# ---------------------------------------------------------------------------
+
+
+_CUSTOM_AGENT_SELECT_COLS = (
+    "agent_id, description, preset_name, system_prompt, user_prompt, "
+    "parameters, groups, capabilities, expose_to_llm, output_as_file, "
+    "enabled, agent_loop_enabled, max_rounds, file_access, peer_tools_enabled, "
+    "created_at, updated_at, created_by, "
+    "pending_invitation_token, pending_invitation_expires_at"
+)
+
+
+async def list_custom_agents(conn: asyncpg.Connection) -> list[CustomAgentRow]:
+    rows = await conn.fetch(
+        f"SELECT {_CUSTOM_AGENT_SELECT_COLS} FROM custom_agents ORDER BY agent_id"
+    )
+    return [CustomAgentRow.model_validate(dict(r)) for r in rows]
+
+
+async def get_custom_agent(
+    conn: asyncpg.Connection, agent_id: str
+) -> CustomAgentRow | None:
+    row = await conn.fetchrow(
+        f"SELECT {_CUSTOM_AGENT_SELECT_COLS} FROM custom_agents WHERE agent_id = $1",
+        agent_id,
+    )
+    return CustomAgentRow.model_validate(dict(row)) if row else None
+
+
+async def insert_custom_agent(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: str,
+    description: str,
+    preset_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    parameters: list[dict[str, Any]],
+    groups: list[str],
+    capabilities: list[str],
+    expose_to_llm: bool,
+    output_as_file: bool,
+    enabled: bool,
+    created_by: str | None,
+    agent_loop_enabled: bool = False,
+    max_rounds: int = 4,
+    file_access: str = "none",
+    peer_tools_enabled: bool = False,
+) -> CustomAgentRow:
+    row = await conn.fetchrow(
+        f"""
+        INSERT INTO custom_agents
+            (agent_id, description, preset_name, system_prompt, user_prompt,
+             parameters, groups, capabilities, expose_to_llm, output_as_file,
+             enabled, created_by, agent_loop_enabled, max_rounds, file_access,
+             peer_tools_enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $15, $16)
+        RETURNING {_CUSTOM_AGENT_SELECT_COLS}
+        """,
+        agent_id, description, preset_name, system_prompt, user_prompt,
+        parameters, groups, capabilities, expose_to_llm, output_as_file,
+        enabled, created_by, agent_loop_enabled, max_rounds, file_access,
+        peer_tools_enabled,
+    )
+    assert row is not None
+    return CustomAgentRow.model_validate(dict(row))
+
+
+async def update_custom_agent(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    *,
+    description: str | None = None,
+    preset_name: str | None = None,
+    system_prompt: str | None = None,
+    user_prompt: str | None = None,
+    parameters: list[dict[str, Any]] | None = None,
+    groups: list[str] | None = None,
+    capabilities: list[str] | None = None,
+    expose_to_llm: bool | None = None,
+    output_as_file: bool | None = None,
+    enabled: bool | None = None,
+    agent_loop_enabled: bool | None = None,
+    max_rounds: int | None = None,
+    file_access: str | None = None,
+    peer_tools_enabled: bool | None = None,
+) -> CustomAgentRow | None:
+    """PATCH semantics — only non-None fields are written. `updated_at`
+    is always stamped so the bridge's config_signature picks up edits."""
+    sets: list[str] = ["updated_at = now()"]
+    params: list[Any] = [agent_id]
+    for col, val in (
+        ("description", description),
+        ("preset_name", preset_name),
+        ("system_prompt", system_prompt),
+        ("user_prompt", user_prompt),
+        ("parameters", parameters),
+        ("groups", groups),
+        ("capabilities", capabilities),
+        ("expose_to_llm", expose_to_llm),
+        ("output_as_file", output_as_file),
+        ("enabled", enabled),
+        ("agent_loop_enabled", agent_loop_enabled),
+        ("max_rounds", max_rounds),
+        ("file_access", file_access),
+        ("peer_tools_enabled", peer_tools_enabled),
+    ):
+        if val is not None:
+            params.append(val)
+            sets.append(f"{col} = ${len(params)}")
+    row = await conn.fetchrow(
+        f"""
+        UPDATE custom_agents
+        SET {', '.join(sets)}
+        WHERE agent_id = $1
+        RETURNING {_CUSTOM_AGENT_SELECT_COLS}
+        """,
+        *params,
+    )
+    return CustomAgentRow.model_validate(dict(row)) if row else None
+
+
+async def delete_custom_agent(conn: asyncpg.Connection, agent_id: str) -> bool:
+    result = await conn.execute(
+        "DELETE FROM custom_agents WHERE agent_id = $1", agent_id,
+    )
+    return result.endswith(" 1")
+
+
+async def record_custom_agent_connected(
+    conn: asyncpg.Connection, agent_id: str
+) -> bool:
+    """Stamp `updated_at`-independent connection state: clear the pending
+    onboarding invitation now that the bridge has connected the agent.
+    Returns False when `agent_id` is unknown."""
+    result = await conn.execute(
+        """
+        UPDATE custom_agents
+        SET pending_invitation_token = NULL,
+            pending_invitation_expires_at = NULL
+        WHERE agent_id = $1
+        """,
+        agent_id,
+    )
+    return result.endswith(" 1")
+
+
+async def set_custom_agent_pending_invitation(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    *,
+    token: str,
+    expires_at: datetime,
+) -> bool:
+    """Stash a short-TTL onboarding invitation on the agent's row for the
+    bridge to consume on its next poll. Returns False when `agent_id` is
+    unknown."""
+    result = await conn.execute(
+        """
+        UPDATE custom_agents
+        SET pending_invitation_token = $2,
+            pending_invitation_expires_at = $3
+        WHERE agent_id = $1
+        """,
+        agent_id,
+        token,
+        expires_at,
+    )
+    return result.endswith(" 1")

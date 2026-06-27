@@ -33,6 +33,10 @@ from pathlib import Path
 from bp_mcp_bridge import metrics
 from bp_mcp_bridge.admin_client import AdminApiError, AdminClient
 from bp_mcp_bridge.config import StdioPolicy
+from bp_mcp_bridge.custom_agent_bridge import (
+    CustomAgentBridge,
+    CustomAgentBridgeRow,
+)
 from bp_mcp_bridge.server_bridge import ServerBridge, ServerBridgeRow
 
 logger = logging.getLogger(__name__)
@@ -54,6 +58,16 @@ class _ActiveEntry:
     row: ServerBridgeRow
 
 
+@dataclass(frozen=True)
+class _ActiveCustomEntry:
+    """One running CustomAgentBridge — task + bridge handle + the row
+    config that spawned it. Keyed by agent_id in `_active_custom`."""
+
+    task: asyncio.Task
+    bridge: CustomAgentBridge
+    row: CustomAgentBridgeRow
+
+
 class Supervisor:
     """Process-level orchestrator. One instance per process; reads
     the full `mcp_servers` table from one router."""
@@ -73,6 +87,7 @@ class Supervisor:
         self._poll_interval_s = poll_interval_s
         self._stdio_policy = stdio_policy or StdioPolicy()
         self._active: dict[str, _ActiveEntry] = {}
+        self._active_custom: dict[str, _ActiveCustomEntry] = {}
 
     async def run(self) -> None:
         """Run forever — reconcile loop + ServerBridge tasks share
@@ -92,6 +107,17 @@ class Supervisor:
                     logger.exception(
                         "mcp_supervisor_reconcile_failed",
                         extra={"event": "mcp_supervisor_reconcile_failed"},
+                    )
+                # Custom-agent reconcile is independent — isolate its failures
+                # so an error in one source never starves the other.
+                try:
+                    await self._reconcile_custom_once()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "custom_agent_supervisor_reconcile_failed",
+                        extra={
+                            "event": "custom_agent_supervisor_reconcile_failed",
+                        },
                     )
                 await asyncio.sleep(self._poll_interval_s)
         finally:
@@ -272,7 +298,130 @@ class Supervisor:
             )
 
     async def _tear_down_all(self) -> None:
-        """Cancel every running ServerBridge. Called from the
-        supervisor's finally block on shutdown."""
+        """Cancel every running ServerBridge + CustomAgentBridge. Called
+        from the supervisor's finally block on shutdown."""
         for sid in list(self._active.keys()):
             await self._stop(sid)
+        for aid in list(self._active_custom.keys()):
+            await self._stop_custom(aid)
+
+    # -- custom agents ------------------------------------------------------
+
+    async def _reconcile_custom_once(self) -> None:
+        try:
+            rows_raw = await self._admin_client.list_custom_agents()
+        except AdminApiError as exc:
+            logger.warning(
+                "custom_agent_supervisor_list_failed",
+                extra={
+                    "event": "custom_agent_supervisor_list_failed",
+                    "status_code": exc.status_code,
+                    "detail": exc.message,
+                },
+            )
+            return
+        # Desired = enabled rows only. A disabled row is treated like an absent
+        # one, so flipping `enabled` off tears the bridge down.
+        desired = {
+            r["agent_id"]: CustomAgentBridgeRow.from_admin_dict(r)
+            for r in rows_raw
+            if r.get("enabled", True)
+        }
+
+        for aid in list(self._active_custom.keys()):
+            if aid not in desired:
+                logger.info(
+                    "custom_agent_bridge_removed",
+                    extra={
+                        "event": "custom_agent_bridge_removed",
+                        "bp.custom_agent_id": aid,
+                    },
+                )
+                await self._stop_custom(aid)
+
+        for aid, row in desired.items():
+            existing = self._active_custom.get(aid)
+            if existing is None:
+                self._start_custom(row)
+                continue
+            if existing.row.config_signature() != row.config_signature():
+                logger.info(
+                    "custom_agent_bridge_config_changed",
+                    extra={
+                        "event": "custom_agent_bridge_config_changed",
+                        "bp.custom_agent_id": aid,
+                    },
+                )
+                await self._stop_custom(aid)
+                self._start_custom(row)
+                continue
+            # Same config signature — only rebuild the entry if the full row
+            # actually differs (e.g. a freshly minted invitation), so the
+            # steady-state pass is alloc-free.
+            if existing.row != row:
+                self._active_custom[aid] = _ActiveCustomEntry(
+                    task=existing.task, bridge=existing.bridge, row=row,
+                )
+
+    def _start_custom(self, row: CustomAgentBridgeRow) -> None:
+        bridge = CustomAgentBridge(
+            row,
+            admin_client=self._admin_client,
+            router_url=self._router_url,
+            state_dir=self._state_dir,
+        )
+        task = asyncio.create_task(
+            bridge.run(),
+            name=f"custom_agent_bridge:{row.agent_id}",
+        )
+        task.add_done_callback(self._on_custom_bridge_done)
+        self._active_custom[row.agent_id] = _ActiveCustomEntry(
+            task=task, bridge=bridge, row=row,
+        )
+        logger.info(
+            "custom_agent_bridge_started",
+            extra={
+                "event": "custom_agent_bridge_started",
+                "bp.custom_agent_id": row.agent_id,
+                "preset": row.preset_name,
+            },
+        )
+
+    def _on_custom_bridge_done(self, task: asyncio.Task) -> None:
+        name = task.get_name()
+        prefix = "custom_agent_bridge:"
+        if name.startswith(prefix):
+            agent_id = name[len(prefix):]
+            current = self._active_custom.get(agent_id)
+            if current is not None and current.task is task:
+                self._active_custom.pop(agent_id, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.exception(
+                "custom_agent_bridge_exited",
+                extra={
+                    "event": "custom_agent_bridge_exited",
+                    "task_name": task.get_name(),
+                },
+                exc_info=exc,
+            )
+
+    async def _stop_custom(self, agent_id: str) -> None:
+        entry = self._active_custom.pop(agent_id, None)
+        if entry is None:
+            return
+        entry.task.cancel()
+        try:
+            await entry.task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "custom_agent_bridge_stop_error",
+                extra={
+                    "event": "custom_agent_bridge_stop_error",
+                    "bp.custom_agent_id": agent_id,
+                },
+            )

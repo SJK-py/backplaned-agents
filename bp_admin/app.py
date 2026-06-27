@@ -29,6 +29,7 @@ from bp_admin.pages import (
     agents,
     audit,
     auth_pages,
+    custom_agents,
     dashboard,
     invitations,
     llm_presets,
@@ -188,6 +189,7 @@ def create_app(config: AdminConfig | None = None) -> FastAPI:
     app.include_router(test_task.router, prefix="/test-task")
     app.include_router(llm_presets.router, prefix="/llm/presets")
     app.include_router(mcp_servers.router, prefix="/mcp-servers")
+    app.include_router(custom_agents.router, prefix="/custom-agents")
 
     return app
 

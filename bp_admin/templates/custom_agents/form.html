@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if mode == "new" %}New custom agent{% else %}Edit custom agent — {{ agent.agent_id }}{% endif %} — bp_admin
+{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/custom-agents" class="hover:text-brand-900 underline underline-offset-2">Custom agents</a>
+  <span class="mx-1">/</span>
+  <span>{% if mode == "new" %}New{% else %}custom_{{ form.agent_id }}{% endif %}</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">
+    {% if mode == "new" %}Add custom agent{% else %}Edit custom_{{ form.agent_id }}{% endif %}
+  </h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Configuration only — the <code class="text-brand-700">bp_mcp_bridge</code>
+    process reads this row and onboards one agent
+    (<code class="text-brand-700">custom_{{ form.agent_id or '&lt;id&gt;' }}</code>)
+    whose single mode runs an LLM completion against the chosen preset,
+    exposed to the LLM as
+    <code class="text-brand-700">call_custom_{{ form.agent_id or '&lt;id&gt;' }}</code>.
+  </p>
+</header>
+
+{% if error %}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    {{ error }}
+  </div>
+{% endif %}
+
+<form method="post"
+      action="{% if mode == 'new' %}/admin/custom-agents/new{% else %}/admin/custom-agents/custom_{{ form.agent_id }}/edit{% endif %}"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
+  {% include "_partials/csrf.html" %}
+
+  <div>
+    <label for="agent_id" class="block text-xs font-medium text-brand-700 mb-1">
+      Agent ID <span class="text-red-700">*</span>
+    </label>
+    <div class="flex items-stretch">
+      <span class="inline-flex items-center rounded-l border border-r-0 border-brand-500/20
+                   bg-brand-50 px-2 text-sm font-mono text-brand-500">custom_</span>
+      <input id="agent_id" name="agent_id" type="text" required
+             pattern="[a-z][a-z0-9_]*"
+             value="{{ form.agent_id }}"
+             {% if mode == "edit" %}readonly{% endif %}
+             class="w-full rounded-r border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    {% if mode == 'edit' %}bg-brand-50 text-brand-500{% endif %}
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <p class="text-xs text-brand-500 mt-1">
+      Lowercase + digits + underscores. The <code>custom_</code> namespace
+      prefix is added automatically.
+      {% if mode == "edit" %}Immutable after creation.{% endif %}
+    </p>
+  </div>
+
+  <div>
+    <label for="description" class="block text-xs font-medium text-brand-700 mb-1">
+      Description
+    </label>
+    <input id="description" name="description" type="text"
+           value="{{ form.description }}"
+           placeholder="Shown to a calling LLM as the tool description."
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+  </div>
+
+  <div>
+    <label for="preset_name" class="block text-xs font-medium text-brand-700 mb-1">
+      Model preset <span class="text-red-700">*</span>
+    </label>
+    <select id="preset_name" name="preset_name" required
+            class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                   focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+      <option value="" disabled {% if not form.preset_name %}selected{% endif %}>— select a preset —</option>
+      {% for name in presets %}
+        <option value="{{ name }}" {% if name == form.preset_name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+      {# Keep an out-of-list current value selectable (e.g. preset later renamed). #}
+      {% if form.preset_name and form.preset_name not in presets %}
+        <option value="{{ form.preset_name }}" selected>{{ form.preset_name }} (not found)</option>
+      {% endif %}
+    </select>
+    <p class="text-xs text-brand-500 mt-1">
+      A preset's <code>min_user_level</code> gate is checked against the
+      <em>calling</em> user — pick one your callers can use.
+    </p>
+  </div>
+
+  <div>
+    <label for="system_prompt" class="block text-xs font-medium text-brand-700 mb-1">
+      System prompt
+    </label>
+    <textarea id="system_prompt" name="system_prompt" rows="4"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+              >{{ form.system_prompt }}</textarea>
+    <p class="text-xs text-brand-500 mt-1">
+      Reference parameters with <code>$name</code>. Treat the user-prompt
+      content as untrusted input.
+    </p>
+  </div>
+
+  <div>
+    <label for="user_prompt" class="block text-xs font-medium text-brand-700 mb-1">
+      User prompt
+    </label>
+    <textarea id="user_prompt" name="user_prompt" rows="4"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+              >{{ form.user_prompt }}</textarea>
+    <p class="text-xs text-brand-500 mt-1">
+      Reference parameters with <code>$name</code>. Every <code>$placeholder</code>
+      must be a declared parameter below.
+    </p>
+  </div>
+
+  <div x-data="{
+         params: {{ form.parameters | tojson | forceescape }},
+         add() { this.params.push({name: '', description: '', required: true, file_ref: false}); },
+         remove(i) { this.params.splice(i, 1); }
+       }">
+    <label class="block text-xs font-medium text-brand-700 mb-1">Parameters</label>
+    <p class="text-xs text-brand-500 mb-2">
+      Each becomes a tool input field and a <code>$name</code> prompt
+      placeholder. All values are strings. Tick <strong>file ref</strong> to
+      treat the value as a file name whose UTF-8 text content is read in and
+      substituted (text files only).
+    </p>
+
+    <div class="space-y-2">
+      <template x-for="(p, i) in params" :key="i">
+        <div class="flex flex-wrap items-center gap-2 rounded border border-brand-500/15 bg-brand-50/40 p-2">
+          <input type="text" x-model="p.name" placeholder="name"
+                 pattern="[a-z][a-z0-9_]*"
+                 class="w-32 rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <input type="text" x-model="p.description" placeholder="description"
+                 class="flex-1 min-w-[10rem] rounded border border-brand-500/20 px-2 py-1 text-sm
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <label class="flex items-center gap-1 text-xs text-brand-700">
+            <input type="checkbox" x-model="p.required"
+                   class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+            required
+          </label>
+          <label class="flex items-center gap-1 text-xs text-brand-700">
+            <input type="checkbox" x-model="p.file_ref"
+                   class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+            file ref
+          </label>
+          <button type="button" @click="remove(i)"
+                  title="Remove parameter"
+                  class="ml-auto text-red-700 hover:text-red-900 text-sm px-1">&times;</button>
+        </div>
+      </template>
+    </div>
+
+    <button type="button" @click="add()"
+            class="mt-2 inline-flex items-center rounded border border-brand-500/30 bg-white
+                   px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50">
+      + Add parameter
+    </button>
+
+    {# Alpine serialises the rows into this hidden field the form actually posts. #}
+    <input type="hidden" name="parameters_json" :value="JSON.stringify(params)"/>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="groups" class="block text-xs font-medium text-brand-700 mb-1">
+        Groups
+      </label>
+      <input id="groups" name="groups" type="text"
+             value="{{ form.groups }}"
+             placeholder="comma, separated"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <div>
+      <label for="capabilities" class="block text-xs font-medium text-brand-700 mb-1">
+        Capabilities
+      </label>
+      <input id="capabilities" name="capabilities" type="text"
+             value="{{ form.capabilities }}"
+             placeholder="custom.search, custom.write"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+  </div>
+  <p class="text-xs text-brand-500 -mt-2">
+    Used for ACL targeting (who may call this agent). Every custom agent also
+    carries the fixed <code>custom.agent</code> capability.
+  </p>
+
+  <div class="space-y-2 pt-2">
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="expose_to_llm" value="on"
+             {% if form.expose_to_llm %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Expose to LLM (callable as a tool by other agents)
+    </label>
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="output_as_file" value="on"
+             {% if form.output_as_file %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Output as file (return a file reference instead of inline text)
+    </label>
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="enabled" value="on"
+             {% if form.enabled %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Enabled (the bridge runs this agent)
+    </label>
+  </div>
+
+  <div class="border-t border-brand-500/15 pt-4 mt-2"
+       x-data="{ loop: {{ form.agent_loop_enabled | tojson | forceescape }} }">
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="agent_loop_enabled" value="on" x-model="loop"
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Agent loop (run a bounded tool-use loop instead of one completion)
+    </label>
+
+    <div x-show="loop" x-cloak class="mt-3 space-y-3 pl-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label for="max_rounds" class="block text-xs font-medium text-brand-700 mb-1">
+            Max rounds
+          </label>
+          <input id="max_rounds" name="max_rounds" type="number" min="1" max="16"
+                 value="{{ form.max_rounds }}"
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <p class="text-xs text-brand-500 mt-1">
+            Tool-use rounds before a forced final answer (1–16).
+          </p>
+        </div>
+        <div>
+          <label for="file_access" class="block text-xs font-medium text-brand-700 mb-1">
+            File access
+          </label>
+          <select id="file_access" name="file_access"
+                  class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                         focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+            <option value="none" {% if form.file_access == 'none' %}selected{% endif %}>none</option>
+            <option value="read_only" {% if form.file_access == 'read_only' %}selected{% endif %}>read only</option>
+            <option value="full" {% if form.file_access == 'full' %}selected{% endif %}>full (read + write/delete)</option>
+          </select>
+          <p class="text-xs text-brand-500 mt-1">
+            File-store tools the loop may call.
+          </p>
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-brand-700">
+        <input type="checkbox" name="peer_tools_enabled" value="on"
+               {% if form.peer_tools_enabled %}checked{% endif %}
+               class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+        Peer tools (let this agent call the other agents its ACL allows)
+      </label>
+    </div>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+                   text-white text-sm font-medium px-4 py-2 transition-colors">
+      {% if mode == "new" %}Create agent{% else %}Save changes{% endif %}
+    </button>
+    <a href="/admin/custom-agents"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

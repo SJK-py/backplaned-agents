@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Custom agents — bp_admin{% endblock %}
+
+{% block content %}
+<header class="mb-6 flex items-baseline justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold text-brand-900">Custom agents</h1>
+    <p class="text-sm text-brand-500 mt-1">
+      Operator-defined LLM agents bridged into the backplane. The
+      <code class="text-brand-700">bp_mcp_bridge</code> process reads these
+      rows and onboards one agent per row
+      (<code class="text-brand-700">custom_&lt;id&gt;</code>) whose single mode
+      runs an LLM completion against the chosen preset, exposed to the LLM as
+      <code class="text-brand-700">call_custom_&lt;id&gt;</code>. The bridge
+      isn't part of the default deployment yet — run it separately to bring
+      configured agents online.
+    </p>
+  </div>
+  <a href="/admin/custom-agents/new"
+     class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+            text-white text-sm font-medium px-3 py-2 transition-colors">
+    + Add custom agent
+  </a>
+</header>
+
+{% if flash %}
+  <div class="mb-4 rounded border border-brand-500/20 bg-white px-3 py-2 text-sm text-brand-700">
+    {{ flash }}
+  </div>
+{% endif %}
+
+<div class="bg-white border border-brand-500/10 rounded-md shadow-sm overflow-x-auto">
+  {% if agents %}
+    <table class="w-full text-sm">
+      <thead class="bg-brand-50 text-brand-500 text-xs uppercase tracking-wider">
+        <tr>
+          <th class="px-4 py-2 text-left font-medium">Agent ID</th>
+          <th class="px-4 py-2 text-left font-medium">Description</th>
+          <th class="px-4 py-2 text-left font-medium">Preset</th>
+          <th class="px-4 py-2 text-left font-medium">LLM-callable</th>
+          <th class="px-4 py-2 text-left font-medium">Output</th>
+          <th class="px-4 py-2 text-left font-medium">Loop</th>
+          <th class="px-4 py-2 text-left font-medium">Enabled</th>
+          <th class="px-4 py-2 text-right font-medium">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-brand-500/10">
+        {% for a in agents %}
+          <tr class="hover:bg-brand-50/50">
+            <td class="px-4 py-2 font-mono text-xs text-brand-900">{{ a.agent_id }}</td>
+            <td class="px-4 py-2 text-brand-700">{{ a.description or "—" }}</td>
+            <td class="px-4 py-2 font-mono text-xs text-brand-700">{{ a.preset_name }}</td>
+            <td class="px-4 py-2">
+              {% if a.expose_to_llm %}
+                <span class="text-emerald-700 text-xs">yes</span>
+              {% else %}
+                <span class="text-brand-500/70 text-xs">hidden</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-xs text-brand-700">
+              {% if a.output_as_file %}file ref{% else %}inline{% endif %}
+            </td>
+            <td class="px-4 py-2 text-xs">
+              {% if a.agent_loop_enabled %}
+                <span class="text-brand-700"
+                      title="file: {{ a.file_access }}{% if a.peer_tools_enabled %}, peers{% endif %}, max {{ a.max_rounds }}">
+                  on
+                  {%- if a.file_access and a.file_access != 'none' %} · {{ a.file_access }}{% endif -%}
+                  {%- if a.peer_tools_enabled %} · peers{% endif -%}
+                </span>
+              {% else %}
+                <span class="text-brand-500/70">—</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2">
+              {% if a.enabled %}
+                <span class="text-emerald-700 text-xs">yes</span>
+              {% else %}
+                <span class="text-amber-700 text-xs">disabled</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 text-right">
+              <a href="/admin/custom-agents/{{ a.agent_id }}/edit"
+                 class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2 mr-3">
+                Edit
+              </a>
+              <form method="post"
+                    action="/admin/custom-agents/{{ a.agent_id }}/reconnect"
+                    class="inline">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        title="Re-mint the onboarding invitation so a bridge that lost this agent's credentials can re-onboard it."
+                        class="text-xs text-brand-700 hover:text-brand-900 underline underline-offset-2 mr-3">
+                  Reconnect
+                </button>
+              </form>
+              <form method="post"
+                    action="/admin/custom-agents/{{ a.agent_id }}/delete"
+                    class="inline"
+                    onsubmit="return confirm('Delete custom agent {{ a.agent_id }}? The bridge will tear down its agent.');">
+                {% include "_partials/csrf.html" %}
+                <button type="submit"
+                        class="text-xs text-red-700 hover:text-red-900 underline underline-offset-2">
+                  Delete
+                </button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="px-4 py-12 text-center text-brand-500">
+      No custom agents configured.
+      <a href="/admin/custom-agents/new" class="text-brand-700 hover:text-brand-900 underline ml-1">
+        Add one
+      </a>
+      to define a prompt-driven LLM agent on the backplane.
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
