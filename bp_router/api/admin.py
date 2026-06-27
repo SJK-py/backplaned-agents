@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 from bp_router.acl import (
     Rule,
@@ -4171,4 +4171,445 @@ async def record_mcp_tools_refreshed(
                     ),
                 },
             )
+    return {"status": "recorded"}
+
+
+# ---------------------------------------------------------------------------
+# Custom agents (operator-defined LLM-backed agents)
+# ---------------------------------------------------------------------------
+
+
+_CUSTOM_AGENT_ID_RE = re.compile(r"^custom_[a-z][a-z0-9_]*$")
+_CUSTOM_PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _check_caps_grammar(caps: list[str]) -> None:
+    from bp_router.acl import CAPABILITY_PATTERN  # noqa: PLC0415
+    for c in caps:
+        if not CAPABILITY_PATTERN.match(c):
+            raise ValueError(
+                f"capability {c!r} must match "
+                r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$ (e.g. custom.search)"
+            )
+
+
+def _check_groups_grammar(groups: list[str]) -> None:
+    from bp_protocol.types import GROUP_NAME_PATTERN  # noqa: PLC0415
+    for g in groups:
+        if not GROUP_NAME_PATTERN.match(g):
+            raise ValueError(
+                f"group {g!r} must match [a-z][a-z0-9_:.\\-]{{0,63}}"
+            )
+
+
+def _prompt_placeholders(*templates: str) -> set[str]:
+    """The `$name` identifiers referenced across the given templates.
+
+    Uses `string.Template.get_identifiers()` so the set matches exactly
+    what `safe_substitute` would substitute at render time — `$$`
+    escapes and malformed `$` sequences are not identifiers."""
+    from string import Template  # noqa: PLC0415
+    found: set[str] = set()
+    for tpl in templates:
+        found.update(Template(tpl).get_identifiers())
+    return found
+
+
+def _check_prompt_placeholders(
+    system_prompt: str, user_prompt: str, param_names: list[str]
+) -> None:
+    """Every `$name` placeholder in the prompts must be a declared param —
+    otherwise `safe_substitute` would leave a literal `$undeclared` in the
+    prompt sent to the model. Caught at the boundary on create + edit."""
+    undeclared = _prompt_placeholders(system_prompt, user_prompt) - set(param_names)
+    if undeclared:
+        raise ValueError(
+            "prompt references undeclared parameter(s): "
+            + ", ".join(sorted(undeclared))
+            + " — declare them as parameters or remove the $placeholder"
+        )
+
+
+class CustomAgentParam(BaseModel):
+    """One operator-declared parameter. All params are type `string`
+    (v1); `name` is both the `accepts_schema` property and the
+    `$name` substitution key in the prompts."""
+
+    name: str
+    description: str = ""
+    required: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _name_shape(cls, v: str) -> str:
+        if not _CUSTOM_PARAM_NAME_RE.match(v):
+            raise ValueError(
+                "parameter name must match ^[a-z][a-z0-9_]*$ "
+                "(lowercase letters / digits / underscores, no leading digit)"
+            )
+        return v
+
+
+def _check_param_names_unique(params: list[CustomAgentParam]) -> None:
+    names = [p.name for p in params]
+    if len(names) != len(set(names)):
+        raise ValueError("parameter names must be unique")
+
+
+class CustomAgentCreate(BaseModel):
+    """Create-time payload for `POST /v1/admin/custom-agents`.
+
+    `agent_id` is the FULL backplane id and must already carry the
+    `custom_` namespace prefix (the admin UI prepends it); the router
+    keeps a single id everywhere rather than deriving it."""
+
+    agent_id: str
+    description: str = ""
+    preset_name: str
+    system_prompt: str = ""
+    user_prompt: str = ""
+    parameters: list[CustomAgentParam] = Field(default_factory=list)
+    groups: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+
+    @field_validator("agent_id")
+    @classmethod
+    def _agent_id_shape(cls, v: str) -> str:
+        if not _CUSTOM_AGENT_ID_RE.match(v):
+            raise ValueError(
+                "agent_id must match ^custom_[a-z][a-z0-9_]*$ "
+                "(the 'custom_' namespace prefix is required)"
+            )
+        return v
+
+    @field_validator("groups")
+    @classmethod
+    def _groups_grammar(cls, v: list[str]) -> list[str]:
+        _check_groups_grammar(v)
+        return v
+
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities_grammar(cls, v: list[str]) -> list[str]:
+        _check_caps_grammar(v)
+        return v
+
+    @model_validator(mode="after")
+    def _cross_field(self) -> CustomAgentCreate:
+        _check_param_names_unique(self.parameters)
+        _check_prompt_placeholders(
+            self.system_prompt, self.user_prompt,
+            [p.name for p in self.parameters],
+        )
+        return self
+
+
+class CustomAgentUpdate(BaseModel):
+    """PATCH payload — every field optional. Placeholder / param
+    consistency is validated against the MERGED record in the endpoint
+    (a prompt edit can reference a param added in the same request)."""
+
+    description: str | None = None
+    preset_name: str | None = None
+    system_prompt: str | None = None
+    user_prompt: str | None = None
+    parameters: list[CustomAgentParam] | None = None
+    groups: list[str] | None = None
+    capabilities: list[str] | None = None
+    expose_to_llm: bool | None = None
+    output_as_file: bool | None = None
+    enabled: bool | None = None
+
+    @field_validator("groups")
+    @classmethod
+    def _groups_grammar(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_groups_grammar(v)
+        return v
+
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities_grammar(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_caps_grammar(v)
+        return v
+
+
+class CustomAgentView(BaseModel):
+    """Response model. No secrets to mask — prompts + params are
+    operator-authored config. `pending_invitation_token` is exposed
+    (the bridge reads this endpoint) but not rendered by the UI."""
+
+    agent_id: str
+    description: str
+    preset_name: str
+    system_prompt: str
+    user_prompt: str
+    parameters: list[dict[str, Any]] = []
+    groups: list[str] = []
+    capabilities: list[str] = []
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+    created_by: str | None = None
+    pending_invitation_token: str | None = None
+
+
+def _custom_agent_row_to_view(row) -> CustomAgentView:  # type: ignore[no-untyped-def]
+    return CustomAgentView(
+        agent_id=row.agent_id,
+        description=row.description,
+        preset_name=row.preset_name,
+        system_prompt=row.system_prompt,
+        user_prompt=row.user_prompt,
+        parameters=list(row.parameters or []),
+        groups=list(row.groups or []),
+        capabilities=list(row.capabilities or []),
+        expose_to_llm=row.expose_to_llm,
+        output_as_file=row.output_as_file,
+        enabled=row.enabled,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        created_by=row.created_by,
+        pending_invitation_token=row.pending_invitation_token,
+    )
+
+
+async def _mint_custom_agent_pending_invitation(
+    conn: Any, agent_id: str, *, created_by: str
+) -> None:
+    """Mint a short-TTL `service` invitation for `custom_<id>` and stash it on
+    the row for the bridge to consume on its next poll. Admin-gated callers
+    only. Must run inside the caller's transaction (after the row exists)."""
+    token = _secrets.token_urlsafe(32)
+    expires_at = _now() + timedelta(seconds=_MCP_INVITATION_TTL_S)
+    await queries.insert_invitation(
+        conn,
+        token_hash=_hash(token),
+        level="service",
+        expires_at=expires_at,
+        created_by=created_by,
+        idempotency_key=None,
+        provisions_service_user=False,
+    )
+    await queries.set_custom_agent_pending_invitation(
+        conn, agent_id, token=token, expires_at=expires_at
+    )
+
+
+@router.get("/custom-agents", response_model=list[CustomAgentView])
+async def list_custom_agents(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> list[CustomAgentView]:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await queries.list_custom_agents(conn)
+    return [_custom_agent_row_to_view(r) for r in rows]
+
+
+@router.get("/custom-agents/{agent_id}", response_model=CustomAgentView)
+async def get_custom_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> CustomAgentView:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        row = await queries.get_custom_agent(conn, agent_id)
+    if row is None:
+        raise HTTPException(404, "custom agent not found")
+    return _custom_agent_row_to_view(row)
+
+
+@router.post("/custom-agents", response_model=CustomAgentView, status_code=201)
+async def create_custom_agent(
+    req: CustomAgentCreate,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> CustomAgentView:
+    """Create a custom LLM agent. The `bp_mcp_bridge` process picks it up and
+    onboards one agent (`custom_<id>`, a single mode) at runtime, using the
+    short-TTL invitation stashed on the row here (the bridge can't self-mint)."""
+    import asyncpg  # noqa: PLC0415
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row = await queries.insert_custom_agent(
+                    conn,
+                    agent_id=req.agent_id,
+                    description=req.description,
+                    preset_name=req.preset_name,
+                    system_prompt=req.system_prompt,
+                    user_prompt=req.user_prompt,
+                    parameters=[p.model_dump() for p in req.parameters],
+                    groups=req.groups,
+                    capabilities=req.capabilities,
+                    expose_to_llm=req.expose_to_llm,
+                    output_as_file=req.output_as_file,
+                    enabled=req.enabled,
+                    created_by=principal.user_id,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(
+                    409, f"agent_id {req.agent_id!r} already exists"
+                ) from exc
+            except asyncpg.ForeignKeyViolationError as exc:
+                raise HTTPException(
+                    400, f"preset {req.preset_name!r} does not exist"
+                ) from exc
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="custom_agent.created",
+                target_kind="custom_agent", target_id=req.agent_id,
+                payload={
+                    "preset_name": req.preset_name,
+                    "expose_to_llm": req.expose_to_llm,
+                    "enabled": req.enabled,
+                },
+            )
+            await _mint_custom_agent_pending_invitation(
+                conn, req.agent_id, created_by=principal.user_id
+            )
+    return _custom_agent_row_to_view(row)
+
+
+@router.patch("/custom-agents/{agent_id}", response_model=CustomAgentView)
+async def update_custom_agent(
+    agent_id: str,
+    req: CustomAgentUpdate,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> CustomAgentView:
+    """PATCH — only the fields the admin set are written. Prompt placeholders
+    are re-validated against the merged record so a prompt + params edit in the
+    same request stays consistent."""
+    import asyncpg  # noqa: PLC0415
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        existing = await queries.get_custom_agent(conn, agent_id)
+        if existing is None:
+            raise HTTPException(404, "custom agent not found")
+
+        eff_system = (
+            req.system_prompt if req.system_prompt is not None
+            else existing.system_prompt
+        )
+        eff_user = (
+            req.user_prompt if req.user_prompt is not None
+            else existing.user_prompt
+        )
+        eff_params = (
+            [p.model_dump() for p in req.parameters]
+            if req.parameters is not None
+            else list(existing.parameters)
+        )
+        try:
+            _check_prompt_placeholders(
+                eff_system, eff_user, [p["name"] for p in eff_params]
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        async with conn.transaction():
+            try:
+                row = await queries.update_custom_agent(
+                    conn, agent_id,
+                    description=req.description,
+                    preset_name=req.preset_name,
+                    system_prompt=req.system_prompt,
+                    user_prompt=req.user_prompt,
+                    parameters=eff_params if req.parameters is not None else None,
+                    groups=req.groups,
+                    capabilities=req.capabilities,
+                    expose_to_llm=req.expose_to_llm,
+                    output_as_file=req.output_as_file,
+                    enabled=req.enabled,
+                )
+            except asyncpg.ForeignKeyViolationError as exc:
+                raise HTTPException(
+                    400, f"preset {req.preset_name!r} does not exist"
+                ) from exc
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="custom_agent.updated",
+                target_kind="custom_agent", target_id=agent_id,
+                payload={
+                    k: getattr(req, k)
+                    for k in (
+                        "description", "preset_name", "expose_to_llm",
+                        "output_as_file", "enabled",
+                    )
+                    if getattr(req, k) is not None
+                },
+            )
+    assert row is not None
+    return _custom_agent_row_to_view(row)
+
+
+@router.delete("/custom-agents/{agent_id}", status_code=204)
+async def delete_custom_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> None:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await queries.get_custom_agent(conn, agent_id)
+            if existing is None:
+                raise HTTPException(404, "custom agent not found")
+            await queries.delete_custom_agent(conn, agent_id)
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="custom_agent.deleted",
+                target_kind="custom_agent", target_id=agent_id,
+            )
+
+
+@router.post("/custom-agents/{agent_id}/reconnect", status_code=202)
+async def reconnect_custom_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Re-mint the onboarding invitation so a bridge that lost the agent's
+    persisted credentials can re-onboard `custom_<id>` on its next poll. A
+    connected bridge ignores the unused invitation (it expires harmlessly)."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await queries.get_custom_agent(conn, agent_id)
+            if existing is None:
+                raise HTTPException(404, "custom agent not found")
+            await _mint_custom_agent_pending_invitation(
+                conn, agent_id, created_by=principal.user_id
+            )
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="custom_agent.reconnect_requested",
+                target_kind="custom_agent", target_id=agent_id,
+            )
+    return {"status": "reconnect_requested"}
+
+
+@router.post("/custom-agents/{agent_id}/connected", status_code=200)
+async def record_custom_agent_connected(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> dict[str, Any]:
+    """Bridge callback once `custom_<id>` has onboarded to the router. Clears
+    the consumed pending invitation so the admin UI stops showing 'pending'."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        ok = await queries.record_custom_agent_connected(conn, agent_id)
+    if not ok:
+        raise HTTPException(404, "custom agent not found")
     return {"status": "recorded"}
