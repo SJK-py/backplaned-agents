@@ -42,6 +42,10 @@ class CustomAgentBridgeRow:
     expose_to_llm: bool
     output_as_file: bool
     enabled: bool
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"
+    peer_tools_enabled: bool = False
     # Admin-minted short-TTL invitation for first onboard / reconnect. Consumed
     # by the bridge; NOT part of config_signature (a mint must not restart a
     # healthy bridge).
@@ -61,6 +65,10 @@ class CustomAgentBridgeRow:
             expose_to_llm=bool(row.get("expose_to_llm", True)),
             output_as_file=bool(row.get("output_as_file", False)),
             enabled=bool(row.get("enabled", True)),
+            agent_loop_enabled=bool(row.get("agent_loop_enabled", False)),
+            max_rounds=int(row.get("max_rounds", 4) or 4),
+            file_access=row.get("file_access") or "none",
+            peer_tools_enabled=bool(row.get("peer_tools_enabled", False)),
             pending_invitation_token=row.get("pending_invitation_token"),
         )
 
@@ -86,6 +94,10 @@ class CustomAgentBridgeRow:
             tuple(self.capabilities),
             self.expose_to_llm,
             self.output_as_file,
+            self.agent_loop_enabled,
+            self.max_rounds,
+            self.file_access,
+            self.peer_tools_enabled,
         )
 
 
@@ -201,6 +213,10 @@ class CustomAgentBridge:
             capabilities=self._row.capabilities,
             expose_to_llm=self._row.expose_to_llm,
             output_as_file=self._row.output_as_file,
+            agent_loop_enabled=self._row.agent_loop_enabled,
+            max_rounds=self._row.max_rounds,
+            file_access=self._row.file_access,
+            peer_tools_enabled=self._row.peer_tools_enabled,
             router_url=self._router_url,
             state_dir=self._state_dir,
         )

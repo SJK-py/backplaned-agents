@@ -310,9 +310,10 @@ window — the whole point of the toggle. Exact `FileStash.store`
 signature is an implementation detail to confirm against
 `bp_sdk/files.py`.
 
-## 9. v2 — the agent loop (designed, deferred)
+## 9. v2 — the agent loop (implemented)
 
-Additive. New nullable/default-off columns (additive migration):
+Additive (migration `0009_custom_agent_loop`, all default-off so v1 rows
+are unchanged):
 
 ```sql
 ALTER TABLE custom_agents
@@ -325,28 +326,42 @@ ALTER TABLE custom_agents
 ```
 
 When `agent_loop_enabled`, the handler runs a **minimal in-bridge
-loop** built on SDK primitives only (no `bp_agents` import):
+loop** (`custom_agent._run_loop`) built on SDK primitives only (no
+`bp_agents` import):
 
 ```
 messages = [system, user]
-tools  = (file_access != 'none' ? sdk_file_tools.file_tools(file_access) : [])
-       + (peer_tools_enabled    ? build_tools(ctx.peers.visible(), provider) : [])
+tools  = (file_access != 'none' ? file_tools(file_access) : [])      # ToolSpec[]
+       + (peer_tools_enabled    ? _peer_tool_specs(ctx)    : [])      # ToolSpec[]
+resp = None
 for _ in range(max_rounds):
-    resp = await ctx.llm.generate(prompt=messages, preset=…, tools=tools)
+    resp = await ctx.llm.generate(messages, preset=…, tools=tools or None)
     messages.append(Message.assistant_from_response(resp))
-    if not resp.tool_calls: break
+    if not resp.tool_calls: return resp
     for tc in resp.tool_calls:
-        if is_file_tool(tc):  result = sdk_file_tools.dispatch_file_tool(ctx.files, tc)
-        else:                 result = await ctx.peers.spawn_from_tool_call(tc)
-        messages.append(<tool response>)
-return _to_output(ctx, resp, output_as_file=…)
+        messages.append(await _dispatch_tool_call(ctx, tc, spec))
+# budget exhausted mid-tool-use → force ONE tool-free final answer
+if resp.tool_calls:
+    messages.append(Message(role="user", content=_FINAL_ANSWER_NUDGE))
+    resp = await ctx.llm.generate(messages, preset=…)   # tools=None
+return resp
 ```
 
+`_dispatch_tool_call` routes a file-tool name to
+`dispatch_file_tool(ctx.files, tc)` and a `call_*` name to
+`ctx.peers.spawn_from_tool_call(tc)` (a non-succeeded child is fed back
+as a readable failure string, not an empty result). Every dispatch runs
+under one error boundary: any failure becomes the tool result so the
+loop continues and the model can recover — only genuine cancellation
+re-raises. `_peer_tool_specs` mirrors `bp_agents.common.tools.peer_tool_specs`
+on bp_sdk only (`build_tools(ctx.peers.visible(), "openai")` unwrapped to
+`ToolSpec`, so the names match `spawn_from_tool_call`'s reverse mapping).
+
 This duplicates a trimmed slice of `run_llm_loop`'s logic
-(`bp_agents/common/loop.py:392-537`) deliberately — reuse would breach
+(`bp_agents/common/loop.py:184-537`) deliberately — reuse would breach
 §1's dependency boundary. The pieces it leans on
 (`assistant_from_response`, `spawn_from_tool_call`,
-`sdk_file_tools.{file_tools,dispatch_file_tool}`, `build_tools`) are
+`file_tools`/`dispatch_file_tool`/`is_file_tool`, `build_tools`) are
 all already in `bp_sdk`. If a third consumer ever wants this, promote
 the minimal loop into `bp_sdk` rather than importing the suite version.
 

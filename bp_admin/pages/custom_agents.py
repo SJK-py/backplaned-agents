@@ -147,6 +147,10 @@ def _empty_form() -> dict[str, Any]:
         "expose_to_llm": True,
         "output_as_file": False,
         "enabled": True,
+        "agent_loop_enabled": False,
+        "max_rounds": 4,
+        "file_access": "none",
+        "peer_tools_enabled": False,
     }
 
 
@@ -167,6 +171,10 @@ def _form_from_agent(a: dict[str, Any]) -> dict[str, Any]:
         "expose_to_llm": a.get("expose_to_llm", True),
         "output_as_file": a.get("output_as_file", False),
         "enabled": a.get("enabled", True),
+        "agent_loop_enabled": a.get("agent_loop_enabled", False),
+        "max_rounds": a.get("max_rounds", 4),
+        "file_access": a.get("file_access", "none"),
+        "peer_tools_enabled": a.get("peer_tools_enabled", False),
     }
 
 
@@ -224,6 +232,10 @@ def _create_payload(
     expose_to_llm: bool,
     output_as_file: bool,
     enabled: bool,
+    agent_loop_enabled: bool,
+    max_rounds: str,
+    file_access: str,
+    peer_tools_enabled: bool,
 ) -> dict[str, Any]:
     return {
         "agent_id": f"custom_{slug.strip()}",
@@ -237,7 +249,19 @@ def _create_payload(
         "expose_to_llm": expose_to_llm,
         "output_as_file": output_as_file,
         "enabled": enabled,
+        "agent_loop_enabled": agent_loop_enabled,
+        "max_rounds": _int_or(max_rounds, 4),
+        "file_access": file_access,
+        "peer_tools_enabled": peer_tools_enabled,
     }
+
+
+def _int_or(raw: str, default: int) -> int:
+    """Coerce a form int field; the router validates the range."""
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _form_echo(payload: dict[str, Any], slug: str) -> dict[str, Any]:
@@ -255,6 +279,10 @@ def _form_echo(payload: dict[str, Any], slug: str) -> dict[str, Any]:
         "expose_to_llm": payload["expose_to_llm"],
         "output_as_file": payload["output_as_file"],
         "enabled": payload["enabled"],
+        "agent_loop_enabled": payload["agent_loop_enabled"],
+        "max_rounds": payload["max_rounds"],
+        "file_access": payload["file_access"],
+        "peer_tools_enabled": payload["peer_tools_enabled"],
     }
 
 
@@ -272,6 +300,10 @@ async def create_custom_agent(
     expose_to_llm: str = Form(""),
     output_as_file: str = Form(""),
     enabled: str = Form(""),
+    agent_loop_enabled: str = Form(""),
+    max_rounds: str = Form("4"),
+    file_access: str = Form("none"),
+    peer_tools_enabled: str = Form(""),
 ) -> Response:
     templates = request.app.state.templates
     payload = _create_payload(
@@ -280,6 +312,10 @@ async def create_custom_agent(
         expose_to_llm in ("on", "true", "1"),
         output_as_file in ("on", "true", "1"),
         enabled in ("on", "true", "1"),
+        agent_loop_enabled in ("on", "true", "1"),
+        max_rounds,
+        file_access,
+        peer_tools_enabled in ("on", "true", "1"),
     )
     try:
         await upstream(request).admin_request(
@@ -319,6 +355,10 @@ async def update_custom_agent(
     expose_to_llm: str = Form(""),
     output_as_file: str = Form(""),
     enabled: str = Form(""),
+    agent_loop_enabled: str = Form(""),
+    max_rounds: str = Form("4"),
+    file_access: str = Form("none"),
+    peer_tools_enabled: str = Form(""),
 ) -> Response:
     templates = request.app.state.templates
     slug = agent_id[len("custom_"):] if agent_id.startswith("custom_") else agent_id
@@ -329,6 +369,10 @@ async def update_custom_agent(
         expose_to_llm in ("on", "true", "1"),
         output_as_file in ("on", "true", "1"),
         enabled in ("on", "true", "1"),
+        agent_loop_enabled in ("on", "true", "1"),
+        max_rounds,
+        file_access,
+        peer_tools_enabled in ("on", "true", "1"),
     )
     payload.pop("agent_id")
     try:

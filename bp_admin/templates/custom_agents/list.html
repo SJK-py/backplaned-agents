@@ -39,6 +39,7 @@
           <th class="px-4 py-2 text-left font-medium">Preset</th>
           <th class="px-4 py-2 text-left font-medium">LLM-callable</th>
           <th class="px-4 py-2 text-left font-medium">Output</th>
+          <th class="px-4 py-2 text-left font-medium">Loop</th>
           <th class="px-4 py-2 text-left font-medium">Enabled</th>
           <th class="px-4 py-2 text-right font-medium">Actions</th>
         </tr>
@@ -58,6 +59,18 @@
             </td>
             <td class="px-4 py-2 text-xs text-brand-700">
               {% if a.output_as_file %}file ref{% else %}inline{% endif %}
+            </td>
+            <td class="px-4 py-2 text-xs">
+              {% if a.agent_loop_enabled %}
+                <span class="text-brand-700"
+                      title="file: {{ a.file_access }}{% if a.peer_tools_enabled %}, peers{% endif %}, max {{ a.max_rounds }}">
+                  on
+                  {%- if a.file_access and a.file_access != 'none' %} · {{ a.file_access }}{% endif -%}
+                  {%- if a.peer_tools_enabled %} · peers{% endif -%}
+                </span>
+              {% else %}
+                <span class="text-brand-500/70">—</span>
+              {% endif %}
             </td>
             <td class="px-4 py-2">
               {% if a.enabled %}

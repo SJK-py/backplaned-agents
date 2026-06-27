@@ -402,6 +402,14 @@ class CustomAgentRow(_Row):
     expose_to_llm: bool = True
     output_as_file: bool = False
     enabled: bool = True
+    # v2 agent loop (all default off → single completion). When enabled the
+    # handler runs a bounded tool-use loop; `file_access` gives it the file-
+    # store tools (none/read_only/full) and `peer_tools_enabled` exposes the
+    # ACL-visible peer agents as tools.
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"  # none | read_only | full
+    peer_tools_enabled: bool = False
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None

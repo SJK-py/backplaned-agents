@@ -4181,6 +4181,24 @@ async def record_mcp_tools_refreshed(
 
 _CUSTOM_AGENT_ID_RE = re.compile(r"^custom_[a-z][a-z0-9_]*$")
 _CUSTOM_PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_CUSTOM_FILE_ACCESS = ("none", "read_only", "full")
+_CUSTOM_MAX_ROUNDS_LO = 1
+_CUSTOM_MAX_ROUNDS_HI = 16
+
+
+def _check_file_access(v: str) -> str:
+    if v not in _CUSTOM_FILE_ACCESS:
+        raise ValueError(f"file_access must be one of {_CUSTOM_FILE_ACCESS}")
+    return v
+
+
+def _check_max_rounds(v: int) -> int:
+    if not _CUSTOM_MAX_ROUNDS_LO <= v <= _CUSTOM_MAX_ROUNDS_HI:
+        raise ValueError(
+            f"max_rounds must be between {_CUSTOM_MAX_ROUNDS_LO} and "
+            f"{_CUSTOM_MAX_ROUNDS_HI}"
+        )
+    return v
 
 
 def _check_caps_grammar(caps: list[str]) -> None:
@@ -4279,6 +4297,11 @@ class CustomAgentCreate(BaseModel):
     expose_to_llm: bool = True
     output_as_file: bool = False
     enabled: bool = True
+    # v2 agent loop (default off → single completion).
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"
+    peer_tools_enabled: bool = False
 
     @field_validator("agent_id")
     @classmethod
@@ -4301,6 +4324,16 @@ class CustomAgentCreate(BaseModel):
     def _capabilities_grammar(cls, v: list[str]) -> list[str]:
         _check_caps_grammar(v)
         return v
+
+    @field_validator("file_access")
+    @classmethod
+    def _file_access_known(cls, v: str) -> str:
+        return _check_file_access(v)
+
+    @field_validator("max_rounds")
+    @classmethod
+    def _max_rounds_range(cls, v: int) -> int:
+        return _check_max_rounds(v)
 
     @model_validator(mode="after")
     def _cross_field(self) -> CustomAgentCreate:
@@ -4327,6 +4360,10 @@ class CustomAgentUpdate(BaseModel):
     expose_to_llm: bool | None = None
     output_as_file: bool | None = None
     enabled: bool | None = None
+    agent_loop_enabled: bool | None = None
+    max_rounds: int | None = None
+    file_access: str | None = None
+    peer_tools_enabled: bool | None = None
 
     @field_validator("groups")
     @classmethod
@@ -4341,6 +4378,16 @@ class CustomAgentUpdate(BaseModel):
         if v is not None:
             _check_caps_grammar(v)
         return v
+
+    @field_validator("file_access")
+    @classmethod
+    def _file_access_known(cls, v: str | None) -> str | None:
+        return _check_file_access(v) if v is not None else v
+
+    @field_validator("max_rounds")
+    @classmethod
+    def _max_rounds_range(cls, v: int | None) -> int | None:
+        return _check_max_rounds(v) if v is not None else v
 
 
 class CustomAgentView(BaseModel):
@@ -4359,6 +4406,10 @@ class CustomAgentView(BaseModel):
     expose_to_llm: bool = True
     output_as_file: bool = False
     enabled: bool = True
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"
+    peer_tools_enabled: bool = False
     created_at: datetime
     updated_at: datetime
     created_by: str | None = None
@@ -4378,6 +4429,10 @@ def _custom_agent_row_to_view(row) -> CustomAgentView:  # type: ignore[no-untype
         expose_to_llm=row.expose_to_llm,
         output_as_file=row.output_as_file,
         enabled=row.enabled,
+        agent_loop_enabled=row.agent_loop_enabled,
+        max_rounds=row.max_rounds,
+        file_access=row.file_access,
+        peer_tools_enabled=row.peer_tools_enabled,
         created_at=row.created_at,
         updated_at=row.updated_at,
         created_by=row.created_by,
@@ -4460,6 +4515,10 @@ async def create_custom_agent(
                     output_as_file=req.output_as_file,
                     enabled=req.enabled,
                     created_by=principal.user_id,
+                    agent_loop_enabled=req.agent_loop_enabled,
+                    max_rounds=req.max_rounds,
+                    file_access=req.file_access,
+                    peer_tools_enabled=req.peer_tools_enabled,
                 )
             except asyncpg.UniqueViolationError as exc:
                 raise HTTPException(
@@ -4536,6 +4595,10 @@ async def update_custom_agent(
                     expose_to_llm=req.expose_to_llm,
                     output_as_file=req.output_as_file,
                     enabled=req.enabled,
+                    agent_loop_enabled=req.agent_loop_enabled,
+                    max_rounds=req.max_rounds,
+                    file_access=req.file_access,
+                    peer_tools_enabled=req.peer_tools_enabled,
                 )
             except asyncpg.ForeignKeyViolationError as exc:
                 raise HTTPException(
@@ -4549,7 +4612,8 @@ async def update_custom_agent(
                     k: getattr(req, k)
                     for k in (
                         "description", "preset_name", "expose_to_llm",
-                        "output_as_file", "enabled",
+                        "output_as_file", "enabled", "agent_loop_enabled",
+                        "max_rounds", "file_access", "peer_tools_enabled",
                     )
                     if getattr(req, k) is not None
                 },

@@ -3461,7 +3461,8 @@ async def clear_mcp_pending_invitation(
 _CUSTOM_AGENT_SELECT_COLS = (
     "agent_id, description, preset_name, system_prompt, user_prompt, "
     "parameters, groups, capabilities, expose_to_llm, output_as_file, "
-    "enabled, created_at, updated_at, created_by, "
+    "enabled, agent_loop_enabled, max_rounds, file_access, peer_tools_enabled, "
+    "created_at, updated_at, created_by, "
     "pending_invitation_token, pending_invitation_expires_at"
 )
 
@@ -3498,19 +3499,26 @@ async def insert_custom_agent(
     output_as_file: bool,
     enabled: bool,
     created_by: str | None,
+    agent_loop_enabled: bool = False,
+    max_rounds: int = 4,
+    file_access: str = "none",
+    peer_tools_enabled: bool = False,
 ) -> CustomAgentRow:
     row = await conn.fetchrow(
         f"""
         INSERT INTO custom_agents
             (agent_id, description, preset_name, system_prompt, user_prompt,
              parameters, groups, capabilities, expose_to_llm, output_as_file,
-             enabled, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             enabled, created_by, agent_loop_enabled, max_rounds, file_access,
+             peer_tools_enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $15, $16)
         RETURNING {_CUSTOM_AGENT_SELECT_COLS}
         """,
         agent_id, description, preset_name, system_prompt, user_prompt,
         parameters, groups, capabilities, expose_to_llm, output_as_file,
-        enabled, created_by,
+        enabled, created_by, agent_loop_enabled, max_rounds, file_access,
+        peer_tools_enabled,
     )
     assert row is not None
     return CustomAgentRow.model_validate(dict(row))
@@ -3530,6 +3538,10 @@ async def update_custom_agent(
     expose_to_llm: bool | None = None,
     output_as_file: bool | None = None,
     enabled: bool | None = None,
+    agent_loop_enabled: bool | None = None,
+    max_rounds: int | None = None,
+    file_access: str | None = None,
+    peer_tools_enabled: bool | None = None,
 ) -> CustomAgentRow | None:
     """PATCH semantics — only non-None fields are written. `updated_at`
     is always stamped so the bridge's config_signature picks up edits."""
@@ -3546,6 +3558,10 @@ async def update_custom_agent(
         ("expose_to_llm", expose_to_llm),
         ("output_as_file", output_as_file),
         ("enabled", enabled),
+        ("agent_loop_enabled", agent_loop_enabled),
+        ("max_rounds", max_rounds),
+        ("file_access", file_access),
+        ("peer_tools_enabled", peer_tools_enabled),
     ):
         if val is not None:
             params.append(val)

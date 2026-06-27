@@ -294,6 +294,9 @@ class _FakeLog:
     def info(self, *a, **k) -> None:  # noqa: D401
         pass
 
+    def warning(self, *a, **k) -> None:  # noqa: D401
+        pass
+
 
 class _FakeResp:
     def __init__(self, text: str) -> None:
@@ -310,9 +313,15 @@ class _FakeLlm:
 
 
 class _FakeStat:
-    def __init__(self, byte_size: int, mime_type: str | None = None) -> None:
+    def __init__(
+        self, byte_size: int, mime_type: str | None = None, name: str = "f"
+    ) -> None:
+        from datetime import UTC, datetime
+
         self.byte_size = byte_size
         self.mime_type = mime_type
+        self.name = name
+        self.created_at = datetime.now(UTC)
 
 
 class _FakeFiles:
@@ -327,7 +336,7 @@ class _FakeFiles:
     async def stat(self, name):
         if name not in self.store:
             raise FileNotFoundError(name)
-        return _FakeStat(len(self.store[name]))
+        return _FakeStat(len(self.store[name]), name=name)
 
     async def read_bytes(self, name):
         if name not in self.store:
@@ -335,11 +344,50 @@ class _FakeFiles:
         return self.store[name]
 
 
+class _FakeOutput:
+    def __init__(self, content: str = "", files: list | None = None) -> None:
+        self.content = content
+        self.files = files or []
+
+
+class _FakeResult:
+    """Stand-in for a peers.spawn_from_tool_call ResultFrame."""
+
+    def __init__(self, status, output=None, error=None) -> None:
+        self.status = status
+        self.output = output
+        self.error = error
+
+
+class _FakePeers:
+    def __init__(self, *, visible=None, result=None, raises=None) -> None:
+        self._visible = visible or {}
+        self._result = result
+        self._raises = raises
+        self.spawned: list = []
+
+    def visible(self, *, for_user_level=None):
+        return self._visible
+
+    async def spawn_from_tool_call(self, tc, **kw):
+        self.spawned.append(tc)
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
 class _FakeCtx:
-    def __init__(self, store: dict[str, bytes] | None = None) -> None:
+    def __init__(
+        self,
+        store: dict[str, bytes] | None = None,
+        *,
+        llm=None,
+        peers=None,
+    ) -> None:
         self.log = _FakeLog()
-        self.llm = _FakeLlm()
+        self.llm = llm or _FakeLlm()
         self.files = _FakeFiles(store)
+        self.peers = peers or _FakePeers()
 
 
 @pytest.mark.asyncio
@@ -622,3 +670,355 @@ def test_parameters_tojson_is_attribute_safe() -> None:
     assert "&#34;name&#34;" in out  # double-quotes escaped for the attribute
     assert "doc" in out
     assert "<" not in out and ">" not in out  # no raw angle brackets
+
+
+# ===========================================================================
+# v2: agent loop
+# ===========================================================================
+
+
+def test_migration_0009_adds_loop_columns() -> None:
+    body = (
+        Path(__file__).parent.parent
+        / "bp_router" / "db" / "migrations" / "versions"
+        / "0009_custom_agent_loop.py"
+    ).read_text()
+    assert 'down_revision = "0008_custom_agents"' in body
+    assert "agent_loop_enabled" in body
+    assert "max_rounds integer NOT NULL DEFAULT 4" in body
+    assert "max_rounds BETWEEN 1 AND 16" in body
+    assert "file_access IN ('none', 'read_only', 'full')" in body
+    assert "peer_tools_enabled" in body
+
+
+def test_model_has_loop_fields() -> None:
+    from bp_router.db.models import CustomAgentRow
+
+    fields = set(CustomAgentRow.model_fields)
+    assert {
+        "agent_loop_enabled", "max_rounds", "file_access", "peer_tools_enabled"
+    } <= fields
+
+
+def test_select_cols_cover_loop_columns() -> None:
+    from bp_router.db import queries
+
+    cols = queries._CUSTOM_AGENT_SELECT_COLS
+    for c in ("agent_loop_enabled", "max_rounds", "file_access", "peer_tools_enabled"):
+        assert c in cols
+
+
+def test_loop_validators() -> None:
+    from pydantic import ValidationError
+
+    # file_access enum.
+    _create(file_access="read_only")
+    _create(file_access="full")
+    with pytest.raises(ValidationError):
+        _create(file_access="sometimes")
+    # max_rounds range.
+    _create(max_rounds=1)
+    _create(max_rounds=16)
+    with pytest.raises(ValidationError):
+        _create(max_rounds=0)
+    with pytest.raises(ValidationError):
+        _create(max_rounds=17)
+
+
+def test_loop_update_validators() -> None:
+    from pydantic import ValidationError
+
+    from bp_router.api.admin import CustomAgentUpdate
+
+    CustomAgentUpdate(file_access="full", max_rounds=8)  # ok
+    with pytest.raises(ValidationError):
+        CustomAgentUpdate(file_access="nope")
+    with pytest.raises(ValidationError):
+        CustomAgentUpdate(max_rounds=99)
+
+
+def test_view_round_trip_includes_loop_fields() -> None:
+    from datetime import UTC, datetime
+
+    from bp_router.api.admin import _custom_agent_row_to_view
+    from bp_router.db.models import CustomAgentRow
+
+    now = datetime.now(UTC)
+    row = CustomAgentRow(
+        agent_id="custom_demo", description="", preset_name="default",
+        system_prompt="", user_prompt="", parameters=[], groups=[],
+        capabilities=[], expose_to_llm=True, output_as_file=False, enabled=True,
+        agent_loop_enabled=True, max_rounds=9, file_access="full",
+        peer_tools_enabled=True, created_at=now, updated_at=now,
+    )
+    view = _custom_agent_row_to_view(row)
+    assert view.agent_loop_enabled is True
+    assert view.max_rounds == 9
+    assert view.file_access == "full"
+    assert view.peer_tools_enabled is True
+
+
+def test_config_signature_sensitive_to_loop_fields() -> None:
+    from bp_mcp_bridge.custom_agent_bridge import CustomAgentBridgeRow
+
+    base = CustomAgentBridgeRow.from_admin_dict(_admin_dict())
+    for over in (
+        {"agent_loop_enabled": True},
+        {"max_rounds": 9},
+        {"file_access": "full"},
+        {"peer_tools_enabled": True},
+    ):
+        assert base.config_signature() != (
+            CustomAgentBridgeRow.from_admin_dict(_admin_dict(**over)).config_signature()
+        )
+
+
+# -- loop tool assembly -----------------------------------------------------
+
+
+def _loop_spec(tmp_path, **over):
+    return _spec(
+        tmp_path,
+        agent_loop_enabled=True,
+        user_prompt="Do the task",
+        parameters=[],
+        **over,
+    )
+
+
+def test_peer_tool_specs_from_catalog(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _peer_tool_specs
+
+    visible = {
+        "helper": {
+            "description": "A helper agent",
+            "accepts_schema": {"main": {"type": "object", "properties": {}}},
+        }
+    }
+    ctx = _FakeCtx(peers=_FakePeers(visible=visible))
+    specs = _peer_tool_specs(ctx)
+    assert [s.name for s in specs] == ["call_helper"]
+    assert specs[0].description == "A helper agent"
+
+
+def test_build_loop_tools_combinations(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _build_loop_tools
+
+    ctx = _FakeCtx(peers=_FakePeers(visible={}))
+    # none + no peers → empty.
+    assert _build_loop_tools(ctx, _loop_spec(tmp_path, file_access="none")) == []
+    # read_only → the read-only file bundle (no mutating tools).
+    ro = {s.name for s in _build_loop_tools(ctx, _loop_spec(tmp_path, file_access="read_only"))}
+    assert "read_file" in ro and "write_file" not in ro
+    # full → adds the mutating tools.
+    full = {s.name for s in _build_loop_tools(ctx, _loop_spec(tmp_path, file_access="full"))}
+    assert {"read_file", "write_file", "delete_file"} <= full
+
+
+def test_build_loop_tools_includes_peers(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _build_loop_tools
+
+    visible = {
+        "helper": {
+            "description": "h",
+            "accepts_schema": {"main": {"type": "object", "properties": {}}},
+        }
+    }
+    ctx = _FakeCtx(peers=_FakePeers(visible=visible))
+    names = {s.name for s in _build_loop_tools(
+        ctx, _loop_spec(tmp_path, file_access="none", peer_tools_enabled=True)
+    )}
+    assert "call_helper" in names
+
+
+# -- dispatch ---------------------------------------------------------------
+
+
+def _tool_call(name, args=None, id="t1"):
+    from bp_sdk import ToolCall
+
+    return ToolCall(id=id, name=name, args=args or {})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unknown_tool(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+
+    ctx = _FakeCtx()
+    msg = await _dispatch_tool_call(ctx, _tool_call("bogus"), _loop_spec(tmp_path))
+    assert msg.role == "tool"
+    assert "unknown tool" in msg.content
+
+
+@pytest.mark.asyncio
+async def test_dispatch_peer_success(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+    from bp_protocol.types import TaskStatus
+
+    result = _FakeResult(TaskStatus.SUCCEEDED, output=_FakeOutput("peer reply"))
+    ctx = _FakeCtx(peers=_FakePeers(result=result))
+    spec = _loop_spec(tmp_path, peer_tools_enabled=True)
+    msg = await _dispatch_tool_call(ctx, _tool_call("call_helper"), spec)
+    assert msg.role == "tool"
+    assert msg.content == "peer reply"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_peer_failure_feeds_back(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+    from bp_protocol.types import TaskStatus
+
+    result = _FakeResult(
+        TaskStatus.FAILED, error={"code": "boom", "message": "it broke"}
+    )
+    ctx = _FakeCtx(peers=_FakePeers(result=result))
+    spec = _loop_spec(tmp_path, peer_tools_enabled=True)
+    msg = await _dispatch_tool_call(ctx, _tool_call("call_helper"), spec)
+    assert "did not succeed" in msg.content
+    assert "boom" in msg.content
+
+
+@pytest.mark.asyncio
+async def test_dispatch_error_boundary(tmp_path) -> None:
+    """A raising peer spawn becomes a tool result — the loop must not die."""
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+
+    ctx = _FakeCtx(peers=_FakePeers(raises=RuntimeError("kaboom")))
+    spec = _loop_spec(tmp_path, peer_tools_enabled=True)
+    msg = await _dispatch_tool_call(ctx, _tool_call("call_helper"), spec)
+    assert "failed" in msg.content
+    assert "kaboom" in msg.content
+
+
+@pytest.mark.asyncio
+async def test_dispatch_file_tool_routes(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+
+    ctx = _FakeCtx(store={"notes.txt": b"hello"})
+    spec = _loop_spec(tmp_path, file_access="read_only")
+    msg = await _dispatch_tool_call(
+        ctx, _tool_call("stat_file", {"name": "notes.txt"}), spec
+    )
+    assert msg.role == "tool"
+    assert msg.name == "stat_file"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_file_tool_disabled_when_access_none(tmp_path) -> None:
+    """A file-tool name with file_access=none is NOT dispatched as a file
+    tool — it falls through to 'unknown tool'."""
+    from bp_mcp_bridge.custom_agent import _dispatch_tool_call
+
+    ctx = _FakeCtx(store={"notes.txt": b"hello"})
+    spec = _loop_spec(tmp_path, file_access="none")
+    msg = await _dispatch_tool_call(
+        ctx, _tool_call("read_file", {"name": "notes.txt"}), spec
+    )
+    assert "unknown tool" in msg.content
+
+
+# -- end-to-end loop --------------------------------------------------------
+
+
+class _ScriptedLlm:
+    """Returns a pre-scripted sequence of LlmResponses, recording each call."""
+
+    def __init__(self, responses) -> None:
+        self._responses = list(responses)
+        self.calls: list = []
+
+    async def generate(self, messages, *, preset=None, tools=None, **kw):
+        self.calls.append({"messages": list(messages), "preset": preset, "tools": tools})
+        return self._responses.pop(0)
+
+
+def _resp(text="", tool_calls=None):
+    from bp_sdk import LlmResponse
+
+    return LlmResponse(text=text, tool_calls=tool_calls or [])
+
+
+@pytest.mark.asyncio
+async def test_loop_no_tool_calls_returns_first(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+
+    llm = _ScriptedLlm([_resp(text="done")])
+    ctx = _FakeCtx(llm=llm)
+    handler = make_custom_handler(_loop_spec(tmp_path))
+    out = await handler(ctx, {})
+    assert out.content == "done"
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_peer_call_then_final(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+    from bp_protocol.types import TaskStatus
+
+    llm = _ScriptedLlm([
+        _resp(tool_calls=[_tool_call("call_helper", {"q": "x"})]),
+        _resp(text="final answer"),
+    ])
+    peers = _FakePeers(
+        result=_FakeResult(TaskStatus.SUCCEEDED, output=_FakeOutput("helper data"))
+    )
+    ctx = _FakeCtx(llm=llm, peers=peers)
+    handler = make_custom_handler(_loop_spec(tmp_path, peer_tools_enabled=True))
+    out = await handler(ctx, {})
+    assert out.content == "final answer"
+    assert len(llm.calls) == 2
+    assert len(peers.spawned) == 1
+
+
+@pytest.mark.asyncio
+async def test_loop_exhausts_rounds_forces_final(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+    from bp_protocol.types import TaskStatus
+
+    # Both rounds keep calling tools; the loop then forces one tool-free answer.
+    llm = _ScriptedLlm([
+        _resp(tool_calls=[_tool_call("call_helper", id="a")]),
+        _resp(tool_calls=[_tool_call("call_helper", id="b")]),
+        _resp(text="forced final"),
+    ])
+    peers = _FakePeers(
+        result=_FakeResult(TaskStatus.SUCCEEDED, output=_FakeOutput("data"))
+    )
+    ctx = _FakeCtx(llm=llm, peers=peers)
+    handler = make_custom_handler(
+        _loop_spec(tmp_path, peer_tools_enabled=True, max_rounds=2)
+    )
+    out = await handler(ctx, {})
+    assert out.content == "forced final"
+    assert len(llm.calls) == 3
+    # The forced final turn disables tools.
+    assert llm.calls[-1]["tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_loop_output_as_file(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+
+    llm = _ScriptedLlm([_resp(text="loop body")])
+    ctx = _FakeCtx(llm=llm)
+    handler = make_custom_handler(_loop_spec(tmp_path, output_as_file=True))
+    out = await handler(ctx, {})
+    assert out.files == ["output.md"]
+    assert ctx.files.written == [("output.md", "loop body")]
+
+
+def test_page_payload_includes_loop_fields() -> None:
+    from bp_admin.pages.custom_agents import _create_payload, _int_or
+
+    payload = _create_payload(
+        "demo", "", "default", "", "do it", "[]", "", "",
+        True, False, True,  # expose, output_as_file, enabled
+        True, "8", "full", True,  # loop, max_rounds, file_access, peers
+    )
+    assert payload["agent_loop_enabled"] is True
+    assert payload["max_rounds"] == 8
+    assert payload["file_access"] == "full"
+    assert payload["peer_tools_enabled"] is True
+    # _int_or coerces and falls back.
+    assert _int_or("12", 4) == 12
+    assert _int_or("xx", 4) == 4

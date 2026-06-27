@@ -220,6 +220,53 @@
     </label>
   </div>
 
+  <div class="border-t border-brand-500/15 pt-4 mt-2"
+       x-data="{ loop: {{ form.agent_loop_enabled | tojson | forceescape }} }">
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="agent_loop_enabled" value="on" x-model="loop"
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Agent loop (run a bounded tool-use loop instead of one completion)
+    </label>
+
+    <div x-show="loop" x-cloak class="mt-3 space-y-3 pl-6">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <label for="max_rounds" class="block text-xs font-medium text-brand-700 mb-1">
+            Max rounds
+          </label>
+          <input id="max_rounds" name="max_rounds" type="number" min="1" max="16"
+                 value="{{ form.max_rounds }}"
+                 class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <p class="text-xs text-brand-500 mt-1">
+            Tool-use rounds before a forced final answer (1–16).
+          </p>
+        </div>
+        <div>
+          <label for="file_access" class="block text-xs font-medium text-brand-700 mb-1">
+            File access
+          </label>
+          <select id="file_access" name="file_access"
+                  class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                         focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+            <option value="none" {% if form.file_access == 'none' %}selected{% endif %}>none</option>
+            <option value="read_only" {% if form.file_access == 'read_only' %}selected{% endif %}>read only</option>
+            <option value="full" {% if form.file_access == 'full' %}selected{% endif %}>full (read + write/delete)</option>
+          </select>
+          <p class="text-xs text-brand-500 mt-1">
+            File-store tools the loop may call.
+          </p>
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-brand-700">
+        <input type="checkbox" name="peer_tools_enabled" value="on"
+               {% if form.peer_tools_enabled %}checked{% endif %}
+               class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+        Peer tools (let this agent call the other agents its ACL allows)
+      </label>
+    </div>
+  </div>
+
   <div class="flex items-center gap-3 pt-2">
     <button type="submit"
             class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700

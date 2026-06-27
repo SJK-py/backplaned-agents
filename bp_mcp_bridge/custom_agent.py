@@ -11,23 +11,45 @@ The operator's parameter list becomes the single mode's `accepts_schema`
 admit-validates it, and the handler substitutes the values into the
 prompt templates with `string.Template.safe_substitute` ($name).
 
+When `agent_loop_enabled`, the handler instead runs a bounded tool-use
+loop (`_run_loop`): the model may call the file-store tools (`file_access`
+read_only/full) and the ACL-visible peer agents (`peer_tools_enabled`),
+for up to `max_rounds` rounds.
+
 Why `bp_sdk` primitives only (no `bp_agents.run_llm_loop`): the bridge
-must stay free of the agent suite's dependency weight. v1 is a single
-completion, which needs nothing beyond `ctx.llm` /
-`ctx.files`. See `docs/design/mcp-bridge-custom-llm-agents.md`.
+must stay free of the agent suite's dependency weight. Everything the
+loop needs — `ctx.llm`, `ctx.files`, `file_tools`/`dispatch_file_tool`,
+`ctx.peers.spawn_from_tool_call`, `build_tools` — lives in `bp_sdk`. See
+`docs/design/mcp-bridge-custom-llm-agents.md` §9.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 from typing import Any
 
-from bp_protocol.types import AgentInfo, AgentOutput
-from bp_sdk import Agent, InputValidationError, Message, TaskContext
+from bp_protocol.types import AgentInfo, AgentOutput, TaskStatus
+from bp_sdk import (
+    Agent,
+    CancellationError,
+    InputValidationError,
+    LlmResponse,
+    Message,
+    TaskContext,
+    ToolCall,
+    ToolSpec,
+    dispatch_file_tool,
+    is_file_tool,
+)
+from bp_sdk import (
+    file_tools as sdk_file_tools,
+)
 from bp_sdk.settings import AgentConfig
+from bp_sdk.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +75,14 @@ _FILE_REF_HINT = (
     "content is read in and substituted."
 )
 
+# Injected when the loop hits max_rounds mid-tool-use, to force a final text
+# answer instead of returning an empty tool-call turn.
+_FINAL_ANSWER_NUDGE = (
+    "You've reached the tool-use limit for this turn. Do not call any more "
+    "tools. Give your best final answer now using the information already "
+    "gathered; if it's incomplete, say what you found and what's still open."
+)
+
 
 @dataclass(frozen=True)
 class CustomAgentSpec:
@@ -70,6 +100,11 @@ class CustomAgentSpec:
     capabilities: list[str] = field(default_factory=list)
     expose_to_llm: bool = True
     output_as_file: bool = False
+    # v2 agent loop (default off → single completion).
+    agent_loop_enabled: bool = False
+    max_rounds: int = 4
+    file_access: str = "none"  # none | read_only | full
+    peer_tools_enabled: bool = False
     router_url: str = "ws://localhost:8000/v1/agent"
     state_dir: Path = field(default_factory=lambda: Path("/var/lib/bp_mcp_bridge"))
 
@@ -169,6 +204,123 @@ async def _resolve_values(
     return resolved
 
 
+# ---------------------------------------------------------------------------
+# v2 agent loop (bp_sdk primitives only — no bp_agents import)
+# ---------------------------------------------------------------------------
+
+
+def _peer_tool_specs(ctx: TaskContext) -> list[ToolSpec]:
+    """The ACL-visible peer agents as neutral `ToolSpec`s. Mirrors
+    `bp_agents.common.tools.peer_tool_specs` but on `bp_sdk` only: build
+    the OpenAI tool shape from the catalog, then unwrap to `ToolSpec` so
+    the tool names match `peers.spawn_from_tool_call`'s reverse mapping."""
+    fns = build_tools(ctx.peers.visible(), provider="openai")
+    return [
+        ToolSpec(
+            name=f["function"]["name"],
+            description=f["function"]["description"],
+            parameters=f["function"]["parameters"],
+        )
+        for f in fns
+    ]
+
+
+def _build_loop_tools(ctx: TaskContext, spec: CustomAgentSpec) -> list[ToolSpec]:
+    """The tools offered to the loop: the file-store bundle (when
+    `file_access` is read_only/full) plus the peer agents (when
+    `peer_tools_enabled`)."""
+    tools: list[ToolSpec] = []
+    if spec.file_access != "none":
+        tools += sdk_file_tools(spec.file_access)  # type: ignore[arg-type]
+    if spec.peer_tools_enabled:
+        tools += _peer_tool_specs(ctx)
+    return tools
+
+
+def _failed_tool_text(tool_name: str, child: Any) -> str:
+    """Render a non-succeeded peer result into a tool-response string the
+    model can act on (its `{code, message}` is agent/router-authored and
+    already scrubbed upstream). Without this the model gets an empty
+    result for a failed delegation and can't recover."""
+    err = getattr(child, "error", None) or {}
+    code = str(err.get("code") or child.status.value)
+    message = str(err.get("message") or "").strip()
+    detail = f"{code}: {message}" if message and message != code else code
+    return f"The {tool_name} call did not succeed ({detail})."
+
+
+async def _dispatch_tool_call(
+    ctx: TaskContext, tc: ToolCall, spec: CustomAgentSpec
+) -> Message:
+    """Route one model tool call to a file-store tool or a peer agent and
+    return the tool-response `Message`. Every failure (a peer spawn that
+    raised, a file-store glitch) is fed back as the result so the loop
+    CONTINUES and the model can recover — only genuine cancellation
+    re-raises."""
+    try:
+        if spec.file_access != "none" and is_file_tool(tc.name):
+            return await dispatch_file_tool(ctx.files, tc)
+        if spec.peer_tools_enabled and tc.name.startswith("call_"):
+            child = await ctx.peers.spawn_from_tool_call(tc)
+            if child.status is not TaskStatus.SUCCEEDED:
+                return Message.tool_response(
+                    tool_call_id=tc.id, name=tc.name,
+                    response=_failed_tool_text(tc.name, child),
+                )
+            return Message.tool_response_from_result(
+                tool_call_id=tc.id, name=tc.name, result=child,
+            )
+        return Message.tool_response(
+            tool_call_id=tc.id, name=tc.name,
+            response=f"unknown tool: {tc.name}",
+        )
+    except (asyncio.CancelledError, CancellationError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — any tool failure becomes a result
+        ctx.log.warning(
+            "custom_agent_tool_dispatch_error",
+            extra={
+                "event": "custom_agent_tool_dispatch_error",
+                "bp.custom_agent_id": spec.agent_id,
+                "tool": tc.name,
+                "error": type(exc).__name__,
+            },
+        )
+        return Message.tool_response(
+            tool_call_id=tc.id, name=tc.name,
+            response=f"The {tc.name} call failed: {exc}",
+        )
+
+
+async def _run_loop(
+    ctx: TaskContext, spec: CustomAgentSpec, messages: list[Message]
+) -> LlmResponse:
+    """A bounded tool-use loop on bp_sdk primitives. Generates with the
+    configured tools, round-trips the assistant turn (reasoning blocks +
+    signatures via `assistant_from_response`), dispatches every tool call,
+    and stops when the model answers without tools or `max_rounds` is hit.
+    On exhausting the budget mid-tool-use it forces one final, tool-free
+    answer so the caller never gets an empty tool-call turn."""
+    tools = _build_loop_tools(ctx, spec)
+    resp: LlmResponse | None = None
+    for _ in range(spec.max_rounds):
+        resp = await ctx.llm.generate(
+            messages, preset=spec.preset_name, tools=tools or None,
+        )
+        messages.append(Message.assistant_from_response(resp))
+        if not resp.tool_calls:
+            return resp
+        for tc in resp.tool_calls:
+            messages.append(await _dispatch_tool_call(ctx, tc, spec))
+    assert resp is not None
+    if not resp.tool_calls:
+        return resp
+    messages.append(Message(role="user", content=_FINAL_ANSWER_NUDGE))
+    final = await ctx.llm.generate(messages, preset=spec.preset_name)
+    messages.append(Message.assistant_from_response(final))
+    return final
+
+
 def make_custom_handler(spec: CustomAgentSpec):  # type: ignore[no-untyped-def]
     """Build the single-mode handler closure: render the prompts, run one
     LLM completion against the preset, return the text (or a file ref when
@@ -190,7 +342,10 @@ def make_custom_handler(spec: CustomAgentSpec):  # type: ignore[no-untyped-def]
         if sys_text.strip():
             messages.append(Message(role="system", content=sys_text))
         messages.append(Message(role="user", content=user_text))
-        resp = await ctx.llm.generate(messages, preset=spec.preset_name)
+        if spec.agent_loop_enabled:
+            resp = await _run_loop(ctx, spec, messages)
+        else:
+            resp = await ctx.llm.generate(messages, preset=spec.preset_name)
         text = resp.text or ""
         if spec.output_as_file:
             saved = await ctx.files.write(_OUTPUT_FILENAME, text)
