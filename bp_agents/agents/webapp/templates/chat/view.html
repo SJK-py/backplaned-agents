@@ -89,12 +89,14 @@
         hx-swap="beforeend"
         hx-on::after-request="this.reset(); scrollMessages()">
     {% include "_partials/csrf.html" %}
-    <input name="message" autocomplete="off" required
+    <input id="chat-input" name="message" autocomplete="off" required
            placeholder="Type a message…"
            class="flex-1 rounded border border-brand-500/20 px-3 py-2 text-sm
-                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700" />
-    <button type="submit"
-            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2">
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700
+                  disabled:opacity-60" />
+    <button id="chat-send" type="submit"
+            class="rounded bg-brand-900 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2
+                   disabled:opacity-60">
       Send
     </button>
   </form>
@@ -107,9 +109,22 @@
     const el = document.getElementById('messages');
     if (el) el.scrollTop = el.scrollHeight;
   }
-  // Initial + after every HTMX swap (new bubble or streamed result).
-  scrollMessages();
-  document.body.addEventListener('htmx:afterSwap', scrollMessages);
-  document.body.addEventListener('htmx:sseMessage', scrollMessages);
+  // Disable the composer while a turn streams so a second send can't open a
+  // second SSE (which would duplicate progress across two activity windows).
+  // The in-flight signal is the Stop button (`[data-streaming]`): the `result`
+  // event swaps it away when the turn ends, so this re-enables on completion,
+  // on stop, and on the resumed bubble after navigating back.
+  function syncComposer() {
+    const streaming = !!document.querySelector('#messages [data-streaming]');
+    const input = document.getElementById('chat-input');
+    const send = document.getElementById('chat-send');
+    if (input) input.disabled = streaming;
+    if (send) send.disabled = streaming;
+  }
+  function onChatSwap() { scrollMessages(); syncComposer(); }
+  // Initial + after every HTMX swap (new bubble, streamed progress, result).
+  onChatSwap();
+  document.body.addEventListener('htmx:afterSwap', onChatSwap);
+  document.body.addEventListener('htmx:sseMessage', onChatSwap);
 </script>
 {% endblock %}

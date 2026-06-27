@@ -155,18 +155,22 @@ async def chat_send(
 
     env = request.app.state.templates.env
     active = request.app.state.active_turns
-    pending_html = env.get_template("chat/_pending.html").render(session_id=session_id)
 
     existing = active.get(session_id)
     if existing is not None and not existing.done.is_set():
-        # A turn is already running for this session (the UI replaces the input
-        # with the pending bubble, so this is rare). Re-attach rather than
-        # starting a duplicate; the typed text is dropped.
+        # A turn is already running for this session. Return NOTHING — the live
+        # pending bubble is already streaming. Emitting another `_pending.html`
+        # here would open a SECOND EventSource that subscribes to the same
+        # runner, so its broadcast progress lands in two activity windows. The
+        # client also disables the input while a turn streams (belt and
+        # braces); the typed text is dropped.
         logger.info(
             "webapp_turn_already_active",
             extra={"event": "webapp_turn_already_active", "bp.session_id": session_id},
         )
-        return HTMLResponse(pending_html)
+        return HTMLResponse("")
+
+    pending_html = env.get_template("chat/_pending.html").render(session_id=session_id)
 
     # Start the turn DETACHED from this request, so closing the SSE (e.g.
     # navigating away) doesn't kill it. The runner records the user turn under

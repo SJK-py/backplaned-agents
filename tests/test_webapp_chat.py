@@ -485,3 +485,43 @@ def test_chat_stream_resume_skips_seen_events(suite_db_url: str) -> None:
     # The reconnect skips the two seen progress rows but still gets the result.
     assert resumed.count("event: progress") == 0
     assert "event: result" in resumed
+
+
+def test_chat_send_while_in_flight_opens_no_second_stream(suite_db_url: str) -> None:
+    """A second send while a turn streams must NOT emit another pending bubble
+    — a second SSE would subscribe to the same runner and duplicate progress
+    across two activity windows."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[str, str]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _BlockingDispatcher()
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                first = await client.post(
+                    "/chat/ses_1", data={"message": "go"},
+                    headers={"X-CSRF-Token": token},
+                )
+                await asyncio.wait_for(disp.started.wait(), timeout=5)
+                # Second send while the first turn is still in flight.
+                second = await client.post(
+                    "/chat/ses_1", data={"message": "again"},
+                    headers={"X-CSRF-Token": token},
+                )
+                disp.release.set()
+                runner = app.state.active_turns["ses_1"]
+                await asyncio.wait_for(runner.task, timeout=5)
+            return first.text, second.text
+        finally:
+            await pool.close()
+
+    first, second = asyncio.run(_drive())
+    assert 'sse-connect="/chat/ses_1/stream"' in first  # the one live stream
+    assert second.strip() == ""  # no second bubble / second EventSource

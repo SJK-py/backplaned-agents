@@ -15,7 +15,10 @@
       <div class="px-2 py-1 space-y-0.5" sse-swap="progress" hx-swap="beforeend"></div>
     </details>
     <div sse-swap="result">
-      <button type="button"
+      {# `data-streaming` marks an in-flight turn: the `result` event swaps this
+         whole slot (replacing the button), so its presence/absence is the
+         signal the chat input uses to disable/enable itself. #}
+      <button type="button" data-streaming
               hx-post="/chat/{{ session_id }}/stop"
               hx-swap="none"
               class="rounded border border-brand-500/20 px-3 py-1 text-xs text-brand-700 hover:bg-brand-50">
