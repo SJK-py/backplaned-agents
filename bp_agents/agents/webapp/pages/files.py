@@ -129,6 +129,34 @@ async def stash_upload(
     )
 
 
+@router.post("/files/{session_id}/delete")
+async def stash_delete(
+    session_id: str, request: Request, name: str = Form(...)
+) -> Response:
+    """Delete one stash file (the row's Delete button). The scope is read from
+    the name itself (`persist/…` → persistent), so the router unbinds it in the
+    right scope; the blob is left for the refcount sweep."""
+    info = await owned_session(request, session_id)
+    if info is None:
+        raise HTTPException(status_code=404)
+    upstream = request.app.state.upstream
+    access = request.session["access_token"]
+    try:
+        await upstream.delete_name(
+            access_token=access, name=name, session_id=session_id
+        )
+    except UpstreamError as exc:
+        logger.warning(
+            "webapp_stash_delete_failed",
+            extra={"event": "webapp_stash_delete_failed", "status_code": exc.status_code},
+        )
+        raise HTTPException(status_code=502) from exc
+    tab = "persist" if name.startswith("persist/") else "session"
+    return Response(
+        status_code=204, headers={"HX-Redirect": f"/files/{session_id}?tab={tab}"}
+    )
+
+
 @router.get("/files/{session_id}/download.zip")
 async def download_archive(
     session_id: str, request: Request, tab: str = "session"

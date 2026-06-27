@@ -13,10 +13,22 @@
     {% for name in names %}
       <li class="flex items-center justify-between px-3 py-2 text-sm">
         <span class="font-mono text-xs text-brand-700 break-all">{{ name }}</span>
-        <a href="/files/{{ session_id }}/{{ name }}" download
-           class="ml-2 shrink-0 rounded bg-brand-50 border border-brand-500/20 px-2 py-0.5 text-xs text-brand-700 hover:bg-brand-100">
-          ⬇ Download
-        </a>
+        <span class="ml-2 flex shrink-0 items-center gap-1">
+          <a href="/files/{{ session_id }}/{{ name }}" download
+             class="rounded bg-brand-50 border border-brand-500/20 px-2 py-0.5 text-xs text-brand-700 hover:bg-brand-100">
+            ⬇ Download
+          </a>
+          {# htmx auto-adds the X-CSRF-Token header on POST (base.html). On
+             success the 204+HX-Redirect reloads the tab with the file gone. #}
+          <form hx-post="/files/{{ session_id }}/delete" class="inline"
+                hx-confirm="Delete “{{ name }}”? This can't be undone.">
+            <input type="hidden" name="name" value="{{ name }}" />
+            <button type="submit"
+                    class="rounded border border-red-200 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50">
+              🗑 Delete
+            </button>
+          </form>
+        </span>
       </li>
     {% endfor %}
   </ul>
