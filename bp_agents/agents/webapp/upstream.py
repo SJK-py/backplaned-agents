@@ -274,6 +274,17 @@ class UpstreamClient:
 
     # -- files (user token) — resolve a produced NAME → bytes ----------
 
+    async def delete_name(
+        self, *, access_token: str, name: str, session_id: str | None = None
+    ) -> int:
+        """Unbind a stash NAME (session or `persist/`). Returns the count
+        deleted (0 if it wasn't bound)."""
+        body = await self.request(
+            "DELETE", "/v1/files/names", access_token=access_token,
+            json={"name": name, "session_id": session_id},
+        )
+        return int(body.get("deleted", 0)) if body else 0
+
     async def resolve_named_file(
         self, *, access_token: str, session_id: str, name: str
     ) -> str | None:

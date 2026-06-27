@@ -18,6 +18,27 @@
 
 ---
 
+## 2026-06-27
+
+> New `DELETE /v1/files/names` lets a session-authed gateway (the webapp) unbind
+> a stash name in its own scope — the HTTP counterpart of the WS `FileManage`
+> delete the agent path already had.
+
+### Added — `DELETE /v1/files/names` (session-authed named-store delete)
+
+- **What (`bp_router/api/files.py`):** a session principal can now unbind one
+  stash NAME (`{file}` session-scoped, or `persist/{file}`) via
+  `DELETE /v1/files/names` with `{name, session_id?}`. Mirrors `bind_name`'s
+  auth/scope path — `require_authenticated` → `Scope.user` → `_resolve_scope`
+  (which enforces session ownership) — and calls the existing
+  `Scope.delete_file_name`; the blob is left for the refcount sweep. Returns
+  `{"deleted": 0|1}` (idempotent — `0` when the name wasn't bound) and writes a
+  `file.delete` audit event.
+- **Why:** the webapp file-stash pane gained a per-file Delete button. The named
+  store previously exposed delete only over the WS `FileManage` frame (the agent
+  path), not to a session-JWT gateway. Additive and backward-compatible (a new
+  endpoint; existing routes unchanged).
+
 ## 2026-06-26
 
 > `ctx.llm.embed` now **auto-splits** a large input list so neither the request

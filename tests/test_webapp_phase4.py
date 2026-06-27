@@ -35,6 +35,7 @@ class _Upstream:
     def __init__(self, *, sub: str = "usr_a") -> None:
         self._sub = sub
         self.uploaded: list[tuple[str, bool, str | None, int]] = []
+        self.deleted: list[tuple[str, str | None]] = []
         self.session_names = ["report.md", "data.csv"]
         self.persist_names = ["persist/notes.txt"]
 
@@ -57,6 +58,10 @@ class _Upstream:
 
     async def fetch_file(self, *, access_token, file_id):
         return b"FILE-BYTES"
+
+    async def delete_name(self, *, access_token, name, session_id=None):
+        self.deleted.append((name, session_id))
+        return 1
 
     async def aclose(self):
         pass
@@ -435,3 +440,52 @@ def test_stash_download_archive_empty_tab_is_404(suite_db_url: str) -> None:
             await pool.close()
 
     assert asyncio.run(_drive()) == 404
+
+
+def test_stash_delete_unbinds_via_upstream(suite_db_url: str) -> None:
+    """The row Delete button posts the name; the webapp unbinds it upstream and
+    redirects back to the right tab. Persist names keep their prefix upstream
+    (so the router deletes in the persist scope) but route the redirect there."""
+    async def _drive() -> tuple[int, str, list]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client, "/files/ses_1")
+                r = await client.post(
+                    "/files/ses_1/delete",
+                    data={"name": "persist/notes.txt"},
+                    headers={"X-CSRF-Token": token},
+                )
+            return r.status_code, r.headers.get("HX-Redirect", ""), up.deleted
+        finally:
+            await pool.close()
+
+    status, redirect, deleted = asyncio.run(_drive())
+    assert status == 204
+    assert redirect == "/files/ses_1?tab=persist"
+    assert deleted == [("persist/notes.txt", "ses_1")]
+
+
+def test_stash_view_renders_delete_button(suite_db_url: str) -> None:
+    async def _drive() -> str:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                return (await client.get("/files/ses_1")).text
+        finally:
+            await pool.close()
+
+    html = asyncio.run(_drive())
+    assert 'hx-post="/files/ses_1/delete"' in html
+    assert 'value="report.md"' in html  # the per-row name field

@@ -69,6 +69,9 @@ class _FakeScope:
             if s == scope and (query is None or query.lower() in f.lower())
         ]
 
+    async def delete_file_name(self, scope: str, filename: str) -> int:  # type: ignore[no-untyped-def]
+        return 1 if self.rows.pop((scope, filename), None) is not None else 0
+
     async def count_user_storage_bytes(self) -> int:
         return sum(r.byte_size for r in self.rows.values())
 
@@ -352,3 +355,75 @@ def test_names_routes_precede_file_id_route() -> None:
         "GET /names must be registered before GET /{file_id}, "
         f"else it is shadowed (got order: {paths})"
     )
+
+
+# ---------------------------------------------------------------------------
+# delete_name
+# ---------------------------------------------------------------------------
+
+
+def test_delete_session_scoped_happy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bp_router.api import files
+
+    scope = _FakeScope(
+        sessions=("s1",), names={("session:s1", "chart.png"): _blob()}
+    )
+    request = _wire(monkeypatch, scope)
+    body = files.DeleteNameRequest(name="chart.png", session_id="s1")
+
+    out = asyncio.run(files.delete_name(body, request, _principal()))
+    assert out == {"deleted": 1}
+    assert ("session:s1", "chart.png") not in scope.rows
+    files.queries.append_audit_event.assert_awaited_once()
+
+
+def test_delete_persist_scope_needs_no_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bp_router.api import files
+
+    scope = _FakeScope(names={("persist", "report.pdf"): _blob()})
+    request = _wire(monkeypatch, scope)
+    body = files.DeleteNameRequest(name="persist/report.pdf")
+
+    out = asyncio.run(files.delete_name(body, request, _principal()))
+    assert out == {"deleted": 1}
+    assert ("persist", "report.pdf") not in scope.rows
+
+
+def test_delete_missing_name_is_idempotent_no_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bp_router.api import files
+
+    scope = _FakeScope(sessions=("s1",))  # nothing bound
+    request = _wire(monkeypatch, scope)
+    body = files.DeleteNameRequest(name="gone.txt", session_id="s1")
+
+    out = asyncio.run(files.delete_name(body, request, _principal()))
+    assert out == {"deleted": 0}
+    files.queries.append_audit_event.assert_not_awaited()
+
+
+def test_delete_invalid_name_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from bp_router.api import files
+
+    request = _wire(monkeypatch, _FakeScope(sessions=("s1",)))
+    body = files.DeleteNameRequest(name="a/b", session_id="s1")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(files.delete_name(body, request, _principal()))
+    assert ei.value.status_code == 400
+
+
+def test_delete_unowned_session_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from bp_router.api import files
+
+    request = _wire(monkeypatch, _FakeScope())  # session "s1" not owned
+    body = files.DeleteNameRequest(name="chart.png", session_id="s1")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(files.delete_name(body, request, _principal()))
+    assert ei.value.status_code == 404

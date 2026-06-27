@@ -304,6 +304,13 @@ class BindNameRequest(BaseModel):
     dedup: Literal["append_count", "overwrite", "error"] = "append_count"
 
 
+class DeleteNameRequest(BaseModel):
+    name: str
+    """Stash name to unbind: `{filename}` (session) or `persist/{filename}`."""
+    session_id: str | None = None
+    """Required for a session-scoped name; ignored for `persist/`."""
+
+
 async def _resolve_scope(
     scope_q: queries.Scope,
     *,
@@ -382,6 +389,41 @@ async def bind_name(
             )
 
     return {"saved_name": _display_name(persistent, saved)}
+
+
+@router.delete("/names")
+async def delete_name(
+    body: DeleteNameRequest,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_authenticated),
+) -> dict[str, int]:
+    """Unbind a NAME from the caller's stash (session or `persist/`). The blob
+    is left for the refcount sweep, exactly like the WS `FileManage` delete.
+    Returns `{"deleted": 0|1}` — 0 means the name wasn't bound (idempotent)."""
+    parsed = _split_stash_name(body.name)
+    if parsed is None:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    persistent, bare = parsed
+
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        scope_q = queries.Scope.user(conn, principal.user_id)
+        scope = await _resolve_scope(
+            scope_q, persistent=persistent, session_id=body.session_id
+        )
+        async with conn.transaction():
+            deleted = await scope_q.delete_file_name(scope, bare)
+            if deleted:
+                await queries.append_audit_event(
+                    conn,
+                    actor_kind="user",
+                    actor_id=principal.user_id,
+                    event="file.delete",
+                    target_kind="file",
+                    target_id=f"{scope}/{bare}",
+                    payload={},
+                )
+    return {"deleted": deleted}
 
 
 @router.get("/names")
