@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response
@@ -81,6 +82,7 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
             "session_id": session_id,
             "history": history,
             "in_flight": in_flight,
+            "in_flight_turn_id": runner.turn_id if in_flight else None,
             "delegated_to": info.delegated_to,
             "delegatable": delegatable,
             "chat_channel_label": (
@@ -170,17 +172,20 @@ async def chat_send(
         )
         return HTMLResponse("")
 
-    pending_html = env.get_template("chat/_pending.html").render(session_id=session_id)
-
     # Start the turn DETACHED from this request, so closing the SSE (e.g.
     # navigating away) doesn't kill it. The runner records the user turn under
     # the session lock; the optimistic user bubble below covers the live page.
+    turn_id = secrets.token_urlsafe(8)
     runner = TurnRunner(
-        session_id=session_id, user_id=session_user_id(request),
+        session_id=session_id, turn_id=turn_id, user_id=session_user_id(request),
         text=text, core=core, env=env,
     )
     register_turn(active, runner)
     runner.task = asyncio.create_task(runner.run())
+
+    pending_html = env.get_template("chat/_pending.html").render(
+        session_id=session_id, turn_id=turn_id
+    )
 
     user_html = env.get_template("chat/_message.html").render(
         role="user", content=text, tag="", files=[]
@@ -188,20 +193,25 @@ async def chat_send(
     return HTMLResponse(user_html + pending_html)
 
 
-@router.get("/chat/{session_id}/stream")
-async def chat_stream(session_id: str, request: Request) -> Response:
+@router.get("/chat/{session_id}/stream/{turn_id}")
+async def chat_stream(session_id: str, turn_id: str, request: Request) -> Response:
     info = await _owned_session(request, session_id)
     if info is None:
         return Response(status_code=404)
     runner = request.app.state.active_turns.get(session_id)
+    # Only serve the SPECIFIC turn this bubble is for. A stale bubble whose
+    # EventSource reconnects (after its turn ended) must NOT latch onto a newer
+    # turn — otherwise the old activity box receives the new turn's progress.
+    if runner is not None and runner.turn_id != turn_id:
+        runner = None
     # On an EventSource auto-reconnect the browser sends the last id it saw;
     # replay only newer events so reconnects don't duplicate the activity strip.
     after = _last_event_id(request)
 
     async def _gen():  # noqa: ANN202
         if runner is None:
-            # No in-flight turn (already finished + cleaned up). Close at once;
-            # the answer is in history and renders on the page itself.
+            # This turn is finished/superseded (or none in flight). Close at
+            # once; the answer is in history and renders on the page itself.
             yield _sse("done", "")
             return
         # Subscribe: replay buffered progress + the result (after `after`), then
