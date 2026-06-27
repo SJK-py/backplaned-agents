@@ -74,7 +74,12 @@ class CustomAgentBridgeRow:
             self.system_prompt,
             self.user_prompt,
             tuple(
-                (p.get("name"), p.get("description", ""), p.get("required", True))
+                (
+                    p.get("name"),
+                    p.get("description", ""),
+                    p.get("required", True),
+                    p.get("file_ref", False),
+                )
                 for p in self.parameters
             ),
             tuple(self.groups),

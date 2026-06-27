@@ -78,8 +78,12 @@ v2 reimplements a ~60-line loop on SDK primitives rather than importing
 
 - The agent loop and any tools given to the custom agent (file access,
   peer-agent calls). Designed for in §9, deferred.
-- Non-string parameters. Strings only, by request — keeps the
-  param→schema mapping and prompt templating trivial and injection-safe.
+- Non-string parameters. Every parameter is a `string` in the tool
+  schema, by request — keeps the param→schema mapping and prompt
+  templating trivial and injection-safe. (A param may be flagged
+  `file_ref`: the schema property stays a `string`, but its value is
+  treated as a file-store name and dereferenced to the file's UTF-8 text
+  at render time — see §6. The schema shape is unchanged.)
 - Per-row provider/sampling knobs beyond what the chosen preset
   carries. Sampling lives in the preset; the custom agent picks a
   preset by name.
@@ -98,9 +102,10 @@ CREATE TABLE custom_agents (
     preset_name   text NOT NULL REFERENCES llm_presets(name),
     system_prompt text NOT NULL DEFAULT '',
     user_prompt   text NOT NULL DEFAULT '',
-    -- ordered list of {name, description, required:bool}; name matches
-    -- ^[a-z][a-z0-9_]*$ so it is a safe $-template key and JSON-schema
-    -- property. ALL params are type "string" (v1 non-goal).
+    -- ordered list of {name, description, required:bool, file_ref:bool};
+    -- name matches ^[a-z][a-z0-9_]*$ so it is a safe $-template key and
+    -- JSON-schema property. ALL params are type "string"; a file_ref param
+    -- carries a file NAME whose text is read in at render time (§6).
     parameters    jsonb NOT NULL DEFAULT '[]'::jsonb,
     groups        jsonb NOT NULL DEFAULT '[]'::jsonb,
     capabilities  jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -245,6 +250,21 @@ Note the obvious: param values are caller-supplied and land in the
 prompt as data — this is ordinary prompt content, not a new injection
 surface, but the system prompt should be authored to treat the
 user-prompt section as untrusted. No code mitigation beyond that in v1.
+
+**`file_ref` parameters.** A param the operator flags `file_ref` keeps a
+`string` schema property (the caller passes a file-store *name*), but
+before substitution the handler dereferences it: `ctx.files.stat` (size
+guard, default 1 MB cap) then `ctx.files.read_bytes`, decoded strict
+UTF-8 — the file's *text content* is what lands in the prompt. Text only:
+a missing file, an oversize file, or non-UTF-8 bytes raise
+`InputValidationError` (400 to the caller — it's their bad ref, not a
+server fault). `asyncio.CancelledError` propagates (BaseException, not
+caught). The schema property gains a description hint so the calling model
+knows to pass a reference, not the content. A non-`file_ref` param is
+substituted verbatim even if its value happens to look like a filename —
+the flag is the only thing that triggers a read. Resolution is keyed off
+the param list, so files resolve in the custom agent's own session/file
+scope (the standard cross-agent file-store sharing).
 
 ## 7. ACL / capabilities / groups
 

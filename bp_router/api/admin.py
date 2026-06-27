@@ -4231,13 +4231,18 @@ def _check_prompt_placeholders(
 
 
 class CustomAgentParam(BaseModel):
-    """One operator-declared parameter. All params are type `string`
-    (v1); `name` is both the `accepts_schema` property and the
-    `$name` substitution key in the prompts."""
+    """One operator-declared parameter. The schema property is always
+    type `string`; `name` is both the `accepts_schema` property and the
+    `$name` substitution key in the prompts.
+
+    `file_ref=True` reinterprets the caller's string value as a NAME in
+    the router file store: at render time the handler reads that file's
+    UTF-8 text and substitutes the CONTENT (text files only)."""
 
     name: str
     description: str = ""
     required: bool = True
+    file_ref: bool = False
 
     @field_validator("name")
     @classmethod

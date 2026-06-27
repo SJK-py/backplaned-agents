@@ -309,20 +309,37 @@ class _FakeLlm:
         return _FakeResp("the answer")
 
 
+class _FakeStat:
+    def __init__(self, byte_size: int, mime_type: str | None = None) -> None:
+        self.byte_size = byte_size
+        self.mime_type = mime_type
+
+
 class _FakeFiles:
-    def __init__(self) -> None:
+    def __init__(self, store: dict[str, bytes] | None = None) -> None:
         self.written: list = []
+        self.store = store or {}  # name -> bytes, for file_ref reads
 
     async def write(self, name, text, **kw):
         self.written.append((name, text))
         return name
 
+    async def stat(self, name):
+        if name not in self.store:
+            raise FileNotFoundError(name)
+        return _FakeStat(len(self.store[name]))
+
+    async def read_bytes(self, name):
+        if name not in self.store:
+            raise FileNotFoundError(name)
+        return self.store[name]
+
 
 class _FakeCtx:
-    def __init__(self) -> None:
+    def __init__(self, store: dict[str, bytes] | None = None) -> None:
         self.log = _FakeLog()
         self.llm = _FakeLlm()
-        self.files = _FakeFiles()
+        self.files = _FakeFiles(store)
 
 
 @pytest.mark.asyncio
@@ -362,6 +379,129 @@ async def test_handler_omits_empty_system_prompt(tmp_path) -> None:
     await handler(ctx, {"topic": "x"})
     roles = [m.role for m in ctx.llm.calls[0]["messages"]]
     assert roles == ["user"]
+
+
+# ===========================================================================
+# file_ref parameters
+# ===========================================================================
+
+
+def _fileref_spec(tmp_path, **over):
+    return _spec(
+        tmp_path,
+        user_prompt="Summarize: $doc",
+        parameters=[{"name": "doc", "description": "the document",
+                     "required": True, "file_ref": True}],
+        **over,
+    )
+
+
+def test_param_model_accepts_file_ref() -> None:
+    p = _create(parameters=[{"name": "doc", "file_ref": True}])
+    assert p.parameters[0].file_ref is True
+    # Defaults to False when omitted.
+    assert _create(parameters=[{"name": "x"}]).parameters[0].file_ref is False
+
+
+def test_accepts_schema_file_ref_stays_string_with_hint() -> None:
+    from bp_mcp_bridge.custom_agent import MODE, _accepts_schema
+
+    schema = _accepts_schema(
+        [{"name": "doc", "description": "the doc", "required": True, "file_ref": True}]
+    )
+    prop = schema[MODE]["properties"]["doc"]
+    assert prop["type"] == "string"  # schema type unchanged
+    assert "the doc" in prop["description"]
+    assert "file" in prop["description"].lower()  # hint appended
+
+
+@pytest.mark.asyncio
+async def test_handler_file_ref_substitutes_text_content(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+
+    handler = make_custom_handler(_fileref_spec(tmp_path))
+    ctx = _FakeCtx(store={"notes.txt": b"the file body"})
+    await handler(ctx, {"doc": "notes.txt"})
+    user_msg = ctx.llm.calls[0]["messages"][-1].content
+    assert user_msg == "Summarize: the file body"
+
+
+@pytest.mark.asyncio
+async def test_handler_file_ref_rejects_missing_file(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+    from bp_sdk import InputValidationError
+
+    handler = make_custom_handler(_fileref_spec(tmp_path))
+    ctx = _FakeCtx(store={})
+    with pytest.raises(InputValidationError):
+        await handler(ctx, {"doc": "nope.txt"})
+
+
+@pytest.mark.asyncio
+async def test_handler_file_ref_rejects_non_utf8(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+    from bp_sdk import InputValidationError
+
+    handler = make_custom_handler(_fileref_spec(tmp_path))
+    ctx = _FakeCtx(store={"bin": b"\xff\xfe\x00\x01"})
+    with pytest.raises(InputValidationError):
+        await handler(ctx, {"doc": "bin"})
+
+
+@pytest.mark.asyncio
+async def test_handler_file_ref_rejects_oversize(tmp_path) -> None:
+    from bp_mcp_bridge.custom_agent import _FILE_REF_MAX_BYTES, make_custom_handler
+    from bp_sdk import InputValidationError
+
+    handler = make_custom_handler(_fileref_spec(tmp_path))
+    ctx = _FakeCtx(store={"big": b"x" * (_FILE_REF_MAX_BYTES + 1)})
+    with pytest.raises(InputValidationError):
+        await handler(ctx, {"doc": "big"})
+
+
+@pytest.mark.asyncio
+async def test_handler_non_file_ref_passes_value_through(tmp_path) -> None:
+    """A plain (non-file_ref) param keeps substituting the raw value even
+    when its value happens to look like a filename."""
+    from bp_mcp_bridge.custom_agent import make_custom_handler
+
+    spec = _spec(
+        tmp_path, user_prompt="Echo: $topic",
+        parameters=[{"name": "topic", "required": True, "file_ref": False}],
+    )
+    handler = make_custom_handler(spec)
+    ctx = _FakeCtx(store={"topic.txt": b"SHOULD NOT BE READ"})
+    await handler(ctx, {"topic": "topic.txt"})
+    assert ctx.llm.calls[0]["messages"][-1].content == "Echo: topic.txt"
+
+
+def test_config_signature_sensitive_to_file_ref() -> None:
+    from bp_mcp_bridge.custom_agent_bridge import CustomAgentBridgeRow
+
+    plain = CustomAgentBridgeRow.from_admin_dict(
+        _admin_dict(parameters=[{"name": "doc", "required": True, "file_ref": False}])
+    )
+    as_ref = CustomAgentBridgeRow.from_admin_dict(
+        _admin_dict(parameters=[{"name": "doc", "required": True, "file_ref": True}])
+    )
+    assert plain.config_signature() != as_ref.config_signature()
+
+
+def test_parse_parameters_json() -> None:
+    from bp_admin.pages.custom_agents import _parse_parameters_json
+
+    out = _parse_parameters_json(
+        '[{"name":"a","description":"d","required":false,"file_ref":true},'
+        '{"name":"  ","description":"blank dropped"},'
+        '{"name":"b"}]'
+    )
+    assert out == [
+        {"name": "a", "description": "d", "required": False, "file_ref": True},
+        {"name": "b", "description": "", "required": True, "file_ref": False},
+    ]
+    # Malformed JSON degrades to empty list (router does real validation).
+    assert _parse_parameters_json("not json") == []
+    assert _parse_parameters_json("") == []
 
 
 # ===========================================================================
@@ -451,3 +591,34 @@ def test_admin_page_and_nav_registered() -> None:
         Path(__file__).parent.parent / "bp_admin" / "templates" / "base.html"
     ).read_text()
     assert "/admin/custom-agents" in nav
+
+
+def test_custom_agent_templates_compile() -> None:
+    """The form + list templates parse without a TemplateSyntaxError — the
+    Alpine parameter editor introduces non-trivial markup, so guard it."""
+    pytest.importorskip("jinja2")
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+    tdir = Path(__file__).parent.parent / "bp_admin" / "templates"
+    env = Environment(
+        loader=FileSystemLoader(str(tdir)),
+        autoescape=select_autoescape(["html"]),
+    )
+    for name in ("custom_agents/form.html", "custom_agents/list.html"):
+        env.get_template(name)  # compiles → raises on bad syntax
+
+
+def test_parameters_tojson_is_attribute_safe() -> None:
+    """The exact pipeline the form uses to seed the Alpine editor's x-data
+    must produce HTML-attribute-safe JSON (quotes entity-escaped)."""
+    pytest.importorskip("jinja2")
+    from jinja2 import Environment
+
+    env = Environment(autoescape=True)
+    tmpl = env.from_string("{{ params | tojson | forceescape }}")
+    out = tmpl.render(
+        params=[{"name": "doc", "description": "", "required": True, "file_ref": True}]
+    )
+    assert "&#34;name&#34;" in out  # double-quotes escaped for the attribute
+    assert "doc" in out
+    assert "<" not in out and ">" not in out  # no raw angle brackets

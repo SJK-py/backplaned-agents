@@ -15,6 +15,7 @@ whose handler runs an LLM completion against the chosen preset).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -60,36 +61,31 @@ def _parse_capabilities(raw: str) -> list[str]:
     return out
 
 
-def _parse_parameters(raw: str) -> list[dict[str, Any]]:
-    """One parameter per line: `name | description | required`.
-
-    Only `name` is mandatory; `description` defaults to empty and
-    `required` defaults to true (set the third field to false/optional/no
-    to make it optional). The router validates names + uniqueness."""
+def _parse_parameters_json(raw: str) -> list[dict[str, Any]]:
+    """Parse the parameter editor's hidden JSON field into normalised
+    dicts. Blank-name rows are dropped; `required`/`file_ref` are coerced
+    to bools. The router does the real grammar/uniqueness validation — a
+    malformed blob degrades to an empty list rather than 500-ing."""
+    try:
+        data = json.loads(raw or "[]")
+    except ValueError:
+        return []
     out: list[dict[str, Any]] = []
-    for raw_line in raw.splitlines():
-        line = raw_line.strip()
-        if not line:
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if not isinstance(item, dict):
             continue
-        parts = [p.strip() for p in line.split("|")]
-        name = parts[0]
+        name = str(item.get("name", "")).strip()
         if not name:
             continue
-        desc = parts[1] if len(parts) > 1 else ""
-        required = True
-        if len(parts) > 2:
-            required = parts[2].lower() not in ("false", "0", "no", "optional")
-        out.append({"name": name, "description": desc, "required": required})
+        out.append({
+            "name": name,
+            "description": str(item.get("description", "")).strip(),
+            "required": bool(item.get("required", True)),
+            "file_ref": bool(item.get("file_ref", False)),
+        })
     return out
-
-
-def _format_parameters(params: list[dict[str, Any]]) -> str:
-    """Render parameter dicts back to the textarea format."""
-    lines = []
-    for p in params or []:
-        required = "true" if p.get("required", True) else "false"
-        lines.append(f"{p.get('name', '')} | {p.get('description', '')} | {required}")
-    return "\n".join(lines)
 
 
 async def _preset_names(request: Request) -> list[str]:
@@ -145,7 +141,7 @@ def _empty_form() -> dict[str, Any]:
         "preset_name": "",
         "system_prompt": "",
         "user_prompt": "",
-        "parameters": "",
+        "parameters": [],
         "groups": "",
         "capabilities": "",
         "expose_to_llm": True,
@@ -165,7 +161,7 @@ def _form_from_agent(a: dict[str, Any]) -> dict[str, Any]:
         "preset_name": a.get("preset_name") or "",
         "system_prompt": a.get("system_prompt") or "",
         "user_prompt": a.get("user_prompt") or "",
-        "parameters": _format_parameters(a.get("parameters") or []),
+        "parameters": a.get("parameters") or [],
         "groups": ", ".join(a.get("groups") or []),
         "capabilities": ", ".join(a.get("capabilities") or []),
         "expose_to_llm": a.get("expose_to_llm", True),
@@ -222,7 +218,7 @@ def _create_payload(
     preset_name: str,
     system_prompt: str,
     user_prompt: str,
-    parameters: str,
+    parameters_json: str,
     groups: str,
     capabilities: str,
     expose_to_llm: bool,
@@ -235,7 +231,7 @@ def _create_payload(
         "preset_name": preset_name.strip(),
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
-        "parameters": _parse_parameters(parameters),
+        "parameters": _parse_parameters_json(parameters_json),
         "groups": _parse_groups(groups),
         "capabilities": _parse_capabilities(capabilities),
         "expose_to_llm": expose_to_llm,
@@ -253,7 +249,7 @@ def _form_echo(payload: dict[str, Any], slug: str) -> dict[str, Any]:
         "preset_name": payload["preset_name"],
         "system_prompt": payload["system_prompt"],
         "user_prompt": payload["user_prompt"],
-        "parameters": _format_parameters(payload["parameters"]),
+        "parameters": payload["parameters"],
         "groups": ", ".join(payload["groups"]),
         "capabilities": ", ".join(payload["capabilities"]),
         "expose_to_llm": payload["expose_to_llm"],
@@ -270,7 +266,7 @@ async def create_custom_agent(
     preset_name: str = Form(...),
     system_prompt: str = Form(""),
     user_prompt: str = Form(""),
-    parameters: str = Form(""),
+    parameters_json: str = Form("[]"),
     groups: str = Form(""),
     capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
@@ -280,7 +276,7 @@ async def create_custom_agent(
     templates = request.app.state.templates
     payload = _create_payload(
         agent_id, description, preset_name, system_prompt, user_prompt,
-        parameters, groups, capabilities,
+        parameters_json, groups, capabilities,
         expose_to_llm in ("on", "true", "1"),
         output_as_file in ("on", "true", "1"),
         enabled in ("on", "true", "1"),
@@ -317,7 +313,7 @@ async def update_custom_agent(
     preset_name: str = Form(...),
     system_prompt: str = Form(""),
     user_prompt: str = Form(""),
-    parameters: str = Form(""),
+    parameters_json: str = Form("[]"),
     groups: str = Form(""),
     capabilities: str = Form(""),
     expose_to_llm: str = Form(""),
@@ -329,7 +325,7 @@ async def update_custom_agent(
     # Reuse the create shaper, then drop the immutable agent_id for the PATCH.
     payload = _create_payload(
         slug, description, preset_name, system_prompt, user_prompt,
-        parameters, groups, capabilities,
+        parameters_json, groups, capabilities,
         expose_to_llm in ("on", "true", "1"),
         output_as_file in ("on", "true", "1"),
         enabled in ("on", "true", "1"),

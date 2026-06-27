@@ -26,7 +26,7 @@ from string import Template
 from typing import Any
 
 from bp_protocol.types import AgentInfo, AgentOutput
-from bp_sdk import Agent, Message, TaskContext
+from bp_sdk import Agent, InputValidationError, Message, TaskContext
 from bp_sdk.settings import AgentConfig
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,18 @@ MODE = "main"
 # shape for a generated artifact; the parent reads it on demand via the
 # file ref rather than receiving the whole body inline.
 _OUTPUT_FILENAME = "output.md"
+
+# Cap on the text inlined from a `file_ref` parameter. A reference to a
+# huge (or accidentally binary) file would otherwise stuff the whole body
+# into the prompt; reject past this with a clear caller-facing error.
+_FILE_REF_MAX_BYTES = 1_000_000
+
+# The hint appended to a `file_ref` param's tool-schema description so the
+# calling model knows to pass a file NAME, not the literal content.
+_FILE_REF_HINT = (
+    "Provide a file reference (a name in the file store); its UTF-8 text "
+    "content is read in and substituted."
+)
 
 
 @dataclass(frozen=True)
@@ -74,15 +86,20 @@ def _render(template: str, values: dict[str, Any]) -> str:
 def _accepts_schema(parameters: list[dict[str, Any]]) -> dict[str, Any]:
     """The single mode's parameter schema: every operator param is one
     `string` property; `required` params land in the schema's required
-    list. Object schema with `additionalProperties: False` so the router
-    rejects anything the operator didn't declare."""
+    list. A `file_ref` param stays a `string` (the caller passes a file
+    name) but gains a description hint so the model passes a reference,
+    not the content. Object schema with `additionalProperties: False` so
+    the router rejects anything the operator didn't declare."""
     props: dict[str, Any] = {}
     required: list[str] = []
     for p in parameters:
         name = p["name"]
+        desc = p.get("description") or ""
+        if p.get("file_ref"):
+            desc = f"{desc} {_FILE_REF_HINT}".strip() if desc else _FILE_REF_HINT
         prop: dict[str, Any] = {"type": "string"}
-        if p.get("description"):
-            prop["description"] = p["description"]
+        if desc:
+            prop["description"] = desc
         props[name] = prop
         if p.get("required", True):
             required.append(name)
@@ -94,6 +111,62 @@ def _accepts_schema(parameters: list[dict[str, Any]]) -> dict[str, Any]:
     if required:
         schema["required"] = required
     return {MODE: schema}
+
+
+async def _read_text_ref(ctx: TaskContext, name: str, param_name: str) -> str:
+    """Read a `file_ref` parameter's referenced file as UTF-8 text.
+
+    Raises `InputValidationError` (400 to the caller) when the reference
+    is empty, the file is missing, too large, or not valid UTF-8 text —
+    these are all "the caller gave a bad file ref", not server faults.
+    `asyncio.CancelledError` is a BaseException and propagates."""
+    if not name:
+        raise InputValidationError(
+            f"file_ref parameter {param_name!r} was given an empty reference"
+        )
+    try:
+        stat = await ctx.files.stat(name)
+        if stat.byte_size is not None and stat.byte_size > _FILE_REF_MAX_BYTES:
+            raise InputValidationError(
+                f"file_ref parameter {param_name!r}: file {name!r} is "
+                f"{stat.byte_size} bytes, over the {_FILE_REF_MAX_BYTES}-byte "
+                "text limit"
+            )
+        data = await ctx.files.read_bytes(name)
+    except InputValidationError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise InputValidationError(
+            f"file_ref parameter {param_name!r}: cannot read file "
+            f"{name!r} ({exc})"
+        ) from exc
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InputValidationError(
+            f"file_ref parameter {param_name!r}: file {name!r} is not "
+            "UTF-8 text"
+        ) from exc
+
+
+async def _resolve_values(
+    ctx: TaskContext,
+    parameters: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Map the validated payload to substitution values: `file_ref`
+    params are dereferenced to their file's text content; the rest pass
+    through verbatim. Params declared but absent from the payload (an
+    optional the caller omitted) are left out, so `$name` survives as a
+    literal — matching the no-file-ref behaviour."""
+    file_ref_names = {p["name"] for p in parameters if p.get("file_ref")}
+    resolved: dict[str, Any] = {}
+    for name, raw in payload.items():
+        if name in file_ref_names:
+            resolved[name] = await _read_text_ref(ctx, str(raw), name)
+        else:
+            resolved[name] = raw
+    return resolved
 
 
 def make_custom_handler(spec: CustomAgentSpec):  # type: ignore[no-untyped-def]
@@ -110,8 +183,9 @@ def make_custom_handler(spec: CustomAgentSpec):  # type: ignore[no-untyped-def]
                 "preset": spec.preset_name,
             },
         )
-        sys_text = _render(spec.system_prompt, payload)
-        user_text = _render(spec.user_prompt, payload)
+        values = await _resolve_values(ctx, spec.parameters, payload)
+        sys_text = _render(spec.system_prompt, values)
+        user_text = _render(spec.user_prompt, values)
         messages: list[Message] = []
         if sys_text.strip():
             messages.append(Message(role="system", content=sys_text))

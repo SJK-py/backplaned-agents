@@ -3,6 +3,10 @@
   {% if mode == "new" %}New custom agent{% else %}Edit custom agent — {{ agent.agent_id }}{% endif %} — bp_admin
 {% endblock %}
 
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
 {% block content %}
 <nav class="text-xs text-brand-500 mb-4">
   <a href="/admin/custom-agents" class="hover:text-brand-900 underline underline-offset-2">Custom agents</a>
@@ -118,21 +122,54 @@
     </p>
   </div>
 
-  <div>
-    <label for="parameters" class="block text-xs font-medium text-brand-700 mb-1">
-      Parameters
-    </label>
-    <textarea id="parameters" name="parameters" rows="3"
-              placeholder="topic | what to write about | true&#10;tone | optional style hint | false"
-              class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
-                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
-              >{{ form.parameters }}</textarea>
-    <p class="text-xs text-brand-500 mt-1">
-      One per line: <code>name | description | required</code>. All parameters
-      are strings; <code>required</code> defaults to true (set false/optional to
-      relax). Names become the tool's input fields and the <code>$name</code>
-      prompt placeholders.
+  <div x-data="{
+         params: {{ form.parameters | tojson | forceescape }},
+         add() { this.params.push({name: '', description: '', required: true, file_ref: false}); },
+         remove(i) { this.params.splice(i, 1); }
+       }">
+    <label class="block text-xs font-medium text-brand-700 mb-1">Parameters</label>
+    <p class="text-xs text-brand-500 mb-2">
+      Each becomes a tool input field and a <code>$name</code> prompt
+      placeholder. All values are strings. Tick <strong>file ref</strong> to
+      treat the value as a file name whose UTF-8 text content is read in and
+      substituted (text files only).
     </p>
+
+    <div class="space-y-2">
+      <template x-for="(p, i) in params" :key="i">
+        <div class="flex flex-wrap items-center gap-2 rounded border border-brand-500/15 bg-brand-50/40 p-2">
+          <input type="text" x-model="p.name" placeholder="name"
+                 pattern="[a-z][a-z0-9_]*"
+                 class="w-32 rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <input type="text" x-model="p.description" placeholder="description"
+                 class="flex-1 min-w-[10rem] rounded border border-brand-500/20 px-2 py-1 text-sm
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <label class="flex items-center gap-1 text-xs text-brand-700">
+            <input type="checkbox" x-model="p.required"
+                   class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+            required
+          </label>
+          <label class="flex items-center gap-1 text-xs text-brand-700">
+            <input type="checkbox" x-model="p.file_ref"
+                   class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+            file ref
+          </label>
+          <button type="button" @click="remove(i)"
+                  title="Remove parameter"
+                  class="ml-auto text-red-700 hover:text-red-900 text-sm px-1">&times;</button>
+        </div>
+      </template>
+    </div>
+
+    <button type="button" @click="add()"
+            class="mt-2 inline-flex items-center rounded border border-brand-500/30 bg-white
+                   px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50">
+      + Add parameter
+    </button>
+
+    {# Alpine serialises the rows into this hidden field the form actually posts. #}
+    <input type="hidden" name="parameters_json" :value="JSON.stringify(params)"/>
   </div>
 
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
