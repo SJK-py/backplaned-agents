@@ -26,14 +26,18 @@
   </div>
 
   <div x-show="tab === 'session'">
-    {% with names=session_files %}{% include "files/_list.html" %}{% endwith %}
+    {% with names=session_files, archive_tab="session" %}
+      {% include "files/_list.html" %}
+    {% endwith %}
     {% with scope="session", label="Upload to this session" %}
       {% include "files/_upload.html" %}
     {% endwith %}
   </div>
 
   <div x-show="tab === 'persist'" x-cloak>
-    {% with names=persist_files %}{% include "files/_list.html" %}{% endwith %}
+    {% with names=persist_files, archive_tab="persist" %}
+      {% include "files/_list.html" %}
+    {% endwith %}
     {% with scope="persist", label="Upload to persistent stash" %}
       {% include "files/_upload.html" %}
     {% endwith %}
