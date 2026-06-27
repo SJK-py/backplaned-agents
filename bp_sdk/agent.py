@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import signal
@@ -699,14 +700,30 @@ class Agent:
                 # result that raced ahead of our subscribe lives in the
                 # result future, not the queue); just await the result.
                 return await stream.result(timeout_s=timeout_s)
-            # Verbose path: drain Progress frames as they arrive,
-            # terminating when the terminal Result lands. The documented
-            # streaming idiom — see docs/backplaned/sdk/core.md §7.
-            async for pf in stream:
-                res = on_progress(pf)
-                if inspect.isawaitable(res):
-                    await res
-            return await stream.result(timeout_s=timeout_s)
+            # Verbose path: drain Progress frames to `on_progress`
+            # CONCURRENTLY with awaiting the result. `stream.result()` (with its
+            # own timeout) is the authoritative terminator — the progress
+            # iteration parks on the progress QUEUE, but a timed-out / silent
+            # task is settled on the RESULT FUTURE (by the reaper), which never
+            # wakes that queue. Draining alone would therefore hang past the
+            # timeout forever; awaiting the result alongside it bounds the wait.
+            # See docs/backplaned/sdk/core.md §7.
+            async def _drain() -> None:
+                try:
+                    async for pf in stream:
+                        res = on_progress(pf)
+                        if inspect.isawaitable(res):
+                            await res
+                except Exception:  # noqa: BLE001 — progress is best-effort
+                    logger.debug("spawn_progress_drain_stopped", exc_info=True)
+
+            drain = asyncio.ensure_future(_drain())
+            try:
+                return await stream.result(timeout_s=timeout_s)
+            finally:
+                drain.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await drain
 
     def run(self) -> None:
         """Blocking run loop for external agents. Installs SIGINT/SIGTERM.
