@@ -34,8 +34,16 @@ class TurnRunner:
     (under the session lock) and publishes rendered SSE events; subscribers
     attach via `subscribe()` and replay the backlog before following live."""
 
-    def __init__(self, *, session_id: str, user_id: str, text: str, core: Any, env: Any) -> None:
+    def __init__(
+        self, *, session_id: str, turn_id: str, user_id: str, text: str,
+        core: Any, env: Any,
+    ) -> None:
         self.session_id = session_id
+        # A per-turn id: the pending bubble streams `/chat/{sid}/stream/{turn_id}`
+        # and chat_stream only serves a matching runner. So a PREVIOUS bubble's
+        # EventSource reconnect can't latch onto a newer turn (which would feed
+        # the old activity box the new turn's progress).
+        self.turn_id = turn_id
         self.user_id = user_id
         self.text = text
         self._core = core

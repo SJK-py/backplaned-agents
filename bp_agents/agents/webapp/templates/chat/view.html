@@ -78,8 +78,8 @@
     {% endfor %}
     {% if in_flight %}
       {# A turn is still running (the user navigated back mid-turn): re-attach
-         the pending bubble so the Stop button + progress resume. #}
-      {% include "chat/_pending.html" %}
+         the pending bubble (its own turn_id) so Stop + progress resume. #}
+      {% with turn_id=in_flight_turn_id %}{% include "chat/_pending.html" %}{% endwith %}
     {% endif %}
   </div>
 

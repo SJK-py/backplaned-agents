@@ -140,6 +140,13 @@ async def _csrf(client, path: str = "/chat/ses_1") -> str:
     return m.group(1) if m else ""
 
 
+def _turn_id(html: str, session_id: str = "ses_1") -> str:
+    """The turn id from a pending bubble's SSE-connect URL."""
+    m = re.search(rf'/chat/{session_id}/stream/([\w-]+)"', html)
+    assert m, html
+    return m.group(1)
+
+
 def test_chat_view_renders_visible_history_only(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
 
@@ -212,9 +219,9 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
                     headers={"X-CSRF-Token": token},
                 )
                 assert send.status_code == 200, send.text[:300]
-                # The pending bubble subscribes to the session's in-flight turn.
-                assert 'sse-connect="/chat/ses_1/stream"' in send.text
-                stream = await client.get("/chat/ses_1/stream")
+                # The pending bubble subscribes to THIS turn's stream.
+                turn_id = _turn_id(send.text)
+                stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
                 stream_text = stream.text
             # The user turn was recorded by the channel.
             async with pool.acquire() as conn:
@@ -256,7 +263,7 @@ def test_chat_stream_no_active_turn_closes(suite_db_url: str) -> None:
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
-                r = await client.get("/chat/ses_1/stream")
+                r = await client.get("/chat/ses_1/stream/anything")
             return r.status_code, r.text
         finally:
             await pool.close()
@@ -279,7 +286,7 @@ def test_chat_stream_unowned_session_is_404(suite_db_url: str) -> None:
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
-                r = await client.get("/chat/ses_other/stream")
+                r = await client.get("/chat/ses_other/stream/x")
             return r.status_code
         finally:
             await pool.close()
@@ -302,7 +309,7 @@ def test_chat_stop_cancels_active_turn(suite_db_url: str) -> None:
             # Simulate a turn in flight for this session (a runner with its
             # router task spawned but not yet done).
             app.state.active_turns["ses_1"] = SimpleNamespace(
-                task_id="tsk_live", done=asyncio.Event()
+                task_id="tsk_live", turn_id="t_live", done=asyncio.Event()
             )
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -367,11 +374,11 @@ def test_chat_stream_cancelled_renders_stopped(suite_db_url: str) -> None:
             ) as client:
                 await _login(client)
                 token = await _csrf(client)
-                await client.post(
+                send = await client.post(
                     "/chat/ses_1", data={"message": "go"},
                     headers={"X-CSRF-Token": token},
                 )
-                stream = await client.get("/chat/ses_1/stream")
+                stream = await client.get(f"/chat/ses_1/stream/{_turn_id(send.text)}")
                 return stream.text
         finally:
             await pool.close()
@@ -437,7 +444,7 @@ def test_chat_view_resumes_in_flight_bubble(suite_db_url: str) -> None:
 
     view = asyncio.run(_drive())
     # The reloaded view re-attaches the live bubble: a reconnecting SSE + Stop.
-    assert 'sse-connect="/chat/ses_1/stream"' in view
+    assert 'sse-connect="/chat/ses_1/stream/' in view
     assert 'hx-post="/chat/ses_1/stop"' in view  # the Stop button is back
     assert "go" in view  # the user message was recorded under the lock
 
@@ -465,14 +472,15 @@ def test_chat_stream_resume_skips_seen_events(suite_db_url: str) -> None:
             ) as client:
                 await _login(client)
                 token = await _csrf(client)
-                await client.post(
+                send = await client.post(
                     "/chat/ses_1", data={"message": "go"},
                     headers={"X-CSRF-Token": token},
                 )
-                first = (await client.get("/chat/ses_1/stream")).text
+                url = f"/chat/ses_1/stream/{_turn_id(send.text)}"
+                first = (await client.get(url)).text
                 # Reconnect after having seen event id 2 (the two progress rows).
                 resumed = (await client.get(
-                    "/chat/ses_1/stream", headers={"Last-Event-ID": "2"}
+                    url, headers={"Last-Event-ID": "2"}
                 )).text
             return first, resumed
         finally:
@@ -523,5 +531,45 @@ def test_chat_send_while_in_flight_opens_no_second_stream(suite_db_url: str) -> 
             await pool.close()
 
     first, second = asyncio.run(_drive())
-    assert 'sse-connect="/chat/ses_1/stream"' in first  # the one live stream
+    assert 'sse-connect="/chat/ses_1/stream/' in first  # the one live stream
     assert second.strip() == ""  # no second bubble / second EventSource
+
+
+def test_chat_stream_stale_turn_id_does_not_attach_to_current(suite_db_url: str) -> None:
+    """A previous bubble's EventSource (its turn_id) must NOT latch onto the
+    CURRENT in-flight turn — else the old activity box gets the new turn's
+    progress. A non-matching turn_id closes at once."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[str, str]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            disp = _BlockingDispatcher()
+            core = ChannelCore(dispatcher=disp, pool=pool)
+            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client)
+                send = await client.post(
+                    "/chat/ses_1", data={"message": "go"},
+                    headers={"X-CSRF-Token": token},
+                )
+                await asyncio.wait_for(disp.started.wait(), timeout=5)
+                current = _turn_id(send.text)
+                # A stale/previous bubble requests a DIFFERENT (old) turn id
+                # while the current turn runs.
+                stale = (await client.get("/chat/ses_1/stream/old-turn-xyz")).text
+                disp.release.set()
+                await asyncio.wait_for(app.state.active_turns["ses_1"].task, timeout=5)
+            return current, stale
+        finally:
+            await pool.close()
+
+    current, stale = asyncio.run(_drive())
+    assert current != "old-turn-xyz"
+    # The stale request closed immediately — it never attached to the live turn.
+    assert "event: done" in stale
+    assert "event: progress" not in stale and "event: result" not in stale
