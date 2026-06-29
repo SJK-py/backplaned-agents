@@ -179,7 +179,31 @@ agents reference at call time:
   knobs (Anthropic `thinking`, OpenAI `reasoning`, Gemini
   `thinking_level`, etc.). Call-time `provider_options` REPLACES
   this entirely (not merged) — agents override only when they want
-  a wholly different config.
+  a wholly different config. For `openai-compatible*` presets there
+  is no first-class reasoning knob; instead a special `extra_body`
+  key is forwarded to the Chat Completions request VERBATIM, which
+  is how operators reach server-specific options the OpenAI schema
+  doesn't name. To enable a model's thinking mode and split the
+  reasoning out of the answer (e.g. a Friendli/vLLM/SGLang
+  endpoint), set:
+
+  ```json
+  {
+    "extra_body": {
+      "parse_reasoning": true,
+      "chat_template_kwargs": { "enable_thinking": true }
+    }
+  }
+  ```
+
+  When the server then returns reasoning SEPARATELY —
+  `message.reasoning_content` (DeepSeek/vLLM/SGLang/Friendli) or
+  `message.reasoning` (OpenRouter & gateways) — the adapter
+  surfaces it as the turn's thought summary (and streams it as
+  thought deltas), shown as the "thinking" progress line. It is
+  display-only and is never round-tripped back as model input.
+  Reasoning left INLINE in `content` (raw `<think>…</think>`) is not
+  parsed — enable the server's reasoning parser to split it out.
 - **Fallback preset** + **Max retries** — wire up retry + fallback
   behaviour for non-streaming calls. The router tries this preset
   `max_retries+1` times before walking to `fallback_preset`; the

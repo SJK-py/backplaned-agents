@@ -356,6 +356,7 @@ def _convert_response(resp: Any) -> LlmResponse:
     choice = choices[0]
     msg = getattr(choice, "message", None)
     text = ""
+    reasoning: str | None = None
     tool_calls: list[ToolCall] = []
     if msg is not None:
         # `content` can be a plain string or a list (some servers)
@@ -367,6 +368,14 @@ def _convert_response(resp: Any) -> LlmResponse:
                 part.get("text", "") if isinstance(part, dict) else ""
                 for part in c
             )
+        # Separated reasoning, when the server splits it out of `content`.
+        # `reasoning_content` is the de-facto field (DeepSeek/vLLM/SGLang/
+        # Friendli with `parse_reasoning`); `reasoning` is the gateway alias
+        # (OpenRouter etc.). Display-only — surfaced as the turn's thought
+        # summary, never round-tripped back as model input.
+        r = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
+        if isinstance(r, str) and r:
+            reasoning = r
         for tc in getattr(msg, "tool_calls", None) or []:
             fn = getattr(tc, "function", None)
             args_raw = getattr(fn, "arguments", "") if fn else ""
@@ -386,6 +395,7 @@ def _convert_response(resp: Any) -> LlmResponse:
     return LlmResponse(
         text=text,
         tool_calls=tool_calls,
+        thought_summary=reasoning,
         finish_reason=_finish_reason(getattr(choice, "finish_reason", None)),
         usage=_usage_from_chat(getattr(resp, "usage", None)),
         raw=resp.model_dump() if hasattr(resp, "model_dump") else {},
@@ -501,6 +511,17 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
                 if delta is None:
                     continue
+
+                # Separated reasoning chunks (when the server splits them out
+                # of `content`): `reasoning_content` is the de-facto field,
+                # `reasoning` the gateway alias. Surface as thought deltas —
+                # the SDK aggregator concatenates `thought=True` text into the
+                # response's thought summary. Display-only, not round-tripped.
+                rc = getattr(delta, "reasoning_content", None) or getattr(
+                    delta, "reasoning", None
+                )
+                if isinstance(rc, str) and rc:
+                    yield LlmDelta(text=rc, thought=True)
 
                 content = getattr(delta, "content", None)
                 if isinstance(content, str) and content:

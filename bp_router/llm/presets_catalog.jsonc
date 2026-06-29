@@ -261,4 +261,42 @@
     "concrete_model": "text-embedding-3-large",
     "api_key_ref": "env://OPENAI_API_KEY"
   }
+
+  // ===================== OpenAI-compatible endpoints =====================
+  // Any Chat Completions endpoint (vLLM, SGLang, LM Studio, llama.cpp-server,
+  // Friendli, OpenRouter, …) rides the `openai-compatible` provider — set
+  // `base_url` to the endpoint and point `api_key_ref` at its key (or omit
+  // both for a keyless local server). No catalogue entry ships by default;
+  // operators add one via the admin UI or a deployment overlay.
+  //
+  // EXTRA REQUEST KNOBS (`extra_body`): unlike the native gemini/anthropic/
+  // openai providers, this provider has no first-class reasoning toggle. The
+  // adapter passes a top-level set of sampling kwargs through, and forwards
+  // ANYTHING under a special `extra_body` key to the upstream VERBATIM. That
+  // is the escape hatch for server-specific options the OpenAI schema doesn't
+  // name — e.g. enabling a model's thinking mode and splitting reasoning out
+  // of `content`. Put them in `default_provider_options.extra_body`:
+  //
+  //   {
+  //     "name": "friendli-qwen",
+  //     "provider": "openai-compatible",
+  //     "concrete_model": "<model-id>",
+  //     "base_url": "https://api.friendli.ai/serverless/v1",
+  //     "api_key_ref": "env://FRIENDLI_TOKEN",
+  //     "default_provider_options": {
+  //       "extra_body": {
+  //         "parse_reasoning": true,
+  //         "chat_template_kwargs": { "enable_thinking": true }
+  //       }
+  //     }
+  //   }
+  //
+  // REASONING OUTPUT: when the server returns reasoning SEPARATELY from the
+  // answer — `message.reasoning_content` (DeepSeek/vLLM/SGLang/Friendli with
+  // `parse_reasoning`) or `message.reasoning` (OpenRouter & gateways) — the
+  // adapter surfaces it as the turn's thought summary (and streams it as
+  // thought deltas). It is display-only: shown as the "thinking" progress
+  // line, never round-tripped back as model input. Reasoning left INLINE in
+  // `content` (e.g. raw `<think>…</think>`) is not parsed — enable the
+  // server's reasoning parser (above) to split it out.
 ]

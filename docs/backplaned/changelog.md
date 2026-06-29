@@ -18,6 +18,33 @@
 
 ---
 
+## 2026-06-29
+
+> The `openai-compatible` chat adapter now surfaces separated reasoning
+> (`message.reasoning_content` / `message.reasoning`) as the response's thought
+> summary, so reasoning endpoints (Friendli/vLLM/SGLang/OpenRouter) show their
+> "thinking" line instead of silently dropping it.
+
+### Added — surface reasoning from OpenAI-compatible endpoints
+
+- **What (`bp_router/llm/providers/openai_compatible.py`):** `_convert_response`
+  now reads `message.reasoning_content` (de-facto field on DeepSeek/vLLM/SGLang/
+  Friendli) or `message.reasoning` (OpenRouter & gateway alias) and sets it on
+  `LlmResponse.thought_summary`. The streaming path yields the matching
+  `delta.reasoning_content` / `delta.reasoning` chunks as
+  `LlmDelta(text=..., thought=True)`, which the SDK aggregator concatenates into
+  the response's thought summary. Display-only — never round-tripped back as
+  model input. Inline `<think>…</think>` left in `content` is not parsed.
+- **Why:** these endpoints split reasoning out of `content` (often gated behind
+  a server knob passed via `default_provider_options.extra_body`, e.g.
+  `parse_reasoning` + `chat_template_kwargs.enable_thinking`). The adapter
+  previously read only `content` + `tool_calls`, so the reasoning was dropped.
+  Additive and backward-compatible — servers that don't emit these fields are
+  unaffected. Documented in `docs/admin-ui.md` (LLM presets →
+  `provider_options`) and `bp_router/llm/presets_catalog.jsonc`.
+
+---
+
 ## 2026-06-27
 
 > New `DELETE /v1/files/names` lets a session-authed gateway (the webapp) unbind
