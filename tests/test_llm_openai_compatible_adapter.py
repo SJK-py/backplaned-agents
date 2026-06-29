@@ -288,11 +288,17 @@ def test_usage_extraction_handles_none() -> None:
 def _stub_resp(
     *,
     content: str = "",
+    reasoning_content: str | None = None,
+    reasoning: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     finish_reason: str = "stop",
     usage: Any = None,
 ) -> SimpleNamespace:
     msg_kwargs: dict[str, Any] = {"content": content}
+    if reasoning_content is not None:
+        msg_kwargs["reasoning_content"] = reasoning_content
+    if reasoning is not None:
+        msg_kwargs["reasoning"] = reasoning
     if tool_calls is not None:
         msg_kwargs["tool_calls"] = [
             SimpleNamespace(
@@ -362,6 +368,37 @@ def test_convert_response_empty_choices_returns_empty_response() -> None:
     assert out.finish_reason == "stop"
 
 
+def test_convert_response_reasoning_content_surfaced_as_thought() -> None:
+    """Servers that split reasoning out of `content` (DeepSeek/vLLM/SGLang/
+    Friendli with `parse_reasoning`) put it on `message.reasoning_content`.
+    Surface it as the response's thought summary."""
+    resp = _stub_resp(content="42", reasoning_content="Let me think... 6*7.")
+    out = _convert_response(resp)
+    assert out.text == "42"
+    assert out.thought_summary == "Let me think... 6*7."
+
+
+def test_convert_response_reasoning_alias_surfaced_as_thought() -> None:
+    """Gateways (OpenRouter etc.) use the `reasoning` alias instead."""
+    resp = _stub_resp(content="42", reasoning="alias reasoning text")
+    out = _convert_response(resp)
+    assert out.thought_summary == "alias reasoning text"
+
+
+def test_convert_response_reasoning_content_wins_over_alias() -> None:
+    resp = _stub_resp(
+        content="42", reasoning_content="primary", reasoning="alias"
+    )
+    out = _convert_response(resp)
+    assert out.thought_summary == "primary"
+
+
+def test_convert_response_no_reasoning_leaves_thought_none() -> None:
+    resp = _stub_resp(content="plain")
+    out = _convert_response(resp)
+    assert out.thought_summary is None
+
+
 # ---------------------------------------------------------------------------
 # Streaming
 # ---------------------------------------------------------------------------
@@ -404,6 +441,8 @@ class _StubClient:
 def _delta_chunk(
     *,
     text: str | None = None,
+    reasoning_content: str | None = None,
+    reasoning: str | None = None,
     tool_call: dict[str, Any] | None = None,
     finish_reason: str | None = None,
     usage: Any = None,
@@ -411,6 +450,10 @@ def _delta_chunk(
     delta_kwargs: dict[str, Any] = {}
     if text is not None:
         delta_kwargs["content"] = text
+    if reasoning_content is not None:
+        delta_kwargs["reasoning_content"] = reasoning_content
+    if reasoning is not None:
+        delta_kwargs["reasoning"] = reasoning
     if tool_call is not None:
         idx = tool_call.get("index", 0)
         fn_kwargs: dict[str, Any] = {}
@@ -456,6 +499,60 @@ def test_streaming_text_chunks_yield_text_deltas() -> None:
     assert texts == ["Hel", "lo"]
     # Final delta carries finish_reason.
     assert out[-1].finish_reason == "stop"
+
+
+def test_streaming_reasoning_chunks_yield_thought_deltas() -> None:
+    """Separated reasoning chunks (`reasoning_content` / `reasoning`) stream
+    as `thought=True` deltas so the SDK aggregator folds them into the
+    response's thought summary — kept distinct from the answer text."""
+    chunks = [
+        _delta_chunk(reasoning_content="thinking "),
+        _delta_chunk(reasoning_content="hard"),
+        _delta_chunk(text="answer"),
+        _delta_chunk(finish_reason="stop"),
+    ]
+    adapter = OpenAICompatibleAdapter(
+        concrete_model="m", api_key="EMPTY", base_url="http://x/v1"
+    )
+    adapter._client = _StubClient(chunks)
+
+    async def run() -> list[LlmDelta]:
+        deltas: list[LlmDelta] = []
+        async for d in await adapter.generate(
+            [Message(role="user", content="hi")], stream=True
+        ):
+            deltas.append(d)
+        return deltas
+
+    out = asyncio.run(run())
+    thoughts = [d.text for d in out if d.text and d.thought]
+    answers = [d.text for d in out if d.text and not d.thought]
+    assert thoughts == ["thinking ", "hard"]
+    assert answers == ["answer"]
+
+
+def test_streaming_reasoning_alias_yields_thought_deltas() -> None:
+    chunks = [
+        _delta_chunk(reasoning="aliased thought"),
+        _delta_chunk(text="answer"),
+        _delta_chunk(finish_reason="stop"),
+    ]
+    adapter = OpenAICompatibleAdapter(
+        concrete_model="m", api_key="EMPTY", base_url="http://x/v1"
+    )
+    adapter._client = _StubClient(chunks)
+
+    async def run() -> list[LlmDelta]:
+        deltas: list[LlmDelta] = []
+        async for d in await adapter.generate(
+            [Message(role="user", content="hi")], stream=True
+        ):
+            deltas.append(d)
+        return deltas
+
+    out = asyncio.run(run())
+    thoughts = [d.text for d in out if d.text and d.thought]
+    assert thoughts == ["aliased thought"]
 
 
 def test_streaming_tool_call_buffered_then_emitted() -> None:
