@@ -410,6 +410,14 @@ services:
       SUITE_AGENT_GROUP: suite-core
       # Resolved per agent by the host; every agent here draws from the roster.
       SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      # Pool size is PER AGENT and this process runs nine of them, so the
+      # suite defaults (min 1 / max 10) would mean up to 90 connections from
+      # one container — against a stock `max_connections` of 100, with the
+      # router and channels still to come. 0/3 keeps the group under ~27 with
+      # no idle connections held. (Most of these agents stop needing the suite
+      # DB at all once the session-store rework lands.)
+      SUITE_DB_POOL_MIN_SIZE: ${SUITE_DB_POOL_MIN_SIZE:-0}
+      SUITE_DB_POOL_MAX_SIZE: ${SUITE_DB_POOL_MAX_SIZE:-3}
       # research
       SUITE_WEB_SEARCH_BACKEND: ${SUITE_WEB_SEARCH_BACKEND:-searxng}
       SUITE_BRAVE_API_KEY: ${SUITE_BRAVE_API_KEY:-}
@@ -454,6 +462,10 @@ services:
       # not be it.
       CHATBOT_INVITATION: ${CHATBOT_INVITATION:?provisions_service_user invite}
       SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      # Two agents, so the multiplication is mild — but keep it explicit for
+      # the same reason as suite-core above.
+      SUITE_DB_POOL_MIN_SIZE: ${SUITE_DB_POOL_MIN_SIZE:-0}
+      SUITE_DB_POOL_MAX_SIZE: ${SUITE_DB_POOL_MAX_SIZE:-5}
       SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
       SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
       SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}

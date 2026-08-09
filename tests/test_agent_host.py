@@ -427,3 +427,17 @@ def test_compose_group_membership_matches_the_host() -> None:
     for name in ("suite-core", "channels"):
         group = svc[name]["command"][-1]
         assert group in GROUPS, group
+
+
+def test_compose_bounds_the_per_agent_pool_multiplication() -> None:
+    """Pool size is PER AGENT. Nine agents at the suite default (max 10)
+    would open up to 90 connections from one container, against a stock
+    `max_connections` of 100 — with the router and channels still to come.
+    A group service must pin the pool explicitly."""
+    svc = _compose()["services"]
+    core = svc["suite-core"]["environment"]
+    assert "SUITE_DB_POOL_MAX_SIZE" in core
+    # 9 agents x the cap must stay well inside a stock max_connections.
+    cap = int(core["SUITE_DB_POOL_MAX_SIZE"].split(":-")[-1].rstrip("}"))
+    assert cap * len(GROUPS["suite-core"]) <= 40, cap
+    assert "SUITE_DB_POOL_MAX_SIZE" in svc["channels"]["environment"]

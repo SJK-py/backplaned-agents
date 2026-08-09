@@ -158,7 +158,27 @@ Two properties must be preserved deliberately:
     because SDK agents drain in-flight tasks. The host forwards SIGTERM to all
     its agents and waits for the same window.
 
-### 2.3 What is lost
+### 2.3 [shipped] What a shared process makes per-agent
+
+Three settings are process-wide environment variables that hosted agents
+would otherwise share, and each one is a real failure rather than an
+inefficiency:
+
+  * **`AGENT_STATE_DIR`** — credentials live at
+    `state_dir/credentials.json`, so nine agents in one directory overwrite
+    each other's tokens and load someone else's on restart. The host gives
+    each `state_dir/<name>/`.
+  * **`AGENT_INVITATION_TOKEN`** — one shared token means the first agent to
+    onboard consumes it and the rest 403, and in `channels` it would hand the
+    chatbot's `provisions_service_user` credential to whichever went first.
+    The host resolves `<NAME>_INVITATION` first, roster second.
+  * **`SUITE_DB_POOL_MAX_SIZE`** — pool size is per agent, so nine agents at
+    the suite default (max 10) is up to 90 connections from one container,
+    against a stock `max_connections` of 100. The compose pins 0/3 for
+    `suite-core`. This one shrinks on its own as the session-store rework
+    removes the suite database from most agents.
+
+### 2.4 What is lost
 
 `docker compose restart research` becomes "restart nine agents". Since those
 nine already share one image and one tag and are deployed together, the

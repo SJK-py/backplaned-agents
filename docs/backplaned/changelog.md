@@ -55,7 +55,10 @@
   token resolved as `<NAME>_INVITATION` first, roster second, because one
   shared token means the first agent to onboard consumes it — and would take
   the chatbot's `provisions_service_user` credential with it. Both were found
-  in review, before either shipped anywhere.
+  in review, before either shipped anywhere. The compose also pins
+  `SUITE_DB_POOL_MAX_SIZE` per group for the same reason: pool size is per
+  agent, so nine agents at the suite default would open up to 90 connections
+  from one container against a stock `max_connections` of 100.
 - **What:** `python -m bp_agents.host --group suite-core` runs a group of
   agents on one event loop, each keeping its own identity, WebSocket and ACL
   position. Per-agent supervision with exponential backoff (reset after a
