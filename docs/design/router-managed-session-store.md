@@ -352,6 +352,17 @@ Reads — session-scoped, since reading cannot fabricate (§7):
 | op | shape | notes |
 | --- | --- | --- |
 | `Read` | `{owner_agent_id, thread_key, roles, include_retired, include_hidden, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
+
+**[shipped — known wart] `include_retired` does two jobs.** It both
+ignores the floor *and* includes redacted tombstones, so a caller wanting
+the full pre-floor transcript **without** blanked rows cannot say so — and
+the HTTP transcript endpoint exposes the flag directly, so the webapp
+inherits the coupling. They are independent axes: the floor is about what
+is in the active context, redaction is about what was deleted. Split into
+`include_retired` (floor) and `include_redacted` (tombstones), defaulting
+both false. Worth doing **before** the suite rework consumes this API —
+it is an additive field now and a behaviour change for real callers
+later.
 | `GetState` | `{owner_agent_id\|null\|"*", keys}` | `"*"` returns per-thread maps |
 | `StatThread` | `{owner_agent_id, thread_key}` | `{message_count, content_bytes, last_message_id, floor_id}` from one row (§9.3) |
 | `ListThreads` | `{owner_agent_id\|null}` | thread coordinates plus their stats |
@@ -494,6 +505,22 @@ never waits: a batch is one transaction, and blocking inside it would
 pin a connection and hold locks. Ordering comes from the ticket sequence,
 not from retry timing, so a backoff loop cannot reorder two messages that
 arrived in order — the failure a naive try-lock has.
+
+> **[shipped — fixed] The ticket is only stable if the caller's own row is
+> refreshed before stale rows are swept.** The first implementation swept
+> first, so a waiter queued longer than its own `ttl_ms` (because the
+> holder was mid-long-turn) had its row deleted and came back with a new,
+> higher ticket — landing behind waiters that happened to retry more
+> recently. The queue reordered silently under exactly the condition it
+> exists to handle. Statement order in `_op_acquire_lease` is therefore
+> load-bearing, not incidental: **upsert, then sweep.**
+>
+> Two lessons worth carrying into the rest of this design. A waiter's TTL
+> is a *liveness* signal ("am I still interested?"), not a deadline on its
+> position, so anything that expires it must not also forfeit its place.
+> And the bug shipped green because the tests drove the store module while
+> the defect lived one layer up — the transport path needs its own tests,
+> which `tests/test_session_store.py` now has.
 
 **Waiters are told, not polled — with a deadline fallback.** On release
 the router promotes the lowest waiting ticket and pushes a
@@ -648,6 +675,18 @@ beyond, with the file stash as the documented alternative); and size
 service. A dedicated pool is available if measurement justifies it, but
 one pool with correct sizing is the simpler default.
 
+**[shipped — known cost]** The quota gate (§10.4) runs
+`SUM(content_bytes)` over the user's `session_threads` rows on **every**
+append, because tiers 1–3 carry a non-null ceiling. It is an index scan
+over one user's threads — sub-millisecond at a few hundred rows — but it
+is paid 2–6 times per turn and grows with the user's session count, where
+the file store pays the same shape only when a file is stored. The fix, if
+measurement shows it matters, is an O(1) per-user byte counter maintained
+by the same delta arithmetic the thread counters already use (§4), with
+the floor-move recount adjusting it. Measure before building it: an
+aggregate that is fast and obviously correct beats a denormalised counter
+that can drift.
+
 ## 10. Lifecycle, GC, quota
 
 ### 10.1 Close vs purge
@@ -683,7 +722,8 @@ Per-user `content_bytes` summed over `session_threads`, ceiling by user
 level, gated on append — the same shape as the file store's storage
 quota, reusing its enforcement point. A per-session message ceiling
 bounds the pathological case a byte ceiling misses (a million empty
-rows).
+rows). See §9.4 for the per-append cost of computing that sum, and the
+counter that would remove it.
 
 ## 11. SDK surface
 

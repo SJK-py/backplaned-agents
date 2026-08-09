@@ -26,8 +26,11 @@ Measured against the repo as it stands:
 | named state volumes | **13** | one per agent (12) plus the MCP bridge; the shared `lancedb_data` is separate |
 | ordered one-shots | **3** | `migrate` → `suite-migrate` → `bootstrap`, each an edge every agent depends on |
 | hand-written config | **1,777 lines** | 710 compose + 805 `prod.sh` + 262 env example |
+| documented router settings | **24 of 104** | `.env.example` vs. `Settings.model_fields` |
 
-Three causes, and only the third is really about Compose.
+Four causes. Only the last is really about Compose, and only §1.3 is
+strictly a documentation problem — but all four land on the same operator
+on the same afternoon, which is why they belong in one document.
 
 ### 1.1 One process per agent
 
@@ -64,7 +67,32 @@ twelve **unbound bearer credentials** sitting in an env file: any one of them
 can onboard as any agent name. Binding them to a roster (§3) is a tightening,
 not a loosening.
 
-### 1.3 Three ordered one-shots
+### 1.3 The env reference documents a quarter of the surface
+
+`Settings` carries **104** fields; `.env.example` documents **24** of them,
+and the README describes that file as "every configurable environment
+variable (router / agent SDK / suite), grouped with defaults". The
+dict-shaped settings — `file_storage_quota_bytes`, `quota_admit_rate_per_s`,
+`session_store_quota_bytes` — appear nowhere, so an operator tuning a quota
+has to read `bp_router/settings.py` to learn the variable exists.
+
+This is a documentation gap rather than a deployment one, but it lands on
+the same person on the same day, and it is the reason "hassle with env var
+passing" reads as a deployment problem: the variables you *must* set are
+tangled up with variables you cannot discover.
+
+Two changes, both small:
+
+  * **Generate the full reference.** A `scripts/gen-env-reference.py` that
+    walks the three settings models and emits every field with its default
+    and docstring, checked by a test asserting the committed output matches.
+    Then it cannot drift — which is the property `.env.example` was reaching
+    for and does not have.
+  * **Say what `.env.example` is.** Keep it as the curated quick-start (the
+    ~24 variables a deployment actually sets), and correct the README's claim
+    to match, pointing at the generated reference for the rest.
+
+### 1.4 Three ordered one-shots
 
 `migrate` (router schema) → `suite-migrate` (suite schema) → `bootstrap`
 (register invitations + apply ACL), each a service, each with a
@@ -244,7 +272,9 @@ choosing it should know they are trading isolation for one `docker run`.
 4. `bp_agents/init.py` — the merged one-shot, with `--step` for debugging.
 5. Compose rewrite against the four groups; `prod.sh` loses
    `refresh_invitations`' twelve-token loop.
-6. `all-in-one` profile (§8), last and optional.
+6. `scripts/gen-env-reference.py` + the README correction (§1.3) —
+   independent of everything above, and the cheapest item here.
+7. `all-in-one` profile (§8), last and optional.
 
 Steps 1–2 are testable without touching the router. Step 3 is backward
 compatible on its own, so it can land and soak before the Compose rewrite

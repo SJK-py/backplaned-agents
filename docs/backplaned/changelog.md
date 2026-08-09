@@ -18,6 +18,62 @@
 
 ---
 
+## 2026-08-10
+
+> Follow-up to the session store: a FIFO bug in the turn lease found by review,
+> the transport-layer tests that would have caught it, and an unrelated flaky
+> assertion in the token-bucket suite.
+
+### Fixed — turn lease lost FIFO order across a long hold
+
+- **What (`bp_router/session_store.py`):** `_op_acquire_lease` swept stale
+  queue rows *before* upserting the caller's own, so a waiter that had been
+  queued longer than its own `ttl_ms` — because the holder was mid-long-turn —
+  had its row deleted and was re-inserted with a NEW, higher ticket. It then
+  sat behind waiters that happened to retry more recently. The upsert now runs
+  first; the sweep still reaps genuinely abandoned rows, and a holder resuming
+  after its own lease expired keeps the lease it still holds.
+- **Why it matters:** the lease's entire contract is that ordering comes from
+  the ticket sequence and never from retry timing — that is the reason it is a
+  ticket queue rather than a mutex with a backoff loop. Under a long hold the
+  shipped code silently violated exactly the property
+  `docs/design/router-managed-session-store.md` §6.4 asserts. Reproduced
+  against Postgres before the fix (two waiters queued in order; the first aged
+  out behind a 10-minute hold; release promoted the **second**);
+  `test_lease_keeps_its_place_across_a_long_hold` drives the same sequence.
+
+### Added — transport-layer tests for the session store
+
+- **What (`tests/test_session_store.py`):** the original suite exercised the
+  store module, the protocol shapes and the SDK, but nothing drove the router
+  handler — which is where the bug above lived. Five pins added: `SessionOp`
+  has no `user_id` field to assert, the handler derives scope through
+  `_derive_task_scope` and refuses writes to a closed session, promotions are
+  pushed after both the commit and the reply, `_session_audit_payload` never
+  emits message content for any mutating op, and the built OpenAPI route table
+  exposes no message-POST (stronger than the previous source grep).
+- **Why:** the audit-hygiene property was a stated security guarantee with no
+  test, and "test the module, not the transport" is what let a statement-order
+  bug ship green.
+
+### Fixed — flaky wall-clock assertion in the token-bucket tests
+
+- **What (`tests/test_redis_integration.py`):**
+  `test_bucket_consumes_until_empty` asserted `0.05 < retry_after_s`, which
+  requires four `try_consume` calls to complete in under ~50 ms. Real time
+  between calls partially refills the bucket, so the wait is anywhere in
+  `(0, 0.1]`; only the ceiling is deterministic. Now asserts that.
+- **Why:** it passed two full local runs and failed the third under load —
+  the shape that reddens CI intermittently and trains people to re-run.
+
+### Changed — internal cleanup
+
+- **What:** dropped three lint-appeasing `_ = x` no-ops in
+  `bp_router/session_store.py` and an unused `_Handle._index` slot in
+  `bp_sdk/history.py`.
+
+---
+
 ## 2026-08-09
 
 > The router now owns **conversation** — a session-scoped message log, per-thread
