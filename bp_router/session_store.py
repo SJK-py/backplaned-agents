@@ -624,7 +624,7 @@ async def _op_read(
     if floor:
         params.append(floor)
         conds.append(f"id > ${len(params)}")
-    if not op.include_retired:
+    if not op.include_redacted:
         conds.append("redacted_at IS NULL")
     if not op.include_hidden:
         conds.append("hidden = false")

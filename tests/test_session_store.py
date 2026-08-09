@@ -71,6 +71,15 @@ def test_write_ops_have_no_owner_field_at_all() -> None:
         assert not {"owner_agent_id", "author_agent_id"} & set(op.model_fields), op
 
 
+def test_read_separates_retired_from_redacted() -> None:
+    """One flag for both would make "full transcript without tombstones"
+    inexpressible — and the HTTP transcript endpoint would inherit it."""
+    assert "include_retired" in ReadOp.model_fields
+    assert "include_redacted" in ReadOp.model_fields
+    assert ReadOp.model_fields["include_retired"].default is False
+    assert ReadOp.model_fields["include_redacted"].default is False
+
+
 def test_read_ops_do_take_an_owner() -> None:
     """Reads are session-scoped on purpose — a summarizer must read the
     thread it summarizes, and reading cannot fabricate an utterance."""
@@ -460,7 +469,9 @@ def test_redaction_blanks_content_and_keeps_the_id(test_db_url: str) -> None:
                 )
                 mid = out.results[0].message_id
                 await execute_batch(conn, scope, [RedactOp(message_ids=[mid])])
-                full = await execute_batch(conn, scope, [ReadOp(include_retired=True)])
+                full = await execute_batch(
+                    conn, scope, [ReadOp(include_retired=True, include_redacted=True)]
+                )
             row = next(m for m in full.results[0].messages if m.id == mid)
             assert row.content == ""
             assert row.redacted is True
@@ -468,6 +479,48 @@ def test_redaction_blanks_content_and_keeps_the_id(test_db_url: str) -> None:
                 "SELECT content FROM session_messages WHERE id = $1", mid
             )
             assert stored == ""  # blanked at rest, not merely filtered
+        await pool.close()
+
+    _run(go())
+
+
+def test_retired_and_redacted_are_independent_axes(test_db_url: str) -> None:
+    """The floor is about what is in the active context; redaction is about
+    what was deleted. A transcript wants the full history WITHOUT tombstones;
+    an audit view wants both. One flag could not express the difference."""
+
+    async def go() -> None:
+        pool = await _pool(test_db_url)
+        async with pool.acquire() as conn:
+            user, session = await _fresh(conn, "axes")
+            scope = StoreScope(user, session, "orchestrator")
+            async with conn.transaction():
+                kept = await execute_batch(conn, scope, [AppendOp(role="user", content="kept")])
+                gone = await execute_batch(conn, scope, [AppendOp(role="user", content="deleted")])
+                await execute_batch(
+                    conn, scope, [RedactOp(message_ids=[gone.results[0].message_id])]
+                )
+                # Retire both behind the floor.
+                stat = await execute_batch(conn, scope, [StatThreadOp()])
+                await execute_batch(
+                    conn, scope, [SetFloorOp(floor_id=stat.results[0].stat.last_message_id)]
+                )
+
+                active = await execute_batch(conn, scope, [ReadOp()])
+                transcript = await execute_batch(conn, scope, [ReadOp(include_retired=True)])
+                audit = await execute_batch(
+                    conn, scope, [ReadOp(include_retired=True, include_redacted=True)]
+                )
+                live_only = await execute_batch(conn, scope, [ReadOp(include_redacted=True)])
+
+            assert active.results[0].messages == []
+            # Full history, tombstone excluded.
+            assert [m.content for m in transcript.results[0].messages] == ["kept"]
+            # Full history including the tombstone.
+            assert len(audit.results[0].messages) == 2
+            assert any(m.redacted for m in audit.results[0].messages)
+            # Redacted-but-still-floored stays out: the floor still applies.
+            assert live_only.results[0].messages == []
         await pool.close()
 
     _run(go())

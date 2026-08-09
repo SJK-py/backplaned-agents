@@ -1000,7 +1000,12 @@ class ReadOp(BaseModel):
     owner_agent_id: str | None = None
     thread_key: str = ""
     roles: list[str] | None = None
-    include_retired: bool = False
+    # Two INDEPENDENT axes, deliberately not one flag: the floor is about
+    # what is in the active context, redaction is about what was deleted.
+    # A transcript view wants `include_retired=True` with tombstones still
+    # excluded; an audit view wants both.
+    include_retired: bool = False    # ignore the thread's floor
+    include_redacted: bool = False   # include blanked tombstones
     include_hidden: bool = True
     since_id: int | None = None
     before_id: int | None = None

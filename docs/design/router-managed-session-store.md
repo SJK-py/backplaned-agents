@@ -351,18 +351,17 @@ Reads — session-scoped, since reading cannot fabricate (§7):
 
 | op | shape | notes |
 | --- | --- | --- |
-| `Read` | `{owner_agent_id, thread_key, roles, include_retired, include_hidden, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
+| `Read` | `{owner_agent_id, thread_key, roles, include_retired, include_redacted, include_hidden, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
 
-**[shipped — known wart] `include_retired` does two jobs.** It both
-ignores the floor *and* includes redacted tombstones, so a caller wanting
-the full pre-floor transcript **without** blanked rows cannot say so — and
-the HTTP transcript endpoint exposes the flag directly, so the webapp
-inherits the coupling. They are independent axes: the floor is about what
-is in the active context, redaction is about what was deleted. Split into
-`include_retired` (floor) and `include_redacted` (tombstones), defaulting
-both false. Worth doing **before** the suite rework consumes this API —
-it is an additive field now and a behaviour change for real callers
-later.
+**[shipped — fixed] `include_retired` and `include_redacted` are separate
+flags.** The first implementation had one flag doing both jobs, so "the
+full pre-floor transcript **without** blanked rows" was inexpressible —
+and the HTTP transcript endpoint exposed the coupling straight to the
+webapp. They are independent axes: the floor is about what is in the
+active context, redaction is about what was deleted. Both default false;
+a transcript view sets `include_retired`, an audit view sets both. Fixed
+before the suite rework consumed the API, while it was still an additive
+field rather than a behaviour change for real callers.
 | `GetState` | `{owner_agent_id\|null\|"*", keys}` | `"*"` returns per-thread maps |
 | `StatThread` | `{owner_agent_id, thread_key}` | `{message_count, content_bytes, last_message_id, floor_id}` from one row (§9.3) |
 | `ListThreads` | `{owner_agent_id\|null}` | thread coordinates plus their stats |
