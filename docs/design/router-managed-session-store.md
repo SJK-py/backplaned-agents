@@ -72,7 +72,10 @@ unknown ones fail as `unsupported_op`, not as a parse error, so an old
 router and a new SDK degrade legibly (§5.4). Nothing in the schema
 encodes "orchestrator", "delegate", "summary", or "episode".
 
-**Versatility.** A thread is `(agent_id, thread_key)`, so an agent can
+**Versatility.** Turn ordering is a posture a suite chooses, not one the
+platform imposes: the store is safe under concurrency unconditionally,
+and strictly ordered when a suite takes the lease — which the SDK does by
+default (§6.4). A thread is `(agent_id, thread_key)`, so an agent can
 partition its own context without ever naming another agent (§3.2).
 Scopes are `session` and `user`, mirroring the file store's session /
 `persist` split, so cross-session agent context is a first-class case and
@@ -82,7 +85,7 @@ suite-defined (§3.5).
 
 **Efficiency.** A turn costs **two round trips** — one batch to open, one
 to close — because a batch is an ordered list of *mixed reads and writes*
-in one transaction (§6). Read bounds are enforced server-side against a
+in one transaction (§6.1). Read bounds are enforced server-side against a
 byte budget with a resumable cursor (§9.2). A `StatThread` op answers
 "should I summarize?" without transferring the thread (§9.3). Index
 design is specified, not left to the implementer (§9.1).
@@ -90,9 +93,10 @@ design is specified, not left to the implementer (§9.1).
 **Completeness.** The op inventory (§5.2) covers what a conversation
 store needs beyond append-and-read: redaction with cursor-stable
 tombstones, compare-and-swap on state, thread enumeration, cheap
-statistics, and idempotent appends. Absent by deliberate choice:
-mutation of stored text, server-side search, and change subscriptions
-(§15).
+statistics, idempotent appends, and both halves of concurrency control —
+optimistic assertions for safety, a FIFO lease for ordering (§6). Absent
+by deliberate choice: mutation of stored text, server-side search, and
+change subscriptions (§15).
 
 ## 3. Model
 
@@ -199,7 +203,7 @@ pointer is a lost update waiting to happen.
 
 ## 4. Schema
 
-Four tables, one migration (`bp_router/db/migrations/versions/0010_*`).
+Five tables, one migration (`bp_router/db/migrations/versions/0010_*`).
 
 **`session_messages`**
 
@@ -234,7 +238,7 @@ the counters that make `StatThread` O(1).
 | `last_message_id`, `updated_at` | | |
 
 Denormalising the counters turns "should I summarize?" from a thread scan
-into a single-row read (§9.3), and gives quota enforcement (§10.3) a
+into a single-row read (§9.3), and gives quota enforcement (§10.4) a
 number to gate on without an aggregate.
 
 **`session_state`** — `(scope, session_id, owner_agent_id, key) →
@@ -246,6 +250,23 @@ is handled by a partial unique index, not a sentinel.
 thread_key, kind, payload jsonb, created_at, consumed_at,
 consumed_by_task_id)`. Indexed `(session_id, target_agent_id, thread_key)
 WHERE consumed_at IS NULL`, so a drain is a bounded index scan.
+
+**`session_turn_queue`** — the lease and its waiters in one table (§6.4).
+
+| column | type | notes |
+| --- | --- | --- |
+| `ticket` | bigserial PK | FIFO order; the whole ordering guarantee |
+| `session_id` | text, FK `sessions` ON DELETE CASCADE | |
+| `holder_id` | text | caller-supplied (the root task id, typically) |
+| `agent_id` | text | the acquiring principal, for the push target and audit |
+| `state` | text | `waiting` \| `active` |
+| `expires_at` | timestamptz | TTL for the active holder; waiters expire too, so an abandoned queue drains itself |
+| `created_at` | timestamptz | |
+
+Unique partial index on `(session_id) WHERE state = 'active'` — at most
+one holder per session, enforced by the database rather than by
+application logic. Promotion is a single CTE on acquire/release: expire
+the stale active row, promote the lowest live `waiting` ticket.
 
 ## 5. Protocol
 
@@ -276,6 +297,21 @@ class SessionResultFrame(_FrameBase):
     results: list[SessionOpResult] = []
 ```
 
+One unsolicited router→agent push completes the set — the same shape as
+`CatalogUpdateFrame`, which the router already pushes without a request:
+
+```python
+class SessionLeaseFrame(_FrameBase):
+    """Router → agent. Your waiting ticket is now the active lease
+    (§6.4). Not correlated to a request: the `AcquireLease` that returned
+    `busy` was answered then. `granted=False` means the ticket was
+    dropped — the session closed, or the waiter's own TTL expired."""
+    type: Literal["SessionLease"] = "SessionLease"
+    session_id: str
+    ticket: int
+    granted: bool
+```
+
 Every request is a batch, minimum length one, so there is a single
 request shape to implement, test, rate-limit, and audit. Convenience
 wrappers live in the SDK, not the protocol.
@@ -293,11 +329,20 @@ Writes — all confined to the caller's own threads:
 | `HandOver` | `{target_agent_id, thread_key, kind, payload}` | the only cross-agent write (§3.5) |
 | `ConsumeHandovers` | `{kinds, limit}` | drains **my** queue; items come back in the batch results |
 
+Concurrency control (§6.3, §6.4) — assertions guard, leases order:
+
+| op | shape | notes |
+| --- | --- | --- |
+| `AssertThread` | `{owner_agent_id, thread_key, last_message_id}` | fails `thread_conflict` if the thread moved; rolls back the batch |
+| `AcquireLease` | `{holder_id, ttl_ms}` | never blocks: `granted`, or `busy{ticket, holder_expires_at}` |
+| `RenewLease` | `{holder_id, ttl_ms}` | `lease_lost` if it already expired |
+| `ReleaseLease` | `{holder_id}` | promotes the next ticket and pushes to its waiter |
+
 Reads — session-scoped, since reading cannot fabricate (§7):
 
 | op | shape | notes |
 | --- | --- | --- |
-| `Read` | `{owner_agent_id, thread_key, roles, include_retired, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread |
+| `Read` | `{owner_agent_id, thread_key, roles, include_retired, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
 | `GetState` | `{owner_agent_id\|null\|"*", keys}` | `"*"` returns per-thread maps |
 | `StatThread` | `{owner_agent_id, thread_key}` | `{message_count, content_bytes, last_message_id, floor_id}` from one row (§9.3) |
 | `ListThreads` | `{owner_agent_id\|null}` | thread coordinates plus their stats |
@@ -311,9 +356,11 @@ path to index, budget, and optimise.
 
 `denied` (unknown task, not the active executor, or a write outside the
 caller's own threads — deliberately non-enumerable, as the file ops'
-`denied` is), `session_closed`, `version_conflict` (CAS),
-`floor_regression`, `content_too_large`, `quota_exceeded`,
-`unsupported_op`, `rate_limited`, `batch_too_large`.
+`denied` is), `session_closed`, `version_conflict` (state CAS),
+`thread_conflict` (§6.3), `session_busy` (lease held; carries the
+caller's ticket), `lease_lost` (renew after expiry), `floor_regression`,
+`content_too_large`, `quota_exceeded`, `unsupported_op`, `rate_limited`,
+`batch_too_large`.
 
 ### 5.4 Forward compatibility
 
@@ -330,7 +377,9 @@ caller's own threads — deliberately non-enumerable, as the file ops'
     without schema changes — the pressure valve that keeps
     `history_summary`-shaped columns out of platform tables.
 
-## 6. Batches: mixed reads and writes, one transaction
+## 6. Batches, concurrency, and turn ordering
+
+### 6.1 The batch
 
 `ops` is an ordered list applied in a single transaction, all-or-nothing,
 returning positional results. Reads observe the writes that precede them
@@ -340,15 +389,17 @@ This is the design's main efficiency lever and its main correctness lever
 at once. A turn opens with
 
 ```
-[ConsumeHandovers(kinds=[…]), Append(input), GetState(keys=[…]), Read(…)]
+[AcquireLease(…), AssertThread(…), ConsumeHandovers(…), Append(input),
+ GetState(keys=[…]), Read(…)]
 ```
 
-— one round trip that drains the queue, records the turn's input, fetches
-the caller's own summary/config state, and returns the bounded context,
+— one round trip that takes the turn, drains the queue, records the
+input, fetches the caller's own state, and returns the bounded context,
 atomically. It closes with
 
 ```
-[Append(assistant), Append(tool_call), Append(tool_result), SetState(…), SetFloor(…)]
+[AssertThread(…), Append(assistant), Append(tool_call), Append(tool_result),
+ SetState(…), SetFloor(…), ReleaseLease(…)]
 ```
 
 — one more. **Two round trips per turn**, against five or more if each op
@@ -363,6 +414,110 @@ platform is encoding one conversation model for everyone.
 
 Cap batch length (suggest 32 ops) and total write bytes so a transaction
 cannot be held open indefinitely; `batch_too_large` is the refusal.
+
+### 6.2 What breaks without ordering
+
+Two turns running concurrently in one session produce three distinct
+failures, and it is worth separating them because the store can only fix
+one:
+
+  1. **Interleaved appends.** The thread lands as `U1, U2, A1, A2` — or
+     with `A2` first, since completion order is not submission order. The
+     suite's alternation invariant
+     (`user → assistant → user`, `docs/agent-suite/delegation.md:63`) is
+     broken and `A1` reads as the answer to `U2`.
+  2. **Stale context.** Each turn reloads before the other's reply
+     exists, so both answer as if alone. Nothing is corrupted; the
+     conversation is incoherent.
+  3. **Curation races.** The dangerous class, because summarization holds
+     a read → LLM → write window seconds long. Two overlapping passes
+     compute cutoffs from different snapshots; whichever summary commits
+     last wins, while the *higher* cutoff has already retired rows. If the
+     losing summary was the one covering them, those turns are gone from
+     context permanently.
+
+(1) and (2) are properties of running two turns at once — no storage
+design fixes them. (3) is a storage problem, and §6.3 makes it
+impossible.
+
+### 6.3 Optimistic concurrency — the safety floor
+
+Always on, no opt-in, costing nothing when uncontended:
+
+  * **`AssertThread{thread_key, last_message_id}`** — fails
+    `thread_conflict` if the thread has moved since the caller read it,
+    rolling back the whole batch. `Read` returns `last_message_id` for
+    exactly this. It is the thread-level analogue of the state CAS, and
+    it turns "silently interleaved" into "detected and refused".
+  * **`SetState{expected_version}`** — CAS (§3.6). Two concurrent
+    summarize passes cannot both apply: the loser gets
+    `version_conflict`, and because the batch is atomic, *its floor move
+    does not apply either*. Failure class 3 becomes a retry.
+  * **Monotonic floors** — `floor_regression` refuses a stale, lower
+    floor, so a late writer cannot un-retire rows.
+  * **`idempotency_key`** — a redelivered task cannot double-append.
+
+These make the store safe under concurrency. They do not make a
+conversation *coherent* under concurrency — that needs ordering.
+
+### 6.4 The turn lease — ordering as an opt-out, not an opt-in
+
+A lease is a router-held, TTL-bounded, FIFO turn ticket for a session.
+The **recommended default posture is strict turn ordering**: the SDK's
+turn helper takes a lease unless a suite deliberately opts out (§11), so
+a suite gets correct chat semantics without designing for concurrency.
+Running lock-free is legitimate — a shared multi-user session, an agent
+servicing genuinely independent requests — but it demands deliberate
+suite-side handling of §6.2's classes 1 and 2, so it is the choice you
+make, not the one you get by default.
+
+Ops: `AcquireLease{holder_id, ttl_ms}`, `RenewLease`, `ReleaseLease`.
+
+**FIFO by ticket, never blocking.** `AcquireLease` inserts a waiter row
+and returns either `granted` or `busy{ticket, holder_expires_at}`. It
+never waits: a batch is one transaction, and blocking inside it would
+pin a connection and hold locks. Ordering comes from the ticket sequence,
+not from retry timing, so a backoff loop cannot reorder two messages that
+arrived in order — the failure a naive try-lock has.
+
+**Waiters are told, not polled — with a deadline fallback.** On release
+the router promotes the lowest waiting ticket and pushes a
+`SessionLeaseFrame{session_id, ticket, granted}` to that agent: an
+unsolicited router→agent push, the same shape as `CatalogUpdateFrame`.
+The SDK correlates it by ticket to the waiting coroutine.
+
+A *dirty* holder death has no release to trigger that, and lazy
+promotion alone would leave waiters queued indefinitely — nobody is
+calling acquire or release to evaluate it. Rather than add a sweep loop,
+the `busy` reply carries `holder_expires_at`, and the waiter arms its own
+timer for that instant and re-acquires. The interested party holds the
+timer, which also means a lost push (dropped socket, router restart)
+self-heals on the same deadline. HTTP stewards get `409` plus a
+`Retry-After` derived from the same field.
+
+**Advisory, not enforcing.** The router does not gate writes on lease
+holding. A turn spans several principals — steward dispatch, executor
+run, steward follow-up — so an enforcing lease would have to be a token
+threaded through the task payload, which is suite policy and a new
+failure mode. Advisory keeps the lease a *coordination* primitive and
+leaves *safety* to §6.3. An enforcing variant is possible later without
+changing the shape (§15).
+
+**Crash safety by TTL and lazy promotion.** The holder renews by
+including `RenewLease` in any batch it is already sending, plus an SDK
+timer for long turns; a dead holder's lease expires and the next acquire
+— whether from a new turn or from a waiter's deadline retry — promotes
+past it. No background sweep and no router-side timer: promotion is
+evaluated only on acquire and release, so an idle session costs nothing
+and a router restart loses no state that the next acquire cannot
+reconstruct. A `lease_lost` result on
+renew tells a holder its lease expired under it — which is exactly when
+§6.3's assertions start earning their keep.
+
+**The two layers compose.** The lease gives ordering in the normal case;
+the assertions catch the abnormal one (expired lease, deliberate
+concurrency, a buggy suite). Neither is sufficient alone, and the failure
+mode of the pair is a refused batch rather than a corrupted thread.
 
 ## 7. Authorization
 
@@ -405,7 +560,8 @@ and shape follow `/v1/files/names`.
 | `GET /v1/sessions/{id}/messages` | transcript rendering; cursor-paginated, `roles` + `include_retired` filters |
 | `GET /v1/sessions/{id}/threads` | thread list plus stats |
 | `POST /v1/sessions/{id}/handovers` | enqueue for an agent |
-| `POST /v1/sessions/{id}/ops` | a batch restricted to session state, hand-over, and reads |
+| `POST /v1/sessions/{id}/ops` | a batch restricted to session state, hand-over, reads, and lease ops |
+| `POST\|DELETE /v1/sessions/{id}/lease` | acquire / release the turn lease (§6.4); `409` + `Retry-After` when busy |
 | `GET\|PATCH /v1/sessions/{id}/state` | session-scoped keys only |
 | `PATCH /v1/sessions/{id}` | session `metadata` (title, channel, whatever the suite puts there) |
 
@@ -436,6 +592,10 @@ cannot drift.
   * `session_handovers (session_id, target_agent_id, thread_key) WHERE
     consumed_at IS NULL` — partial, so drains never scan consumed rows.
   * `session_threads` is PK-only; every stat is a single-row fetch.
+  * `session_turn_queue UNIQUE (session_id) WHERE state = 'active'` plus
+    `(session_id, ticket) WHERE state = 'waiting'` — acquire, promote,
+    and release are each one indexed statement, and the uniqueness of the
+    holder is a database guarantee, not a code path.
 
 ### 9.2 Read budget and resumption
 
@@ -466,7 +626,7 @@ proxy it can serve in O(1).
 ### 9.4 Write path cost
 
 Appends ride the router's pool alongside task admit. Three mitigations,
-specified rather than left open: batch the turn's writes (§6) so a turn
+specified rather than left open: batch the turn's writes (§6.1) so a turn
 is two round trips; cap `content` (suggest 256 KiB, `content_too_large`
 beyond, with the file stash as the documented alternative); and size
 `db_pool_max_size` for the added per-turn writes before enabling the
@@ -488,14 +648,21 @@ sweep take messages, threads, state, and hand-overs through the
 same transaction that scrubs the user row, so `users.purged_at` stops
 being a cross-database signal for conversation data.
 
-### 10.2 Consumed hand-overs
+### 10.2 Queue and hand-over rows
+
+`session_turn_queue` rows cascade with the session. A released lease
+deletes its row; an abandoned one expires by TTL and is cleared by the
+next acquire's promotion CTE, so no background sweep exists to fall
+behind.
+
+### 10.3 Consumed hand-overs
 
 Swept on the session cascade, plus a short retention for audit. An
 un-consumed item lives until its target drains it or the session dies; a
 suite that wants staleness rules puts a timestamp check in its drain
 (§15).
 
-### 10.3 Quota
+### 10.4 Quota
 
 Per-user `content_bytes` summed over `session_threads`, ceiling by user
 level, gated on append — the same shape as the file store's storage
@@ -531,6 +698,27 @@ class SessionHistory:
                         thread: str = "") -> None: ...
 
     def batch(self) -> SessionBatch: ...   # one transaction, one round trip
+    def turn(self, *, ordered: bool = True) -> Turn: ...   # §6.4; see below
+```
+
+**The turn helper is the default path, and it is ordered.** `ordered=True`
+takes the lease, renews it on a timer for the length of the turn,
+releases it at the end, and asserts the thread hasn't moved before
+writing. A suite gets strict turn ordering by using the helper; going
+lock-free is `ordered=False` and an explicit decision, with §6.2's
+classes 1 and 2 becoming the caller's problem:
+
+```python
+async with ctx.history.turn() as t:           # lease acquired or awaited
+    async with t.batch() as b:                # the opening batch of §6.1
+        items = b.consume_handovers()
+        b.append("user", payload.prompt, idempotency_key="input")
+        state = b.get_state("summary")
+        turns = b.read(roles=["user", "assistant"])
+    ...                                        # LLM loop; lease auto-renewed
+    async with t.batch() as b:                 # closing batch, thread asserted
+        b.append("assistant", reply)
+# lease released; on `busy` the helper waits for SessionLeaseFrame, in ticket order
 ```
 
 ```python
@@ -574,8 +762,14 @@ builds it over `read`, as the current one does over
   * **Redaction is real.** `Redact` blanks stored content rather than
     hiding it behind a flag, so a user-facing "delete this message" is
     honest at the storage layer while ids stay stable.
-  * **DoS.** Batch caps (§6), content cap (§9.4), quota (§10.3), and the
-    existing per-agent rate limiter (`rate_limited`).
+  * **Lease starvation.** A holder that never releases wedges a session
+    until its TTL expires, and a misbehaving agent can re-acquire in a
+    loop. The TTL bounds the damage; the lease is per session and per
+    user, so the blast radius is one conversation, not the router. Keep
+    the default TTL tight enough that a wedged session self-heals within
+    a turn's worth of patience, and rate-limit acquires per agent.
+  * **DoS.** Batch caps (§6.1), content cap (§9.4), quota (§10.4), and
+    the existing per-agent rate limiter (`rate_limited`).
 
 ## 13. Reference mapping — a suite on these primitives
 
@@ -600,6 +794,7 @@ none of them writes another agent's thread:
 | cron report | channel writes an `assistant` row (`cron.py:166`) | pass the job's report policy in the task payload; the orchestrator is already that task's executor and appends its own row |
 | session title, channel, chat id | `session_info` columns | session `metadata` on the router's session row |
 | webapp transcript | direct SQL | `GET /v1/sessions/{id}/messages` |
+| one turn at a time per session | `session_lock.py` — `asyncio.Lock` plus an optional Valkey lock with a renewal watchdog | `ctx.history.turn()` — the router's FIFO lease (§6.4). Valkey stops being the prerequisite for a second channel instance |
 
 Two failure modes disappear rather than move. The orphan-seed rollback
 (`orchestrator/agent.py:270-277`) exists only because the seed is written
@@ -625,7 +820,7 @@ KV and HTTP shapes.
   * **Don't reintroduce a mutable `incumbent`-style flag.** One floor
     cursor covers prefix and whole-thread retirement (§3.4).
   * **Don't add `summarize` / `delegate` / `end_episode` ops.**
-    Primitives plus a transaction boundary (§6).
+    Primitives plus a transaction boundary (§6.1).
   * **Don't GC history on session close** (§10.1) — the file store's
     close-time GC is the wrong precedent here.
   * **Don't put `content` in audit payloads** (§12).
@@ -633,6 +828,16 @@ KV and HTTP shapes.
     large payloads; a second blob path is not (§9.4).
   * **Don't skip CAS on session state.** Two writers exist by design
     (§3.6).
+  * **Don't make the lease enforcing** without solving token propagation
+    first. A turn spans several principals; gating writes on lease
+    holding would break the executor's writes under the steward's lease
+    (§6.4).
+  * **Don't block inside a batch waiting for a lease.** A batch is a
+    transaction; waiting in it pins a connection and holds locks. Acquire
+    is a try, and waiters are pushed (§6.4).
+  * **Don't rely on retry backoff for ordering.** Two messages that
+    arrived in order can be answered out of order by a naive try-loop —
+    the ticket sequence is what makes ordering real (§6.4).
 
 ## 15. Open questions
 
@@ -646,12 +851,19 @@ KV and HTTP shapes.
     out of v1 to avoid designing ranking semantics into the platform
     before a caller needs them; the column can be added without a
     protocol change.
-  * **Turn-level serialization.** The router can lock per session around
-    store ops, which is complete on a single replica. It does not cover
-    dispatch → result (a task-tree concept), so a suite needing turn
-    ordering still needs its own lock. Whether the platform should offer
-    a session-busy primitive at all is a real question — it would make
-    the suite's Valkey lock unnecessary.
+  * **An enforcing lease.** §6.4 ships advisory. Making it enforcing
+    means threading a lease token from the acquiring steward through the
+    task payload to the executor, so the router can reject a write from a
+    turn that no longer holds the lease. That closes the
+    expired-lease-mid-turn window that §6.3's assertions currently catch
+    after the fact, at the cost of putting a platform token inside a
+    suite-defined payload. Worth revisiting once a suite has run on the
+    advisory version.
+  * **Lease scope.** The lease is per session. A suite running genuinely
+    parallel work in separate threads (§3.2) may want per-thread leases
+    instead — cheap to add (the queue is already keyed by session; make
+    it `(session_id, thread_key)`), but nothing wants it yet and a
+    session-wide lease is the conservative default.
   * **Per-agent read narrowing** (§7). Nothing wants it yet; the shape
     would be an ACL scope, not a schema change.
   * **Hand-over staleness.** TTL, drop-on-drain, or leave it to the
@@ -677,9 +889,10 @@ signed URLs, no LLM tool bundle:
 | queries + migration | ~350 |
 | dispatch handler (one frame, batch executor) | ~200 |
 | HTTP endpoints | ~200 |
-| `bp_sdk/history.py` (client, batch builder, paging) | ~400 |
+| lease: queue table, promotion CTE, push frame, HTTP endpoints | ~250 |
+| `bp_sdk/history.py` (client, batch builder, paging, turn helper) | ~500 |
 
-~1,850 LOC, self-contained, with no suite dependency and no migration.
+~2,200 LOC, self-contained, with no suite dependency and no migration.
 What it buys the platform: conversation becomes a first-class managed
 resource alongside identity, tasks, and files; `session.history` becomes
 structurally enforceable rather than advisory; session purge, retention,
