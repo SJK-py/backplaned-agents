@@ -5,11 +5,21 @@
 Logs in as the bootstrap admin (env: ROUTER_BOOTSTRAP_ADMIN_EMAIL /
 _PASSWORD, or BOOTSTRAP_ADMIN_*), then:
 
-  1. **Registers** each agent's pre-supplied invitation token — read from
-     `<AGENT>_INVITATION` env vars — via `POST /v1/admin/invitations` (which
-     accepts a caller-supplied `token`). The chatbot's is flagged
-     `provisions_service_user=true`. Idempotent: a token already registered
-     (201 idempotent / 409) is treated as success.
+  1. **Registers** invitations via `POST /v1/admin/invitations` (which
+     accepts a caller-supplied `token`). Two shapes:
+
+       * `SUITE_ROSTER_TOKEN` — ONE token bound to every agent that does not
+         provision a service user, each name consumable once
+         (`docs/design/deployment-agent-host.md` §3). This is the path the
+         agent host uses.
+       * `<AGENT>_INVITATION` — the original per-agent tokens. Still the only
+         way to register the chatbot's `provisions_service_user=true`
+         invitation, which is deliberately NOT bundled into the roster: it
+         yields a minting-capable principal, and eleven ordinary agents
+         should not inherit that.
+
+     Idempotent either way: a token already registered (201 / 409) is
+     treated as success.
   2. **Applies** the suite ACL (`bp_agents.acl`) via `PUT /v1/admin/acl/rules`,
      MERGING so admin-added rules (e.g. MCP grants) survive each boot.
 
@@ -86,10 +96,51 @@ async def _main() -> int:
         # then presents an unregistered token → 403. Without the key, each
         # launch's fresh token is registered for real.
         registered = 0
+
+        # ROSTER PATH (`docs/design/deployment-agent-host.md` §3). One token
+        # for every agent that does NOT provision a service user — which is
+        # all of them but the chatbot. Twelve mandatory env vars become two,
+        # and the token is bound to names: an invitation with no roster can
+        # onboard as ANY name, because `POST /v1/onboard` takes the name from
+        # the agent's own `agent_info`.
+        #
+        # The chatbot keeps its own token deliberately. Its invitation is
+        # flagged `provisions_service_user` — a higher-privilege credential
+        # that yields a minting-capable principal — and bundling that with
+        # eleven ordinary agents would hand every one of them the same flag.
+        roster_token = os.environ.get("SUITE_ROSTER_TOKEN")
+        if roster_token:
+            roster_names = [n for n, _var, prov in _ROSTER if not prov]
+            resp = await client.post(
+                f"{router}/v1/admin/invitations",
+                headers=headers,
+                json={
+                    "level": "tier1",
+                    "token": roster_token,
+                    "agent_ids": roster_names,
+                    "provisions_service_user": False,
+                    "expires_in_s": _INVITATION_TTL_S,
+                },
+            )
+            if resp.status_code in (201, 409):
+                registered += 1
+                print(f"registered roster for {len(roster_names)} agent(s)")
+            else:
+                print(
+                    f"register roster FAILED: {resp.status_code} {resp.text}",
+                    file=sys.stderr,
+                )
+                resp.raise_for_status()
+
+        # PER-AGENT PATH. Still supported and still the only way to register
+        # a `provisions_service_user` invitation. With a roster token set,
+        # only the chatbot's var is normally present; without one, this is
+        # the original twelve-token behaviour, unchanged.
         for name, var, prov in _ROSTER:
             tok = os.environ.get(var)
             if not tok:
-                print(f"skip {name}: {var} unset", file=sys.stderr)
+                if not roster_token:
+                    print(f"skip {name}: {var} unset", file=sys.stderr)
                 continue
             resp = await client.post(
                 f"{router}/v1/admin/invitations",

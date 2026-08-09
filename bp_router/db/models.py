@@ -249,6 +249,11 @@ class InvitationRow(_Row):
     # idempotency_key) WHERE idempotency_key IS NOT NULL.
     created_at: datetime
     idempotency_key: str | None = None
+    # Optional ROSTER: the agent names this one token may onboard, once
+    # each (`docs/design/deployment-agent-host.md` §3). NULL = the original
+    # unbound single-use token, which any name may consume.
+    agent_ids: list[str] | None = None
+    consumed: list[str] = []
     # When true, consuming this invitation at `POST /v1/onboard` also
     # provisions a co-located `usr_service_{agent_id}` service principal
     # (see migration 0002 / api/onboard.py).

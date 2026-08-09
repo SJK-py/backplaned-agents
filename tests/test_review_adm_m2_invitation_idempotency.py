@@ -95,9 +95,12 @@ def test_insert_invitation_passes_idempotency_key_to_sql() -> None:
     assert len(captured) == 1
     sql, args = captured[0]
     assert "idempotency_key" in sql
-    # idempotency_key is $5; provisions_service_user ($6) is now last.
+    # idempotency_key is $5, provisions_service_user $6, agent_ids $7.
     assert args[4] == "client-retry-key-1"
-    assert args[-1] is False  # provisions_service_user default
+    # Positional, not args[-1]: appending the roster column would otherwise
+    # have silently moved this check onto the wrong argument.
+    assert args[5] is False  # provisions_service_user default
+    assert args[6] is None  # no roster by default
 
 
 def test_insert_invitation_default_key_is_none() -> None:
@@ -120,10 +123,12 @@ def test_insert_invitation_default_key_is_none() -> None:
         created_by="admin_alice",
     ))
     sql, args = captured[0]
-    # 6 params bound: token_hash, level, expires_at, created_by,
-    # idempotency_key=None ($5), provisions_service_user=False ($6).
+    # 7 params bound: token_hash, level, expires_at, created_by,
+    # idempotency_key=None ($5), provisions_service_user=False ($6),
+    # agent_ids=None ($7 — the optional roster).
     assert args[4] is None  # idempotency_key
-    assert args[-1] is False  # provisions_service_user default
+    assert args[5] is False  # provisions_service_user default
+    assert args[6] is None  # no roster by default
 
 
 # ===========================================================================
@@ -191,6 +196,7 @@ def test_issue_invitation_passes_key_to_insert(
         expires_at: Any, created_by: str,
         idempotency_key: Any = None,
         provisions_service_user: Any = False,
+        agent_ids: Any = None,
     ) -> None:
         captured["idempotency_key"] = idempotency_key
         captured["created_by"] = created_by
@@ -242,6 +248,7 @@ def test_issue_invitation_no_header_passes_none_key(
         expires_at: Any, created_by: str,
         idempotency_key: Any = None,
         provisions_service_user: Any = False,
+        agent_ids: Any = None,
     ) -> None:
         captured["idempotency_key"] = idempotency_key
 

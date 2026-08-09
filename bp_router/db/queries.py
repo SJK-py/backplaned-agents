@@ -2430,6 +2430,7 @@ async def insert_invitation(
     created_by: str,
     idempotency_key: str | None = None,
     provisions_service_user: bool = False,
+    agent_ids: list[str] | None = None,
 ) -> None:
     """Insert a new invitation row.
 
@@ -2443,13 +2444,18 @@ async def insert_invitation(
     `provisions_service_user` marks the invitation so that consuming
     it at onboarding also provisions a co-located service principal
     (see `consume_invitation` / `api/onboard.py`).
+
+    `agent_ids` makes this a ROSTER token: one credential that may onboard
+    exactly the listed names, once each, instead of one unbound single-use
+    token per agent (`docs/design/deployment-agent-host.md` §3). None keeps
+    the original behaviour.
     """
     await conn.execute(
         """
         INSERT INTO invitations
             (token_hash, level, expires_at, created_by, idempotency_key,
-             provisions_service_user)
-        VALUES ($1, $2, $3, $4, $5, $6)
+             provisions_service_user, agent_ids)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         """,
         token_hash,
         level,
@@ -2457,6 +2463,7 @@ async def insert_invitation(
         created_by,
         idempotency_key,
         provisions_service_user,
+        agent_ids,
     )
 
 
@@ -2575,10 +2582,24 @@ async def consume_invitation(
     token_hash: str,
     used_by: str,
 ) -> dict[str, Any] | None:
-    """Mark an invitation used. Returns its claims or None if invalid/used."""
+    """Mark an invitation used. Returns its claims or None if invalid/used.
+
+    Two shapes, distinguished by `agent_ids`
+    (`docs/design/deployment-agent-host.md` §3):
+
+      * **NULL roster** — the original single-use token. Any `used_by` name
+        is accepted and consuming burns the row.
+      * **Roster set** — `used_by` MUST be a listed name that has not been
+        taken. Consuming appends to `consumed` and the row stays live until
+        the roster is exhausted, at which point `used_at` is stamped so the
+        existing GC sweep still reaps it.
+
+    A roster token is strictly TIGHTER than an unbound one: it can only
+    produce the agents the operator listed."""
     row = await conn.fetchrow(
         """
-        SELECT token_hash, level, expires_at, used_at, provisions_service_user
+        SELECT token_hash, level, expires_at, used_at, provisions_service_user,
+               agent_ids, consumed
         FROM invitations
         WHERE token_hash = $1
         FOR UPDATE
@@ -2587,15 +2608,40 @@ async def consume_invitation(
     )
     if row is None or row["used_at"] is not None or row["expires_at"] < _now():
         return None
-    await conn.execute(
-        """
-        UPDATE invitations SET used_at = $2, used_by = $3
-        WHERE token_hash = $1
-        """,
-        token_hash,
-        _now(),
-        used_by,
-    )
+
+    # `.get` rather than `[...]`: a row projected without the column reads
+    # as "no roster", which is exactly what an older row means.
+    roster = row.get("agent_ids")
+    if roster is None:
+        await conn.execute(
+            """
+            UPDATE invitations SET used_at = $2, used_by = $3
+            WHERE token_hash = $1
+            """,
+            token_hash,
+            _now(),
+            used_by,
+        )
+    else:
+        consumed = list(row.get("consumed") or [])
+        if used_by not in roster or used_by in consumed:
+            # Not on the roster, or already taken. Indistinguishable from an
+            # invalid token to the caller — same non-enumerable posture the
+            # unbound path takes.
+            return None
+        consumed.append(used_by)
+        exhausted = set(consumed) >= set(roster)
+        await conn.execute(
+            """
+            UPDATE invitations
+            SET consumed = $2, used_by = $3, used_at = $4
+            WHERE token_hash = $1
+            """,
+            token_hash,
+            consumed,
+            used_by,
+            _now() if exhausted else None,
+        )
     return {
         "level": row["level"],
         "provisions_service_user": row["provisions_service_user"],

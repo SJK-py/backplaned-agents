@@ -193,6 +193,13 @@ class IssueInvitationRequest(BaseModel):
     level: str
     expires_in_s: int = 86_400
     token: str | None = None
+    agent_ids: list[str] | None = None
+    """Optional ROSTER. When set, this ONE token may onboard exactly these
+    agent names, once each, instead of needing one single-use token per
+    agent (`docs/design/deployment-agent-host.md` §3). It is strictly
+    tighter than the unbound default: an invitation with no roster can
+    onboard as ANY name, because `POST /v1/onboard` takes the name from the
+    agent's own `agent_info`."""
     provisions_service_user: bool = False
     """When true, consuming this invitation at `POST /v1/onboard` also
     provisions a co-located `level=service` user (`usr_service_{agent_id}`)
@@ -321,6 +328,7 @@ async def issue_invitation(
                         created_by=principal.user_id,
                         idempotency_key=idempotency_key,
                         provisions_service_user=req.provisions_service_user,
+                        agent_ids=req.agent_ids,
                     )
                 except asyncpg.UniqueViolationError as exc:
                     constraint = getattr(exc, "constraint_name", None)

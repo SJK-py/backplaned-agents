@@ -16,6 +16,7 @@ a doc's status changes, update it in both places.
 | [`router-managed-file-store.md`](./router-managed-file-store.md) | Named per-user/per-session file stash; `File*` frames, `ctx.files`, LLM `file_ref` resolution. Replaced `ProxyFile`. |
 | [`router-managed-session-store.md`](./router-managed-session-store.md) | Conversation log + session state + hand-over queue + FIFO turn lease. `SessionOp` frames, `ctx.history`. Carries two known warts (§5.2, §9.4) and one shipped-then-fixed bug (§6.4). |
 | [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | Router half landed: the tier gate and the user's model choice resolved as one decision from an opaque slot key. Suite cutover outstanding. |
+| [`deployment-agent-host.md`](./deployment-agent-host.md) | One process per agent *group*, a roster token instead of twelve invitations, one `init`. 22 compose services → 11. |
 | [`agent-tool-history-recall.md`](./agent-tool-history-recall.md) | `recall_tool_history` — an agent re-reading its own earlier tool results on demand. |
 | [`oidc-webapp.md`](./oidc-webapp.md) | SSO against an external OpenID Provider; router as relying party, webapp as BFF. |
 | [`mcp-bridge-per-server-mode-per-tool.md`](./mcp-bridge-per-server-mode-per-tool.md) | One backplane agent per MCP server, one mode per tool. |
@@ -23,12 +24,6 @@ a doc's status changes, update it in both places.
 | [`multimodal-vision-sidecar.md`](./multimodal-vision-sidecar.md) | Phase 1 landed — a text-only chat preset reading images/PDFs via a separate vision preset. |
 | [`quota-enforcement.md`](./quota-enforcement.md) | Phases 1–2 landed; phase 3 (concurrent-task caps) outstanding. |
 | [`kakao-channel.md`](./kakao-channel.md) | KakaoTalk as an egress-only pull channel behind a relay + queue. |
-
-## Proposed — not implemented
-
-| doc | depends on |
-| --- | --- |
-| [`deployment-agent-host.md`](./deployment-agent-host.md) | Nothing, though it gets smaller after the suite rework. One process per agent *group*, a roster token instead of twelve invitations, one `init`. |
 
 ## Deferred / superseded
 

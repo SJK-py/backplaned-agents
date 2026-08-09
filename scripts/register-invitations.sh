@@ -44,11 +44,38 @@ ROSTER=(
 )
 
 # --gen: print `<VAR>=<fresh-token>` lines (44-char URL-safe; > the 32 min).
+#
+# TWO tokens, not twelve (`docs/design/deployment-agent-host.md` §3):
+#
+#   SUITE_ROSTER_TOKEN   one token bound to every agent that does NOT
+#                        provision a service user, each name consumable once.
+#                        Bound to names, so it is strictly tighter than the
+#                        twelve it replaces: an invitation with no roster can
+#                        onboard as ANY name, because `POST /v1/onboard` takes
+#                        the name from the agent's own `agent_info`.
+#   CHATBOT_INVITATION   kept separate on purpose — it is flagged
+#                        `provisions_service_user`, a higher-privilege
+#                        credential yielding a minting-capable principal, and
+#                        eleven ordinary agents must not inherit that.
+gen_token() { openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 44; }
+
 if [[ "${1:-}" == "--gen" ]]; then
+    echo "SUITE_ROSTER_TOKEN=$(gen_token)"
+    for entry in "${ROSTER[@]}"; do
+        prov="$(cut -d: -f3 <<<"$entry")"
+        [[ "$prov" == "true" ]] || continue
+        var="$(cut -d: -f2 <<<"$entry")"
+        echo "${var}=$(gen_token)"
+    done
+    exit 0
+fi
+
+# --gen-per-agent: the pre-roster shape, one token per agent. Kept for a
+# deployment that registers agents individually (or is mid-migration).
+if [[ "${1:-}" == "--gen-per-agent" ]]; then
     for entry in "${ROSTER[@]}"; do
         var="$(cut -d: -f2 <<<"$entry")"
-        tok="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9_-' | head -c 44)"
-        echo "${var}=${tok}"
+        echo "${var}=$(gen_token)"
     done
     exit 0
 fi

@@ -668,7 +668,7 @@ refresh_invitations() {
     # `()`/`'` regex metachars) AND every *_INVITATION= line, then re-append a
     # fresh block. Everything else is kept byte-for-byte.
     grep -vxF "$_INVITE_HEADER" "$OUT" \
-        | grep -vE "^[A-Z_]*_INVITATION=" > "$tmp" || true
+        | grep -vE "^([A-Z_]*_INVITATION|SUITE_ROSTER_TOKEN)=" > "$tmp" || true
     # Trim trailing blank lines so they don't accumulate across launches.
     sed -i -e :a -e '/^\n*$/{$d;N;ba}' "$tmp" 2>/dev/null || true
     {
@@ -679,7 +679,7 @@ refresh_invitations() {
     chmod 600 "$tmp"
     mv "$tmp" "$OUT"
     TOKENS_MINTED=1
-    echo "  refreshed agent invitation tokens (single-use — fresh per launch)"
+    echo "  refreshed agent invitation tokens (roster + service-user; fresh per launch)"
 }
 
 # ---------------------------------------------------------------------------

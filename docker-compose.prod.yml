@@ -33,17 +33,10 @@ volumes:
   # expired (>24h down), the agent re-onboards — which now succeeds because
   # prod.sh ships a fresh invitation each launch and the router allows
   # idempotent re-onboard. One volume per agent (state is per-identity).
-  chatbot_state: {}     # chatbot credentials.json + Telegram offset
-  webapp_state: {}
-  orchestrator_state: {}
-  deep_reasoning_state: {}
-  research_state: {}
-  computer_use_state: {}
-  knowledge_base_state: {}
-  memory_state: {}
-  history_summarizer_state: {}
-  md_converter_state: {}
-  config_state: {}
+  # One state volume per GROUP, not per agent: each agent still keeps its own
+  # credentials.json inside it, keyed by agent id.
+  suite_core_state: {}
+  channels_state: {}    # chatbot credentials + Telegram offset, webapp state
   sandbox_state: {}
   mcp_bridge_state: {}  # bp_mcp_bridge: service_mcp token + per-server agent creds
 
@@ -61,7 +54,7 @@ volumes:
 # default SUITE_AGENT=orchestrator with no invitation token → crash-loop on
 # onboard. Keep it top-level.)
 x-suite-agent: &suite-agent
-  image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+  image: backplaned-suite:latest   # built by `init` (one builder per tag)
   pull_policy: never               # use the locally-built tag; never pull
   restart: unless-stopped
   # SDK agents drain in-flight tasks on SIGTERM (bp_sdk graceful shutdown,
@@ -70,8 +63,7 @@ x-suite-agent: &suite-agent
   stop_grace_period: 30s
   depends_on:
     router: {condition: service_started}
-    suite-migrate: {condition: service_completed_successfully}
-    bootstrap: {condition: service_completed_successfully}
+    init: {condition: service_completed_successfully}
   environment: &suite-env
     AGENT_ROUTER_URL: ws://router:8000/v1/agent
     AGENT_STATE_DIR: /state
@@ -254,24 +246,40 @@ services:
   # before starting any container, so the tag exists when both start. Do NOT
   # add `build:` to a second service for the same tag: `up --build` / bake then
   # build the same tag concurrently and fail with `image ... already exists`.
-  migrate:
-    image: backplaned-router:latest
-    build: .
-    # Build locally — never try to PULL this tag. It's a local image with no
-    # registry, so without this an image-only dependent racing ahead of the
-    # build makes compose attempt a registry pull → "login required" against
-    # Docker Hub. `build` pins it to the local build.
-    pull_policy: build
-    command: ["alembic", "upgrade", "head"]
+  init:                            # one-shot: schemas + invitations + ACL
+    # Replaces the former `migrate` + `suite-migrate` + `bootstrap` trio
+    # (`docs/design/deployment-agent-host.md` §4). One service, one ordering
+    # edge for every group to declare, one place to read a boot failure. The
+    # steps stay individually runnable for debugging:
+    #     docker compose run --rm init python -m bp_agents.init --step acl
+    #
+    # CANONICAL BUILDER of backplaned-suite:latest — the ONLY suite-image
+    # service with a `build:`. One builder per tag avoids the `up --build` /
+    # bake "image ... already exists" race.
+    image: backplaned-suite:latest
+    build: {context: ., dockerfile: Dockerfile.suite}
+    pull_policy: build   # build locally; never pull (see migrate's note)
+    command: ["python", "-m", "bp_agents.init"]
     depends_on:
       postgres: {condition: service_healthy}
+      router: {condition: service_healthy}
     environment:
       ROUTER_DB_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_router
-    networks: [backend]
+      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
+      ROUTER_URL: http://router:8000
+      ROUTER_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local.test}
+      ROUTER_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set a strong value}
+      # ONE token for every agent that does not provision a service user
+      # (§3). The chatbot keeps its own below: its invitation yields a
+      # minting-capable principal, and eleven ordinary agents must not
+      # inherit that flag.
+      SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      CHATBOT_INVITATION: ${CHATBOT_INVITATION:?provisions_service_user invite}
+    networks: [backend, agents]
     restart: "no"
 
   router:
-    image: backplaned-router:latest   # built by `migrate` (one builder per tag)
+    image: backplaned-router:latest   # built by `init` (one builder per tag)
     pull_policy: never                 # use the locally-built tag; never pull
     restart: unless-stopped
     # Let the lifespan drain finish (close WS sockets 1001, cancel in-flight
@@ -283,7 +291,6 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       valkey: {condition: service_healthy}
-      migrate: {condition: service_completed_successfully}
     # Operator-supplied custom env (optional). Inject ADDITIONAL vars into the
     # router WITHOUT editing this file — e.g. a provider key referenced by a
     # preset's api_key_ref `env://MY_PROVIDER_KEY`, or an OIDC secret `env://…`.
@@ -380,212 +387,95 @@ services:
   # (no separate `suite-acl` service). See docs/agent-suite/deployment.md.
   # ======================================================================
 
-  suite-migrate:                   # one-shot: apply the suite DB schema
-    # CANONICAL BUILDER of backplaned-suite:latest — the ONLY suite-image
-    # service with a `build:`. `bootstrap`, the `x-suite-agent` anchor, and
-    # every agent inheriting it reference the tag image-only. One builder per
-    # tag avoids the `up --build` / bake `image ... already exists` race.
-    image: backplaned-suite:latest
-    build: {context: ., dockerfile: Dockerfile.suite}
-    pull_policy: build   # build locally; never pull (see migrate's note)
-    command: ["alembic", "-c", "alembic_suite.ini", "upgrade", "head"]
-    depends_on:
-      postgres: {condition: service_healthy}
-    environment:
-      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
-    networks: [backend]
-    restart: "no"
-
-  bootstrap:                       # one-shot: register invitations + apply ACL
-    # Runs once the router is healthy: registers each agent's pre-supplied
-    # invitation token (POST /v1/admin/invitations accepts the token) and
-    # applies the suite ACL. Agents depend on this completing, so a single
-    # `docker compose up -d` onboards the whole roster — no manual steps.
-    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
-    pull_policy: never               # use the locally-built tag; never pull
-    command: ["python", "-m", "bp_agents.bootstrap"]
-    depends_on:
-      router: {condition: service_healthy}
-    environment:
-      ROUTER_URL: http://router:8000
-      ROUTER_BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@local.test}
-      ROUTER_BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set a strong value}
-      CHATBOT_INVITATION: ${CHATBOT_INVITATION:?}
-      WEBAPP_INVITATION: ${WEBAPP_INVITATION:?}
-      ORCHESTRATOR_INVITATION: ${ORCHESTRATOR_INVITATION:?}
-      HISTORY_SUMMARIZER_INVITATION: ${HISTORY_SUMMARIZER_INVITATION:?}
-      MEMORY_INVITATION: ${MEMORY_INVITATION:?}
-      KNOWLEDGE_BASE_INVITATION: ${KNOWLEDGE_BASE_INVITATION:?}
-      MD_CONVERTER_INVITATION: ${MD_CONVERTER_INVITATION:?}
-      CONFIG_INVITATION: ${CONFIG_INVITATION:?}
-      DEEP_REASONING_INVITATION: ${DEEP_REASONING_INVITATION:?}
-      RESEARCH_INVITATION: ${RESEARCH_INVITATION:?}
-      COMPUTER_USE_INVITATION: ${COMPUTER_USE_INVITATION:?}
-      SANDBOX_INVITATION: ${SANDBOX_INVITATION:?}
-    networks: [agents]
-    restart: "no"
-
-  chatbot:                         # gateway + session manager + scheduler
+  # --- Agent groups ------------------------------------------------------
+  #
+  # The deployment unit is an ISOLATION BOUNDARY, not an agent
+  # (`docs/design/deployment-agent-host.md` §2). Nine agents that trust each
+  # other equally, ship in one image at one tag, and are released together
+  # run in ONE process: eleven suite agents imported into a single
+  # interpreter measure ~96 MB RSS against ~40 MB for one alone, because
+  # lancedb / fastapi / markitdown load once per process rather than once
+  # per agent.
+  #
+  # Each agent keeps its own identity, its own WebSocket and its own place in
+  # the ACL — the host is a process, not a merged principal. One agent's
+  # crash is supervised and restarted without touching its neighbours
+  # (bp_agents/host.py), which is strictly better than the container-per-
+  # agent behaviour it replaces: there, the same fault dropped every
+  # in-flight task in the container.
+  suite-core:
     <<: *suite-agent
     environment:
       <<: *suite-env
-      SUITE_AGENT: chatbot
-      AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION:?provisions_service_user invite}
-      SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
-      # KakaoTalk channel (optional). Egress-only pull consumer behind the
-      # deploy/kakao-relay Cloudflare Worker + a Cloudflare Queue. Inert
-      # unless the three CF queue vars are set. Needs Redis (the
-      # deadline/next-touch registry) — already provided by SUITE_VALKEY_URL
-      # in the suite-env anchor above.
-      SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
-      SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}
-      SUITE_KAKAO_CF_API_TOKEN: ${SUITE_KAKAO_CF_API_TOKEN:-}
-      # Outbound KakaoTalk images (optional, presigned R2). Inbound images
-      # reuse the router file store regardless of these.
-      SUITE_KAKAO_R2_ENDPOINT_URL: ${SUITE_KAKAO_R2_ENDPOINT_URL:-}
-      SUITE_KAKAO_R2_BUCKET: ${SUITE_KAKAO_R2_BUCKET:-}
-      SUITE_KAKAO_R2_ACCESS_KEY_ID: ${SUITE_KAKAO_R2_ACCESS_KEY_ID:-}
-      SUITE_KAKAO_R2_SECRET_ACCESS_KEY: ${SUITE_KAKAO_R2_SECRET_ACCESS_KEY:-}
-    volumes: [chatbot_state:/state]
-    networks: [edge, agents, suite]
-
-  webapp:                          # browser channel (FastAPI + agent WS)
-    <<: *suite-agent
-    environment:
-      <<: *suite-env
-      SUITE_AGENT: webapp
-      AGENT_INVITATION_TOKEN: ${WEBAPP_INVITATION:?}
-      # Signs the browser session cookie. Generate a strong random value.
-      WEBAPP_SESSION_SECRET: ${WEBAPP_SESSION_SECRET:?set a strong random value}
-      WEBAPP_DEPLOYMENT_ENV: prod
-      # Serve the self-hosted stylesheet (built into the image) — NOT the
-      # Tailwind Play CDN. Required in prod (the config validator enforces it).
-      WEBAPP_USE_BUILT_CSS: "true"
-      # SSO (OIDC) — frontend half; the router (above) runs the actual flow.
-      # The single OIDC_ENABLED switch drives both. PUBLIC_BASE_URL builds the
-      # redirect_uri (<base>/auth/sso/callback) and defaults to the webapp's
-      # own edge domain, so it matches the router's redirect allowlist by
-      # construction. Set OIDC_ENABLED=true (+ the router's OIDC_* creds) in
-      # deploy/.env.prod to turn it on.
-      WEBAPP_SSO_ENABLED: "${OIDC_ENABLED:-false}"
-      WEBAPP_PUBLIC_BASE_URL: "${WEBAPP_PUBLIC_BASE_URL:-https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}}"
-      # Set false to make the webapp SSO-only (hide/disable password login,
-      # /register, /set-password). Requires SSO enabled. Default keeps both.
-      WEBAPP_PASSWORD_LOGIN_ENABLED: "${WEBAPP_PASSWORD_LOGIN_ENABLED:-true}"
-    # Fronted by the edge proxy (HTTPS + SSE); not published directly.
-    networks: [edge, agents, suite]
-    volumes: [webapp_state:/state]
-
-  orchestrator:
-    <<: *suite-agent
-    environment:
-      <<: *suite-env
-      SUITE_AGENT: orchestrator
-      AGENT_INVITATION_TOKEN: ${ORCHESTRATOR_INVITATION:?}
-    volumes: [orchestrator_state:/state]
-
-  deep_reasoning:
-    <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: deep_reasoning, AGENT_INVITATION_TOKEN: "${DEEP_REASONING_INVITATION:?}"}
-    volumes: [deep_reasoning_state:/state]
-
-  research:
-    <<: *suite-agent
-    environment:
-      <<: *suite-env
-      SUITE_AGENT: research
-      AGENT_INVITATION_TOKEN: ${RESEARCH_INVITATION:?}
-      # Web-search backend selector: searxng (default) | brave | kagi | exa.
-      # brave/kagi/exa use their API key below (Brave LLM-Context / Kagi
-      # FastGPT / Exa neural search); if the chosen backend's key is unset the
-      # research agent falls back to SearXNG (logged).
+      SUITE_AGENT_GROUP: suite-core
+      AGENT_INVITATION_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      # research
       SUITE_WEB_SEARCH_BACKEND: ${SUITE_WEB_SEARCH_BACKEND:-searxng}
       SUITE_BRAVE_API_KEY: ${SUITE_BRAVE_API_KEY:-}
       SUITE_KAGI_API_KEY: ${SUITE_KAGI_API_KEY:-}
       SUITE_EXA_API_KEY: ${SUITE_EXA_API_KEY:-}
       SUITE_EXA_SEARCH_TYPE: ${SUITE_EXA_SEARCH_TYPE:-auto}
-      # SearXNG endpoint (used when backend=searxng). The env file
-      # (scripts/prod.sh) is the single source of truth: set it to the bundled
-      # SearXNG (http://searxng:8080, also pass `--profile search`), an external
-      # instance, or leave it EMPTY to run research with no web search.
-      # Default empty — NOT http://searxng:8080 — so an unset value doesn't
+      # Empty by default — NOT http://searxng:8080 — so an unset value doesn't
       # silently point research at a SearXNG that isn't running.
       SUITE_SEARXNG_URL: ${SUITE_SEARXNG_URL:-}
-    volumes: [research_state:/state]
-
-  computer_use:
-    <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: computer_use, AGENT_INVITATION_TOKEN: "${COMPUTER_USE_INVITATION:?}"}
-    volumes: [computer_use_state:/state]
-
-  # knowledge_base + memory share the per-user LanceDB volume (+ own /state).
-  knowledge_base:
-    <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: knowledge_base, AGENT_INVITATION_TOKEN: "${KNOWLEDGE_BASE_INVITATION:?}"}
-    volumes: [lancedb_data:/lancedb, knowledge_base_state:/state]
-
-  memory:
-    <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: memory, AGENT_INVITATION_TOKEN: "${MEMORY_INVITATION:?}"}
-    volumes: [lancedb_data:/lancedb, memory_state:/state]
-    # memory's per-user lock is in-process; back it with Redis to scale
-    # this service beyond one replica.
-
-  history_summarizer:
-    <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: history_summarizer, AGENT_INVITATION_TOKEN: "${HISTORY_SUMMARIZER_INVITATION:?}"}
-    volumes: [history_summarizer_state:/state]
-
-  md_converter:
-    <<: *suite-agent
-    environment:
-      <<: *suite-env
-      SUITE_AGENT: md_converter
-      AGENT_INVITATION_TOKEN: ${MD_CONVERTER_INVITATION:?}
-      # Conversion backend: markitdown (default, local) or datalab (hosted
-      # Marker API — better on complex layouts/tables/math/scans). datalab needs
-      # SUITE_DATALAB_API_KEY; without it the agent falls back to markitdown.
+      # md_converter
       SUITE_MD_BACKEND: ${SUITE_MD_BACKEND:-markitdown}
       SUITE_DATALAB_API_KEY: ${SUITE_DATALAB_API_KEY:-}
       SUITE_MD_DATALAB_MODE: ${SUITE_MD_DATALAB_MODE:-balanced}
-      # LLM-vision OCR (markitdown-ocr plugin). Set KEY + MODEL to OCR images
-      # embedded in PDF/DOCX/PPTX/XLSX (and full pages of scanned PDFs) via a
-      # vision model — a DEDICATED OpenAI-compatible provider, separate from the
-      # router's presets (MarkItDown needs a synchronous client that can't ride
-      # the frame channel). Both empty (default) → OCR disabled, image handling
-      # stays metadata-only. See deploy/.env.prod.example.
       SUITE_MD_OCR_API_KEY: ${SUITE_MD_OCR_API_KEY:-}
       SUITE_MD_OCR_MODEL: ${SUITE_MD_OCR_MODEL:-}
       SUITE_MD_OCR_BASE_URL: ${SUITE_MD_OCR_BASE_URL:-}
       SUITE_MD_OCR_PROMPT: ${SUITE_MD_OCR_PROMPT:-}
-      # Bound each per-image OCR call. The OpenAI SDK default (600s × 2 retries)
-      # lets one slow/unreachable OCR endpoint hang the WHOLE conversion with no
-      # error — keep it tight. (The plugin speaks OpenAI Chat Completions; the
-      # OCR endpoint must be OpenAI-compatible, not Anthropic-shaped.)
       SUITE_MD_OCR_TIMEOUT_S: ${SUITE_MD_OCR_TIMEOUT_S:-60}
       SUITE_MD_OCR_MAX_RETRIES: ${SUITE_MD_OCR_MAX_RETRIES:-1}
-      # Conversion runs in an isolated child process; these bound it so a
-      # pathological document fails one task cleanly instead of OOM-killing
-      # the agent with no trace. See deploy/.env.prod.example.
       SUITE_MD_CONVERT_TIMEOUT_S: ${SUITE_MD_CONVERT_TIMEOUT_S:-120}
       SUITE_MD_CONVERT_MEM_LIMIT_MB: ${SUITE_MD_CONVERT_MEM_LIMIT_MB:-0}
-    # Bound total memory so the cgroup OOM-killer targets the ballooning
-    # conversion worker (the child), leaving the parent agent up to report the
-    # failure. Without a cap a huge PDF could exhaust host memory.
-    mem_limit: ${MD_CONVERTER_MEM_LIMIT:-2g}
-    volumes: [md_converter_state:/state]
+    command: ["python", "-m", "bp_agents.host", "--group", "suite-core"]
+    # Bounds the whole group now, not md_converter alone. The conversion
+    # worker still runs in a forked CHILD, so a ballooning document is still
+    # the largest process in the cgroup and still the OOM-killer's target —
+    # but the baseline is nine agents, so the cap is raised accordingly.
+    # Lower it and a big PDF starts killing the host instead of the child.
+    mem_limit: ${SUITE_CORE_MEM_LIMIT:-4g}
+    volumes: [lancedb_data:/lancedb, suite_core_state:/state]
 
-  config:
+  channels:                        # Telegram + KakaoTalk gateway, web app
+    # Its own group: the only agents on the `edge` network, and the only ones
+    # whose restart a user notices (§2.1).
     <<: *suite-agent
-    environment: {<<: *suite-env, SUITE_AGENT: config, AGENT_INVITATION_TOKEN: "${CONFIG_INVITATION:?}"}
-    volumes: [config_state:/state]
+    environment:
+      <<: *suite-env
+      SUITE_AGENT_GROUP: channels
+      AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION:?provisions_service_user invite}
+      # The webapp consumes the roster like any other non-service agent; the
+      # chatbot's own token above is the one that provisions its principal.
+      SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
+      SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
+      SUITE_KAKAO_CF_QUEUE_ID: ${SUITE_KAKAO_CF_QUEUE_ID:-}
+      SUITE_KAKAO_CF_API_TOKEN: ${SUITE_KAKAO_CF_API_TOKEN:-}
+      SUITE_KAKAO_R2_ENDPOINT_URL: ${SUITE_KAKAO_R2_ENDPOINT_URL:-}
+      SUITE_KAKAO_R2_BUCKET: ${SUITE_KAKAO_R2_BUCKET:-}
+      SUITE_KAKAO_R2_ACCESS_KEY_ID: ${SUITE_KAKAO_R2_ACCESS_KEY_ID:-}
+      SUITE_KAKAO_R2_SECRET_ACCESS_KEY: ${SUITE_KAKAO_R2_SECRET_ACCESS_KEY:-}
+      WEBAPP_SESSION_SECRET: ${WEBAPP_SESSION_SECRET:?set a strong random value}
+      WEBAPP_DEPLOYMENT_ENV: prod
+      WEBAPP_USE_BUILT_CSS: "true"
+      WEBAPP_SSO_ENABLED: "${OIDC_ENABLED:-false}"
+      WEBAPP_PUBLIC_BASE_URL: "${WEBAPP_PUBLIC_BASE_URL:-https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}}"
+      WEBAPP_PASSWORD_LOGIN_ENABLED: "${WEBAPP_PASSWORD_LOGIN_ENABLED:-true}"
+    command: ["python", "-m", "bp_agents.host", "--group", "channels"]
+    networks: [edge, agents, suite]
+    volumes: [channels_state:/state]
 
   sandbox:                         # UNTRUSTED code execution — hardened
     <<: *suite-agent
     environment:
       <<: *suite-env
       SUITE_AGENT: sandbox
-      AGENT_INVITATION_TOKEN: ${SANDBOX_INVITATION:?}
+      # Its own container for isolation, but an ordinary agent as far as
+      # provisioning goes — so it draws from the roster like the rest.
+      AGENT_INVITATION_TOKEN: ${SUITE_ROSTER_TOKEN:?}
       # This service runs as root with cap_drop: ALL (below), so it has no
       # CAP_DAC_OVERRIDE and can only write a dir it OWNS. The image's default
       # /state is owned by uid 10002 → EACCES on credentials.json. Use the
@@ -649,15 +539,14 @@ services:
     # Runs the suite image's bp_mcp_bridge entrypoint (the package ships in the
     # wheel). Gated behind the `mcp` profile so a bare `up` (no MCP_BRIDGE_SECRET)
     # doesn't start it; prod.sh adds `--profile mcp` when the secret is set.
-    image: backplaned-suite:latest   # built by `suite-migrate` (one builder per tag)
+    image: backplaned-suite:latest   # built by `init` (one builder per tag)
     pull_policy: never
     restart: unless-stopped
     stop_grace_period: 30s
     profiles: ["mcp"]
     depends_on:
       router: {condition: service_started}
-      suite-migrate: {condition: service_completed_successfully}
-      bootstrap: {condition: service_completed_successfully}
+      init: {condition: service_completed_successfully}
     command: ["python", "-m", "bp_mcp_bridge"]
     # Operator-supplied custom env (optional) — the bridge resolves an MCP
     # server's `auth_value_ref` (env://VAR / secret://…) from ITS own env, so a

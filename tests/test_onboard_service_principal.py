@@ -70,7 +70,8 @@ def test_insert_invitation_binds_provisions_service_user() -> None:
     )
     sql, args = captured[-1]
     assert "provisions_service_user" in sql
-    assert args[-1] is True
+    # $6 = provisions_service_user (positional: $7 agent_ids follows).
+    assert args[5] is True
 
     # Default False when omitted.
     asyncio.run(
@@ -83,7 +84,7 @@ def test_insert_invitation_binds_provisions_service_user() -> None:
         )
     )
     _sql, args = captured[-1]
-    assert args[-1] is False
+    assert args[5] is False
 
 
 def test_consume_invitation_returns_provisions_flag() -> None:

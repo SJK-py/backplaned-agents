@@ -18,6 +18,101 @@
 
 ---
 
+## 2026-08-12
+
+> Deployment: agents run in **groups**, one process each, and the twelve
+> single-use invitation tokens become one roster plus the chatbot's. Compose
+> goes from 22 services to 11, 13 state volumes to 4, and three ordered
+> one-shots to one. Design:
+> [`../design/deployment-agent-host.md`](../design/deployment-agent-host.md).
+>
+> The router half is additive: a NULL `agent_ids` keeps the existing unbound
+> single-use invitation behaviour exactly.
+
+### Added — `invitations.agent_ids` roster (`0012_invitation_roster`)
+
+- **What:** an optional `agent_ids` list plus a `consumed` array. With a
+  roster set, `consume_invitation` accepts only a listed, untaken name and
+  appends to `consumed`; the row stays live until the roster is exhausted, at
+  which point `used_at` is stamped so the existing GC sweep still reaps it.
+  `POST /v1/admin/invitations` accepts `agent_ids`.
+- **Why this TIGHTENS rather than loosens:** `invitations` had no name column
+  and `POST /v1/onboard` takes the name from the agent's own `agent_info`, so
+  each of the twelve tokens sitting in an env file was an unbound bearer
+  credential that could onboard as *any* agent. A roster token can only
+  produce the names the operator listed.
+- **Robustness:** the roster is read with `row.get("agent_ids")`, so a row
+  projection without the column reads as "no roster" — which is exactly what
+  a pre-migration row means.
+
+### Added — `bp_agents/host.py` (supervised multi-agent runner)
+
+- **What:** `python -m bp_agents.host --group suite-core` runs a group of
+  agents on one event loop, each keeping its own identity, WebSocket and ACL
+  position. Per-agent supervision with exponential backoff (reset after a
+  healthy run), SIGTERM forwarded to all, and a non-zero process exit when
+  *every* agent ends permanently failed — so a supervisor never sees a
+  healthy-looking container full of dead agents.
+- **Why group, not per agent:** the heavy dependencies load once per
+  *process*. Measured: one suite agent imported is ~40 MB RSS; eleven in one
+  process is ~96 MB.
+- **`sandbox` and `mcp_bridge` are refused by name.** The sandbox runs as
+  root with `CAP_SETUID`, `no-new-privileges` and no DB network — those
+  capabilities and that network position *are* the isolation, and co-hosting
+  anything with it would hand that agent the same. A group naming either
+  exits with an error rather than silently dropping it.
+- **A clean return from `run_async` stops supervision**, it does not restart:
+  the SDK reconnects transient transport failures internally and raises
+  `TransportPermanentlyFailed` for the rest, so returning normally is a
+  deliberate stop. (Caught by a test before it shipped.)
+
+### Added — `bp_agents/init.py`, one-shot instead of three
+
+- **What:** router schema → suite schema → invitations + ACL in one service,
+  with `--step` for running any one of them alone. Replaces the `migrate` →
+  `suite-migrate` → `bootstrap` chain and the `depends_on` edge every agent
+  service declared. Stops at the first failure — a half-migrated schema with
+  a bootstrapped ACL is harder to reason about than a clean stop.
+- **The admin credential stays here and the host never holds one.**
+
+### Added — `scripts/gen_env_reference.py` → `docs/env-reference.md`
+
+- **What:** generates the complete variable reference from the settings
+  models — **222 variables**, against the 24 `.env.example` documented while
+  the README called it complete. A test runs it with `--check`, so it cannot
+  drift.
+- **Why:** the dict-shaped settings (`file_storage_quota_bytes`,
+  `session_store_quota_bytes`, `llm_default_presets`) appeared nowhere, so an
+  operator tuning a quota had to read `settings.py` to learn the variable
+  existed.
+
+### Changed — `docker-compose.prod.yml` rewritten around groups
+
+- **What:** 22 services → 11 (`suite-core`, `channels`, `sandbox`, `init`,
+  plus infra and the two profiles); 13 state volumes → 4; 12 mandatory
+  invitation vars → 2 (`SUITE_ROSTER_TOKEN` + `CHATBOT_INVITATION`).
+- **Why two and not one:** the chatbot's invitation is flagged
+  `provisions_service_user` — a higher-privilege credential yielding a
+  minting-capable principal — and the flag is per-invitation, not per-name.
+  Bundling it would hand eleven ordinary agents the same.
+- **Memory caveat:** `md_converter`'s `mem_limit: 2g` existed so the OOM
+  killer would target a ballooning conversion child. In `suite-core` that cap
+  covers nine agents, so it is raised to 4g (`SUITE_CORE_MEM_LIMIT`); the
+  mechanism holds (conversion still runs in a forked child) but the margin is
+  shared. Recorded as an open question in the design.
+
+### Changed — compose-shape tests updated, properties preserved
+
+- **What:** `test_compose_every_suite_agent_sets_name_and_token` now walks
+  group services and checks `SUITE_AGENT_GROUP` against `host.GROUPS`;
+  `test_bootstrap_compose_env_covers_full_roster` checks the roster token
+  plus every service-user var; the custom-env-file least-privilege test names
+  the group services. Two invitation tests moved from `args[-1]` to
+  positional indices — appending the roster column had silently moved those
+  assertions onto the wrong argument.
+
+---
+
 ## 2026-08-11
 
 > Preset **slots**: an agent names an opaque preference key ("balanced") and the

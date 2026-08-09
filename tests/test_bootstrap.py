@@ -39,19 +39,47 @@ def test_compose_every_suite_agent_sets_name_and_token() -> None:
     repo = pathlib.Path(__file__).resolve().parent.parent
     d = yaml.safe_load((repo / "docker-compose.prod.yml").read_text())
     svcs = d["services"]
-    roster_names = {name for name, _var, _prov in bs._ROSTER}
-    for name in roster_names:
-        env = svcs[name].get("environment", {})
+
+    # Agents now run in GROUP services (`bp_agents.host`), so the per-agent
+    # name is chosen by `--group`, not by SUITE_AGENT. The property is the
+    # same: every service that runs agents must say WHICH, and must carry a
+    # token — a service inheriting only the anchor would run the image
+    # default with an empty token and crash-loop on onboard.
+    from bp_agents.host import GROUPS  # noqa: PLC0415
+
+    agent_services = {
+        name: svc
+        for name, svc in svcs.items()
+        if isinstance(svc.get("command"), list)
+        and "bp_agents.host" in svc["command"]
+    }
+    assert agent_services, "no group services found"
+    covered: set[str] = set()
+    for name, svc in agent_services.items():
+        env = svc.get("environment", {})
         assert isinstance(env, dict), f"{name}: no environment: block"
-        assert env.get("SUITE_AGENT") == name, (
-            f"{name}: SUITE_AGENT is {env.get('SUITE_AGENT')!r}, expected "
-            f"{name!r} — without it the container runs the image default "
-            "(orchestrator)."
+        group = svc["command"][-1]
+        assert group in GROUPS, f"{name}: unknown group {group!r}"
+        assert env.get("SUITE_AGENT_GROUP") == group, (
+            f"{name}: SUITE_AGENT_GROUP is {env.get('SUITE_AGENT_GROUP')!r}, "
+            f"expected {group!r}"
         )
         assert "AGENT_INVITATION_TOKEN" in env, (
             f"{name}: no AGENT_INVITATION_TOKEN — it will onboard with an "
             "empty token and crash-loop."
         )
+        covered |= set(GROUPS[group])
+
+    # The standalone agents (isolation boundaries) still carry their own.
+    for name in ("sandbox",):
+        env = svcs[name].get("environment", {})
+        assert env.get("SUITE_AGENT") == name, name
+        assert "AGENT_INVITATION_TOKEN" in env, name
+        covered.add(name)
+
+    # Nothing in the bootstrap roster may be left unrun.
+    roster_names = {name for name, _var, _prov in bs._ROSTER}
+    assert roster_names <= covered, roster_names - covered
 
 
 def test_bootstrap_compose_env_covers_full_roster() -> None:
@@ -66,13 +94,21 @@ def test_bootstrap_compose_env_covers_full_roster() -> None:
 
     repo = pathlib.Path(__file__).resolve().parent.parent
     d = yaml.safe_load((repo / "docker-compose.prod.yml").read_text())
-    boot_env = set(d["services"]["bootstrap"]["environment"])
-    roster_vars = {var for _name, var, _prov in bs._ROSTER}
-    missing = roster_vars - boot_env
+    # The trio (migrate / suite-migrate / bootstrap) is now one `init`
+    # service, and the twelve invitation vars are one roster token plus the
+    # chatbot's — whose invitation is flagged `provisions_service_user`, a
+    # higher-privilege credential that must NOT be bundled with the rest.
+    init_env = set(d["services"]["init"]["environment"])
+    assert "SUITE_ROSTER_TOKEN" in init_env, (
+        "init must carry the roster token or every non-service agent will "
+        "403 on onboard"
+    )
+    service_user_vars = {var for _name, var, prov in bs._ROSTER if prov}
+    missing = service_user_vars - init_env
     assert not missing, (
-        f"bootstrap service env is missing roster invitation var(s): {missing}. "
-        "Add them to the bootstrap `environment:` block or bootstrap will skip "
-        "those agents and they'll 403 on onboard."
+        f"init service env is missing service-user invitation var(s): "
+        f"{missing}. Those cannot ride the roster (the flag is per-invitation, "
+        "not per-name), so each needs its own var."
     )
 
 

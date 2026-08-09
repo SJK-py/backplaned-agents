@@ -179,8 +179,8 @@ def test_custom_env_file_wired_into_router_and_mcp_bridge_only() -> None:
         "mcp_bridge must load deploy/.env.prod.custom (it resolves MCP "
         "auth_value_ref from its own env)"
     )
-    # Must NOT leak into the untrusted sandbox or the channel/worker agents.
-    for svc in ("sandbox", "chatbot", "webapp", "orchestrator"):
+    # Must NOT leak into the untrusted sandbox or the agent groups.
+    for svc in ("sandbox", "channels", "suite-core"):
         assert not _custom_env_file(d["services"][svc]), (
             f"{svc} must NOT load the operator custom env file (it never "
             "resolves secret refs; least-privilege)"

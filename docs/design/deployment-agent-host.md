@@ -1,6 +1,13 @@
 # Deployment: agent host, roster provisioning, one init
 
-> **Status:** design proposal — not implemented.
+> **Status: implemented.** Shipped as `bp_agents/host.py` (supervised
+> multi-agent runner), `bp_agents/init.py` (the merged one-shot),
+> `invitations.agent_ids` (migration `0012_invitation_roster`) with roster
+> support in `bp_agents/bootstrap.py` and `scripts/register-invitations.sh`,
+> `scripts/gen_env_reference.py` → `docs/env-reference.md`, and a rewritten
+> `docker-compose.prod.yml`: **22 services → 11**, **12 credential vars → 2**,
+> **13 state volumes → 4**. Covered by `tests/test_agent_host.py` and
+> `tests/test_invitation_roster.py`. Deviations are marked **[shipped]**.
 >
 > Targets the operator-facing cost of running the suite: 22 compose services,
 > 12 mandatory single-use invitation tokens minted on every launch, 13 state
@@ -193,6 +200,16 @@ split stays: an admin-authenticated one-shot mints the roster token and
 applies the ACL; the host holds only a token that can produce the agents it
 was given.
 
+**[shipped] Two tokens, not one.** The chatbot's invitation is flagged
+`provisions_service_user` — it yields a minting-capable principal — and
+that flag is per-*invitation*, not per-name. Bundling it into the roster
+would hand eleven ordinary agents the same privilege, so it keeps its own
+token: `SUITE_ROSTER_TOKEN` + `CHATBOT_INVITATION`. Twelve mandatory vars
+become two rather than one, and the higher-privilege credential stays
+visibly separate — which is the better outcome, not a compromise.
+`--gen-per-agent` still emits the pre-roster shape for a deployment that
+provisions individually.
+
 ## 4. Change 3 — one `init`
 
 Collapse `migrate` + `suite-migrate` + `bootstrap` into a single `init`
@@ -217,6 +234,7 @@ uses to build the invitation roster. Declarative, one file, no YAML anchors.
 | compose services | 22 | **11** |
 | mandatory invitation vars | 12 | **1** |
 | state volumes | 13 | **4** (`lancedb_data` unchanged) |
+| credential vars | 12 | **2** (roster + the service-user invite) |
 | python processes | ~14 | **5** |
 | suite RSS (interpreters) | ~500 MB–1 GB | **~150 MB** |
 | ordered one-shots | 3 | **1** |
@@ -289,6 +307,15 @@ depends on it.
   * **Per-agent restart control.** §2.3 defers it. If it proves necessary, the
     cleanest shape is a host control socket rather than splitting groups back
     apart.
+  * **[shipped] `md_converter`'s memory bound now covers its group.** It had
+    `mem_limit: 2g` specifically so the cgroup OOM-killer would target a
+    ballooning conversion *child* and leave the parent agent up to report the
+    failure. In `suite-core` that cap bounds nine agents, so it is raised to
+    4g (`SUITE_CORE_MEM_LIMIT`). The mechanism still holds — conversion runs
+    in a forked child, which remains the largest process and the killer's
+    target — but the margin is now shared. If a pathological document starts
+    taking the host down instead of the child, `md_converter` wants its own
+    group, and that is the first thing to try.
   * **Roster token TTL.** Today's invitation TTL is 600 s because tokens are
     minted per launch and consumed seconds later. A roster token that survives
     a partial rollout may want longer — but a long-lived multi-name credential
