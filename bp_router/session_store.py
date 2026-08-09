@@ -337,7 +337,7 @@ async def _op_append(
         if usage + size > quota_ceiling:
             raise SessionStoreError("quota_exceeded", index)
 
-    thread = await _ensure_thread(conn, scope, owner, op.thread_key)
+    await _ensure_thread(conn, scope, owner, op.thread_key)
     row = await conn.fetchrow(
         """
         INSERT INTO session_messages
@@ -377,7 +377,6 @@ async def _op_append(
         owner,
         op.thread_key,
     )
-    _ = thread
     return SessionOpResult(kind=op.kind, message_id=message_id)
 
 
@@ -715,7 +714,6 @@ async def _op_get_state(
     conn: asyncpg.Connection, scope: StoreScope, op: GetStateOp, index: int
 ) -> SessionOpResult:
     where, args = _scope_sql(scope, start=1)
-    n = len(args)
     params: list[Any] = [*args]
     if op.session_scoped:
         owner_pred = "owner_agent_id IS NULL"
@@ -739,7 +737,6 @@ async def _op_get_state(
         """,
         *params,
     )
-    _ = n
     return SessionOpResult(
         kind=op.kind,
         state=[
@@ -779,7 +776,6 @@ async def _op_list_threads(
         """,
         *params,
     )
-    _ = index
     return SessionOpResult(
         kind=op.kind,
         threads=[_stat_from_row(dict(r), r["owner_agent_id"], r["thread_key"]) for r in rows],
@@ -836,10 +832,17 @@ async def _op_acquire_lease(
         # meaningful user-scope equivalent.
         raise SessionStoreError("denied", index)
     session_id = scope.session_id
-    await _expire_stale(conn, session_id)
     expires = _now() + timedelta(milliseconds=op.ttl_ms)
-    # Re-acquiring with the same holder_id keeps the original ticket, so a
-    # retry never loses its place in line.
+    # Upsert BEFORE sweeping. Order is load-bearing: a waiter that has been
+    # queued longer than its own ttl_ms — because the holder is mid-long-turn
+    # — would otherwise have its row swept here and come back with a NEW,
+    # higher ticket, landing BEHIND waiters that happened to retry more
+    # recently. That silently reorders the queue and defeats the whole point
+    # of ticketing (ordering must come from the ticket sequence, never from
+    # retry timing). Refreshing first keeps a live-but-slow waiter's place;
+    # the sweep below still reaps genuinely abandoned rows.
+    #
+    # Re-acquiring with the same holder_id keeps the original ticket.
     row = await conn.fetchrow(
         """
         INSERT INTO session_turn_queue
@@ -856,6 +859,7 @@ async def _op_acquire_lease(
         expires,
     )
     my_ticket = int(row["ticket"])
+    await _expire_stale(conn, session_id)
     if row["state"] == "active":
         return (
             SessionOpResult(

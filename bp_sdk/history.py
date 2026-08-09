@@ -84,10 +84,9 @@ class _Handle:
     still being a single round trip. Touching a handle before the batch has
     been sent is a programming error, not a silent empty result."""
 
-    __slots__ = ("_result", "_index", "_resolved")
+    __slots__ = ("_result", "_resolved")
 
-    def __init__(self, index: int) -> None:
-        self._index = index
+    def __init__(self) -> None:
         self._result: SessionOpResult | None = None
         self._resolved = False
 
@@ -152,7 +151,7 @@ class SessionBatch:
     def _add(self, op: Any) -> _Handle:
         if self._sent:
             raise RuntimeError("batch already sent")
-        handle = _Handle(len(self._ops))
+        handle = _Handle()
         self._ops.append(op)
         self._handles.append(handle)
         return handle

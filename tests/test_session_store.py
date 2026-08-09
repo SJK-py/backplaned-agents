@@ -618,6 +618,61 @@ def test_lease_is_fifo_and_promotes_on_release(test_db_url: str) -> None:
     _run(go())
 
 
+def test_lease_keeps_its_place_across_a_long_hold(test_db_url: str) -> None:
+    """A waiter queued longer than its own ttl_ms must NOT lose its ticket.
+
+    Regression: the acquire path swept stale rows BEFORE refreshing the
+    caller's own, so a waiter sitting behind a long turn came back with a
+    new, higher ticket — landing behind waiters that happened to retry more
+    recently. That silently reorders the queue, which defeats ticketing:
+    ordering must come from the sequence, never from retry timing.
+    """
+
+    async def go() -> None:
+        pool = await _pool(test_db_url)
+        async with pool.acquire() as conn:
+            user, session = await _fresh(conn, "fifo")
+            holder = StoreScope(user, session, "orchestrator")
+            first = StoreScope(user, session, "research")
+            second = StoreScope(user, session, "deep_reasoning")
+
+            async with conn.transaction():
+                await execute_batch(
+                    conn, holder, [AcquireLeaseOp(holder_id="turn_A", ttl_ms=600_000)]
+                )
+            async with conn.transaction():
+                r1 = await execute_batch(
+                    conn, first, [AcquireLeaseOp(holder_id="turn_B", ttl_ms=60_000)]
+                )
+            async with conn.transaction():
+                r2 = await execute_batch(
+                    conn, second, [AcquireLeaseOp(holder_id="turn_C", ttl_ms=60_000)]
+                )
+            t1 = r1.results[0].lease.ticket
+            assert t1 < r2.results[0].lease.ticket  # first really is first
+
+            # The hold outlasts the first waiter's TTL.
+            await conn.execute(
+                "UPDATE session_turn_queue SET expires_at = now() - interval '1 second' "
+                "WHERE holder_id = 'turn_B'"
+            )
+            async with conn.transaction():
+                again = await execute_batch(
+                    conn, first, [AcquireLeaseOp(holder_id="turn_B", ttl_ms=60_000)]
+                )
+            assert again.results[0].lease.ticket == t1, "waiter lost its place in line"
+
+            async with conn.transaction():
+                released = await execute_batch(
+                    conn, holder, [ReleaseLeaseOp(holder_id="turn_A")]
+                )
+            assert released.promotions[0].agent_id == "research"
+            assert released.promotions[0].ticket == t1
+        await pool.close()
+
+    _run(go())
+
+
 def test_lease_renew_after_loss_reports_lease_lost(test_db_url: str) -> None:
     async def go() -> None:
         pool = await _pool(test_db_url)
@@ -873,3 +928,91 @@ def test_sdk_user_scope_switches_the_frame_scope() -> None:
         assert d.sent[1].scope == "user"
 
     _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Router handler + HTTP surface
+#
+# The store's own tests can't see these: identity derivation, the closed-session
+# refusal, audit hygiene and post-commit push all live in the transport layer.
+# ---------------------------------------------------------------------------
+
+
+def test_session_op_frame_has_no_user_id_to_assert() -> None:
+    """Identity cannot be asserted because there is nowhere to assert it.
+
+    The LLM path once trusted `frame.user_id` and had to be hardened; this
+    frame never offers the option — the router derives `(user_id, session_id)`
+    from the task row."""
+    assert "user_id" not in SessionOpFrame.model_fields
+
+
+def test_handler_derives_scope_and_refuses_closed_sessions() -> None:
+    from bp_router import dispatch
+
+    src = inspect.getsource(dispatch._handle_session_op)
+    # Same primitive the file frames use — one derivation, one thing to audit.
+    assert "_derive_task_scope" in src
+    assert "entry.agent_id" in src
+    # Writes to a closed session are refused; reads stay open.
+    assert "session_closed" in src
+    assert "closed_at" in src
+
+
+def test_lease_promotions_are_pushed_after_the_commit() -> None:
+    """Announcing a promotion inside the transaction would advertise a lease
+    that a rollback then erased."""
+    from bp_router import dispatch
+
+    src = inspect.getsource(dispatch._handle_session_op)
+    txn = src.index("async with conn.transaction():")
+    push = src.index("notify_lease_promotions")
+    reply = src.index("_session_result(frame, results=")
+    assert push > txn, "promotion pushed inside the transaction"
+    assert push > reply, "promotion pushed before the caller was answered"
+
+
+def test_audit_payloads_never_carry_message_content() -> None:
+    """Conversation text in an append-only hash chain is an erasure problem
+    `purge_user` cannot solve — audit records coordinates and sizes only."""
+    from bp_protocol.frames import SessionOpResult
+    from bp_router.dispatch import _session_audit_payload
+
+    secret = "the user's private message"
+    cases = [
+        (AppendOp(role="user", content=secret), SessionOpResult(kind="append", message_id=7)),
+        (SetStateOp(key="summary", value=secret), SessionOpResult(kind="set_state")),
+        (HandOverOp(target_agent_id="x", item_kind="recap", payload={"text": secret}),
+         SessionOpResult(kind="hand_over")),
+        (RedactOp(message_ids=[1, 2]), SessionOpResult(kind="redact", affected=2)),
+        (SetFloorOp(floor_id=9), SessionOpResult(kind="set_floor")),
+    ]
+    for op, result in cases:
+        payload = _session_audit_payload(op, result)
+        assert secret not in json.dumps(payload), (type(op).__name__, payload)
+    # ...and the append payload still carries what an auditor needs.
+    payload = _session_audit_payload(
+        AppendOp(role="user", content=secret), SessionOpResult(kind="append", message_id=7)
+    )
+    assert payload["role"] == "user"
+    assert payload["bytes"] == len(secret.encode())
+    assert payload["message_id"] == 7
+
+
+def test_http_surface_exposes_no_message_post_route() -> None:
+    """Stronger than a source grep: assert it against the built route table,
+    so a route added by any means shows up here."""
+    import os
+
+    os.environ.setdefault("ROUTER_DB_URL", "postgresql://unused/unused")
+    os.environ.setdefault("ROUTER_PUBLIC_URL", "http://localhost:8000")
+    os.environ.setdefault("ROUTER_JWT_SECRET", "k" * 32)
+    os.environ.setdefault("ROUTER_SERVE_ADMIN_UI", "false")
+    pytest.importorskip("fastapi")
+    from bp_router.app import create_app
+
+    paths = create_app().openapi()["paths"]
+    messages = paths.get("/v1/sessions/{session_id}/messages", {})
+    assert set(messages) == {"get"}, messages
+    # The steward's only route into a thread is the hand-over queue.
+    assert "post" in paths.get("/v1/sessions/{session_id}/handovers", {})
