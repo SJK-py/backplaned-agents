@@ -1,990 +1,688 @@
 # Router-managed session store
 
-> **Status:** design proposal — not implemented. Nothing in this document
-> has landed; the suite still owns `session_info` / `session_history` in its
-> own Postgres (`bp_suite`).
+> **Status:** design proposal — not implemented.
+>
+> **Scope note.** This specifies a **platform service**: a general
+> conversation log + session state store owned by the router, designed
+> against the four criteria in §2 rather than against the current agent
+> suite. The suite is expected to be rebuilt on top of it, so nothing here
+> is shaped by today's `bp_agents` code or by migrating its data. §13 maps
+> the suite's known behaviours onto the primitives — as a completeness
+> check on this spec, and as a target for that rebuild.
 
-Make the conversation store a **first-class router service**, the way the
-named file store already is: agents append turns, reload their thread, and
-read/write session state over typed frames whose `(user_id, session_id)`
-scope the **router derives** from the task row — never from an
-agent-asserted field. The suite stops opening its own Postgres pool for
-session data; `bp_suite` shrinks to the things that are genuinely suite
-policy (cron, channel identity mappings, LanceDB).
+The router already owns identity, tasks, files, and sessions. It does not
+own what happens *inside* a session — the conversation. That gap is why
+every agent in the suite holds a Postgres password (§1). This closes it
+the way the named file store closed the file gap: typed frames, scope the
+router derives from the task row, and a session-JWT HTTP surface for
+gateways.
 
-The derivation goes one step further than the file store's. A file lives
-in a shared per-session namespace any peer may write; a **history row is
-an utterance**, so the thread it lands in is derived too — an agent
-writes its own thread and no other. Today's suite does not obey that rule
-(five cross-thread write patterns, §8.1), so this design carries the
-suite rework that makes it true, and that rework is sequenced *first*
-(§15, §16).
-
-This is the same move `docs/design/router-managed-file-store.md` made for
-files, and it reuses that design's primitives verbatim
-(`attachments.derive_task_file_scope`, the `FileResult`-style correlated
-reply, the session-JWT HTTP path for gateway agents, the
-session-close/purge GC hooks).
+**One rule shapes everything below: a message is an utterance, so the
+thread it lands in is derived, never named.** A file lives in a shared
+per-session namespace any peer may write; a message is attributable
+speech. An agent writes its own threads and no others — not because a
+check rejects the attempt, but because the wire format has nowhere to put
+another agent's name (§7).
 
 ## 1. The gap today
 
-The suite keeps a **second Postgres database** (`bp_suite`, created in
-`deploy/postgres-init/01-create-suite-db.sql:19`, distinct owner) holding
-`session_info`, `session_history`, `user_config`, `cron_jobs`,
-`cron_executions`, `suite_platform_mappings`. Sessions themselves live in
-the router (`sessions`, `bp_router/db/models.py:75`), joined only by
-`session_id`. Six concrete costs follow from that seam:
+The suite keeps a second Postgres database (`bp_suite`, separate owner,
+`deploy/postgres-init/01-create-suite-db.sql:19`) holding `session_info`,
+`session_history`, `user_config`, cron, and platform mappings. Sessions
+themselves live in the router (`sessions`, `bp_router/db/models.py:75`),
+joined only by `session_id`. What that seam costs:
 
-**1.1 Ten of twelve agents hold Postgres credentials.** `open_pool` is
-called at agent startup in `orchestrator/agent.py:125`,
-`config/agent.py:165`, `research/agent.py:121`,
-`deep_reasoning/agent.py:122`, `knowledge_base/agent.py:116`,
-`chatbot/agent.py:126`, `computer_use/agent.py:88`, `webapp/agent.py:87`,
-`history_summarizer/agent.py:96`, `memory/agent.py:184`. Every one of
-them ships `SUITE_DATABASE_URL` and a copy of the schema knowledge. The
-platform's whole premise is that an agent holds no infrastructure
-credentials — it holds no provider keys and no object-store keys, but it
-does hold a database password.
+  * **Ten of twelve agents hold Postgres credentials** — `open_pool` at
+    `orchestrator/agent.py:125`, `config:165`, `research:121`,
+    `deep_reasoning:122`, `knowledge_base:116`, `chatbot:126`,
+    `computer_use:88`, `webapp:87`, `history_summarizer:96`,
+    `memory:184`. The platform's premise is that an agent holds no
+    infrastructure credentials: no provider keys, no object-store keys —
+    but a database password.
+  * **`session.history` is a decorative capability.** Seven agents
+    advertise it (`orchestrator/agent.py:110`, `research:108`,
+    `deep_reasoning:110`, `chatbot:61`, `computer_use:76`, `webapp:47`,
+    `history_summarizer:84`); nothing enforces it, because access is raw
+    SQL and the thread key is whatever the writer types.
+  * **GC and erasure are two-sided.** The router's closed-session sweep
+    (`closed_session_retention_days`, `bp_router/settings.py:315`) cannot
+    reach `bp_suite`, so a mirror reaper
+    (`bp_agents/agents/chatbot/session_gc.py`) polls a bespoke admin probe
+    (`GET /v1/admin/sessions/filter-existing`) on the same retention
+    default. GDPR erase keys off `users.purged_at` across the two
+    databases (`bp_router/db/models.py:45-50`).
+    `docs/backplaned/router/state.md` §2.2 says it outright: "The suite's
+    conversation history (a separate store the router can't reach)…".
+  * **Per-session serialization is reimplemented outside the router** —
+    `bp_agents/session_lock.py`, local lock plus optional Valkey — while
+    the router is single-replica and already serializes per task.
+  * **`session_info` shadows the router's session row**, keyed on the
+    same id, duplicating `created_at`/`opened_at`.
 
-**1.2 `session.history` is a decorative capability.** Seven agents
-advertise it (`orchestrator/agent.py:110`, `research/agent.py:108`,
-`deep_reasoning/agent.py:110`, `chatbot/agent.py:61`,
-`computer_use/agent.py:76`, `webapp/agent.py:47`,
-`history_summarizer/agent.py:84`) and **nothing enforces it**, because
-history access is raw SQL. `session_history.agent_id` — the
-thread key — is whatever the writer types. Any agent with the DSN can
-append an `assistant` row to any other agent's thread in any session, for
-any user, and no record of who actually wrote it survives. Contrast the
-file path: `_handle_file_store` (`bp_router/dispatch.py:1403`) resolves
-identity through `attachments.derive_task_file_scope`
-(`bp_router/attachments.py:25`) — "the authoritative `(user_id,
-session_id)` for `task_id` **iff** `agent_id` is the task's active
-executor."
+## 2. Design criteria
 
-**1.3 GC and erasure are two-sided.** The router's closed-session sweep
-hard-deletes its own rows (`closed_session_retention_days`,
-`bp_router/settings.py:315`) but cannot reach `bp_suite`, so the suite runs
-a mirror reaper (`bp_agents/agents/chatbot/session_gc.py`) on the *same*
-default retention (`session_gc_retention_days`, `bp_agents/settings.py:261`)
-that asks the router which sessions still exist via a bespoke admin probe,
-`GET /v1/admin/sessions/filter-existing`
-(`bp_agents/agents/chatbot/credentials.py:290`). The webapp's "remove
-session" needs two purges (`bp_router` `purge_session` **and**
-`queries.purge_session_suite_data`, `bp_agents/db/queries.py:43`). GDPR
-erasure keys off `users.purged_at` as a cross-database signal
-(`bp_router/db/models.py:45-50`) driving `purge_user_suite_data`
-(`queries.py:82`). `docs/backplaned/router/state.md` §2.2 states the
-constraint plainly: "The suite's conversation history (a separate store the
-router can't reach)…".
+The four the router side is judged against, with what each rules in or
+out. Where they conflict, the order below is the tiebreak.
 
-**1.4 Per-session serialization is reimplemented outside the router.**
-`sessions.md` §4 requires one in-flight op per `session_id`;
-`bp_agents/session_lock.py` provides it as a process-local `asyncio.Lock`
-plus an optional Valkey `SET NX PX` lock with a renewal watchdog, and
-Valkey is the stated prerequisite for running a second channel instance.
-The router is **single-replica** by design (`docs/backplaned/overview.md`
-§2) and already serializes per *task*. If it owned session writes, a
-per-session in-process lock there would be strictly stronger than the
-suite's arrangement, and a second channel instance would need no Valkey at
-all.
+**Compatibility.** The router interprets *nothing* about conversation
+content. Roles are opaque strings, not an enum the platform validates
+(§3.3). Every message and every state value carries a `metadata` jsonb
+the router stores and never reads. New ops extend a discriminated union;
+unknown ones fail as `unsupported_op`, not as a parse error, so an old
+router and a new SDK degrade legibly (§5.4). Nothing in the schema
+encodes "orchestrator", "delegate", "summary", or "episode".
 
-**1.5 `session_info` shadows the router's session row.** Both are keyed on
-`session_id`. The router row already carries `metadata` (jsonb),
-`opened_at`, `closed_at`. The suite row adds `channel`, `chat_id`,
-`session_name`, `delegated_to`, `history_summary`, `delegate_summary` — and
-a `created_at`/`updated_at` pair duplicating `opened_at`. Two rows, two
-lifecycles, one entity.
+**Versatility.** A thread is `(agent_id, thread_key)`, so an agent can
+partition its own context without ever naming another agent (§3.2).
+Scopes are `session` and `user`, mirroring the file store's session /
+`persist` split, so cross-session agent context is a first-class case and
+not a workaround. Retirement is one cursor, not two special-cased
+mechanisms (§3.4). Hand-over is a typed queue whose `kind` values are
+suite-defined (§3.5).
 
-**1.6 The user's preset choice is stored away from the authority that
-gates it.** `user_config.preset_{pro,balanced,lite}` holds preset *names*;
-the suite reads them per turn (`orchestrator/agent.py:156`, 28
-`get_user_config` call sites) and passes an explicit name on every
-`LlmRequest`, which the router then tier-checks against the user's level
-(`bp_router/llm/service.py:205-257`). The router owns the catalog and the
-gate; the suite owns the selection. A `ctx.llm(tier="balanced")` that the
-router resolved itself would collapse the round trip.
+**Efficiency.** A turn costs **two round trips** — one batch to open, one
+to close — because a batch is an ordered list of *mixed reads and writes*
+in one transaction (§6). Read bounds are enforced server-side against a
+byte budget with a resumable cursor (§9.2). A `StatThread` op answers
+"should I summarize?" without transferring the thread (§9.3). Index
+design is specified, not left to the implementer (§9.1).
 
-## 2. Goals / non-goals
+**Completeness.** The op inventory (§5.2) covers what a conversation
+store needs beyond append-and-read: redaction with cursor-stable
+tombstones, compare-and-swap on state, thread enumeration, cheap
+statistics, and idempotent appends. Absent by deliberate choice:
+mutation of stored text, server-side search, and change subscriptions
+(§15).
 
-**Goals**
+## 3. Model
 
-  * A router-owned conversation log where **an agent can only write its
-    own thread** — the thread key is derived from the task's active
-    executor, so there is no field in which to name another agent (§8).
-  * A suite reworked so that rule is achievable without losing behaviour:
-    every cross-thread write re-homed to its owner (§8.1).
-  * A **policy-free** carrier for per-thread session state (the rolling
-    summaries, the sticky delegate), so no suite semantics enter the
-    platform schema.
-  * **Atomic multi-write** ops, preserving the three transactional
-    sequences the suite depends on today — minus their cross-thread half.
-  * Frames + SDK for task handlers; **session-JWT HTTP** for gateway
-    agents (channel / webapp), mirroring `/v1/files/names`.
-  * One-sided GC: session purge and closed-session retention reap history
-    with no cross-database reconcile.
-  * Per-session serialization owned by the router.
+### 3.1 Scope
 
-**Non-goals**
+A thread lives in one of two scopes, mirroring the file store exactly:
 
-  * **Moving cron.** `cron_jobs` / `cron_executions` encode scheduler
-    policy (report modes, the unreachable-session nudge, DST-aware
-    evaluation). They stay in `bp_suite`. (§3.3)
-  * **Moving channel identity.** `suite_platform_mappings`
-    (`telegram|web|kakao` × `chat_id` → `user_id`) is transport-specific.
-    Stays. (§3.3)
-  * **Moving LanceDB.** Per-user memory + knowledge vector stores are not
-    a router concern, and their erase path keeps needing a suite-side
-    sweep. (§9.4)
-  * **Summarization / delegation policy in the router.** The router
-    provides atomic primitives; *when* to summarize and *what* a
-    delegation episode means stay suite-side. (§6, §17)
-  * **Retiring `bp_suite`.** With the companion prefs move (§13) it still
-    holds cron + platform mappings, and two agents still open a pool for
-    them.
-  * **Cross-user history reference.** Same construction as the file
-    store: impossible by keying.
+  * **`session`** — the default. Bound to one `session_id`; reaped with it
+    (§10).
+  * **`user`** — cross-session, user-wide. The conversational analogue of
+    `persist/`: an agent's standing context with a user. Survives session
+    close and purge; reaped only on user purge.
 
-## 3. What moves, what reshapes, what stays
+The router derives `user_id` and `session_id` from the task row; the
+caller chooses only which of the two scopes it means. A `user`-scoped op
+carries no session and is legal from any of that user's sessions.
 
-### 3.1 Moves as-is — the conversation log
+### 3.2 Thread
 
-`session_history` is structurally the same object as the file stash: a
-per-`(user, session)` namespace of rows owned by an agent, with an
-existing router-side lifecycle hook to hang GC on. Its five access
-patterns are all narrow and already isolated behind
-`bp_agents/db/queries.py`:
+A thread is `(scope, owner_agent_id, thread_key)`.
 
-| suite query | today | becomes |
-| --- | --- | --- |
-| `append_history` (`queries.py:211`) | 17 call sites | `append` command |
-| `reload_incumbent` (`:238`) | 7 | `reload` command |
-| `recent_tool_exchanges` (`:271`) | 1 | `recall` command |
-| `demote_incumbent_through` (`:331`) | 2 | **deleted** — the `history.floor` watermark (§8.3) |
-| `demote_thread` (`:355`) | 2 | **deleted** — the `delegation.episode` counter (§8.3) |
+`owner_agent_id` is **always derived** from the task's active executor —
+it is not a wire field. `thread_key` is a short caller-chosen string
+(default `""`, the agent's main thread) confined to the caller's own
+namespace, so partitioning your own context costs nothing while reaching
+another agent's remains impossible. A suite that wants exactly one thread
+per agent simply never sets it.
 
-### 3.2 Reshapes — `session_info`
+### 3.3 Message
 
-Do **not** give the router `history_summary` / `delegate_summary` /
-`delegated_to` / `chat_id` columns. That is suite policy in platform
-schema, and it is the mistake the file store deliberately avoided (the
-router knows names and byte counts, never contents). Split the six fields
-by what they actually are:
+Append-only. Fields: `role`, `content`, `hidden`, `metadata`, plus
+router-stamped `id`, `created_at`, thread coordinates, and the
+originating `task_id`.
 
-| field | carrier | why |
-| --- | --- | --- |
-| `channel`, `chat_id`, `session_name` | the router session row's existing `metadata` jsonb | descriptive, per-session, already has a home |
-| `history_summary`, `delegate_summary` | `session_state` KV, keyed `(session_id, agent_id, key)` | per-**thread** values; the KV shape is exactly right |
-| `delegated_to` | `session_state` KV, `agent_id = NULL` (session-wide) | sticky across turns, so it is *not* the router's per-task `active_agent_id` — but it is opaque text to the router |
-| `created_at` / `updated_at` | drop | `sessions.opened_at` + the KV's own `updated_at` |
+`role` is an **opaque short string**. The router does not enumerate it,
+does not validate it against a list, and never filters on it implicitly —
+every read states the roles it wants (§5.2). This is the most important
+compatibility decision here: the moment the platform knows what
+"assistant" means, it owns a conversation model.
 
-`session_info` as a table disappears; `create_session_info` /
-`update_session_info` (`queries.py:142`, `:181`) become metadata patches
-and KV sets.
+`content` is text. Large payloads belong in the file stash; a message
+references one by name in `metadata`, exactly as an `LlmRequest` does
+(`docs/design/router-managed-file-store.md` §8.1). The router caps
+`content` (§9.4) rather than becoming a blob store with a second door.
 
-### 3.3 Stays in `bp_suite`
+### 3.4 The floor — one cursor, not two mechanisms
 
-`cron_jobs`, `cron_executions`, `suite_platform_mappings`.
+Every thread has a **`floor`**: the message id below which rows are no
+longer part of the active context. Reads default to `id > floor`.
+Retirement of any shape is a floor move:
 
-`user_config` is out of scope for the session store itself, but it is
-**not** staying: §12 shows why the credential payoff depends on it, and
-§13 moves the whole row — presets/timezone/name as typed router fields,
-the suite-policy fields as opaque KV values.
+  * summarization folds a prefix → floor = the cutoff id;
+  * an episode ends and the whole thread retires → floor = the thread's
+    current max id;
+  * nothing is ever mutated, so a full read (`include_retired`) still
+    returns the complete record for transcripts and audit.
 
-## 4. Storage model
+An earlier draft carried both a `floor` watermark *and* an `episode`
+column stamped per row. The episode column is unnecessary: "retire
+everything through id N" is a floor move, and a fresh episode is just the
+rows after it. One cursor, one column fewer, one less suite concept in
+platform schema.
 
-Three router tables, one migration (`bp_router/db/migrations/versions/0010_*`).
+**The floor is owned by the thread owner**, like the messages. When
+another component needs a thread retired (a channel ending a delegation),
+it enqueues a hand-over carrying an explicit `through_id` snapshot, and
+the owner applies it on its next turn, before appending anything new
+(§3.5). Lazy application is not a compromise: a thread with no next turn
+has no context to bound.
 
-**`session_messages`** — the log. (Named for the router, not
-`session_history`, so a dual-run window can't confuse the two databases'
-tables in a query or a backup.)
+### 3.5 Hand-over queue
 
-| column | type | notes |
-| --- | --- | --- |
-| `id` | bigserial PK | the cursor for paging, the floor watermark, and recall |
-| `user_id` | text, FK `users` | the scope half the router derives |
-| `session_id` | text, FK `sessions` ON DELETE CASCADE | purge/retention comes free (§9) |
-| `thread_agent_id` | text | the thread key — **router-derived from the task's active executor, never a caller field** (§8) |
-| `episode` | int | delegation-episode stamp, immutable at insert; the delegate's reload bound (§8.3) |
-| `role` | text CHECK `user\|assistant\|tool_call\|tool_result` | unchanged |
-| `message` | text | unchanged |
-| `hidden` | bool | unchanged |
-| `task_id` | text NULL, FK `tasks` | the input row's idempotency key (§8.4) |
-| `created_at` | timestamptz | unchanged |
+The one channel by which anything reaches another agent's context. An
+item is `(target_agent_id, thread_key, kind, payload, created_at,
+consumed_at)` where `kind` and `payload` are **suite-defined and opaque**.
 
-**There is no `incumbent` column and no `author_agent_id` column.** Both
-were in an earlier draft of this design and both are gone for the same
-reason: with `thread_agent_id` derived, the author *is* the thread owner
-(so recording it separately is noise), and `incumbent` was mutable state
-whose only use was bulk-retiring someone's rows (so it becomes a derived
-bound — §8.3).
+An item is not a message: no role, no content, no position in any
+transcript. The owner drains its queue at turn start and decides what, if
+anything, to write into its own thread. The enqueuer proposes; only the
+owner speaks.
 
-Index `(session_id, thread_agent_id, episode, id)` serves the reload
-query; `(session_id, thread_agent_id, role, id DESC)` serves `recall`; a
-unique partial index on `(session_id, task_id) WHERE role = 'user'` makes
-the input append idempotent under redelivery. The `ON DELETE CASCADE` on
-`session_id` is load-bearing: it is what makes §9 one-sided.
+Two properties make this more than a renamed cross-thread write. An item
+is inert until materialised, so an un-drained queue can never appear in a
+transcript as something an agent said. And materialisation is an ordinary
+owner-authored append, so the ownership invariant holds with no exception
+anywhere in the system.
 
-**`session_state`** — the policy-free KV.
+### 3.6 State
+
+A per-scope key/value store: `(scope, session_id?, owner_agent_id?, key)
+→ (value, version, metadata)`.
+
+  * **Thread state** (`owner_agent_id` set) — owner-writable only. The
+    floor lives here (`sys.floor`, the one reserved key the router
+    interprets); everything else is opaque.
+  * **Session state** (`owner_agent_id` null) — writable by the steward
+    or any executor in the session. Routing flags, delegation pointers,
+    whatever the suite needs.
+
+Every write takes an optional `expected_version` for compare-and-swap.
+Session state has two legitimate concurrent writers (a steward and an
+executor), so CAS is not optional sugar — without it the delegation
+pointer is a lost update waiting to happen.
+
+## 4. Schema
+
+Four tables, one migration (`bp_router/db/migrations/versions/0010_*`).
+
+**`session_messages`**
 
 | column | type | notes |
 | --- | --- | --- |
-| `user_id` | text, FK `users` | |
-| `session_id` | text, FK `sessions` ON DELETE CASCADE | |
-| `agent_id` | text NULL | thread-scoped when set (owner-writable only); session-wide when NULL (steward-writable) |
-| `key` | text | opaque to the router |
-| `value` | text | opaque to the router |
-| `updated_at` | timestamptz | |
+| `id` | bigserial PK | cursor for reads, floors, and idempotency |
+| `user_id` | text, FK `users` | derived |
+| `session_id` | text NULL, FK `sessions` ON DELETE CASCADE | null for `user` scope |
+| `owner_agent_id` | text | derived from the task's active executor — never a wire field |
+| `thread_key` | text NOT NULL DEFAULT `''` | caller's own namespace |
+| `role` | text | opaque; no CHECK constraint, by design (§3.3) |
+| `content` | text | capped (§9.4) |
+| `hidden` | bool | a rendering hint the router stores and ignores |
+| `metadata` | jsonb NOT NULL DEFAULT `'{}'` | extension point; never read by the router |
+| `task_id` | text NULL, FK `tasks` | provenance |
+| `idempotency_key` | text NULL | set only by an idempotent append; unique per task (§9.1) |
+| `redacted_at` | timestamptz NULL | tombstone; `content` blanked, id preserved (§5.2) |
+| `created_at` | timestamptz | |
 
-PK `(session_id, agent_id, key)` — with NULL `agent_id` handled by a
-partial unique index, or a `''` sentinel; pin at implementation. Bound
-`value` length (suggest 256 KiB) and the row count per session so the KV
-can't become an unpoliced blob store; a summary is a few KB.
+There is **no `incumbent` column** (replaced by the floor, §3.4) and **no
+`author_agent_id`** (with the owner derived, the author *is* the owner —
+recording it separately records nothing).
 
-Known keys, all suite-defined and opaque to the router: thread-scoped
-`history.summary` and `history.floor` (§8.3); session-scoped
-`delegated_to`, `delegation.episode`, `delegation.instruction`.
-
-**`session_pending`** — the hand-over queue (§8.2).
+**`session_threads`** — one row per live thread, carrying the floor and
+the counters that make `StatThread` O(1).
 
 | column | type | notes |
 | --- | --- | --- |
-| `id` | bigserial PK | drain order |
-| `session_id` | text, FK `sessions` ON DELETE CASCADE | |
-| `target_agent_id` | text | who may consume it |
-| `kind` | text | `input` \| `delegation_seed` \| `handback_recap` \| `summary_apply` — opaque to the router |
-| `payload` | jsonb | opaque to the router |
-| `created_at` / `consumed_at` | timestamptz | consumed rows are kept briefly for audit, then swept |
+| `user_id`, `session_id`, `owner_agent_id`, `thread_key` | | PK |
+| `floor_id` | bigint DEFAULT 0 | §3.4 |
+| `message_count`, `content_bytes` | bigint | counted **above the floor**; adjusted by delta on append and redact, recomputed by one aggregate over the retired range when the floor moves (rare) |
+| `last_message_id`, `updated_at` | | |
 
-A pending item is **not history**: no role, no author, never rendered as
-an utterance. Only `target_agent_id` may consume it, and consuming means
-the owner writes its own rows (§8.2).
+Denormalising the counters turns "should I summarize?" from a thread scan
+into a single-row read (§9.3), and gives quota enforcement (§10.3) a
+number to gate on without an aggregate.
 
-## 5. Frames
+**`session_state`** — `(scope, session_id, owner_agent_id, key) →
+(value, version, metadata, updated_at)`. `version` is a bigint bumped on
+every write: the CAS token of §3.6. NULL `owner_agent_id` (session state)
+is handled by a partial unique index, not a sentinel.
 
-One frame with a typed discriminated `command`, mirroring
-`FileManageFrame`, plus one correlated reply mirroring `FileResultFrame`.
-Both go in the `bp_protocol/frames.py` `Frame` union.
+**`session_handovers`** — `(id, user_id, session_id, target_agent_id,
+thread_key, kind, payload jsonb, created_at, consumed_at,
+consumed_by_task_id)`. Indexed `(session_id, target_agent_id, thread_key)
+WHERE consumed_at IS NULL`, so a drain is a bounded index scan.
+
+## 5. Protocol
+
+### 5.1 Frames
 
 ```python
 class SessionOpFrame(_FrameBase):
-    """Agent → router. A typed session-store command. `task_id` is NOT
-    trusted as proof: the router derives the authoritative
-    `(user_id, session_id)` from the task row after verifying the
-    connection's authenticated `agent_id` is the task's active executor
-    (`attachments.derive_task_file_scope`). That same derivation supplies
-    `thread_agent_id` for every row written — which is why no command
-    below carries a writable thread field."""
+    """Agent → router. `task_id` is not trusted as proof: the router
+    derives `(user_id, session_id)` from the task row after verifying the
+    connection's authenticated agent is that task's active executor
+    (`attachments.derive_task_file_scope`), and that same derivation
+    supplies `owner_agent_id` for every write. No op below carries a
+    writable owner field."""
     type: Literal["SessionOp"] = "SessionOp"
     task_id: str
-    command: SessionCommand
+    scope: Literal["session", "user"] = "session"
+    ops: list[SessionOp]        # ordered; one transaction; §6
 ```
-
-Commands (`kind`-discriminated, `extra="forbid"`, as the file commands are):
-
-  * **`AppendRequest`** `{ role, message, hidden: bool = False,
-    once_per_task: bool = False }` — append one row **to the caller's own
-    thread**; there is no thread parameter (§8). `once_per_task` engages
-    the idempotency index for the turn's input row. Reply: `message_id`.
-  * **`ReloadRequest`** `{ thread: str|None, up_to_id: int|None,
-    before_id: int|None }` — the `sessions.md` §2.1 reload for one thread,
-    chronological, bounded by that thread's `history.floor` and (for a
-    delegate) the current `delegation.episode`. `thread` defaults to the
-    caller's own; naming another agent's thread is permitted because
-    **reads are session-scoped** (§8) — the summarizer needs exactly this.
-    `up_to_id` bounds the read to a cutoff window; `before_id` pages
-    backwards under the payload budget (§10). Reply: `messages` +
-    `truncated_before_id`.
-  * **`RecallRequest`** `{ thread: str|None, limit, skip }` — a page of
-    past `tool_call`/`tool_result` **pairs**, the read side of
-    `recall_tool_history` (`docs/design/agent-tool-history-recall.md`).
-    Reply: `exchanges`.
-  * **`StateGetRequest`** `{ agent_id: str|None|"*", keys: list[str] }`
-    → `state` (a `{key: value}` map, or per-agent maps for `"*"`).
-  * **`PendingPutRequest`** `{ target_agent_id, kind, payload }` — enqueue
-    a hand-over item for another agent (§8.2). This is the *only* way to
-    put something into another agent's context, and it is not history.
-  * **`MutateRequest`** `{ ops: list[SessionMutateOp] }` — §6.
 
 ```python
 class SessionResultFrame(_FrameBase):
-    """Router → agent. Correlated response to `SessionOp`. Exactly one
-    outcome shape is populated alongside `ref_correlation_id`.
-      * `error` → `denied` (unknown task / not the active executor /
-        state key not owned by the caller — non-enumerable, as file
-        `denied` is), `session_closed`, `invalid_role`,
-        `value_too_large`, `state_quota_exceeded`, `rate_limited`.
-      * `message_id`      → Append (the existing row's id when
-                             `once_per_task` found one — idempotent, not
-                             an error).
-      * `messages` + `truncated_before_id` → Reload.
-      * `exchanges`       → Recall.
-      * `state`           → StateGet.
-      * `pending`         → Mutate with a ConsumePendingOp: the drained
-                             items, so the owner can materialise them.
-      * `applied_counts`  → Mutate (per-op affected-row counts, in order).
-    """
+    """Router → agent. Correlated reply. `results` is positional — one
+    entry per op, same order, each a typed per-op outcome. A set `error`
+    means the whole batch was refused and NOTHING was applied."""
+    type: Literal["SessionResult"] = "SessionResult"
+    ref_correlation_id: str
+    error: str | None = None
+    results: list[SessionOpResult] = []
 ```
 
-`Ack` is not reused: like the file ops, these need typed payloads back.
+Every request is a batch, minimum length one, so there is a single
+request shape to implement, test, rate-limit, and audit. Convenience
+wrappers live in the SDK, not the protocol.
 
-## 6. The `mutate` command — where atomicity goes
+### 5.2 Op inventory
 
-Three sequences in `ChannelCore` perform dependent writes inside one
-`conn.transaction()`, and `tests/test_review_channel_atomicity.py` pins
-all three (a behavioural test for `delegate` against a live suite DB,
-source pins for the other two — the review that added them documents
-exactly what a crash between statements corrupts):
+Writes — all confined to the caller's own threads:
 
-| sequence | writes today | after the rework (§8.1) |
+| op | shape | notes |
 | --- | --- | --- |
-| `maybe_summarize` (`core.py:231`) | set summary + demote rows `≤ cutoff` | steward enqueues `summary_apply`; the **owner** applies it as set-summary + set-floor on its own state |
-| `delegate` (`core.py:275`) | append seed into the target's thread + set `delegated_to` | set session-scoped `delegation.instruction` + `delegated_to` + bump `delegation.episode` — no thread touched |
-| `_fold_back` (`core.py:348`) | append recap + ack into the orchestrator's thread + demote the delegate's thread + clear `delegated_to` | enqueue `handback_recap` + clear `delegated_to` + bump `delegation.episode` |
+| `Append` | `{thread_key, role, content, hidden, metadata, idempotency_key}` | supplying `idempotency_key` makes the append exactly-once within its task: a redelivered task appends nothing and gets the original id back. Omit it and the same task may append many rows of the same role, which is the normal case |
+| `SetFloor` | `{thread_key, floor_id}` | monotonic; a lower value is refused `floor_regression` |
+| `SetState` | `{thread_key\|null, key, value, expected_version, metadata}` | null value deletes; CAS via `expected_version` (§3.6) |
+| `Redact` | `{message_ids}` | blanks `content`, stamps `redacted_at`, **keeps the id** so floors and cursors stay valid |
+| `HandOver` | `{target_agent_id, thread_key, kind, payload}` | the only cross-agent write (§3.5) |
+| `ConsumeHandovers` | `{kinds, limit}` | drains **my** queue; items come back in the batch results |
 
-Note what the rework does to this table: **none of the three still writes
-another agent's thread**, so the atomicity requirement survives but the
-ownership violation does not. The batch is still needed — a summary
-applied without its floor, or a cleared delegation without its episode
-bump, is still corruption.
+Reads — session-scoped, since reading cannot fabricate (§7):
 
-`MutateRequest.ops` is an ordered list applied in **one router-side
-transaction**, all-or-nothing:
+| op | shape | notes |
+| --- | --- | --- |
+| `Read` | `{owner_agent_id, thread_key, roles, include_retired, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread |
+| `GetState` | `{owner_agent_id\|null\|"*", keys}` | `"*"` returns per-thread maps |
+| `StatThread` | `{owner_agent_id, thread_key}` | `{message_count, content_bytes, last_message_id, floor_id}` from one row (§9.3) |
+| `ListThreads` | `{owner_agent_id\|null}` | thread coordinates plus their stats |
 
-```python
-AppendOp           { role, message, hidden, once_per_task }   # own thread only
-StateSetOp         { agent_id: str|None, key, value: str|None }  # own thread, or session-scoped
-PendingPutOp       { target_agent_id, kind, payload }
-ConsumePendingOp   { kinds: list[str] | None }   # drain MY queue; replies `pending`
-MetadataOp         { patch: dict[str, str|None] }             # session metadata
+`Read` deliberately subsumes what an earlier draft split into `reload`
+and `recall`: "the active user/assistant turns" and "a page of past tool
+exchanges" are one query with different `roles` and cursors. One read
+path to index, budget, and optimise.
+
+### 5.3 Errors
+
+`denied` (unknown task, not the active executor, or a write outside the
+caller's own threads — deliberately non-enumerable, as the file ops'
+`denied` is), `session_closed`, `version_conflict` (CAS),
+`floor_regression`, `content_too_large`, `quota_exceeded`,
+`unsupported_op`, `rate_limited`, `batch_too_large`.
+
+### 5.4 Forward compatibility
+
+  * The op union is discriminated on `kind`; a router that does not know
+    a `kind` refuses that batch with `unsupported_op` and applies
+    nothing, rather than failing the frame at parse time. New ops are
+    additive for old routers and legible to new SDKs.
+  * `WelcomeFrame` gains `features: list[str]` — a defaulted field, so
+    older SDKs are unaffected — advertising e.g. `session_store.v1`. Note
+    the existing `WelcomeFrame.capabilities` is **not** this: it echoes
+    the connecting agent's own capability list (`ws_hub.py:630`) and
+    cannot carry router features.
+  * `metadata` on messages and state values absorbs suite-specific fields
+    without schema changes — the pressure valve that keeps
+    `history_summary`-shaped columns out of platform tables.
+
+## 6. Batches: mixed reads and writes, one transaction
+
+`ops` is an ordered list applied in a single transaction, all-or-nothing,
+returning positional results. Reads observe the writes that precede them
+in the same batch.
+
+This is the design's main efficiency lever and its main correctness lever
+at once. A turn opens with
+
+```
+[ConsumeHandovers(kinds=[…]), Append(input), GetState(keys=[…]), Read(…)]
 ```
 
-`DemoteOp` is **absent by design** — §8.3 replaces bulk `incumbent` flips
-with the `history.floor` watermark (a `StateSetOp` on the owner's own
-state) and the `delegation.episode` counter (a session-scoped
-`StateSetOp`). Removing the op is what removes the last way to reach into
-another agent's thread.
+— one round trip that drains the queue, records the turn's input, fetches
+the caller's own summary/config state, and returns the bounded context,
+atomically. It closes with
 
-A turn's opening batch is therefore one round trip: consume pending →
-materialise each item as an `AppendOp` on the caller's own thread → apply
-any `summary_apply` floor. Its closing batch is the assistant row plus the
-tool rows.
+```
+[Append(assistant), Append(tool_call), Append(tool_result), SetState(…), SetFloor(…)]
+```
 
-There is still no `summarize` op and no `delegate` op. The router gets
-primitives and a transaction boundary; "fold the oldest 70% of the
-thread" and "a delegation episode ends" stay in `ChannelCore`. That line
-is the whole reason this design is safe to build — cross it and the
-platform starts encoding one suite's conversation model.
+— one more. **Two round trips per turn**, against five or more if each op
+were its own frame; and every multi-write sequence a suite might need
+(apply-a-summary, end-an-episode, record-and-retire) is atomic by
+construction rather than by a bespoke compound command.
 
-Cap `ops` (suggest 16) so a batch can't hold a transaction open
-indefinitely.
+What the router still refuses to offer: a `summarize` op, a `delegate`
+op, an `end_episode` op. Primitives and a transaction boundary; the
+policy that composes them stays in the suite. Cross that line and the
+platform is encoding one conversation model for everyone.
 
-## 7. HTTP surface — for stewards, not executors
+Cap batch length (suggest 32 ops) and total write bytes so a transaction
+cannot be held open indefinitely; `batch_too_large` is the refusal.
 
-The channel and the webapp **spawn** tasks; they are never the active
-executor, so they cannot derive scope from a task and cannot use the
-frames. This is exactly the gateway-agent case the file store already
-solved with session-JWT endpoints (`POST/GET /v1/files/names`,
-`/v1/files/names/resolve`, and the note in that design that supersedes its
-own earlier "HTTP rejected" position). Same shape here — with one
-deliberate absence:
+## 7. Authorization
+
+| op class | permitted actor |
+| --- | --- |
+| append / redact / set floor / thread state | **the thread's owner only** — and the owner is derived, so there is no field in which to name another agent |
+| session state | steward, or any executor in the session (CAS-guarded) |
+| hand-over put | steward, or any executor in the session |
+| hand-over consume | the target agent only |
+| reads | any agent acting in the session |
+
+Two consequences worth stating plainly.
+
+**The rule is structural, not enforced.** `Append` has no owner field;
+the router fills it from the task's active executor. There is no check to
+misconfigure and no ACL rule to get wrong, because the malformed request
+is unrepresentable. This is also why the HTTP surface (§8) has no
+message-POST endpoint: a gated one would reintroduce exactly the hole the
+wire format closes.
+
+**Reads stay session-wide, deliberately.** A summarizer must read the
+thread it summarizes; a delegate reads what a peer left for it. Reading
+cannot fabricate, so the file store's "shared-session reach is
+intentional" applies unchanged. Narrowing reads per agent is possible
+later (§15); nothing needs it today.
+
+Writes to a **closed** session are refused (`session_closed`), matching
+the `NewTask` admit rule (`docs/backplaned/router/state.md` §2.2). Reads
+of a closed session are allowed — transcripts outlive conversations, and
+reopen must not lose them.
+
+## 8. HTTP surface
+
+For gateways: agents that spawn tasks but are never a task's active
+executor, and so have no task from which scope can be derived. Precedent
+and shape follow `/v1/files/names`.
 
 | endpoint | use |
 | --- | --- |
-| `GET /v1/sessions/{id}/messages` | render the transcript (webapp chat page), paginated |
-| `POST /v1/sessions/{id}/pending` | enqueue a hand-over item for an agent (§8.2) |
-| `POST /v1/sessions/{id}/mutate` | the atomic sequences of §6 — session state + pending, never a thread append |
-| `GET\|PATCH /v1/sessions/{id}/state` | read the KV; patch **session-scoped** keys only |
-| `PATCH /v1/sessions/{id}` | patch session `metadata` (name, channel, chat_id) |
+| `GET /v1/sessions/{id}/messages` | transcript rendering; cursor-paginated, `roles` + `include_retired` filters |
+| `GET /v1/sessions/{id}/threads` | thread list plus stats |
+| `POST /v1/sessions/{id}/handovers` | enqueue for an agent |
+| `POST /v1/sessions/{id}/ops` | a batch restricted to session state, hand-over, and reads |
+| `GET\|PATCH /v1/sessions/{id}/state` | session-scoped keys only |
+| `PATCH /v1/sessions/{id}` | session `metadata` (title, channel, whatever the suite puts there) |
 
-**There is no `POST /v1/sessions/{id}/messages`.** An earlier draft had
-one, for the channel's `record_user_turn`. It is exactly the hole the
-rework closes: a steward with a session JWT could write any role into any
-thread. Removing the endpoint — not gating it — is what makes the rule
-structural. A steward that wants something in a thread enqueues it.
+**There is no message-POST endpoint, by design.** A steward holding a
+session JWT cannot append to any thread, at any time, for any reason. It
+enqueues.
 
-Auth is the caller's **session JWT** for the owning user, ownership-checked
-against `sessions.user_id` exactly as `POST /v1/files` is. One
-implementation under both surfaces (`bp_router/session_store.py`, sibling
-to `bp_router/file_store.py`) so frames and HTTP cannot drift.
+Auth is the caller's session JWT, ownership-checked against
+`sessions.user_id` exactly as `POST /v1/files` is. Both surfaces call one
+module (`bp_router/session_store.py`, sibling to `file_store.py`) so they
+cannot drift.
 
-## 8. Authorization — strict thread ownership
+## 9. Efficiency
 
-**The rule: a history row is written only by the agent whose thread it
-lands in.** No exceptions, no steward override, no "trusted" cross-thread
-appends. Anything another component wants to put into an agent's context
-becomes a **pending item** the owner materializes under its own
-authorship on its next turn (§8.2).
+### 9.1 Indexes
 
-| op | permitted actor |
-| --- | --- |
-| append into thread T | **T's owner only** — and `thread_agent_id` is not a frame field at all; the router derives it from the task's active executor |
-| thread state (`history.floor`, `history.summary`) | T's owner only |
-| session state (`delegated_to`, `delegation.*`, the pending queue) | steward, or an executor in the session |
-| pending-item put | steward, or an executor in the session |
-| reads (reload / recall / state) | any agent acting in the session |
+  * `session_messages (session_id, owner_agent_id, thread_key, id)` — the
+    read path: a range scan over a narrow partition, with `roles` and
+    `redacted_at` applied as filters on the scanned rows.
+  * `session_messages (user_id, owner_agent_id, thread_key, id) WHERE
+    session_id IS NULL` — the `user`-scope read path.
+  * `UNIQUE (task_id, idempotency_key) WHERE idempotency_key IS NOT
+    NULL` — makes an idempotent append a no-op on redelivery without a
+    read-then-write race. Keying on the caller's explicit key rather than
+    on `(task_id, role)` matters: one task legitimately appends several
+    rows of the same role (a tool_call and its tool_result, two tool
+    calls in one turn), and a role-keyed constraint would reject them.
+  * `session_handovers (session_id, target_agent_id, thread_key) WHERE
+    consumed_at IS NULL` — partial, so drains never scan consumed rows.
+  * `session_threads` is PK-only; every stat is a single-row fetch.
 
-The prize is the first row's parenthetical. Once the owner is derived,
-`AppendRequest` **has no thread field to forge** — the whole class of
-"write in another agent's name" is gone at the protocol boundary rather
-than policed inside it. An earlier draft of this design carried an
-`author_agent_id` column to make cross-thread writes *attributable*;
-under this rule it has nothing to record that `thread_agent_id` doesn't
-already say, so §4 drops it. Attribution by construction beats
-attribution by column.
+### 9.2 Read budget and resumption
 
-Reads stay session-scoped, unchanged and deliberate — the same
-"shared-session reach is intentional" call the file store made.
-`history_summarizer` must read the orchestrator's thread
-(`history_summarizer/agent.py:145`, `:163`), and a delegate reads what the
-orchestrator left for it (`l1_common.py:224`). Reading cannot fabricate.
+`max_payload_bytes` is 1 MiB per WS frame (`bp_router/settings.py:269`;
+the SDK's receive ceiling is 2 MiB, `bp_sdk/settings.py:102`). A long
+thread's active window can approach it, and unlike files there is no
+indirection available — the agent needs the text.
 
-Writes to a **closed** session are refused (`session_closed`), matching the
-`NewTask` admit rule in `docs/backplaned/router/state.md` §2.2. Reads of a
-closed session are allowed — the webapp renders closed conversations, and
-reopen must not lose the transcript.
+So the router enforces the budget rather than hoping. `Read` fills to
+`min(max_bytes, budget)` where `budget` defaults to ~60% of the
+negotiated payload cap, walks **backwards from newest** so the most
+recent turns always survive truncation, and returns `truncated_before_id`
+when it stopped early. The SDK pages transparently and presents one list.
+The HTTP transcript endpoint is the unbounded path.
 
-The steward keeps a role, but a much smaller one: session-scoped state and
-the pending queue. It can ask for something to appear in a thread; it
-cannot make it appear. Model it as an ACL capability (`session.steward`)
-on the channel and webapp agents.
+Operators can enable WebSocket `permessage-deflate` for a large win on
+conversational text; it is a CPU-for-bandwidth trade on a single-replica
+router, so it is a lever, not a default.
 
-### 8.1 What has to change in the suite for that rule to hold
+### 9.3 Cheap decisions
 
-Today's 17 `append_history` sites include five cross-thread patterns. Each
-one is re-homeable, and in three of the five the payload **already carries
-everything the owner needs** — the cross-thread write is incidental, not
-load-bearing:
+`StatThread` exists so a steward can decide to summarize without
+transferring a thread: `content_bytes` above the floor comes from one
+`session_threads` row. Token estimation stays caller-side — the router
+has no tokenizer and must not pretend otherwise. Bytes are the honest
+proxy it can serve in O(1).
 
-| # | today | rework |
-| --- | --- | --- |
-| 1 | the channel writes the `user` row into the dispatch target's thread (`core.py:101` ← `gateway.py:693`, `kakao_gateway.py:508`, `webapp/turns.py:124`), including the `user-attached file saved as …` note (`gateway.py:770`) | the channel **enqueues** an `input` item (pre-dispatch, as today's write is pre-dispatch); **the receiving agent materialises it into its own thread at turn start.** The text also already rides `payload.prompt`, and the orchestrator *already* falls back to it when the row is missing (`orchestrator/agent.py:166-169`) — that branch becomes the fallback for direct invocation |
-| 2 | the orchestrator writes the delegation seed into the delegate's thread (`_do_hand_off`, `:259`) | **the delegate composes and writes its own seed on `first_turn`.** `ctx.peers.delegate` already ships all three ingredients — `LLMData(prompt, agent_instruction, context)` (`:263`) — so the seed text is reconstructible at the far end verbatim |
-| 3 | the channel's `/delegate` writes a summarized seed into the target's thread (`core.py:276`) | the channel writes **session-scoped** `delegation.instruction`; the delegate materializes it on its first turn, through the same path as #2 |
-| 4 | the channel writes recap + ack into the orchestrator's thread on hand-back (`_fold_back`, `core.py:355`, `:359`), and the cron report as an orchestrator `assistant` row (`cron.py:166`) | recap → the orchestrator's **pending queue**, materialized on its next turn. Cron → pass the job's `report` policy in the payload so the orchestrator evaluates `_effective_report` itself and writes its own row (it is already the executor of the `cron_message` task, `cron.py:137`) |
-| 5 | cross-thread **demotes**: `_fold_back` and `end_delegation` retire the delegate's whole thread; summarize-apply demotes a prefix of the owner's | replaced by derived reload bounds — §8.3 |
+### 9.4 Write path cost
 
-Two of these are net deletions. #2 removes the orphan-seed rollback
-(`orchestrator/agent.py:270-277`) that exists *only* because the seed is
-written before the reassignment that can fail — write it at the far end
-and the failure mode cannot occur. #1 removes `record_user_turn` and its
-four call sites, plus the fallback branch it forced.
+Appends ride the router's pool alongside task admit. Three mitigations,
+specified rather than left open: batch the turn's writes (§6) so a turn
+is two round trips; cap `content` (suggest 256 KiB, `content_too_large`
+beyond, with the file stash as the documented alternative); and size
+`db_pool_max_size` for the added per-turn writes before enabling the
+service. A dedicated pool is available if measurement justifies it, but
+one pool with correct sizing is the simpler default.
 
-### 8.2 The pending queue
+## 10. Lifecycle, GC, quota
 
-The honest residue. When one component wants something in another's
-context, it enqueues a **pending item** — session-scoped, typed, and
-explicitly *not* history:
+### 10.1 Close vs purge
 
-```
-pending(session_id, target_agent_id, kind, payload, created_at, consumed_at)
-   kind ∈ { input | delegation_seed | handback_recap | summary_apply }
-```
+Unlike the file stash, **history is not GC'd on session close.** Sessions
+reopen; transcripts outlive conversations. Close does nothing to the
+store. Purge (`DELETE …?purge=true`) and the closed-session retention
+sweep take messages, threads, state, and hand-overs through the
+`ON DELETE CASCADE` on `session_id` — one-sided, no reconcile loop, no
+`filter-existing` probe.
 
-The owner drains its queue at turn start and materializes each item into
-its own thread **as its own append**, batched into the same `MutateRequest`
-that already opens the turn. Zero extra round trips.
+`user`-scoped threads survive both and are reaped by `purge_user` in the
+same transaction that scrubs the user row, so `users.purged_at` stops
+being a cross-database signal for conversation data.
 
-Why this is not the old cross-thread write with a new name: a pending item
-has no author, no role, and never renders as an utterance. Until the owner
-materializes it, nothing in the transcript claims that agent said or
-received anything. The steward can propose; only the owner can speak.
+### 10.2 Consumed hand-overs
 
-### 8.3 Retiring `incumbent` — derived bounds instead of bulk flips
+Swept on the session cascade, plus a short retention for audit. An
+un-consumed item lives until its target drains it or the session dies; a
+suite that wants staleness rules puts a timestamp check in its drain
+(§15).
 
-`incumbent` is a **mutable** column today, and every mutation of it is a
-bulk retirement of someone's rows: a prefix (`demote_incumbent_through`,
-`id <= cutoff`) or a whole thread (`demote_thread`). That mutability is the
-only reason cross-thread *curation* exists. Both shapes are expressible as
-**derived bounds** instead:
+### 10.3 Quota
 
-  * **`history.floor`** — per-thread state, owner-written. Reload becomes
-    `id > floor`. Summarize-apply = set summary + set floor, two writes to
-    the owner's own state, atomically, on the owner's next turn.
-  * **`delegation.episode`** — a session-scoped counter, steward-written.
-    Rows are stamped with the current episode at insert (immutable, like
-    `thread_agent_id`); a delegate reloads `episode = current`. Ending an
-    episode is a **counter bump** — no write into anyone's thread.
-
-So `session_messages` carries `episode int` and **no `incumbent` column**;
-the `(incumbent, hidden)` matrix of `sessions.md` §2.2 collapses to
-`hidden` plus two bounds. Tool rows are already excluded from reload by the
-`role IN ('user','assistant')` filter, not by `incumbent`
-(`queries.py:238`), so nothing else depends on the column.
-
-This is the deepest change in the rework and the one that actually closes
-the hole: with no mutable `incumbent` and no `thread_agent_id` field,
-there is no way to reach into another agent's thread at all — not to write
-it, not to retire it.
-
-### 8.4 What it costs
-
-Stated plainly, because three of these are behaviour changes, not just
-refactors:
-
-  * **`/stop` keeps its property, but through a new mechanism.** Today
-    "the user message stays" on cancel (`webapp/turns.py:130-133`) because
-    the channel wrote the row pre-dispatch. Enqueueing pre-dispatch
-    preserves the durability, but on a cancel-before-start the item is
-    never consumed, so the text lives in the queue rather than the
-    transcript. The webapp must render un-consumed `input` items to keep
-    the behaviour user-visible — deliberate work, not a free carry-over.
-    (This is why `input` is a queue kind at all: without it, the user's
-    text would exist only in the task payload, and a turn cancelled before
-    its agent started would vanish.)
-  * **Deferred materialisation can never happen.** A hand-back recap
-    (#4) lands only if the orchestrator takes another turn. If the user
-    walks away, the orchestrator never learns about the delegation — which
-    costs nothing, because it has no next turn to be wrong in. The
-    delegate's own rows still hold the record of the work.
-  * **Input rows need per-task idempotency.** A redelivered task must not
-    double-append. A unique partial index on `(session_id, task_id)` for
-    `role='user'` input rows makes the append naturally idempotent.
-  * **Transcript timestamps shift** by the dispatch latency — the user row
-    is stamped when the agent starts, not when the channel received it.
-    Sub-second; the webapp's optimistic echo already covers the live view.
-  * **The queue is net-new machinery** — a table, a drain step, and a
-    consumed-item GC that rides the session cascade.
-
-## 9. Lifecycle & GC
-
-### 9.1 History survives close — unlike the file stash
-
-The file store GCs `scope = session:{id}` rows on close
-(`bp_router/api/sessions.py::_close_session`). **History must not.**
-Sessions reopen (`POST /v1/sessions/{id}/reopen`), the webapp lists and
-renders closed sessions, and `sessions.md` §2 makes the log the durable
-record. So:
-
-  * **close** — no history GC. (The `session_state` KV also survives; a
-    reopened conversation keeps its summary. `delegated_to` is the one
-    value the channel may want to clear, and clearing it is suite policy
-    via a `StateSetOp`, not a router-side sweep.)
-  * **purge** (`DELETE …?purge=true`, the webapp's "remove") — the FK
-    cascade takes `session_messages` + `session_state` with the session
-    row. `queries.purge_session_suite_data` loses two of its three tables
-    and becomes a cron-only cleanup.
-  * **retention** (`session_gc_loop`, `closed_session_retention_days`) —
-    same cascade, no change to the loop.
-
-### 9.2 The reconcile loop shrinks
-
-`bp_agents/agents/chatbot/session_gc.py` and the
-`/v1/admin/sessions/filter-existing` probe exist only because history is
-unreachable from the router. After the store move the loop no longer reaps
-history or `session_info` — it reaps `cron_jobs` only, which is a small
-enough job that folding it into the cron agent is worth considering. The
-probe endpoint stays (cron still needs it), so this is a shrink, not a
-deletion. Be precise about that in the changelog when it lands.
-
-### 9.3 Per-session serialization moves to the router
-
-With writes centralized, the router can hold a per-`session_id`
-`asyncio.Lock` around message/mutate ops — it is single-replica, so that
-is a complete guarantee, where the suite's is complete only with Valkey
-configured. Two caveats keep `session_lock.py` alive even then: the
-suite's lock also spans **dispatch → agent run → result → channel
-writes** (a turn, not a write), and it serializes `memory.add`-adjacent
-policy the router knows nothing about. So: the router lock protects
-*store consistency*; the suite lock keeps protecting *turn ordering*.
-Valkey stops being a correctness prerequisite for a second channel
-instance only once turn ordering also has a router-side answer — call
-that out of scope and don't oversell it.
-
-### 9.4 GDPR erase
-
-`purge_user` cascades `session_messages` / `session_state` in the same
-transaction that scrubs the user row, so `users.purged_at` stops being a
-cross-database signal for conversation data. It is still the signal for
-per-user **LanceDB** erase (memory + knowledge), so
-`purge_user_suite_data` and the reconcile path survive — narrower, not
-gone.
-
-## 10. Payload budget and paging
-
-`max_payload_bytes` defaults to **1 MiB** per WS frame
-(`bp_router/settings.py:269`; the SDK's `ws_max_receive_bytes` is 2 MiB,
-`bp_sdk/settings.py:102`). A reload response is the one shape here that
-can approach it: at a generous `max_context_token_limit` a thread's
-in-context rows (those above its `history.floor`) can reach several
-hundred KB of text. The file store's
-answer was to keep bulk bytes off the control pump entirely (§8.1 of that
-design: names on the frame, bytes resolved router-side). History has no
-equivalent indirection — the agent genuinely needs the text.
-
-So bound it explicitly rather than hoping:
-
-  * The router applies a **byte budget** to `Reload`/`Recall` replies
-    (default ~60% of `max_payload_bytes`), fills newest-first back to the
-    oldest row that fits, and sets `truncated_before_id` when it stopped
-    early.
-  * The SDK pages transparently: on `truncated_before_id`, issue the next
-    `ReloadRequest(before_id=…)` and prepend. Callers see one list.
-  * The **HTTP** transcript endpoint (§7) is the unbounded path, paginated
-    by `id` — that is what the webapp render uses, and it has no frame cap.
-
-Recall is already capped per-result and in total by
-`agent-tool-history-recall.md`; keep those caps and let the budget be the
-outer guard.
+Per-user `content_bytes` summed over `session_threads`, ceiling by user
+level, gated on append — the same shape as the file store's storage
+quota, reusing its enforcement point. A per-session message ceiling
+bounds the pathological case a byte ceiling misses (a million empty
+rows).
 
 ## 11. SDK surface
 
-`ctx.history`, shaped like `ctx.files` (`bp_sdk/files.py::FileStash`), in a
-new `bp_sdk/history.py`. Note what the signatures cannot express:
+`ctx.history`, shaped like `ctx.files`, in `bp_sdk/history.py`. Note what
+the signatures cannot express:
 
 ```python
 class SessionHistory:
-    # Writes — no `thread` parameter exists. You write your own thread.
-    async def append(self, role: str, message: str, *,
-                     hidden: bool = False,
-                     once_per_task: bool = False) -> int: ...
+    # Writes — no owner parameter exists, at any level. You write yours.
+    async def append(self, role: str, content: str, *, thread: str = "",
+                     hidden: bool = False, metadata: dict | None = None,
+                     idempotency_key: str | None = None) -> int: ...
+    async def set_floor(self, floor_id: int, *, thread: str = "") -> None: ...
+    async def redact(self, *message_ids: int) -> int: ...
 
-    # Reads — `thread` IS a parameter; reads are session-scoped (§8).
-    async def reload(self, *, thread: str | None = None,
-                     up_to_id: int | None = None) -> list[Turn]: ...  # pages internally
-    async def recall(self, *, count: int, skip: int = 0,
-                     thread: str | None = None) -> list[ToolExchange]: ...
+    # Reads — owner IS a parameter; reads are session-scoped (§7).
+    async def read(self, *, owner: str | None = None, thread: str = "",
+                   roles: list[str] | None = None, since_id: int | None = None,
+                   include_retired: bool = False) -> list[Message]: ...  # pages internally
+    async def stat(self, *, owner: str | None = None,
+                   thread: str = "") -> ThreadStat: ...
     async def state(self, *keys: str,
-                    thread: str | None = None) -> dict[str, str]: ...
+                    owner: str | None = None) -> dict[str, StateValue]: ...
 
     # Hand-over — the only way to reach another agent's context.
-    async def hand_over(self, target: str, kind: str, payload: dict) -> None: ...
+    async def hand_over(self, target: str, kind: str, payload: dict, *,
+                        thread: str = "") -> None: ...
 
-    def mutate(self) -> SessionMutation: ...   # builder → one atomic MutateRequest
+    def batch(self) -> SessionBatch: ...   # one transaction, one round trip
 ```
-
-The turn-opening idiom, which every l0/l1 handler now shares:
 
 ```python
-async with ctx.history.mutate() as m:            # ONE transaction, ONE round trip
-    for item in await m.consume_pending():       # my queue, drained
-        m.append(*materialise(item))             # ...into MY thread, as MY rows
-    m.append("user", payload.prompt, once_per_task=True)
+async with ctx.history.batch() as b:            # the turn-opening idiom
+    items = b.consume_handovers()               # my queue
+    b.append("user", payload.prompt, idempotency_key="input")
+    state = b.get_state("summary")
+    turns = b.read(roles=["user", "assistant"])
+# exiting the context manager resolves every handle, positionally
 ```
 
-and the hand-back that used to be a cross-thread write:
+Scope selection is a client construction (`ctx.history.user_scope`), not
+a parameter on every call, so the common case stays terse.
 
-```python
-await ctx.history.hand_over(ORCHESTRATOR, "handback_recap",
-                            {"summary": summary, "reason": reason})
-```
+No LLM tool bundle. Unlike files, there is no case for handing a model
+raw write access to a conversation log; a suite that wants a recall tool
+builds it over `read`, as the current one does over
+`common/tool_history.py`.
 
-The steward side gets the same shape over HTTP in
-`bp_agents/agents/chatbot/credentials.py`, alongside the existing named-file
-store client — minus `append`, which it has no endpoint for (§7).
-`ChannelCore` swaps `self._pool` for that client and keeps its method
-signatures.
+## 12. Security
 
-No LLM tool bundle. `recall_tool_history` is already a suite-side local
-tool over `common/tool_history.py`; it re-points at `ctx.history.recall`
-and needs no protocol-level tool surface.
+  * **Derived identity, one pattern.** Scope resolution reuses
+    `attachments.derive_task_file_scope` (`bp_router/attachments.py:25`)
+    — no second derivation to get wrong.
+  * **Attribution is structural.** A row's writer is its thread's owner;
+    there is nothing to forge and nothing to cross-check.
+  * **The steward's authority is bounded.** Session state and enqueueing.
+    A malicious steward can spam a queue or flip a routing flag — a
+    nuisance, not a forged utterance. Still worth an explicit ACL
+    capability (`session.steward`) and audit coverage.
+  * **The hand-over queue is the residual trust surface.** A poisoned
+    item becomes a real utterance once its owner materialises it. Owners
+    must treat payloads as untrusted input, exactly as they treat task
+    payloads — this is where prompt injection reaches a thread, and the
+    SDK docs should say so at the `consume_handovers` call site.
+  * **Audit** on mutating ops (`session.append`, `session.redact`,
+    `session.state_set`, `session.handover`), hash-chained as file
+    mutations are. **Never** put `content` in an audit payload: ids,
+    coordinates, role, and byte counts only. Conversation text in an
+    append-only chain is an erasure problem `purge_user` cannot solve.
+  * **Redaction is real.** `Redact` blanks stored content rather than
+    hiding it behind a flag, so a user-facing "delete this message" is
+    honest at the storage layer while ids stay stable.
+  * **DoS.** Batch caps (§6), content cap (§9.4), quota (§10.3), and the
+    existing per-agent rate limiter (`rate_limited`).
 
-## 12. Suite-side deletions — and what the store move does *not* buy
+## 13. Reference mapping — a suite on these primitives
 
-`bp_agents/db/queries.py` loses 10 of its 32 functions outright
-(`get_session_info`, `list_session_info_for_user`, `list_old_session_ids`,
-`create_session_info`, `update_session_info`, `append_history`,
-`reload_incumbent`, `recent_tool_exchanges`, `demote_incumbent_through`,
-`demote_thread`), `purge_session_suite_data` shrinks to cron-only, and
-`bp_agents/db/models.py` loses `SessionInfoRow` + `SessionHistoryRow`.
-Roughly **54 call sites** are rewritten: 17 `append_history`, 12
-`get_session_info`, 8 `update_session_info`, 7 `reload_incumbent`, 6
-`create_session_info`, 2 `demote_incumbent_through`, 2 `demote_thread`, 1
-`recent_tool_exchanges`, 1 `list_session_info_for_user`.
+Not a migration plan; a completeness check, and a target shape for the
+suite rebuild. Every behaviour the current suite gets from
+`session_history` + `session_info`, expressed in §5 ops — and note that
+none of them writes another agent's thread:
 
-**It removes zero Postgres pools.** This is the correction that matters
-most for judging the phase, and it is easy to get wrong: `get_user_config`
-is the *universal* suite dependency — 9 of the 10 agents in §1.1 call it,
-including every agent whose only other suite use is session data. Per-agent
-suite query usage today:
-
-| agent | session data | `user_config` | other |
-| --- | --- | --- | --- |
-| `orchestrator` | ✓ | ✓ | |
-| `history_summarizer` | ✓ | ✓ | |
-| `computer_use` | ✓ (via `l1_common`) | ✓ (via `l1_common`) | |
-| `research`, `deep_reasoning` | | ✓ | |
-| `knowledge_base` | | ✓ | LanceDB |
-| `memory` | | ✓ | LanceDB, `list_user_ids` |
-| `config` | | ✓ (read + write) | |
-| `webapp` | ✓ | ✓ | cron, mappings |
-| `chatbot` | ✓ | ✓ | cron, mappings |
-
-So after the store move every one of those agents still opens
-`open_pool` — for a single `SELECT * FROM user_config`. The
-credential-removal payoff (§1.1) lands only when `user_config` moves too
-(§13), and it is worth stating in that order rather than claiming it here.
-
-What the store move *does* buy, on its own: `session.history` becomes
-structurally enforceable (§8), session purge and retention go one-sided
-(§9), and the write lock moves to the router (§9.3). The ownership
-property itself is bought earlier and separately, by the suite rework
-(§8.1) — which needs no router work at all.
-
-## 13. The companion move — `user_config` → router user preferences
-
-Per §12 the credential payoff needs this, and it is **smaller and lower
-risk than the session store**: 28 reads, 2 writes, tiny values, no
-atomicity requirement, no paging, no authorship subtlety. Recommended
-**first**, as the cheap proof of the pattern.
-
-Same policy-free trick as `session_state` — a `user_prefs` KV keyed
-`(user_id, key)`, opaque to the router — with three fields promoted to
-typed columns on the router side *because the router acts on them*:
-
-| field | shape | why |
+| suite behaviour | today | on these primitives |
 | --- | --- | --- |
-| `preset_{pro,balanced,lite,embedding}` | typed | the router owns the catalog + the tier gate (`bp_router/llm/service.py:205-257`); the selection belongs with the authority that validates it |
-| `timezone`, `full_name` | typed on `users` | no router equivalent today; both are plainly user identity, and cron's DST-aware evaluation already depends on the timezone being right |
-| `sandbox_uid`, `custom_note`, `verbose_default`, `max_context_token_limit`, `language`, `default_session_id` | KV | pure suite policy — the router stores and returns them, and interprets none of them |
+| record the user's turn | channel writes a `user` row into the target's thread (`core.py:101`) | channel `HandOver(kind="input")`; the target materialises it in its opening batch |
+| build context | `reload_incumbent` | `Read(roles=["user","assistant"])` — floor applied server-side |
+| assistant turn, tool rows | agent appends its own | unchanged — `Append`, batched at turn close |
+| recall past tool results | `recent_tool_exchanges` | `Read(roles=["tool_call","tool_result"], before_id=…)` |
+| rolling summary | `session_info.history_summary`, channel-written | thread state `summary`, owner-written |
+| apply a summary | set summary + `demote_incumbent_through` | `[SetState(summary), SetFloor(cutoff)]`, one batch |
+| decide to summarize | agent measures context, reports it in metadata | steward `StatThread` — no transfer |
+| delegation seed | orchestrator writes into the delegate's thread (`:259`) | the delegate composes it from the `LLMData` the hand-off already carries (`prompt`, `agent_instruction`, `context`) and appends to its own thread |
+| sticky delegation pointer | `session_info.delegated_to` | session state, CAS-guarded |
+| end an episode | `demote_thread` on the delegate's thread | `HandOver(kind="retire", through_id=N)`; the owner sets its floor on next use |
+| hand-back recap | channel writes `user`+`assistant` into the orchestrator's thread (`core.py:355`) | `HandOver(kind="recap")`, materialised by the orchestrator |
+| cron report | channel writes an `assistant` row (`cron.py:166`) | pass the job's report policy in the task payload; the orchestrator is already that task's executor and appends its own row |
+| session title, channel, chat id | `session_info` columns | session `metadata` on the router's session row |
+| webapp transcript | direct SQL | `GET /v1/sessions/{id}/messages` |
 
-Note the reversal from §3.3: the suite-policy fields move too, as *opaque
-values*. Leaving them in `bp_suite` would mean every agent keeps its pool
-for them, which defeats the point. Storing them ≠ knowing what they mean —
-exactly the line the file store draws around file contents.
+Two failure modes disappear rather than move. The orphan-seed rollback
+(`orchestrator/agent.py:270-277`) exists only because the seed is written
+before the reassignment that can fail — composed at the far end, that
+window does not exist. And a cancelled turn no longer leaves a dangling
+`user` row: the un-consumed hand-over is the durable record, and the
+webapp renders it as pending or drops it, its choice.
 
-With both phases landed, the agents that hold **no** Postgres pool are
-`orchestrator`, `research`, `deep_reasoning`, `computer_use`,
-`knowledge_base`, `memory`, `config`, and `history_summarizer` — eight of
-ten. `chatbot` and `webapp` keep theirs for cron + platform mappings
-(§2 non-goals). `memory.list_user_ids` needs a router-side replacement
-(the `users` table already has the data; a service-principal endpoint
-serves it).
+The suite's remaining Postgres use after this is cron and platform
+mappings. `user_config` should follow the same path — a per-user state
+surface on the router, with presets typed because the router already owns
+the catalog and the tier gate (`bp_router/llm/service.py:205-257`) — and
+that, not this, is what finally closes those ten pools. Worth building
+first: it is smaller, has no atomicity requirement, and exercises the same
+KV and HTTP shapes.
 
-**Tier resolution is a separate, later refinement.** Once prefs are
-router-side, `LlmRequestFrame` *could* carry `tier="balanced"` and let the
-router resolve the preset, deleting the read-config prologue from every
-turn. Don't bundle that with the storage move: it touches the LLM request
-path, which carries a known identity-derivation inconsistency already
-flagged as an open question in the file-store design (that path trusts
-`frame.user_id` for tier/quota/audit while file ops derive it from the
-task). Land that hardening pass first or concurrently — not underneath a
-data migration.
+## 14. What not to do
 
-## 14. Security
+  * **Don't add an owner or thread-owner field to `Append`, or a
+    message-POST endpoint.** Gating is not the same as absence (§7, §8).
+  * **Don't let the router interpret `role`.** No enum, no CHECK, no
+    implicit filter. Reads name the roles they want (§3.3).
+  * **Don't reintroduce a mutable `incumbent`-style flag.** One floor
+    cursor covers prefix and whole-thread retirement (§3.4).
+  * **Don't add `summarize` / `delegate` / `end_episode` ops.**
+    Primitives plus a transaction boundary (§6).
+  * **Don't GC history on session close** (§10.1) — the file store's
+    close-time GC is the wrong precedent here.
+  * **Don't put `content` in audit payloads** (§12).
+  * **Don't let `content` grow unbounded.** The stash is the answer for
+    large payloads; a second blob path is not (§9.4).
+  * **Don't skip CAS on session state.** Two writers exist by design
+    (§3.6).
 
-  * **Derived identity, one pattern.** Every frame op resolves
-    `(user_id, session_id)` from the task row and verifies active-executor,
-    reusing `attachments.derive_task_file_scope`. No new derivation logic
-    means no second thing to get wrong.
-  * **Attribution is structural, not recorded.** Every row's writer *is*
-    its thread owner (§8), so there is nothing to forge and nothing to
-    cross-check. Today any holder of the DSN can author a row as any
-    agent, and the schema keeps no evidence of it.
-  * **The steward's remaining authority is bounded.** It can set
-    session-scoped state and enqueue pending items — it can ask for
-    something to appear in a thread, never make it appear. That is still
-    worth an explicit ACL capability (`session.steward`) rather than
-    "whoever holds a session token", and steward ops still belong in the
-    audit chain: a malicious steward can spam a queue or flip a session's
-    delegation, which is a nuisance, not a forged utterance.
-  * **The pending queue is the residual trust surface.** An item is
-    consumed by the owner and materialised *as the owner's own row*, so a
-    poisoned item becomes a real utterance. The owner is the last check:
-    treat pending payloads as input, not instructions — the same posture
-    an agent takes toward any task payload.
-  * **Audit.** Mutating ops append hash-chain audit events
-    (`session.message_append`, `session.state_set`, `session.pending_put`)
-    the
-    way file mutations do. Do **not** put `message` content in the audit
-    payload — row id, thread, role, and byte count only. Conversation text
-    in an append-only audit chain is a retention and erasure problem
-    (`purge_user` must be able to erase it).
-  * **DoS surface.** History append is now a router write path on the
-    task-admit pool. Bound it: the `value`/`ops` caps of §4/§6, a
-    per-session row ceiling, and the existing per-agent rate limiter
-    (`rate_limited` is in the error set for this reason). Size
-    `db_pool_max_size` for the added per-turn writes before the flip.
-  * **Reads are session-wide by design** (§8) — same intentional
-    shared-session reach as the stash, and the reason a delegate can read
-    its seed row without re-keying.
+## 15. Open questions
 
-## 15. Migration — phased, with live data
+  * **Change notification.** The webapp polls or rides progress frames
+    today. A `SessionEvent` push (new message in a session you can read)
+    would serve live transcripts and multi-viewer cases, but it is a
+    fan-out mechanism on a single-replica router and wants the scrutiny
+    `ProgressFrame` got. Deferred, not dismissed.
+  * **Search.** A `tsvector` on `content` plus a `Search` op is a small
+    addition and an obvious want ("what did we decide about X?"). Left
+    out of v1 to avoid designing ranking semantics into the platform
+    before a caller needs them; the column can be added without a
+    protocol change.
+  * **Turn-level serialization.** The router can lock per session around
+    store ops, which is complete on a single replica. It does not cover
+    dispatch → result (a task-tree concept), so a suite needing turn
+    ordering still needs its own lock. Whether the platform should offer
+    a session-busy primitive at all is a real question — it would make
+    the suite's Valkey lock unnecessary.
+  * **Per-agent read narrowing** (§7). Nothing wants it yet; the shape
+    would be an ACL scope, not a schema change.
+  * **Hand-over staleness.** TTL, drop-on-drain, or leave it to the
+    consumer? The router can carry a column and enforce nothing, which is
+    probably right, but decide before the first suite builds on it.
+  * **`user` scope and quota.** Session and user threads share one
+    ceiling in v1, as session and `persist/` files do. Split if
+    cross-session context turns out to be the abuse vector.
 
-Unlike the file store (pre-release, hard cutover), this touches a
-**deployed** database with real conversations. No hard cutover.
+## 16. Sizing
 
-1. **Land the router side** (§4 tables, §5 frames, §7 HTTP, §8 authz).
-   Inert — nothing writes to it.
-2. **Do the suite rework first, against the suite's own DB** (§8.1). Every
-   re-homing — agent-side input rows, delegate-side seed, pending queue,
-   floor/episode instead of `incumbent` — is expressible against
-   `session_history` today. Landing it before the store move means the
-   cutover is a *transport* change, not a semantics change, and each
-   behavioural risk in §8.4 gets its own release to surface in. This is
-   the single most useful ordering decision in the plan.
-3. **Backfill.** `session_history` → `session_messages`,
-   `session_info` → `sessions.metadata` + `session_state`. Both databases
-   live in one Postgres instance but are **separate databases with
-   separate owners** (`deploy/postgres-init/01-create-suite-db.sql:19`), so
-   there is no `INSERT … SELECT` across them: use `COPY … TO STDOUT` piped
-   to `COPY … FROM STDIN` (a `scripts/` one-shot), or `postgres_fdw` if the
-   operator prefers. Preserve `id` values — recall cursors, floors, and the
-   summarizer's cutoffs all reference them. Derive the two new bounds from
-   the column they replace:
-     * `history.floor` per thread = `MAX(id) WHERE incumbent = false`
-       (the demoted rows are always a prefix — both suite demote paths are
-       `id <= cutoff` or whole-thread, `queries.py:331`, `:355`).
-     * `episode` = 1 for every existing row; a session with a live
-       `delegated_to` gets `delegation.episode = 1`, so its delegate's
-       thread keeps reloading exactly what it does today.
-   Verify the derivation by diffing each thread's reload result before and
-   after — same rows, or the backfill is wrong.
-4. **Flip the readers/writers behind a suite setting**
-   (`SUITE_SESSION_STORE=router|suite`, default `suite`). Quiesce first —
-   the existing per-session lock is the clean quiesce point — then backfill
-   the tail and flip. One release with the flag; no dual-write (two sources
-   of truth for a thread's floor is worse than a short maintenance window).
-5. **Soak**, then drop `session_info` / `session_history` in a suite
-   migration and delete the dead queries (§12).
-
-Step 5 is the irreversible one; keep 1–4 reversible by leaving the suite
-tables in place and untouched during the soak.
-
-## 16. Implementation sequence
-
-**Phase 0 — the prefs move (§13).** Smaller, no atomicity, no paging, and
-it is what actually starts closing agents' database pools. It also
-exercises the KV pattern, the session-JWT HTTP surface, and the backfill
-mechanics on a table where a mistake costs a preference, not a
-conversation.
-
-**Phase 1 — the ownership rework, suite-side (§8.1), against
-`session_history` as it stands.** In dependency order, each independently
-shippable:
-
-1. Input rows: agents append their own; delete `record_user_turn` and its
-   four call sites; the orchestrator's fallback branch becomes the path.
-   Add the per-task idempotency guard.
-2. Delegation seed: composed and written by the delegate on `first_turn`
-   from the `LLMData` it already receives; delete the orphan-seed rollback.
-3. Pending queue + drain-at-turn-start; move the hand-back recap and the
-   cron report onto it (cron also gains `report` in its payload).
-4. `history.floor` + `delegation.episode` replacing `incumbent`; delete
-   both demote paths. Ship behind a read-path flag and diff reload results
-   against the old query in staging.
-5. `/delegate` writes session state instead of a seed row.
-
-At the end of phase 1 **no code writes another agent's thread**, and the
-suite still runs entirely on its own database. That is the checkpoint
-worth pausing on.
-
-**Phase 2 — the store move.**
-
-6. Schema + migration (§4), with the FK cascades.
-7. `bp_router/session_store.py` — scope keys, the §8 ownership rule, byte
-   budget (§10), audit. One module both surfaces call.
-8. `SessionOpFrame` / `SessionResultFrame` + dispatch handlers (§5) +
-   `mutate` transaction (§6).
-9. Session-JWT HTTP endpoints (§7) — note the absence of a messages POST.
-10. `bp_sdk/history.py` (§11) + the steward HTTP client.
-11. Backfill script (§15 step 3) + the `SUITE_SESSION_STORE` flag.
-12. Cut over `ChannelCore`, the orchestrator, `l1_common`,
-    `history_summarizer`, `tool_history`, the webapp pages (§12).
-13. Shrink the reconcile loop (§9.2); router-side per-session lock (§9.3).
-14. Soak, drop suite tables, delete dead code.
-
-Tier resolution (§13, last paragraph) is a separate sequence after all of
-it.
-
-## 17. What not to do
-
-  * **Don't add a steward append endpoint or a `thread_agent_id` field**
-    "just for the channel". That is the hole (§7, §8); gating it is not
-    the same as not having it. If a component needs something in a
-    thread, it enqueues (§8.2).
-  * **Don't keep `incumbent` as a mutable column.** It reads like a
-    harmless flag and it is the last remaining way to reach into another
-    agent's thread (§8.3).
-  * **Don't give the router `history_summary` / `delegated_to` columns.**
-    The KV exists so platform schema stays free of one suite's
-    conversation model. A column is a one-line change that is very hard to
-    take back.
-  * **Don't add `summarize` / `delegate` / `end_delegation` ops.** The
-    router gets primitives and a transaction boundary (§6). Policy stays
-    in `ChannelCore`.
-  * **Don't GC history on session close.** Reopen and the webapp both
-    depend on it surviving (§9.1). The file store's close-time GC is the
-    wrong precedent to copy here.
-  * **Don't do the store move before the ownership rework** (§15 step 2).
-    Migrating the semantics and the transport in one step means a
-    behavioural regression and a data-layer regression are
-    indistinguishable in production.
-  * **Don't dual-write during migration.** Two writers of a thread's
-    floor race in exactly the way the per-session queue exists to prevent.
-  * **Don't move cron or the platform mappings** to make the suite
-    Postgres "go away" (§2 non-goals). The goal is removing the *seam that
-    costs*, not table count.
-  * **Don't put message text in audit payloads** (§14).
-  * **Don't bundle tier resolution** into either data move (§13) — it
-    changes the LLM request path, which has its own identity-derivation
-    debt to settle first.
-  * **Don't claim the store move closes agents' DB pools.** It doesn't;
-    §12 shows why, and §13 is what does.
-
-## 18. Open questions
-
-  * **How un-consumed `input` items render** (§8.4). The text survives a
-    cancel-before-start either way; the question is whether the webapp
-    shows it as a pending turn, greys it, or drops it from the transcript
-    until consumed. Pin it before phase 1 step 1 — it is the one
-    user-visible difference in that step.
-  * **Turn-level serialization.** §9.3 leaves the suite lock owning turn
-    ordering while the router owns store consistency. Is there a
-    router-side "session busy" primitive worth having (it would need to
-    span dispatch → result, which is a task-tree concept, not a write), or
-    does the suite lock stay indefinitely? This decides whether Valkey
-    ever stops being the multi-instance prerequisite.
-  * **Should a pending item expire?** A `handback_recap` for a
-    conversation the user abandoned sits in the queue forever, and it will
-    be materialised — stale — if that user returns weeks later. A TTL, or
-    a "drop stale kinds on drain" rule, is suite policy the router should
-    carry as a column but not decide.
-  * **Episode counter vs. per-delegation id.** A monotonic counter is the
-    simplest thing that filters correctly (§8.3). A uuid per episode makes
-    the audit trail nicer and costs an extra index; worth deciding when
-    the delegation docs are updated rather than now.
-  * **Does `session_state` need a value history?** Summaries are
-    overwritten in place today. A one-deep previous value would make a
-    failed summarize apply recoverable, at the cost of a shape decision
-    the router shouldn't be making for the suite.
-  * **`session_name` in `metadata` vs. a first-class column.** The webapp
-    lists and sorts by it; a jsonb key is fine for a few hundred sessions
-    per user and awkward beyond that. Measure before promoting.
-  * **Should reads be narrowable?** §8 makes reads session-wide because
-    the summarizer and delegates need cross-thread reads. A future
-    `session.history.read` scope per agent could narrow it, but nothing in
-    the current suite wants that.
-
-## 19. Sizing
-
-The file store cost roughly 2,300 LOC of platform code across
+For reference, the file store cost ~2,300 LOC of platform code:
 `bp_sdk/files.py` (446), `bp_sdk/file_tools.py` (448),
 `bp_router/api/files.py` (635), `bp_router/file_store.py` (146), ~371
-lines of dispatch handlers and ~246 lines of frames. The session store is
-smaller — no blobs, no S3, no dedup, no quota accounting, no LLM tool
-bundle:
+lines of dispatch handlers, ~246 lines of frames. This service is
+comparable in surface but simpler per op — no blobs, no S3, no dedup, no
+signed URLs, no LLM tool bundle:
 
 | piece | estimate |
 | --- | --- |
-| **phase 1 — ownership rework, suite-side** (§8.1) | ~-150 net (deletes `record_user_turn`, the orphan-seed rollback, both demote paths; adds the queue + drain) |
-| frames (`SessionOp` + `SessionResult` + command union) | ~150 |
-| router `session_store.py` + queries | ~350 |
-| dispatch handlers | ~200 |
-| HTTP endpoints | ~180 |
-| migration | ~100 |
-| `bp_sdk/history.py` + steward client | ~350 |
-| suite rewrites (54 call sites) + deletions | ~-400 net |
-| backfill script (incl. floor/episode derivation) | ~200 |
+| frames + op union + results (`bp_protocol`) | ~250 |
+| `bp_router/session_store.py` — ownership, floors, budget, CAS, quota | ~450 |
+| queries + migration | ~350 |
+| dispatch handler (one frame, batch executor) | ~200 |
+| HTTP endpoints | ~200 |
+| `bp_sdk/history.py` (client, batch builder, paging) | ~400 |
 
-Call it ~1,350 LOC new platform code, a net reduction suite-side, and a
-migration. The payoff is not lines:
-
-  * **From phase 1 alone, no router work needed:** no code writes another
-    agent's thread, the orphan-seed failure mode is gone, and `incumbent`
-    stops being mutable state two components fight over.
-  * **From the store move:** `session.history` becomes enforceable — and
-    enforceable *structurally*, since `AppendRequest` has no thread field
-    to forge — plus one-sided session purge and retention, and a
-    router-owned write lock.
-  * **From the store move plus the prefs move** (§13, the smaller of the
-    two): eight of ten agents stop holding a database password.
+~1,850 LOC, self-contained, with no suite dependency and no migration.
+What it buys the platform: conversation becomes a first-class managed
+resource alongside identity, tasks, and files; `session.history` becomes
+structurally enforceable rather than advisory; session purge, retention,
+and GDPR erase become one-sided; and any suite built on the platform —
+the rebuilt one included — gets a conversation store without a database
+credential.
