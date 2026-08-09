@@ -90,8 +90,12 @@ refused on every call. There is no path that re-resolves it.
 ## 3. The model: slots
 
 A **slot** is an opaque per-user key naming a preference — `"balanced"`,
-`"pro"`, `"lite"`, `"embedding"`, or anything a future suite invents. The
-router resolves a slot to a preset; it never interprets the slot's name.
+`"pro"`, `"lite"`, or anything a future suite invents. The router resolves a
+slot to a preset; it never interprets the slot's name.
+
+**Embedding is not a slot** (§12) — it is the one model choice that is not
+safe to change, so it stays operator configuration on the existing explicit
+`preset=` path.
 
 This is the same discipline the session store applies to `role` and
 `item_kind`: the platform stores and dispatches on the key, and the meaning
@@ -245,8 +249,11 @@ and costs a slot call nothing beyond the lookup it already needs.
   * `SuiteSettings.selectable_presets_{pro,balanced,lite}` and the
     `preset_choices` machinery in `bp_agents/config_edit.py` and
     `webapp/pages/config.py` — replaced by `GET /v1/llm/presets`.
-  * `user_config.preset_{pro,balanced,lite,embedding}` — replaced by
-    `user_llm_preferences`.
+  * `user_config.preset_{pro,balanced,lite}` — replaced by
+    `user_llm_preferences`. `preset_embedding` is deleted outright rather
+    than migrated: it was never user-selectable, and it must not become so
+    (§12). The embedding model stays operator config, passed as an explicit
+    `preset=` by the agents that embed.
   * `SuiteSettings.default_preset_*` — replaced by `llm_default_presets`.
   * The per-turn `get_user_config` read whose main job was resolving a preset
     name (28 call sites; the remaining fields move to user-scoped
@@ -319,11 +326,14 @@ behaviour.
     tier1" independent of any individual preset's gate. Expressible as a
     `min_user_level` on the slot default map. Left out of v1 — no caller wants
     it yet, and preset-level gating covers the known cases.
-  * **Should `embedding` be a slot at all?** It is system-managed today and
-    users have no reason to pick an embedding model. Modelling it as a slot
-    with no user-facing entry keeps one mechanism; exposing it invites a
-    choice that silently invalidates a user's stored vectors. Recommend: a
-    slot, never listed by `GET /v1/llm/presets`.
+  * ~~**Should `embedding` be a slot?**~~ **Decided: no.** Changing an
+    embedding model invalidates every vector already written — the per-user
+    LanceDB stores would silently return garbage similarity against vectors
+    from a different model, with no error and no migration path. It stays
+    operator configuration (`llm_default_presets` may name it, but it is not
+    resolvable per user and never appears in `GET /v1/llm/presets`). A slot
+    is for a choice that is safe to change between turns; this one is not
+    safe to change at all without a re-embed.
   * **Notifying a downgrade exactly once.** `preset_downgraded` fires on every
     call until the user re-picks. Suppressing repeats is suite policy (a flag
     in user-scoped `session_state`), but it is worth confirming that is where
