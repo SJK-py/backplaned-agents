@@ -819,12 +819,22 @@ window does not exist. And a cancelled turn no longer leaves a dangling
 webapp renders it as pending or drops it, its choice.
 
 The suite's remaining Postgres use after this is cron and platform
-mappings. `user_config` should follow the same path — a per-user state
-surface on the router, with presets typed because the router already owns
-the catalog and the tier gate (`bp_router/llm/service.py:205-257`) — and
-that, not this, is what finally closes those ten pools. Worth building
-first: it is smaller, has no atomicity requirement, and exercises the same
-KV and HTTP shapes.
+mappings. `user_config` follows, and it splits in two — that split is what
+finally closes those ten pools:
+
+  * **Opaque fields** — `custom_note`, `verbose`, `language`, `sandbox_uid`,
+    `max_context_token_limit`, `default_session_id` — go straight into the
+    user-scoped state this store already provides (§3.1, `scope="user"` with
+    `session_scoped=True`, giving a `(user_id, key)` namespace with CAS that
+    survives session purge). No new router work.
+  * **The four `preset_*` fields do NOT.** The router *acts* on those — they
+    pick a model, at a cost, under a tier gate — and this store's user-scoped
+    namespace is writable by any agent in the session. A value the router
+    enforces policy on cannot be one any agent can overwrite. They get their
+    own table and their own user-authority write path, together with the slot
+    resolution that makes the router's gate and the user's choice one
+    decision instead of two: see
+    [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md).
 
 ## 14. What not to do
 
