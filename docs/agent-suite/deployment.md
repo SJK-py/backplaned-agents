@@ -32,7 +32,7 @@ schemas once, as one-shot jobs (never on container start):
 
 ```
 alembic upgrade head                          # router  (migrate service)
-alembic -c alembic_suite.ini upgrade head     # suite   (suite-migrate service)
+alembic -c alembic_suite.ini upgrade head     # suite   (the `init` service)
 ```
 
 ## Invitations (one per agent)
@@ -274,11 +274,18 @@ bundled SearXNG service) to start/restart/stop whenever the env file's
 so it's correct even when you skip the build step and reuse an earlier env.
 
 Under the hood `compose up` resolves the whole order via `depends_on`:
-`postgres` → `migrate` + `suite-migrate` (schemas) → `router` (healthy) →
-`bootstrap` (`python -m bp_agents.bootstrap` — registers the pre-supplied
-invitation tokens + applies the ACL) → the agents. The migrations stay
-one-shot init services (never on agent start), so scaling an agent never
-races the schema. To run the steps manually instead (e.g. drive
+`postgres` → `router` (healthy) → `init` (`python -m bp_agents.init` — both
+schemas, then the invitations + ACL) → the agent groups. `init` replaced the
+former `migrate` + `suite-migrate` + `bootstrap` trio; its steps stay
+individually runnable for debugging (`docker compose run --rm init python -m
+bp_agents.init --step acl`). Migrations stay one-shot (never on agent start),
+so restarting a group never races the schema.
+
+The agents run in **groups**, one process each — `suite-core` (nine workers)
+and `channels` (chatbot + webapp) — with `sandbox` and the MCP bridge in
+their own containers, because their capabilities and network position are
+the isolation. See
+[`../design/deployment-agent-host.md`](../design/deployment-agent-host.md). To run the steps manually instead (e.g. drive
 `register-invitations.sh` + `load_acl` yourself, or add `--profile search` by
 hand), see the sections above.
 

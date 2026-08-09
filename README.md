@@ -50,7 +50,7 @@ Every task runs as the end user, so all of the above is isolated per person.
 
 ## QuickStart (production)
 
-A single launcher — [`scripts/prod.sh`](./scripts/prod.sh) — drives the whole production lifecycle on top of [`docker-compose.prod.yml`](./docker-compose.prod.yml): the router, all 12 suite agents, and the bundled dependencies (Postgres, Valkey, SeaweedFS, and optionally SearXNG), behind a Caddy edge proxy. For **local development** (router + agents from source), see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+A single launcher — [`scripts/prod.sh`](./scripts/prod.sh) — drives the whole production lifecycle on top of [`docker-compose.prod.yml`](./docker-compose.prod.yml): the router, the suite agents (grouped into two host processes plus the isolated sandbox — see [`docs/design/deployment-agent-host.md`](./docs/design/deployment-agent-host.md)), and the bundled dependencies (Postgres, Valkey, SeaweedFS, and optionally SearXNG), behind a Caddy edge proxy. For **local development** (router + agents from source), see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 **Prerequisites:** Docker (compose v2) on the host, a hostname for the edge proxy (a real domain, a LAN name, or a bare IP — `localhost` also works), an LLM provider API key (Anthropic / Gemini / OpenAI), and a Telegram bot token (from [@BotFather](https://t.me/BotFather)).
 
@@ -77,7 +77,7 @@ Re-run later and answer "no" to reuse the existing file — volume-baked secrets
 | **stop** | `down` — keeps data volumes |
 | **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Valkey, SeaweedFS, LanceDB, agent creds) for a clean slate |
 
-Compose brings everything up in dependency order: schema **migrations** → a one-shot **bootstrap** (registers the agent invitations + applies the suite ACL once the router is healthy) → every agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
+Compose brings everything up in dependency order: **router** → a one-shot **`init`** (both schemas, then the agent invitations + suite ACL once the router is healthy) → the agent groups. Onboarding uses **one roster token** (`SUITE_ROSTER_TOKEN`) plus the chatbot's own higher-privilege invitation, rather than one token per agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 
