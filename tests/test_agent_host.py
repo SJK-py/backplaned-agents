@@ -95,6 +95,46 @@ def test_load_agent_returns_the_module_level_agent() -> None:
     assert agent.info.agent_id == "orchestrator"
 
 
+def test_hosted_agents_do_not_share_a_credentials_file(monkeypatch: Any) -> None:
+    """Credentials live at `state_dir/credentials.json`. Agents sharing one
+    process share `AGENT_STATE_DIR`, so without a per-agent subdirectory
+    nine agents would overwrite each other's tokens and, on restart, load
+    someone else's — every one of them 403ing."""
+    from bp_agents.host import load_agent
+
+    monkeypatch.setenv("SUITE_ROSTER_TOKEN", "roster")
+    paths = {name: load_agent(name).config.state_dir for name in GROUPS["suite-core"]}
+    assert len(set(paths.values())) == len(paths), paths
+    for name, path in paths.items():
+        assert path.name == name, (name, path)
+
+
+def test_each_hosted_agent_gets_its_own_invitation(monkeypatch: Any) -> None:
+    """`AGENT_INVITATION_TOKEN` is ONE process-wide variable. Sharing it
+    would have the first agent to onboard consume it and the rest fail —
+    and it would hand the chatbot's `provisions_service_user` credential to
+    whoever onboarded first."""
+    from bp_agents.host import agent_invitation
+
+    monkeypatch.setenv("SUITE_ROSTER_TOKEN", "roster")
+    monkeypatch.setenv("CHATBOT_INVITATION", "service-user-invite")
+    # An agent-specific var wins: the service-user invitation must not be
+    # replaced by the roster.
+    assert agent_invitation("chatbot") == "service-user-invite"
+    # Everyone else draws from the roster.
+    assert agent_invitation("webapp") == "roster"
+    assert agent_invitation("orchestrator") == "roster"
+
+
+def test_host_agents_carry_the_token_the_host_resolved(monkeypatch: Any) -> None:
+    from bp_agents.host import load_agent
+
+    monkeypatch.setenv("SUITE_ROSTER_TOKEN", "roster")
+    monkeypatch.setenv("CHATBOT_INVITATION", "service-user-invite")
+    assert load_agent("chatbot").config.invitation_token == "service-user-invite"
+    assert load_agent("webapp").config.invitation_token == "roster"
+
+
 # ---------------------------------------------------------------------------
 # Supervision — the cost of hosting
 # ---------------------------------------------------------------------------

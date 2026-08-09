@@ -47,6 +47,15 @@
 
 ### Added — `bp_agents/host.py` (supervised multi-agent runner)
 
+- **Per-agent config is load-bearing.** `AGENT_STATE_DIR` and
+  `AGENT_INVITATION_TOKEN` are process-wide, so hosted agents would share
+  both. `load_agent` overrides each: `state_dir/<name>/`, because credentials
+  live at `state_dir/credentials.json` and nine agents in one directory would
+  overwrite each other's tokens and load someone else's on restart; and a
+  token resolved as `<NAME>_INVITATION` first, roster second, because one
+  shared token means the first agent to onboard consumes it — and would take
+  the chatbot's `provisions_service_user` credential with it. Both were found
+  in review, before either shipped anywhere.
 - **What:** `python -m bp_agents.host --group suite-core` runs a group of
   agents on one event loop, each keeping its own identity, WebSocket and ACL
   position. Per-agent supervision with exponential backoff (reset after a

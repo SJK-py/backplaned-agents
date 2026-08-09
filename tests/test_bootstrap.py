@@ -64,10 +64,12 @@ def test_compose_every_suite_agent_sets_name_and_token() -> None:
             f"{name}: SUITE_AGENT_GROUP is {env.get('SUITE_AGENT_GROUP')!r}, "
             f"expected {group!r}"
         )
-        assert "AGENT_INVITATION_TOKEN" in env, (
-            f"{name}: no AGENT_INVITATION_TOKEN — it will onboard with an "
-            "empty token and crash-loop."
-        )
+        # The host resolves a token PER AGENT — `AGENT_INVITATION_TOKEN` is
+        # one process-wide variable and cannot serve several agents. What the
+        # service must carry is the roster and/or the agent-specific vars.
+        assert "SUITE_ROSTER_TOKEN" in env or any(
+            k.endswith("_INVITATION") for k in env
+        ), f"{name}: no onboarding credential — its agents will 403."
         covered |= set(GROUPS[group])
 
     # The standalone agents (isolation boundaries) still carry their own.

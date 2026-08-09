@@ -110,17 +110,48 @@ def resolve_agents(group: str | None, agents: str | None) -> list[str]:
     return names
 
 
+def agent_invitation(name: str) -> str | None:
+    """This agent's onboarding token.
+
+    `AGENT_INVITATION_TOKEN` is ONE process-wide variable, so hosted agents
+    cannot each take their credential from it. Prefer an agent-specific
+    `<NAME>_INVITATION` — the shape a `provisions_service_user` invitation
+    must keep, since that flag is per-invitation and must not be shared —
+    and fall back to the group's roster token."""
+    return os.environ.get(f"{name.upper()}_INVITATION") or os.environ.get(
+        "SUITE_ROSTER_TOKEN"
+    )
+
+
 def load_agent(name: str) -> Agent:
-    """Import one suite agent module and return its `Agent`.
+    """Import one suite agent module, return its `Agent`, and give it the
+    per-agent config a shared process makes necessary.
 
     Mirrors the per-agent entrypoint (`python -m bp_agents.agents.<name>`),
-    which each module already exposes as a module-level `agent`."""
+    which each module already exposes as a module-level `agent`.
+
+    TWO overrides are load-bearing, because both settings are process-wide
+    environment variables that agents in one process would otherwise share:
+
+      * **`state_dir`** — credentials live at `state_dir/credentials.json`
+        (`bp_sdk.onboarding`), so nine agents sharing one directory would
+        overwrite each other's tokens and, on restart, load someone else's.
+        Each gets `<state_dir>/<name>/`, which also separates their
+        FileStash inbox trees.
+      * **`invitation_token`** — see `agent_invitation`. Sharing one would
+        have the first agent to onboard consume it and the rest 403.
+    """
     import importlib  # noqa: PLC0415
 
     module = importlib.import_module(f"bp_agents.agents.{name}.agent")
     agent = getattr(module, "agent", None)
     if agent is None:  # pragma: no cover - defensive
         raise SystemExit(f"bp_agents.agents.{name}.agent exposes no `agent`")
+
+    agent.config.state_dir = agent.config.state_dir / name
+    token = agent_invitation(name)
+    if token:
+        agent.config.invitation_token = token
     return agent
 
 

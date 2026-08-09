@@ -408,7 +408,8 @@ services:
     environment:
       <<: *suite-env
       SUITE_AGENT_GROUP: suite-core
-      AGENT_INVITATION_TOKEN: ${SUITE_ROSTER_TOKEN:?}
+      # Resolved per agent by the host; every agent here draws from the roster.
+      SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
       # research
       SUITE_WEB_SEARCH_BACKEND: ${SUITE_WEB_SEARCH_BACKEND:-searxng}
       SUITE_BRAVE_API_KEY: ${SUITE_BRAVE_API_KEY:-}
@@ -446,9 +447,12 @@ services:
     environment:
       <<: *suite-env
       SUITE_AGENT_GROUP: channels
-      AGENT_INVITATION_TOKEN: ${CHATBOT_INVITATION:?provisions_service_user invite}
-      # The webapp consumes the roster like any other non-service agent; the
-      # chatbot's own token above is the one that provisions its principal.
+      # The host resolves a token PER AGENT (`bp_agents.host.agent_invitation`):
+      # `<NAME>_INVITATION` wins, else the roster. AGENT_INVITATION_TOKEN is a
+      # single process-wide variable and must NOT be relied on here — the
+      # chatbot's invitation provisions a service user and the webapp's must
+      # not be it.
+      CHATBOT_INVITATION: ${CHATBOT_INVITATION:?provisions_service_user invite}
       SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
       SUITE_TELEGRAM_BOT_TOKEN: ${SUITE_TELEGRAM_BOT_TOKEN:-}
       SUITE_KAKAO_CF_ACCOUNT_ID: ${SUITE_KAKAO_CF_ACCOUNT_ID:-}
