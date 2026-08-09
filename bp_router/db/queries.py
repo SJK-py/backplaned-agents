@@ -2880,6 +2880,50 @@ def _maybe_truncate_audit_payload(
     }
 
 
+async def get_user_llm_preferences(
+    conn: asyncpg.Connection, user_id: str
+) -> dict[str, str]:
+    """The user's slot → preset map
+    (`docs/design/router-resolved-preset-slots.md` §4).
+
+    Read on the LLM hot path, folded into the same fetch as the user's
+    level, so a slot resolution costs no extra round trip."""
+    rows = await conn.fetch(
+        "SELECT slot, preset_name FROM user_llm_preferences WHERE user_id = $1",
+        user_id,
+    )
+    return {r["slot"]: r["preset_name"] for r in rows}
+
+
+async def set_user_llm_preference(
+    conn: asyncpg.Connection, user_id: str, slot: str, preset_name: str | None
+) -> None:
+    """Set (or clear, with `preset_name=None`) one slot preference.
+
+    Callers MUST have tier-gated `preset_name` first: this is the user's
+    half of a decision whose ceiling is the preset's `min_user_level`, and
+    storing an un-entitled choice is what the design moves refusal away
+    from (§2.2 — refuse at selection, not mid-turn)."""
+    if preset_name is None:
+        await conn.execute(
+            "DELETE FROM user_llm_preferences WHERE user_id = $1 AND slot = $2",
+            user_id,
+            slot,
+        )
+        return
+    await conn.execute(
+        """
+        INSERT INTO user_llm_preferences (user_id, slot, preset_name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (user_id, slot) DO UPDATE
+            SET preset_name = EXCLUDED.preset_name, updated_at = now()
+        """,
+        user_id,
+        slot,
+        preset_name,
+    )
+
+
 async def append_audit_event(
     conn: asyncpg.Connection,
     *,

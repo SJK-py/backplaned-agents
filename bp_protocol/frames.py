@@ -378,6 +378,13 @@ class LlmRequestFrame(_FrameBase):
     # `preset` instead. Resolution: `preset` first, then `model`.
     model: str = "default"
     preset: str | None = None
+    # Resolve the preset from the caller's per-user preference for this
+    # SLOT — an opaque key the router never interprets — falling back to
+    # the operator's slot default, gate-checked at every step
+    # (`docs/design/router-resolved-preset-slots.md`). Mutually exclusive
+    # with `preset`: naming both is a caller bug (which model did you
+    # mean?), so it is rejected rather than silently resolved one way.
+    preset_slot: str | None = None
 
     # generate
     messages: list[dict[str, Any]] = Field(
@@ -398,6 +405,19 @@ class LlmRequestFrame(_FrameBase):
     # context (propagated for quotas + audit)
     user_id: str | None = None
     task_id: str | None = None
+
+    @model_validator(mode="after")
+    def _slot_xor_preset(self) -> LlmRequestFrame:
+        """`preset_slot` and `preset` name the model two different ways.
+        Silently preferring one would make a caller bug invisible — and the
+        two have different refusal semantics (a slot degrades, a named
+        preset does not), so guessing is the wrong kind of helpful."""
+        if self.preset_slot is not None and self.preset is not None:
+            raise ValueError(
+                "preset_slot and preset are mutually exclusive — "
+                "name the model one way"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +616,16 @@ class LlmResultFrame(_FrameBase):
     )
     finish_reason: str = "stop"
     usage: dict[str, int] = Field(default_factory=dict)
+    # Which preset actually served the call. With slot resolution the agent
+    # otherwise cannot know — the whole point is that it named a slot, not a
+    # model. Also set for explicit `preset=` / `model=` calls, so callers
+    # have one field to log.
+    resolved_preset: str | None = None
+    # True when the caller's stored preference for the slot failed the tier
+    # gate and the operator default was used instead (design §3.1 case 2).
+    # Lets a suite tell the user ONCE — "your saved model is no longer
+    # available on your plan" — rather than silently changing behaviour.
+    preset_downgraded: bool = False
     raw: dict[str, Any] = Field(default_factory=dict)
     # Gemini-style thought summary (`include_thoughts=True`) — joined
     # text of every part with `thought=True`. None when not requested

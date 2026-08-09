@@ -18,6 +18,75 @@
 
 ---
 
+## 2026-08-11
+
+> Preset **slots**: an agent names an opaque preference key ("balanced") and the
+> router resolves it to a preset from the user's own choice and the operator's
+> default, gate-checked at every step. Joins two halves that never met — the
+> router owned the ceiling (`min_user_level`), the suite owned the choice
+> (`user_config.preset_*`) — without teaching the router what "balanced" means.
+> Design: [`../design/router-resolved-preset-slots.md`](../design/router-resolved-preset-slots.md).
+>
+> Additive: an agent that never sends `preset_slot` behaves exactly as before.
+
+### Added — `preset_slot` resolution (`bp_protocol`, `bp_router/llm`, `bp_sdk`)
+
+- **What:** `LlmRequestFrame.preset_slot` (mutually exclusive with `preset`,
+  rejected at validation rather than silently resolved one way);
+  `LlmResultFrame.resolved_preset` + `preset_downgraded`;
+  `LlmService.resolve_slot`; `Settings.llm_default_presets` (slot → preset,
+  validated against the loaded preset map after every reload);
+  `ctx.llm.generate(slot=…)` with the two new fields on `LlmResponse`.
+- **Resolution order:** user preference if it passes the gate → else the slot
+  default, flagged `preset_downgraded` → else the slot default → refuse if the
+  default itself is unreachable → `preset_slot_unknown` for an unknown slot.
+- **Why a slot degrades where an explicit `preset=` refuses:** "give me the
+  balanced model" is satisfiable by degrading; "give me claude-opus" is not.
+  Without the degrade, a user demoted after choosing has *every* turn fail
+  with no path that re-resolves — the old behaviour.
+- **Why the router never interprets a slot name:** no `Literal["pro",…]`, no
+  per-slot branch. "Balanced" means whatever `llm_default_presets` says, so
+  the vocabulary lives in operator config rather than platform code — the same
+  discipline `role` and `item_kind` follow in the session store.
+
+### Added — `user_llm_preferences` + user-facing LLM endpoints
+
+- **What (`0011_user_llm_preferences`, `bp_router/api/llm.py`):** a
+  `(user_id, slot) → preset_name` table, plus `GET /v1/llm/presets` (only
+  presets the caller's level satisfies) and `GET|PUT /v1/llm/preferences`
+  (gate-checked on write, returning `403 preset_not_allowed` with the required
+  level).
+- **Why its own table rather than the session store's user-scoped KV:** that
+  namespace is writable by any agent in the user's session, and the router
+  *acts* on this value — it selects a model, at a cost, under a tier gate. A
+  value the router enforces policy on must not be one any agent can overwrite.
+  There is no agent-facing write path at all.
+- **Why the listing endpoint matters:** it filters with the same
+  `user_level_satisfies` the call path gates on, so the menu cannot drift from
+  the entitlement. The suite's `selectable_presets_*` was a global list that
+  could not be correct for a tier1 and a tier3 user in one deployment, and the
+  suite could not compute a correct one because preset enumeration was
+  admin-only.
+- **Cache:** preferences load with the user's level into the existing
+  `_UserLevelCacheEntry` (60 s TTL), so a slot costs no extra round trip; a
+  preference write calls `invalidate_user_level`, without which the old model
+  would keep running for up to the TTL.
+
+### Changed — two source-pin tests updated for the new gate shape
+
+- **What:** `test_l3_dispatch_tier_lookup_is_task_derived_and_gated` and
+  `test_dispatch_user_level_lookup_error_proceeds_for_open_preset` pinned the
+  literal `if first_preset_gated:`, now `... and not slot_level_resolved:`.
+- **Why this is a refinement, not a weakening:** slot resolution needs the
+  user's preference, so a slot request derives identity unconditionally — by
+  necessity. The gating assertions now run against the source *after* the slot
+  block (so a `*` preset with no slot still pays nothing), and a new assertion
+  requires the slot path to derive identity through `_derive_task_scope` before
+  reading any preference — an agent must not read a preference for a user it
+  merely claimed to be.
+
+---
+
 ## 2026-08-10
 
 > Follow-up to the session store: a FIFO bug in the turn lease found by review,

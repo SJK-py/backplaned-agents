@@ -620,6 +620,7 @@ async def _run_llm_call(
 ) -> None:
     from bp_router.llm.presets import (  # noqa: PLC0415
         PresetNotAllowedError,
+        PresetSlotUnknownError,
         PresetUnknownError,
     )
     from bp_router.llm.retry_classification import (  # noqa: PLC0415
@@ -631,7 +632,14 @@ async def _run_llm_call(
     correlation = frame.correlation_id
     # `preset` wins when both are set; otherwise fall back to legacy
     # `model` (which resolves through the same default-preset names).
+    # A `preset_slot` (mutually exclusive with `preset`) is resolved below,
+    # once we hold a trusted identity to read the user's preference under.
     preset_name = frame.preset or frame.model
+    slot_downgraded = False
+    # Set once the caller's trusted level is known, so the tier gate further
+    # down reuses it instead of deriving the task scope a second time.
+    slot_user_level: str | None = None
+    slot_level_resolved = False
 
     def _send(out_frame: Frame) -> asyncio.Future:  # type: ignore[no-untyped-def]
         return entry.outbox.put(out_frame)
@@ -684,6 +692,69 @@ async def _run_llm_call(
     # Failure handling (tier-gated only): a DB outage → `auth_lookup_failed`;
     # an unverifiable caller (no task context, or not the task's active
     # executor, or unknown user) → `preset_not_allowed`. Both fail closed.
+    # --- Slot resolution -------------------------------------------------
+    #
+    # A slot is an OPAQUE key; the router resolves it to a preset from the
+    # user's own preference and the operator's default, gate-checked at each
+    # step (`docs/design/router-resolved-preset-slots.md` §3.1). Identity is
+    # the same task-derived one the gate uses — a preference must be read for
+    # the TRUSTED user, never an asserted one, or an agent could borrow
+    # another tenant's entitlement by naming them.
+    if frame.preset_slot is not None:
+        if frame.task_id is None:
+            await _send(_err_result(
+                "preset_slot requires a task context to resolve the "
+                "caller's preference",
+                code=ErrorCode.LLM_PRESET_NOT_ALLOWED,
+            ))
+            return
+        try:
+            async with state.db_pool.acquire() as conn:
+                scope_t = await _derive_task_scope(
+                    conn, frame.task_id, entry.agent_id
+                )
+                if scope_t is None:
+                    await _send(_err_result(
+                        "caller could not be verified for slot resolution",
+                        code=ErrorCode.LLM_PRESET_NOT_ALLOWED,
+                    ))
+                    return
+                slot_user_level = await state.llm_service.resolve_user_level(  # type: ignore[attr-defined]
+                    conn, scope_t[0]
+                )
+                slot_level_resolved = True
+                slots = state.llm_service.peek_user_slots_cached(scope_t[0])  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "llm_slot_lookup_failed",
+                extra={
+                    "event": "llm_slot_lookup_failed",
+                    "bp.slot": frame.preset_slot,
+                    "bp.task_id": frame.task_id,
+                },
+                exc_info=True,
+            )
+            await _send(_err_result(
+                "preference lookup unavailable; slot cannot be resolved",
+                code=ErrorCode.LLM_AUTH_LOOKUP_FAILED,
+            ))
+            return
+        try:
+            preset_name, slot_downgraded = state.llm_service.resolve_slot(  # type: ignore[attr-defined]
+                frame.preset_slot, user_level=slot_user_level, slots=slots
+            )
+        except PresetSlotUnknownError:
+            await _send(_err_result(
+                f"unknown preset slot {frame.preset_slot!r}",
+                code=ErrorCode.LLM_PRESET_UNKNOWN,
+            ))
+            return
+        except PresetNotAllowedError as exc:
+            await _send(_err_result(
+                str(exc), code=ErrorCode.LLM_PRESET_NOT_ALLOWED
+            ))
+            return
+
     preset_obj = None
     try:
         preset_obj = state.llm_service.get_preset(preset_name)  # type: ignore[attr-defined]
@@ -706,7 +777,12 @@ async def _run_llm_call(
         chain_needs_tier = first_preset_gated  # defensive: fail toward resolving
 
     user_level: str | None = None
-    if first_preset_gated:
+    if slot_level_resolved:
+        # Slot resolution already derived the trusted identity and resolved
+        # the level (and cached the preferences with it) — don't pay for the
+        # task-scope derive twice.
+        user_level = slot_user_level
+    if first_preset_gated and not slot_level_resolved:
         if frame.task_id is None:
             # No task to bind a trusted identity to (e.g. a spawn-context
             # LLM call). The gate can't be evaluated → refuse.
@@ -896,6 +972,8 @@ async def _run_llm_call(
                     thought_summary=resp.thought_summary,
                     thought_signature=resp.thought_signature,
                     reasoning_blocks=resp.reasoning_blocks,
+                    resolved_preset=preset_name,
+                    preset_downgraded=slot_downgraded,
                 )
             )
             return
@@ -1007,6 +1085,8 @@ async def _run_llm_call(
                 finish_reason=final_finish,
                 usage=_serialize_usage(final_usage),
                 reasoning_blocks=agg_reasoning,
+                resolved_preset=preset_name,
+                preset_downgraded=slot_downgraded,
             )
         )
         # Land the same Prometheus counters the unary path lands.

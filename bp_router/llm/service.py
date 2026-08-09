@@ -15,6 +15,7 @@ from bp_router.llm.presets import (
     Preset,
     PresetCycleError,
     PresetNotAllowedError,
+    PresetSlotUnknownError,
     PresetUnknownError,
     ResolvedCallParams,
     default_presets_with_overlay,
@@ -210,6 +211,11 @@ def _messages_have_tool_call_ids(messages: list[Message]) -> bool:
 class _UserLevelCacheEntry:
     level: str
     expires_at: float
+    # The user's slot → preset preferences, fetched with the level so a
+    # slot resolution costs no extra round trip on the hot path
+    # (`docs/design/router-resolved-preset-slots.md` §7). Invalidated by
+    # the same `invalidate_user_level` a preference write calls.
+    slots: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +414,19 @@ class LlmService:
         # Atomic publish: the map is fully built above; swap it in as the
         # final mutation so a concurrent reader never sees a partial map.
         self._presets = new_map
+        bad_slots = self.validate_slot_defaults()
+        if bad_slots:
+            # An operator typo in `llm_default_presets` should surface at
+            # boot, not on a user's turn. Logged rather than raised so one
+            # bad slot can't take the router down; the slot itself then
+            # refuses with `preset_slot_unknown` when used.
+            logger.error(
+                "llm_slot_default_unknown_preset",
+                extra={
+                    "event": "llm_slot_default_unknown_preset",
+                    "bp.slots": bad_slots,
+                },
+            )
         # Adapter cache may now be stale (e.g., concrete_model changed)
         # so flush; lazy reconstruction is cheap.
         self._adapters.clear()
@@ -415,6 +434,13 @@ class LlmService:
 
     def list_presets(self) -> list[Preset]:
         return sorted(self._presets.values(), key=lambda p: p.name)
+
+    @property
+    def presets(self) -> dict[str, Preset]:
+        """The loaded preset map. Read-only by convention — mutating it
+        bypasses the cycle + slot-default validation `load_presets_from_db`
+        runs."""
+        return self._presets
 
     def get_preset(self, name: str) -> Preset | None:
         return self._presets.get(name)
@@ -487,9 +513,12 @@ class LlmService:
             # must take effect at the next invalidate, not after
             # TTL.
             return None
+        # One fetch serves both the tier gate and slot resolution.
+        slots = await queries.get_user_llm_preferences(conn, user_id)
         self._user_level_cache[user_id] = _UserLevelCacheEntry(
             level=user.level,
             expires_at=now + self.USER_LEVEL_TTL_S,
+            slots=slots,
         )
         self._user_level_cache.move_to_end(user_id)
         # Evict the oldest entries past the cap. `popitem(last=False)`
@@ -497,6 +526,96 @@ class LlmService:
         while len(self._user_level_cache) > self.USER_LEVEL_CACHE_MAX:
             self._user_level_cache.popitem(last=False)
         return user.level
+
+    def peek_user_slots_cached(self, user_id: str | None) -> dict[str, str]:
+        """The cached slot preferences, or `{}` on a miss. Pure in-memory —
+        the caller resolves the level first (which populates this)."""
+        if not user_id:
+            return {}
+        entry = self._user_level_cache.get(user_id)
+        if entry is None or entry.expires_at <= time.monotonic():
+            return {}
+        return entry.slots
+
+    def resolve_slot(
+        self, slot: str, *, user_level: str | None, slots: dict[str, str]
+    ) -> tuple[str, bool]:
+        """Resolve an opaque slot key to a preset name.
+
+        Returns `(preset_name, downgraded)`. The router never interprets the
+        slot's NAME — it is a key into the user's preferences and the
+        operator's `llm_default_presets` (design §3).
+
+        Order (§3.1):
+          1. user preference, if set and it satisfies the gate → use it;
+          2. preference set but gate-failing → the slot default, flagged
+             `downgraded`. This differs deliberately from an explicit
+             `preset=`, which hard-refuses: "give me the balanced model" is
+             satisfiable by degrading, "give me claude-opus" is not. Without
+             it, a user demoted after choosing has EVERY turn fail with no
+             path that re-resolves;
+          3. no preference → the slot default;
+          4. slot default itself gate-failing → `PresetNotAllowedError` (an
+             operator configured a default this user cannot reach — failing
+             closed is right, and it is a config error worth surfacing);
+          5. unknown slot → `PresetSlotUnknownError`.
+        """
+        defaults = getattr(self.settings, "llm_default_presets", None) or {}
+        default_name = defaults.get(slot)
+        if default_name is None:
+            raise PresetSlotUnknownError(slot)
+
+        preferred = slots.get(slot)
+        if preferred is not None:
+            preset = self._presets.get(preferred)
+            if preset is not None and user_level_satisfies(
+                user_level, preset.min_user_level
+            ):
+                return preferred, False
+            # Fall through to the default, flagged. A preference naming a
+            # preset that no longer EXISTS degrades the same way — an
+            # operator removing a preset must not wedge everyone who chose it.
+            logger.info(
+                "llm_slot_preference_downgraded",
+                extra={
+                    "event": "llm_slot_preference_downgraded",
+                    "bp.slot": slot,
+                    "bp.preset": preferred,
+                    "bp.user_level": user_level,
+                },
+            )
+            default_preset = self._presets.get(default_name)
+            if default_preset is not None and not user_level_satisfies(
+                user_level, default_preset.min_user_level
+            ):
+                raise PresetNotAllowedError(
+                    preset_name=default_name,
+                    user_level=user_level,
+                    required=default_preset.min_user_level,
+                )
+            return default_name, True
+
+        default_preset = self._presets.get(default_name)
+        if default_preset is not None and not user_level_satisfies(
+            user_level, default_preset.min_user_level
+        ):
+            raise PresetNotAllowedError(
+                preset_name=default_name,
+                user_level=user_level,
+                required=default_preset.min_user_level,
+            )
+        return default_name, False
+
+    def validate_slot_defaults(self) -> list[str]:
+        """Slot defaults naming a preset that is not loaded. Checked after
+        every preset (re)load, same posture as the fallback-cycle check —
+        an operator typo should surface at boot, not on a user's turn."""
+        defaults = getattr(self.settings, "llm_default_presets", None) or {}
+        return [
+            f"{slot} -> {name}"
+            for slot, name in defaults.items()
+            if name not in self._presets
+        ]
 
     def peek_user_level_cached(self, user_id: str | None) -> str | None:
         """Return the cached level if there's a FRESH entry; else None.

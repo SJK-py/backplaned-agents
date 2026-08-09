@@ -15,6 +15,7 @@ a doc's status changes, update it in both places.
 | --- | --- |
 | [`router-managed-file-store.md`](./router-managed-file-store.md) | Named per-user/per-session file stash; `File*` frames, `ctx.files`, LLM `file_ref` resolution. Replaced `ProxyFile`. |
 | [`router-managed-session-store.md`](./router-managed-session-store.md) | Conversation log + session state + hand-over queue + FIFO turn lease. `SessionOp` frames, `ctx.history`. Carries two known warts (§5.2, §9.4) and one shipped-then-fixed bug (§6.4). |
+| [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | Router half landed: the tier gate and the user's model choice resolved as one decision from an opaque slot key. Suite cutover outstanding. |
 | [`agent-tool-history-recall.md`](./agent-tool-history-recall.md) | `recall_tool_history` — an agent re-reading its own earlier tool results on demand. |
 | [`oidc-webapp.md`](./oidc-webapp.md) | SSO against an external OpenID Provider; router as relying party, webapp as BFF. |
 | [`mcp-bridge-per-server-mode-per-tool.md`](./mcp-bridge-per-server-mode-per-tool.md) | One backplane agent per MCP server, one mode per tool. |
@@ -27,7 +28,6 @@ a doc's status changes, update it in both places.
 
 | doc | depends on |
 | --- | --- |
-| [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | Nothing — unblocked. Makes the router's tier gate and the user's model choice one decision, resolved from an opaque slot key. |
 | [`deployment-agent-host.md`](./deployment-agent-host.md) | Nothing, though it gets smaller after the suite rework. One process per agent *group*, a roster token instead of twelve invitations, one `init`. |
 
 ## Deferred / superseded

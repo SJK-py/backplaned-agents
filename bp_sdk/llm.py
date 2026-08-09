@@ -291,6 +291,14 @@ class LlmResponse:
     # on individual parts instead). `assistant_from_response`
     # prepends these to the rebuilt assistant turn.
     reasoning_blocks: list[dict[str, Any]] = field(default_factory=list)
+    # Which preset actually served the call. With `slot=` the agent named a
+    # preference, not a model, so this is the only way it learns what ran.
+    resolved_preset: str | None = None
+    # The caller's stored preference for the slot failed the tier gate and
+    # the operator default was used. Surface it to the user ONCE rather than
+    # silently running a different model
+    # (`docs/design/router-resolved-preset-slots.md` §3.1).
+    preset_downgraded: bool = False
 
 
 @dataclass
@@ -1051,6 +1059,7 @@ class LlmServiceClient:
         prompt: str | list[Message],
         *,
         preset: str | None = None,
+        slot: str | None = None,
         model: str = "default",
         tools: list[ToolSpec] | None = None,
         tool_choice: ToolChoice | None = None,
@@ -1061,6 +1070,16 @@ class LlmServiceClient:
         retry: RetryPolicy | None = None,
     ) -> LlmResponse | AsyncIterator[LlmDelta]:
         """Issue an LLM request via the router.
+
+        `slot` names an opaque PREFERENCE key ("balanced", "pro", …) the
+        ROUTER resolves to a preset from the user's own choice and the
+        operator's default, gate-checked at every step
+        (`docs/design/router-resolved-preset-slots.md`). Prefer it over
+        `preset` for user-facing work: the agent stops needing to know which
+        model a user is entitled to, and a user demoted after choosing
+        degrades to the operator default instead of failing every turn.
+        Mutually exclusive with `preset`; `LlmResponse.resolved_preset` says
+        what actually ran, and `preset_downgraded` flags case 2.
 
         `max_tokens` caveat for thinking models: on Gemini 2.5+ and
         Anthropic Claude with extended thinking, `max_tokens` is the
@@ -1100,6 +1119,7 @@ class LlmServiceClient:
                 kind="generate",
                 model=model,
                 preset=preset,
+                preset_slot=slot,
                 messages=[m.model_dump() for m in messages],
                 tools=[t.model_dump() for t in tools] if tools else [],
                 tool_choice=tool_choice,
@@ -1483,6 +1503,8 @@ def _result_to_response(result: LlmResultFrame) -> LlmResponse:
         thought_summary=result.thought_summary,
         thought_signature=result.thought_signature,
         reasoning_blocks=list(result.reasoning_blocks),
+        resolved_preset=result.resolved_preset,
+        preset_downgraded=result.preset_downgraded,
     )
 
 

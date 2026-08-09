@@ -780,6 +780,7 @@ def create_app() -> FastAPI:
         auth,
         files,
         health,
+        llm,
         onboard,
         registrations,
         sessions,
@@ -791,6 +792,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions.router, prefix="/v1/sessions", tags=["sessions"])
     app.include_router(tasks.router, prefix="/v1/tasks", tags=["tasks"])
     app.include_router(files.router, prefix="/v1/files", tags=["files"])
+    app.include_router(llm.router, prefix="/v1/llm", tags=["llm"])
     app.include_router(onboard.router, prefix="/v1", tags=["onboard"])
     app.include_router(
         registrations.router, prefix="/v1/registrations", tags=["registrations"]

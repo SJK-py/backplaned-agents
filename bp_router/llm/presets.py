@@ -211,6 +211,20 @@ class PresetNotAllowedError(PermissionError):
         self.required = required
 
 
+class PresetSlotUnknownError(KeyError):
+    """The agent named a `preset_slot` the operator has not configured.
+
+    Slots are opaque to the router — their meaning lives entirely in
+    `Settings.llm_default_presets` — so an unknown slot is a deployment
+    mismatch (an agent expecting a slot this deployment does not define),
+    not a user error. See `docs/design/router-resolved-preset-slots.md` §3.
+    """
+
+    def __init__(self, slot: str) -> None:
+        super().__init__(f"unknown preset slot {slot!r}")
+        self.slot = slot
+
+
 class PresetCycleError(ValueError):
     """`fallback_preset` chain contains a cycle. Raised at load time
     so a misconfigured set of presets fails loud — at startup or on

@@ -462,6 +462,30 @@ class Settings(BaseSettings):
     service / tier0 unlimited by default). Keys MUST match the
     user-level vocabulary used by `quota_admit_*`."""
 
+    llm_default_presets: dict[str, str] = Field(
+        default_factory=lambda: {
+            "pro": "default",
+            "balanced": "default",
+            "lite": "default",
+        }
+    )
+    """Operator defaults for LLM preset SLOTS
+    (`docs/design/router-resolved-preset-slots.md` §3.2). A slot is an
+    OPAQUE key an agent names on `LlmRequest.preset_slot`; the router
+    resolves it to a preset via the user's own preference
+    (`user_llm_preferences`) and falls back to the value here. The router
+    never interprets a slot's name — "balanced" means whatever this map
+    says it means, which is why the vocabulary lives in operator config
+    rather than in router code.
+
+    Every value MUST name a loaded preset; unknown targets are rejected at
+    preset-load time, the same posture as the fallback-cycle check. Slots
+    absent from this map are unknown and refused (`preset_slot_unknown`).
+
+    Embedding is deliberately NOT a slot: changing an embedding model
+    invalidates every vector already written. Agents that embed name an
+    explicit `preset=` instead."""
+
     session_store_quota_bytes: dict[str, int | None] = Field(
         default_factory=lambda: {
             "admin": None,

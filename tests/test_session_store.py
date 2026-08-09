@@ -495,7 +495,7 @@ def test_retired_and_redacted_are_independent_axes(test_db_url: str) -> None:
             user, session = await _fresh(conn, "axes")
             scope = StoreScope(user, session, "orchestrator")
             async with conn.transaction():
-                kept = await execute_batch(conn, scope, [AppendOp(role="user", content="kept")])
+                await execute_batch(conn, scope, [AppendOp(role="user", content="kept")])
                 gone = await execute_batch(conn, scope, [AppendOp(role="user", content="deleted")])
                 await execute_batch(
                     conn, scope, [RedactOp(message_ids=[gone.results[0].message_id])]

@@ -1,6 +1,14 @@
 # Router-resolved preset slots
 
-> **Status:** design proposal — not implemented.
+> **Status: implemented** (router side). Shipped as
+> `LlmRequestFrame.preset_slot` + `LlmResultFrame.resolved_preset` /
+> `preset_downgraded`, `LlmService.resolve_slot`, migration
+> `0011_user_llm_preferences`, `Settings.llm_default_presets`, the
+> `/v1/llm/presets` + `/v1/llm/preferences` endpoints, and
+> `ctx.llm.generate(slot=…)`. Covered by `tests/test_preset_slots.py`.
+> **Step 7 (the suite cutover, §8) is outstanding** — the suite still
+> reads `user_config.preset_*` and passes explicit names, so nothing has
+> been deleted there yet.
 >
 > Companion to [`router-managed-session-store.md`](./router-managed-session-store.md),
 > which moved conversation into the router and left `user_config` — including

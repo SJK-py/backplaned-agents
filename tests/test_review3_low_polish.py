@@ -210,20 +210,34 @@ def test_l3_dispatch_tier_lookup_is_task_derived_and_gated() -> None:
     from bp_router import dispatch
 
     src = inspect.getsource(dispatch._run_llm_call)
-    # Second-pass: the gate now branches on `first_preset_gated` (the
-    # requested preset is gated → hard-verify-or-refuse) and `chain_needs_tier`
-    # (a gated FALLBACK → best-effort resolve). Either way the level lookup
-    # (pool acquire + derive) is gated — never unconditional.
-    guard_idx = src.find("if first_preset_gated:")
-    derive_idx = src.find("_derive_task_scope(")
-    pool_idx = src.find("state.db_pool.acquire")
+    # Second-pass: the gate branches on `first_preset_gated` (the requested
+    # preset is gated → hard-verify-or-refuse) and `chain_needs_tier` (a gated
+    # FALLBACK → best-effort resolve). Either way the level lookup (pool
+    # acquire + derive) is gated — never unconditional.
+    #
+    # Preset SLOTS added a second, earlier lookup: resolving a slot needs the
+    # user's stored preference, so a slot request always derives identity. That
+    # is by necessity, not a regression of this property — so the gating
+    # assertions below are made against the source AFTER the slot block, while
+    # the identity assertions are made against the whole function.
+    slot_block = src.find("if frame.preset_slot is not None:")
+    assert slot_block > 0, "slot resolution should precede the tier gate"
+    gate_src = src[src.find("user_level: str | None = None", slot_block):]
+
+    guard_idx = gate_src.find("if first_preset_gated and not slot_level_resolved:")
+    derive_idx = gate_src.find("_derive_task_scope(")
+    pool_idx = gate_src.find("state.db_pool.acquire")
     assert guard_idx > 0, "tier lookup must be gated on first_preset_gated"
     assert derive_idx > 0, "tier identity must come from _derive_task_scope"
-    # The pool acquire (and the derive) sit AFTER the first gate guard.
+    # The pool acquire (and the derive) sit AFTER the gate guard, so a `*`
+    # preset with no slot still pays nothing.
     assert guard_idx < pool_idx and guard_idx < derive_idx
-    # The gate must NOT resolve the level from the agent-asserted user_id.
+    # NEITHER path may resolve the level from the agent-asserted user_id.
     assert "resolve_user_level(conn, frame.user_id)" not in src
     assert "peek_user_level_cached" not in src
+    # The slot path derives identity too — it must not read a preference for
+    # a user the caller merely claimed to be.
+    assert "_derive_task_scope(" in src[slot_block:src.find("resolve_slot(", slot_block)]
 
 
 def test_l3_resolve_user_level_unchanged_for_miss_path() -> None:

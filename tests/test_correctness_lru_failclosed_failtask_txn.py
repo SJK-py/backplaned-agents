@@ -151,11 +151,13 @@ def test_dispatch_user_level_lookup_error_proceeds_for_open_preset() -> None:
     from bp_router import dispatch
 
     src = _inspect.getsource(dispatch._run_llm_call)
-    # The fail-closed (auth_lookup_failed) path must be guarded by
-    # `if first_preset_gated:` — it only fires when the REQUESTED preset is
+    # The fail-closed (auth_lookup_failed) path must be guarded on
+    # `first_preset_gated` — it only fires when the REQUESTED preset is
     # gated. An open (`*`) preset whose lookup fails (or which has no gated
     # fallback) proceeds with user_level=None rather than failing closed.
-    assert "if first_preset_gated:" in src
+    # (The guard also excludes the slot path, which resolved the level
+    # already — see `test_l3_dispatch_tier_lookup_is_task_derived_and_gated`.)
+    assert "if first_preset_gated and not slot_level_resolved:" in src
 
 
 # ---------------------------------------------------------------------------
