@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bp_protocol.frames import AckFrame, Frame
 
@@ -159,4 +159,37 @@ def fanout_frame(
                 },
             )
             _record_deliver_dropped(frame.type)
+    return delivered
+
+
+def notify_lease_promotions(state: AppState, promotions: list[Any]) -> int:
+    """Push `SessionLease` to waiters that just became the holder.
+
+    Called AFTER the store transaction commits — announcing a promotion the
+    transaction then rolled back would leave a waiter believing it holds a
+    lease nobody granted (`docs/design/router-managed-session-store.md`
+    §6.4). Best-effort like every fan-out: a waiter that misses the push
+    still re-acquires on the `holder_expires_at` deadline it was handed,
+    which is the same fallback that covers a holder dying without
+    releasing.
+    """
+    if not promotions:
+        return 0
+    from bp_protocol.frames import SessionLeaseFrame  # noqa: PLC0415
+
+    delivered = 0
+    for promo in promotions:
+        frame = SessionLeaseFrame(
+            agent_id="router",
+            # Router-originated push with no request to inherit a trace
+            # from — the same synthetic id `tasks.py` uses for its
+            # router-minted Result frames.
+            trace_id="0" * 32,
+            span_id="0" * 16,
+            session_id=promo.session_id,
+            ticket=promo.ticket,
+            granted=True,
+            holder_expires_at=promo.holder_expires_at,
+        )
+        delivered += fanout_frame(state, [promo.agent_id], frame)
     return delivered

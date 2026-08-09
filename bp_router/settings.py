@@ -462,6 +462,26 @@ class Settings(BaseSettings):
     service / tier0 unlimited by default). Keys MUST match the
     user-level vocabulary used by `quota_admit_*`."""
 
+    session_store_quota_bytes: dict[str, int | None] = Field(
+        default_factory=lambda: {
+            "admin": None,
+            "service": None,
+            "tier0": None,
+            "tier1": 256 * 1024 * 1024,        # 256 MiB
+            "tier2": 64 * 1024 * 1024,         # 64 MiB
+            "tier3": 16 * 1024 * 1024,         # 16 MiB
+        }
+    )
+    """Per-user-level ceiling on the router-managed session store
+    (`docs/design/router-managed-session-store.md` §10.4). Usage is
+    `SUM(content_bytes)` over the user's `session_threads` rows — the
+    ACTIVE window only, so folding a thread into a summary reclaims
+    quota, which is the behaviour that makes a long-running assistant
+    sustainable. Enforced on every append; `None` disables the cap for
+    that level. Keys MUST match the user-level vocabulary used by
+    `quota_admit_*`. Conversation text is far smaller than files, hence
+    the lower defaults."""
+
     # ------------------------------------------------------------------
     # Authentication rate limits (credential-stuffing defence)
     # ------------------------------------------------------------------

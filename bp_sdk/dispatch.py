@@ -35,6 +35,8 @@ from bp_protocol.frames import (
     PongFrame,
     ProgressFrame,
     ResultFrame,
+    SessionLeaseFrame,
+    SessionResultFrame,
 )
 from bp_protocol.types import AgentOutput, TaskStatus
 from bp_sdk.context import CancelToken, TaskContext
@@ -149,6 +151,10 @@ class Dispatcher:
         # `_drain_task_correlations` rejects whatever's left when
         # the handler exits.
         self._task_correlations: dict[str, set[tuple[PendingMap, str]]] = {}
+        # Live `ctx.history` handles by task id, so an unsolicited
+        # `SessionLease` promotion can be routed to the coroutine waiting on
+        # that ticket. Dropped with the task in `_drain_task_correlations`.
+        self._session_histories: dict[str, Any] = {}
 
     # Class-level buffer caps for the pre-subscribe progress race.
     # Class-level so deployments with unusual workloads can tune via
@@ -395,6 +401,16 @@ class Dispatcher:
             # Correlated response to a FileStash store / fetch /
             # manage round-trip — same pending_acks map.
             self.pending_acks.resolve(frame.ref_correlation_id, frame)
+        elif isinstance(frame, SessionResultFrame):
+            # Correlated response to a session-store batch — same
+            # pending_acks map as the File / Ack / Pong round-trips.
+            self.pending_acks.resolve(frame.ref_correlation_id, frame)
+        elif isinstance(frame, SessionLeaseFrame):
+            # UNSOLICITED: a waiting turn-lease ticket was promoted. Not a
+            # correlated reply — the AcquireLease that returned `busy` was
+            # answered at the time — so it is fanned to whichever live
+            # handle is waiting on that ticket.
+            self._on_session_lease(frame)
         elif isinstance(frame, LlmDeltaFrame):
             await self._handle_llm_delta(frame)
         elif isinstance(frame, LlmResultFrame):
@@ -733,6 +749,19 @@ class Dispatcher:
         fut.add_done_callback(_untrack)
         return fut
 
+    def _on_session_lease(self, frame: SessionLeaseFrame) -> None:
+        """Route a turn-lease promotion to whichever live task is waiting on
+        that ticket.
+
+        The push is best-effort by design: a handle that has already gone
+        away (task finished, socket reconnected) simply drops it, and the
+        waiter's own `holder_expires_at` timer re-acquires. That fallback is
+        what makes a holder dying without releasing recoverable without a
+        server-side sweep.
+        """
+        for history in list(self._session_histories.values()):
+            history._on_lease_frame(frame.ticket, frame.granted)
+
     def _drain_task_correlations(
         self, task_id: str, exc: BaseException
     ) -> int:
@@ -764,6 +793,7 @@ class Dispatcher:
         self, frame: NewTaskFrame, cancel_token: CancelToken
     ) -> TaskContext:
         from bp_sdk.files import FileStash  # noqa: PLC0415
+        from bp_sdk.history import SessionHistory  # noqa: PLC0415
         from bp_sdk.llm import LlmServiceClient  # noqa: PLC0415
         from bp_sdk.peers import PeerClient  # noqa: PLC0415
         from bp_sdk.progress import ProgressEmitter  # noqa: PLC0415
@@ -791,6 +821,11 @@ class Dispatcher:
         ctx.progress = ProgressEmitter(ctx, self)
         ctx.peers = PeerClient(ctx, self)
         ctx.llm = LlmServiceClient(ctx, self)
+        ctx.history = SessionHistory(ctx, dispatcher=self)
+        # Track the live handle so a `SessionLease` promotion push can be
+        # routed back to the coroutine waiting on that ticket.
+        if frame.task_id:
+            self._session_histories[frame.task_id] = ctx.history
         ctx.files = FileStash(
             ctx,
             inbox_dir=Path(self.agent.config.state_dir) / "inbox" / (frame.task_id or "spawn"),
@@ -923,6 +958,12 @@ class Dispatcher:
                 self._drain_task_correlations(
                     frame.task_id, HandlerExited(frame.task_id)
                 )
+            # Drop the task's session-store handle so a late `SessionLease`
+            # push has nothing to resolve and the map can't grow unbounded.
+            # Sits with the FileStash teardown below: both are per-task
+            # context lifecycle, not correlation bookkeeping.
+            if frame.task_id:
+                self._session_histories.pop(frame.task_id, None)
             # Tear down the per-task FileStash inbox dir.
             # Without this, every task leaks its inbox tree
             # into `state_dir/inbox/<task_id>` until process exit.

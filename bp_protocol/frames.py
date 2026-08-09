@@ -126,6 +126,11 @@ class WelcomeFrame(_FrameBase):
     capabilities: list[str] = Field(default_factory=list)
     heartbeat_interval_ms: int = 20_000
     max_payload_bytes: int = 1_048_576
+    # Router FEATURES the connecting SDK may use, e.g. "session_store.v1".
+    # Distinct from `capabilities` above, which echoes the AGENT's own
+    # declared capability list. Defaulted, so an older SDK that never reads
+    # it — and an older router that never sets it — are both unaffected.
+    features: list[str] = Field(default_factory=list)
 
 
 class CatalogUpdateFrame(_FrameBase):
@@ -837,12 +842,367 @@ class FileResultFrame(_FrameBase):
 
 
 # ---------------------------------------------------------------------------
+# Router-managed session store (docs/design/router-managed-session-store.md)
+# ---------------------------------------------------------------------------
+#
+# One request frame carrying an ORDERED op list applied in a single
+# transaction (§6.1), one correlated reply carrying positional results,
+# and one unsolicited push for lease promotion (§6.4).
+#
+# The router derives `(user_id, session_id)` from the task row and the
+# owning agent from the authenticated socket, so NO op below carries a
+# writable owner field: an agent can only ever write its own threads
+# (§7). Reads take an explicit `owner_agent_id` because reads are
+# session-scoped — reading cannot fabricate an utterance.
+
+
+class AppendOp(BaseModel):
+    """Append one message to the CALLER'S OWN thread. There is no owner
+    field by design; the router stamps the task's active executor.
+
+    `idempotency_key` makes the append exactly-once within its task —
+    a redelivered task appends nothing and gets the original id back.
+    Omit it and one task may append many rows of the same role (a
+    tool_call and its tool_result, two calls in one turn)."""
+
+    kind: Literal["append"] = "append"
+    thread_key: str = ""
+    role: str
+    content: str
+    hidden: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+    model_config = {"extra": "forbid"}
+
+
+class SetFloorOp(BaseModel):
+    """Move the caller's thread floor — the id below which messages leave
+    the active context (§3.4). Monotonic: a lower value is refused
+    `floor_regression`. Covers both prefix folding (summarization) and
+    whole-thread retirement (floor = last id)."""
+
+    kind: Literal["set_floor"] = "set_floor"
+    thread_key: str = ""
+    floor_id: int
+    model_config = {"extra": "forbid"}
+
+
+class SetStateOp(BaseModel):
+    """Write a state value. `session_scoped=True` targets the session-wide
+    namespace (steward or any executor in the session); otherwise it is
+    the caller's own thread state. `value=None` deletes.
+
+    `expected_version` is the CAS token from a prior `GetState` — a
+    mismatch fails the whole batch `version_conflict`, which is what
+    makes two concurrent summarize passes safe (§6.3)."""
+
+    kind: Literal["set_state"] = "set_state"
+    session_scoped: bool = False
+    thread_key: str = ""
+    key: str
+    value: str | None = None
+    expected_version: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
+
+
+class RedactOp(BaseModel):
+    """Blank the content of messages in the caller's own threads, keeping
+    their ids so floors and cursors stay valid (§5.2)."""
+
+    kind: Literal["redact"] = "redact"
+    message_ids: list[int]
+    model_config = {"extra": "forbid"}
+
+
+class HandOverOp(BaseModel):
+    """Enqueue an item for ANOTHER agent (§3.5) — the only way to reach
+    another agent's context. An item is not a message: no role, no
+    content, no place in a transcript. `item_kind` and `payload` are
+    caller-defined and opaque to the router."""
+
+    kind: Literal["hand_over"] = "hand_over"
+    target_agent_id: str
+    thread_key: str = ""
+    item_kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
+
+
+class ConsumeHandoversOp(BaseModel):
+    """Drain the CALLER'S OWN queue. Items come back in this op's result;
+    the caller decides what, if anything, to materialise into its thread
+    as its own appends."""
+
+    kind: Literal["consume_handovers"] = "consume_handovers"
+    item_kinds: list[str] | None = None
+    limit: int = Field(default=32, ge=1, le=256)
+    model_config = {"extra": "forbid"}
+
+
+class AssertThreadOp(BaseModel):
+    """Fail the batch `thread_conflict` unless the thread's last message
+    id is still `last_message_id` (§6.3). The thread-level analogue of
+    the state CAS: it turns a silently interleaved write into a refused
+    batch. `owner_agent_id=None` means the caller's own thread."""
+
+    kind: Literal["assert_thread"] = "assert_thread"
+    owner_agent_id: str | None = None
+    thread_key: str = ""
+    last_message_id: int
+    model_config = {"extra": "forbid"}
+
+
+class AcquireLeaseOp(BaseModel):
+    """Take the session's FIFO turn lease, or get a waiting ticket
+    (§6.4). NEVER blocks — a batch is one transaction, and waiting in it
+    would pin a connection. On `granted=False` the caller waits for a
+    `SessionLease` push, and arms its own timer against
+    `holder_expires_at` in case the holder dies without releasing."""
+
+    kind: Literal["acquire_lease"] = "acquire_lease"
+    holder_id: str
+    ttl_ms: int = Field(default=300_000, ge=1_000, le=3_600_000)
+    model_config = {"extra": "forbid"}
+
+
+class RenewLeaseOp(BaseModel):
+    """Extend the caller's lease. `lease_lost` if it already expired —
+    which is exactly when `AssertThread` starts earning its keep."""
+
+    kind: Literal["renew_lease"] = "renew_lease"
+    holder_id: str
+    ttl_ms: int = Field(default=300_000, ge=1_000, le=3_600_000)
+    model_config = {"extra": "forbid"}
+
+
+class ReleaseLeaseOp(BaseModel):
+    """Release the lease (or drop a waiting ticket) and promote the next
+    ticket, which the router pushes to its waiter."""
+
+    kind: Literal["release_lease"] = "release_lease"
+    holder_id: str
+    model_config = {"extra": "forbid"}
+
+
+class ReadOp(BaseModel):
+    """The one read. Defaults to the caller's own thread, active window
+    (`id > floor`), ascending. `roles` is REQUIRED to be explicit about
+    what the caller wants — the router never filters by role implicitly,
+    because it does not know what any role means (§3.3).
+
+    Server-side byte budget: the router fills newest-first up to
+    `max_bytes` (capped by the negotiated payload budget) so the most
+    recent turns always survive truncation, then returns rows in the
+    requested order with `truncated_before_id` set if it stopped early."""
+
+    kind: Literal["read"] = "read"
+    owner_agent_id: str | None = None
+    thread_key: str = ""
+    roles: list[str] | None = None
+    include_retired: bool = False
+    include_hidden: bool = True
+    since_id: int | None = None
+    before_id: int | None = None
+    limit: int = Field(default=500, ge=1, le=5_000)
+    max_bytes: int | None = None
+    order: Literal["asc", "desc"] = "asc"
+    model_config = {"extra": "forbid"}
+
+
+class GetStateOp(BaseModel):
+    """Read state values. `session_scoped=True` reads the session-wide
+    namespace; otherwise `owner_agent_id` (default: the caller) selects a
+    thread's state. `keys=None` returns every key in that namespace."""
+
+    kind: Literal["get_state"] = "get_state"
+    session_scoped: bool = False
+    owner_agent_id: str | None = None
+    thread_key: str = ""
+    keys: list[str] | None = None
+    model_config = {"extra": "forbid"}
+
+
+class StatThreadOp(BaseModel):
+    """Counts and cursors for one thread, from a single row — so a
+    steward can decide whether to summarize without transferring the
+    thread (§9.3)."""
+
+    kind: Literal["stat_thread"] = "stat_thread"
+    owner_agent_id: str | None = None
+    thread_key: str = ""
+    model_config = {"extra": "forbid"}
+
+
+class ListThreadsOp(BaseModel):
+    """Enumerate threads in scope (all owners when `owner_agent_id` is
+    null), each with its stats."""
+
+    kind: Literal["list_threads"] = "list_threads"
+    owner_agent_id: str | None = None
+    model_config = {"extra": "forbid"}
+
+
+SessionOp = Annotated[
+    AppendOp
+    | SetFloorOp
+    | SetStateOp
+    | RedactOp
+    | HandOverOp
+    | ConsumeHandoversOp
+    | AssertThreadOp
+    | AcquireLeaseOp
+    | RenewLeaseOp
+    | ReleaseLeaseOp
+    | ReadOp
+    | GetStateOp
+    | StatThreadOp
+    | ListThreadsOp,
+    Field(discriminator="kind"),
+]
+
+
+class SessionMessage(BaseModel):
+    """One stored message. `content` is empty and `redacted` true for a
+    tombstone — the id survives so floors and cursors stay valid."""
+
+    id: int
+    owner_agent_id: str
+    thread_key: str = ""
+    role: str
+    content: str
+    hidden: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    redacted: bool = False
+    created_at: datetime
+    model_config = {"extra": "forbid"}
+
+
+class ThreadStat(BaseModel):
+    """Counts above the floor, plus the cursors. `last_message_id` is the
+    token `AssertThread` checks."""
+
+    owner_agent_id: str
+    thread_key: str = ""
+    message_count: int = 0
+    content_bytes: int = 0
+    last_message_id: int = 0
+    floor_id: int = 0
+    model_config = {"extra": "forbid"}
+
+
+class StateValue(BaseModel):
+    """A state entry. `version` is the CAS token for `SetStateOp`."""
+
+    key: str
+    value: str | None = None
+    version: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
+
+
+class HandoverItem(BaseModel):
+    """A drained hand-over. Not a message — the consumer decides what to
+    write into its own thread, under its own authorship."""
+
+    id: int
+    item_kind: str
+    thread_key: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    model_config = {"extra": "forbid"}
+
+
+class LeaseStatus(BaseModel):
+    """Turn-lease outcome. `granted=False` carries the caller's place in
+    the FIFO queue and when the current holder's TTL runs out, so the
+    waiter can arm a fallback timer for a holder that dies without
+    releasing (§6.4)."""
+
+    granted: bool
+    ticket: int
+    holder_expires_at: datetime | None = None
+    model_config = {"extra": "forbid"}
+
+
+class SessionOpResult(BaseModel):
+    """One op's outcome, positional with the request's `ops`. Exactly the
+    fields that op populates are set; the rest stay null."""
+
+    kind: str
+    message_id: int | None = None
+    messages: list[SessionMessage] | None = None
+    last_message_id: int | None = None
+    truncated_before_id: int | None = None
+    stat: ThreadStat | None = None
+    threads: list[ThreadStat] | None = None
+    state: list[StateValue] | None = None
+    items: list[HandoverItem] | None = None
+    lease: LeaseStatus | None = None
+    affected: int | None = None
+    model_config = {"extra": "forbid"}
+
+
+class SessionOpFrame(_FrameBase):
+    """Agent → router. An ordered op list applied in ONE transaction
+    (§6.1); reads observe the writes that precede them.
+
+    `task_id` is NOT trusted as proof: the router derives the
+    authoritative `(user_id, session_id)` from the task row after
+    verifying this connection's authenticated agent is that task's
+    active executor (the `FileStore`/`complete_task` pattern), and that
+    same derivation supplies the owning agent for every write. This is
+    why no op carries a writable owner field — writing in another
+    agent's name is unrepresentable, not merely rejected.
+
+    `scope="user"` addresses the cross-session, user-wide namespace (the
+    conversational analogue of the file store's `persist/`)."""
+
+    type: Literal["SessionOp"] = "SessionOp"
+    task_id: str
+    scope: Literal["session", "user"] = "session"
+    ops: list[SessionOp] = Field(default_factory=list, max_length=32)
+
+
+class SessionResultFrame(_FrameBase):
+    """Router → agent. Correlated reply to `SessionOp`.
+
+    `results` is positional — one entry per op, in order. A set `error`
+    means the batch was refused and NOTHING was applied; `error_index`
+    identifies the offending op when the failure is attributable to one
+    (`thread_conflict`, `version_conflict`, `floor_regression`,
+    `content_too_large`, `session_busy`, `lease_lost`, `denied`)."""
+
+    type: Literal["SessionResult"] = "SessionResult"
+    ref_correlation_id: str
+    error: str | None = None
+    error_index: int | None = None
+    results: list[SessionOpResult] = Field(default_factory=list)
+
+
+class SessionLeaseFrame(_FrameBase):
+    """Router → agent. Your waiting ticket is now the active lease
+    (§6.4). Unsolicited — the `AcquireLease` that returned `busy` was
+    answered at the time; this is the promotion notice, pushed the same
+    way `CatalogUpdate` is.
+
+    `granted=False` means the ticket was dropped (the session closed, or
+    the waiter's own TTL expired) — re-acquire if still interested."""
+
+    type: Literal["SessionLease"] = "SessionLease"
+    session_id: str
+    ticket: int
+    granted: bool = True
+    holder_expires_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
 # Discriminated union + parser
 # ---------------------------------------------------------------------------
 
 
 Frame = Annotated[
-    HelloFrame | WelcomeFrame | CatalogUpdateFrame | AgentInfoUpdateFrame | NewTaskFrame | ResultFrame | ProgressFrame | CancelFrame | ErrorFrame | AckFrame | PingFrame | PongFrame | LlmRequestFrame | LlmDeltaFrame | LlmResultFrame | FileUploadRequestFrame | FileUploadGrantFrame | FileStoreFrame | FileFetchFrame | FileManageFrame | FileResultFrame,
+    HelloFrame | WelcomeFrame | CatalogUpdateFrame | AgentInfoUpdateFrame | NewTaskFrame | ResultFrame | ProgressFrame | CancelFrame | ErrorFrame | AckFrame | PingFrame | PongFrame | LlmRequestFrame | LlmDeltaFrame | LlmResultFrame | FileUploadRequestFrame | FileUploadGrantFrame | FileStoreFrame | FileFetchFrame | FileManageFrame | FileResultFrame | SessionOpFrame | SessionResultFrame | SessionLeaseFrame,
     Field(discriminator="type"),
 ]
 

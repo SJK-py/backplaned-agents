@@ -1,6 +1,12 @@
 # Router-managed session store
 
-> **Status:** design proposal — not implemented.
+> **Status: implemented.** Shipped as `bp_protocol` frames (`SessionOp` /
+> `SessionResult` / `SessionLease`), `bp_router/session_store.py` +
+> migration `0010_session_store`, the `SessionOp` dispatch handler, the
+> steward HTTP endpoints on `/v1/sessions/{id}`, and `ctx.history`
+> (`bp_sdk/history.py`). Covered by `tests/test_session_store.py`.
+> Deviations from this text where the implementation knew better are
+> marked **[shipped]** inline.
 >
 > **Scope note.** This specifies a **platform service**: a general
 > conversation log + session state store owned by the router, designed
@@ -189,9 +195,12 @@ anywhere in the system.
 A per-scope key/value store: `(scope, session_id?, owner_agent_id?, key)
 → (value, version, metadata)`.
 
-  * **Thread state** (`owner_agent_id` set) — owner-writable only. The
-    floor lives here (`sys.floor`, the one reserved key the router
-    interprets); everything else is opaque.
+  * **Thread state** (`owner_agent_id` set) — owner-writable only. Every
+    key is opaque to the router. **[shipped]** the floor is *not* a state
+    key: it is `session_threads.floor_id`, a first-class column, so a read
+    applies it without a second lookup and `SetFloor` can enforce
+    monotonicity in one statement. State stayed fully opaque as a
+    result — there is no reserved key at all.
   * **Session state** (`owner_agent_id` null) — writable by the steward
     or any executor in the session. Routing flags, delegation pointers,
     whatever the suite needs.
@@ -342,7 +351,7 @@ Reads — session-scoped, since reading cannot fabricate (§7):
 
 | op | shape | notes |
 | --- | --- | --- |
-| `Read` | `{owner_agent_id, thread_key, roles, include_retired, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
+| `Read` | `{owner_agent_id, thread_key, roles, include_retired, include_hidden, since_id, before_id, limit, max_bytes, order}` | the one read. Defaults to `id > floor`, ascending, caller's own thread. The result carries `last_message_id` — the token a later `AssertThread` checks |
 | `GetState` | `{owner_agent_id\|null\|"*", keys}` | `"*"` returns per-thread maps |
 | `StatThread` | `{owner_agent_id, thread_key}` | `{message_count, content_bytes, last_message_id, floor_id}` from one row (§9.3) |
 | `ListThreads` | `{owner_agent_id\|null}` | thread coordinates plus their stats |
@@ -357,10 +366,16 @@ path to index, budget, and optimise.
 `denied` (unknown task, not the active executor, or a write outside the
 caller's own threads — deliberately non-enumerable, as the file ops'
 `denied` is), `session_closed`, `version_conflict` (state CAS),
-`thread_conflict` (§6.3), `session_busy` (lease held; carries the
-caller's ticket), `lease_lost` (renew after expiry), `floor_regression`,
-`content_too_large`, `quota_exceeded`, `unsupported_op`, `rate_limited`,
-`batch_too_large`.
+`thread_conflict` (§6.3), `lease_lost` (renew after expiry),
+`floor_regression`, `content_too_large`, `quota_exceeded`,
+`unsupported_op`, `rate_limited`, `batch_too_large`.
+
+**[shipped]** `session_busy` is *not* a frame error. A contended
+`AcquireLease` is a normal outcome, not a refusal: the op result carries
+`granted=false` plus the caller's ticket, so the batch around it still
+commits. `session_busy` surfaces only where a request must resolve
+one way or the other — HTTP (`409` + `Retry-After`) and the SDK's turn
+helper when its wait budget runs out.
 
 ### 5.4 Forward compatibility
 
@@ -873,29 +888,33 @@ KV and HTTP shapes.
     ceiling in v1, as session and `persist/` files do. Split if
     cross-session context turns out to be the abuse vector.
 
-## 16. Sizing
+## 16. Sizing — estimate vs. shipped
 
-For reference, the file store cost ~2,300 LOC of platform code:
-`bp_sdk/files.py` (446), `bp_sdk/file_tools.py` (448),
-`bp_router/api/files.py` (635), `bp_router/file_store.py` (146), ~371
-lines of dispatch handlers, ~246 lines of frames. This service is
-comparable in surface but simpler per op — no blobs, no S3, no dedup, no
-signed URLs, no LLM tool bundle:
+The estimate below was written before implementation; the shipped column is
+what landed. It came in ~25% over, entirely in the two places where a spec
+can afford to be vaguer than code: the store module (scope predicates for
+the session/user split, counter maintenance, the promotion CTE) and the SDK
+(the batch-handle machinery and transparent read paging).
 
-| piece | estimate |
-| --- | --- |
-| frames + op union + results (`bp_protocol`) | ~250 |
-| `bp_router/session_store.py` — ownership, floors, budget, CAS, quota | ~450 |
-| queries + migration | ~350 |
-| dispatch handler (one frame, batch executor) | ~200 |
-| HTTP endpoints | ~200 |
-| lease: queue table, promotion CTE, push frame, HTTP endpoints | ~250 |
-| `bp_sdk/history.py` (client, batch builder, paging, turn helper) | ~500 |
+| piece | estimated | shipped |
+| --- | --- | --- |
+| frames + op union + results (`bp_protocol/frames.py`) | ~250 | 361 |
+| `bp_router/session_store.py` | ~450 | 1,025 |
+| migration `0010_session_store` | ~100 | 256 |
+| dispatch handler (`bp_router/dispatch.py`) | ~200 | 175 |
+| HTTP endpoints (`bp_router/api/sessions.py`) | ~200 | 384 |
+| lease (queue table, promotion, push frame) | ~250 | folded into the rows above |
+| `bp_sdk/history.py` | ~500 | 674 |
+| glue (`delivery`, `queries`, `settings`, SDK dispatch/context) | — | 128 |
+| tests (`tests/test_session_store.py`) | — | 875 |
 
-~2,200 LOC, self-contained, with no suite dependency and no migration.
-What it buys the platform: conversation becomes a first-class managed
-resource alongside identity, tasks, and files; `session.history` becomes
-structurally enforceable rather than advisory; session purge, retention,
-and GDPR erase become one-sided; and any suite built on the platform —
-the rebuilt one included — gets a conversation store without a database
-credential.
+~2,900 lines of platform code plus 875 of tests, self-contained, with no
+suite dependency and no migration of existing data.
+
+What it buys the platform: conversation is now a first-class managed
+resource alongside identity, tasks, and files; `session.history` is
+structurally enforceable rather than advisory — `AppendOp` has no owner
+field to forge and the steward surface has no message-POST; session purge,
+retention, and GDPR erase are one-sided through the `ON DELETE CASCADE`;
+and any suite built on the platform gets a conversation store without a
+database credential.

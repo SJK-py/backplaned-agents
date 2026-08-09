@@ -18,7 +18,9 @@ from bp_protocol.errors import safe_validator_message
 from bp_protocol.frames import (
     AckFrame,
     AgentInfoUpdateFrame,
+    AppendOp,
     CancelFrame,
+    ConsumeHandoversOp,
     CopyFileRequest,
     DeleteFileRequest,
     ErrorCode,
@@ -30,6 +32,7 @@ from bp_protocol.frames import (
     FileUploadGrantFrame,
     FileUploadRequestFrame,
     Frame,
+    HandOverOp,
     ListFileRequest,
     LlmDeltaFrame,
     LlmRequestFrame,
@@ -38,7 +41,13 @@ from bp_protocol.frames import (
     PingFrame,
     PongFrame,
     ProgressFrame,
+    RedactOp,
     ResultFrame,
+    SessionOpFrame,
+    SessionOpResult,
+    SessionResultFrame,
+    SetFloorOp,
+    SetStateOp,
     StatFileRequest,
     WriteFileRequest,
 )
@@ -49,7 +58,7 @@ from bp_router.attachments import (
 from bp_router.attachments import (
     derive_task_file_scope as _derive_task_scope,
 )
-from bp_router.delivery import fanout_frame
+from bp_router.delivery import fanout_frame, notify_lease_promotions
 from bp_router.file_store import (
     _PERSIST_PREFIX,
     _allocate_name,
@@ -60,6 +69,12 @@ from bp_router.file_store import (
     _valid_bare_filename,
 )
 from bp_router.observability import metrics
+from bp_router.session_store import (
+    READ_BUDGET_FRACTION,
+    SessionStoreError,
+    StoreScope,
+    execute_batch,
+)
 
 if TYPE_CHECKING:
     from bp_router.app import AppState
@@ -195,6 +210,8 @@ async def dispatch_frame(
         await _handle_file_fetch(state, entry, frame)
     elif isinstance(frame, FileManageFrame):
         await _handle_file_manage(state, entry, frame)
+    elif isinstance(frame, SessionOpFrame):
+        await _handle_session_op(state, entry, frame)
     else:
         logger.warning(
             "unexpected_frame_in_dispatch",
@@ -1777,4 +1794,161 @@ async def _file_write(
         )
     await entry.outbox.put(
         _file_result(frame, saved_name=_display_name(cmd.persistent, saved))
+    )
+
+
+async def _session_quota_ceiling(state: AppState, user_id: str) -> int | None:
+    """The user's level ceiling on stored conversation bytes, or None for
+    uncapped. Mirrors the file store's `_quota_ok` lookup."""
+    from bp_router.tasks import _session_level  # noqa: PLC0415
+
+    level = await _session_level(state, user_id)
+    return state.settings.session_store_quota_bytes.get(level or "")  # type: ignore[attr-defined]
+
+
+_SESSION_WRITE_OPS = (
+    AppendOp,
+    SetFloorOp,
+    SetStateOp,
+    RedactOp,
+    HandOverOp,
+    ConsumeHandoversOp,
+)
+
+# Mutating ops that earn an audit row. Ids, coordinates and byte counts
+# only — NEVER `content`. Conversation text in an append-only hash chain
+# is an erasure problem `purge_user` cannot solve (design §12).
+_SESSION_AUDIT_EVENTS = {
+    AppendOp: "session.append",
+    SetFloorOp: "session.set_floor",
+    SetStateOp: "session.state_set",
+    RedactOp: "session.redact",
+    HandOverOp: "session.handover",
+}
+
+
+def _session_audit_payload(op: Any, result: SessionOpResult) -> dict[str, Any]:
+    if isinstance(op, AppendOp):
+        return {
+            "thread_key": op.thread_key,
+            "role": op.role,
+            "bytes": len(op.content.encode("utf-8")),
+            "message_id": result.message_id,
+        }
+    if isinstance(op, SetFloorOp):
+        return {"thread_key": op.thread_key, "floor_id": op.floor_id}
+    if isinstance(op, SetStateOp):
+        return {
+            "thread_key": op.thread_key,
+            "key": op.key,
+            "session_scoped": op.session_scoped,
+            "deleted": op.value is None,
+        }
+    if isinstance(op, RedactOp):
+        return {"message_ids": op.message_ids[:32], "affected": result.affected}
+    if isinstance(op, HandOverOp):
+        return {"target": op.target_agent_id, "item_kind": op.item_kind}
+    return {}
+
+
+async def _handle_session_op(
+    state: AppState, entry: SocketEntry, frame: SessionOpFrame
+) -> None:
+    """Apply an ordered session-store batch in ONE transaction.
+
+    Identity is derived, never asserted: `(user_id, session_id)` comes from
+    the task row via `_derive_task_scope` (which also verifies this socket's
+    agent is the task's active executor), and that agent becomes the owner
+    of every row the batch writes. This is why no op carries a writable
+    owner field — writing in another agent's name is unrepresentable
+    (`docs/design/router-managed-session-store.md` §7).
+    """
+    from bp_router.db import queries  # noqa: PLC0415
+
+    pool = state.db_pool  # type: ignore[attr-defined]
+    budget = int(state.settings.max_payload_bytes * READ_BUDGET_FRACTION)  # type: ignore[attr-defined]
+
+    async with pool.acquire() as conn:
+        scope_t = await _derive_task_scope(conn, frame.task_id, entry.agent_id)
+        if scope_t is None:
+            logger.warning(
+                "session_op_denied",
+                extra={
+                    "event": "session_op_denied",
+                    "bp.agent_id": entry.agent_id,
+                    "bp.task_id": frame.task_id,
+                },
+            )
+            await entry.outbox.put(_session_result(frame, error="denied"))
+            return
+        user_id, session_id = scope_t
+
+        # A closed session accepts no writes — the same rule `NewTask` admit
+        # applies. Reads stay open: transcripts outlive the conversation and
+        # reopen must not lose them (design §7).
+        if any(isinstance(op, _SESSION_WRITE_OPS) for op in frame.ops):
+            closed = await conn.fetchval(
+                "SELECT closed_at FROM sessions WHERE session_id = $1", session_id
+            )
+            if closed is not None:
+                await entry.outbox.put(_session_result(frame, error="session_closed"))
+                return
+
+        store_scope = StoreScope(
+            user_id=user_id,
+            session_id=None if frame.scope == "user" else session_id,
+            agent_id=entry.agent_id,
+        )
+        ceiling = await _session_quota_ceiling(state, user_id)
+
+        try:
+            async with conn.transaction():
+                outcome = await execute_batch(
+                    conn,
+                    store_scope,
+                    frame.ops,
+                    task_id=frame.task_id,
+                    budget_bytes=budget,
+                    quota_ceiling=ceiling,
+                )
+                for op, result in zip(frame.ops, outcome.results, strict=True):
+                    event = _SESSION_AUDIT_EVENTS.get(type(op))
+                    if event is None:
+                        continue
+                    await queries.append_audit_event(
+                        conn,
+                        actor_kind="agent",
+                        actor_id=entry.agent_id,
+                        event=event,
+                        target_kind="session",
+                        target_id=session_id,
+                        payload=_session_audit_payload(op, result),
+                    )
+        except SessionStoreError as exc:
+            await entry.outbox.put(
+                _session_result(frame, error=exc.code, error_index=exc.index)
+            )
+            return
+
+    await entry.outbox.put(_session_result(frame, results=outcome.results))
+    # Promotions are pushed AFTER the commit: announcing a lease inside the
+    # transaction would advertise one a rollback then erased (§6.4).
+    notify_lease_promotions(state, outcome.promotions)
+
+
+def _session_result(
+    frame: SessionOpFrame,
+    *,
+    error: str | None = None,
+    error_index: int | None = None,
+    results: list[SessionOpResult] | None = None,
+) -> SessionResultFrame:
+    return SessionResultFrame(
+        agent_id="router",
+        trace_id=frame.trace_id,
+        span_id=frame.span_id,
+        ref_correlation_id=frame.correlation_id,
+        error=error,
+        error_index=error_index,
+        results=results or [],
     )

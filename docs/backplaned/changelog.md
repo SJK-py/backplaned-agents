@@ -18,6 +18,176 @@
 
 ---
 
+## 2026-08-09
+
+> The router now owns **conversation** — a session-scoped message log, per-thread
+> and per-session state, a hand-over queue, and a FIFO turn lease — the way it
+> already owns identity, tasks, and files. Agents reach it over one typed frame
+> (`SessionOp`) or, for gateways, session-authed HTTP. The load-bearing property
+> is structural rather than enforced: **an agent can only write its own threads,
+> because no write op has a field in which to name another agent's.** Full design
+> in [`../design/router-managed-session-store.md`](../design/router-managed-session-store.md).
+>
+> Additive throughout: new tables, new frames, new SDK surface. No existing
+> frame, endpoint, or table changed shape, and `bp_agents` is untouched — the
+> suite keeps its own `session_history` until it is rebuilt on this.
+
+### Added — session-store frames (`bp_protocol/frames.py`)
+
+- **What:** `SessionOpFrame` (agent → router; `task_id`, `scope`, and an ordered
+  `ops` list, max 32), `SessionResultFrame` (positional `results`, one per op,
+  plus `error`/`error_index` for a refused batch), and `SessionLeaseFrame`
+  (router → agent, unsolicited: a waiting turn-lease ticket was promoted). The
+  op union is `kind`-discriminated with `extra="forbid"`: 6 writes (`append`,
+  `set_floor`, `set_state`, `redact`, `hand_over`, `consume_handovers`), 4 reads
+  (`read`, `get_state`, `stat_thread`, `list_threads`), and 4 concurrency ops
+  (`assert_thread`, `acquire_lease`, `renew_lease`, `release_lease`). Result
+  payload models: `SessionMessage`, `ThreadStat`, `StateValue`, `HandoverItem`,
+  `LeaseStatus`, `SessionOpResult`.
+- **Why the write ops carry no owner field:** a file lives in a shared
+  per-session namespace any peer may write, but a message is attributable
+  speech. The router stamps `owner_agent_id` from the task's active executor, so
+  writing in another agent's name is *unrepresentable* rather than rejected —
+  there is no check to misconfigure. Reads *do* take `owner_agent_id`, because
+  reads are session-scoped by design (a summarizer must read the thread it
+  summarizes) and reading cannot fabricate an utterance.
+- **Why `role` is an opaque string** with no enum and no CHECK: the moment the
+  platform knows what "assistant" means, it owns a conversation model. Every
+  read names the roles it wants. `metadata` jsonb on messages and state values
+  is the extension point that keeps suite-specific fields out of platform
+  schema.
+
+### Added — `WelcomeFrame.features` (`bp_protocol/frames.py`)
+
+- **What:** a defaulted `features: list[str]` advertising router capabilities to
+  the connecting SDK (e.g. `session_store.v1`).
+- **Why:** the existing `capabilities` field cannot serve this — it echoes the
+  *agent's* own declared capability list (`ws_hub.py:630`). Defaulted on both
+  sides, so an older SDK that never reads it and an older router that never sets
+  it are both unaffected.
+
+### Added — `bp_router/session_store.py` + migration `0010_session_store`
+
+- **What (schema):** five tables. `session_messages` (append-only; `content`
+  capped at 256 KiB, `redacted_at` tombstone that blanks content but keeps the
+  id so cursors stay valid); `session_threads` (one row per
+  `(scope, owner, thread_key)` carrying `floor_id` and the denormalised
+  above-floor counters); `session_state` (`(scope, owner?, thread, key)` →
+  `value` + `version` CAS token); `session_handovers` (the queue, with a partial
+  index so a drain never scans consumed rows); `session_turn_queue` (the lease,
+  with a partial unique index making "at most one holder per session" a database
+  guarantee rather than a code path). `session_id` is nullable — NULL rows are
+  the cross-session `user` scope, the conversational analogue of the file
+  store's `persist/`. Every table cascades from `sessions`.
+- **What (module):** `execute_batch(conn, scope, ops)` applies an ordered op
+  list inside a transaction the *caller* owns, so reads observe the writes
+  before them and any `SessionStoreError` rolls the whole batch back. One module
+  backs both surfaces (WS frame and HTTP), exactly as `file_store` backs the
+  file frames and `/v1/files/names`, so they cannot drift.
+- **Why no `incumbent` column:** retirement of any shape is a move of one
+  monotonic `floor_id` cursor — prefix folding (summarization) and whole-thread
+  retirement (floor = last id) are the same operation. A mutable per-row flag
+  would be the last remaining way to reach into another agent's thread.
+- **Why no `author_agent_id`:** with the owner derived, the author *is* the
+  owner; a separate column would record nothing the thread key doesn't already
+  say. An earlier draft of the design carried one, for attributing *permitted*
+  cross-thread writes — which this design does not have.
+- **Why the counters are denormalised:** it makes "should I summarize?" a
+  single-row read instead of a thread scan, and gives quota a number to gate on
+  without an aggregate. Appends and redactions adjust by delta; a floor move
+  pays for one aggregate over the retired range (rare — one per summarization).
+
+### Added — `SessionOp` dispatch handler (`bp_router/dispatch.py`)
+
+- **What:** derives `(user_id, session_id)` from the task row via
+  `attachments.derive_task_file_scope` (the same primitive the file frames use,
+  which also verifies this socket's agent is the task's active executor), refuses
+  writes to a closed session with `session_closed`, applies the batch in one
+  transaction, appends a hash-chained audit event per mutating op, and replies
+  `SessionResult`. Lease promotions are pushed **after** the commit via the new
+  `delivery.notify_lease_promotions`.
+- **Why audit payloads carry no `content`:** ids, thread coordinates, role, and
+  byte counts only. Conversation text in an append-only hash chain is an erasure
+  problem `purge_user` cannot solve.
+- **Why promotions are pushed post-commit:** announcing a lease inside the
+  transaction would advertise one that a rollback then erased.
+
+### Added — steward HTTP surface (`bp_router/api/sessions.py`)
+
+- **What:** `GET /v1/sessions/{id}/messages` (cursor-paginated transcript),
+  `GET /threads`, `POST /handovers`, `GET|PATCH /state` (session-scoped keys),
+  `POST /ops` (an arbitrary batch), `POST|DELETE /lease`, and `PATCH
+  /v1/sessions/{id}` (shallow-merge into the session's `metadata`, backed by the
+  new `queries.Scope.patch_session_metadata`).
+- **What is deliberately absent:** there is **no** message-POST endpoint. The
+  steward path runs batches with `agent_id=None`, so every thread-writing op
+  refuses `denied` inside the store — the endpoint set needs no allowlist of its
+  own, and a session JWT cannot append to any thread at any time. A steward that
+  wants something in a thread enqueues a hand-over and the owning agent
+  materialises it under its own authorship.
+- **Why HTTP at all:** a channel or webapp *spawns* tasks and is never a task's
+  active executor, so it has no task from which scope can be derived — the same
+  gateway case `/v1/files/names` exists for.
+- **Lease over HTTP:** `409` + `Retry-After` derived from the current holder's
+  TTL, because a steward has no socket for the router to push a promotion to.
+
+### Added — `ctx.history` (`bp_sdk/history.py`, `bp_sdk/context.py`)
+
+- **What:** `SessionHistory` with one-op conveniences, a `batch()` builder whose
+  handles resolve positionally when the batch commits, and `turn()` — the
+  default path, **ordered by default**: it takes the FIFO lease, renews it on a
+  timer for the length of the turn, and releases it even on failure.
+  `turn(ordered=False)` opts out. `read()` pages transparently when the router
+  truncates against its byte budget. `user_scope` switches to the cross-session
+  namespace.
+- **Why the signatures are asymmetric:** `append` has no `owner` parameter at
+  any level, `read` does. The SDK must not reintroduce what the wire format
+  removed — a test asserts exactly this.
+- **Why ordered-by-default:** without serialization, concurrent turns interleave
+  appends and read stale context. The store stays *safe* either way (thread
+  assertions, state CAS, monotonic floors, idempotency keys), but coherence
+  needs ordering, so a suite gets it unless it deliberately opts out.
+- **Batch results are count-checked:** a short `results` list raises
+  `result_count_mismatch` rather than leaving a handle silently unresolved —
+  the failure mode if an older router skips an op it doesn't know.
+
+### Changed — SDK frame routing and per-task teardown (`bp_sdk/dispatch.py`)
+
+- **What:** `SessionResultFrame` resolves on the existing `pending_acks` map
+  (like `FileResult` / `Ack` / `Pong`); `SessionLeaseFrame` is routed to
+  whichever live `ctx.history` handle is waiting on that ticket via a new
+  `_session_histories` map, cleared in `_run_handler`'s finally beside the
+  `FileStash` inbox teardown.
+- **Why the lease push is best-effort:** a handle that has already gone away
+  drops it, and the waiter re-acquires on the `holder_expires_at` deadline it
+  was handed. That same fallback covers a *holder* dying without releasing —
+  which is what lets promotion stay lazy, with no background sweep to fall
+  behind.
+
+### Added — `session_store_quota_bytes` (`bp_router/settings.py`)
+
+- **What:** per-user-level ceiling on stored conversation bytes (256 MiB /
+  64 MiB / 16 MiB for tier1–3, uncapped for admin/service/tier0), enforced on
+  every append. Mirrors `file_storage_quota_bytes`.
+- **Why usage counts only the active window:** folding a thread into a summary
+  reclaims quota, which is what makes a long-running assistant sustainable.
+
+### Added — `tests/test_session_store.py`
+
+- **What:** 32 tests in three layers. *Structural* (no DB): `AppendOp` has no
+  owner field and rejects one, the HTTP module has no message-POST, the steward
+  path passes `agent_id=None`, the SDK's `append` has no `owner` parameter.
+  *Store* (gated on `TEST_DB_URL`): derived ownership, idempotent appends,
+  hand-over enqueue/drain/once-only, thread isolation with cross-thread reads,
+  `thread_conflict` on an interleaved append, the summarize-apply CAS with its
+  floor rolling back, floor monotonicity, redaction blanked at rest, the
+  newest-first read budget and paging, content cap, quota, `user` scope
+  surviving session purge, and the lease's FIFO ordering, promotion, expiry and
+  `lease_lost`. *SDK*: batch builds one frame in order, turn is ordered by
+  default, unordered takes no lease, typed errors carry the op index.
+
+---
+
 ## 2026-06-29
 
 > The `openai-compatible` chat adapter now surfaces separated reasoning

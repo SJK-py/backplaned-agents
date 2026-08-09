@@ -12,6 +12,7 @@ from bp_sdk.errors import CancellationError
 
 if TYPE_CHECKING:
     from bp_sdk.files import FileStash
+    from bp_sdk.history import SessionHistory
     from bp_sdk.llm import LlmServiceClient
     from bp_sdk.peers import PeerClient
     from bp_sdk.progress import ProgressEmitter
@@ -90,6 +91,11 @@ class TaskContext:
     # never None at handler invocation time.
     progress: ProgressEmitter | None = None
     files: FileStash | None = None
+    # Router-managed conversation log + session state
+    # (`docs/design/router-managed-session-store.md`). Writes land in THIS
+    # agent's threads only — the owner is derived from the task, so there is
+    # no parameter for naming another agent's thread.
+    history: SessionHistory | None = None
     llm: LlmServiceClient | None = None
     peers: PeerClient | None = None
 

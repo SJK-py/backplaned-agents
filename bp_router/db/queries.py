@@ -150,6 +150,32 @@ class Scope:
         )
         return SessionRow.model_validate(dict(row))
 
+    async def patch_session_metadata(
+        self, session_id: str, patch: dict[str, Any]
+    ) -> SessionRow | None:
+        """Shallow-merge `patch` into a session's `metadata`, deleting the
+        keys whose value is null. The suite keeps conversation-level
+        descriptors here (title, channel, chat id) instead of shadowing the
+        session row in a second table — see
+        `docs/design/router-managed-session-store.md` §3.2."""
+        user_id = self._require_user()
+        drop = [k for k, v in patch.items() if v is None]
+        keep = {k: v for k, v in patch.items() if v is not None}
+        row = await self._conn.fetchrow(
+            """
+            UPDATE sessions
+            SET metadata = (COALESCE(metadata, '{}'::jsonb) || $3::jsonb)
+                           - $4::text[]
+            WHERE session_id = $1 AND user_id = $2
+            RETURNING session_id, user_id, opened_at, closed_at, metadata
+            """,
+            session_id,
+            user_id,
+            keep,
+            drop,
+        )
+        return SessionRow.model_validate(dict(row)) if row else None
+
     async def close_session(self, session_id: str) -> None:
         user_id = self._require_user()
         await self._conn.execute(
