@@ -11,30 +11,32 @@ import asyncio
 from pathlib import Path
 
 from bp_agents.common import loop as loop_mod
-from bp_agents.common import multimodal_preset_for
 from bp_sdk import FileStoreError, ToolCall, file_tools
+
+
+class _Resp:
+    """Just enough of an `LlmResponse` for the engagement gate."""
+
+    def __init__(self, resolved_preset: str | None) -> None:
+        self.resolved_preset = resolved_preset
 
 # --------------------------------------------------------------------------
 # config gating
 # --------------------------------------------------------------------------
 
-def test_multimodal_preset_for_gating() -> None:
-    # engages only when configured AND the turn's preset is text-only
-    assert multimodal_preset_for(
-        configured="vision", text_only=["lite", "orch"], preset="orch"
-    ) == "vision"
-    # preset not declared text-only → no proxy (a multimodal main model)
-    assert multimodal_preset_for(
-        configured="vision", text_only=["lite"], preset="pro"
-    ) is None
-    # no vision preset configured → inert
-    assert multimodal_preset_for(
-        configured="", text_only=["orch"], preset="orch"
-    ) is None
-    # preset unknown / None
-    assert multimodal_preset_for(
-        configured="vision", text_only=["orch"], preset=None
-    ) is None
+def test_sidecar_engagement_keys_on_the_resolved_preset() -> None:
+    """The slot is resolved router-side, so engagement is decided per
+    RESPONSE from `resolved_preset` — not from anything the agent chose."""
+    # the preset that actually ran is declared text-only → engage
+    assert loop_mod._sidecar_applies(_Resp("orch"), ["lite", "orch"]) is True
+    # it isn't → no proxy, even though a vision preset is configured
+    assert loop_mod._sidecar_applies(_Resp("pro"), ["lite"]) is False
+    # operator declared nothing text-only → inert
+    assert loop_mod._sidecar_applies(_Resp("orch"), []) is False
+    assert loop_mod._sidecar_applies(_Resp("orch"), None) is False
+    # router didn't report which preset ran → engage; feeding an image to a
+    # possibly-text-only model is the worse failure.
+    assert loop_mod._sidecar_applies(_Resp(None), ["lite"]) is True
 
 
 # --------------------------------------------------------------------------

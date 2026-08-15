@@ -266,7 +266,7 @@ def test_kb_store_generates_missing_metadata(tmp_path) -> None:
         )
         await run_kb_store(
             ctx, KbStore(name="cats.md"),  # no title/tags/description
-            settings=settings, store=store, preset="emb", lite_preset="lite",
+            settings=settings, store=store, preset="emb",
         )
         listed = await run_kb_list(ctx, KbList(), settings=settings, store=store)
         assert "All About Cats" in listed.content
@@ -282,7 +282,7 @@ def test_kb_modify_updates_metadata(tmp_path) -> None:
         ctx = _StubCtx("usr_mod", _StubFiles({"d.md": b"cats draft body"}), _StubLlm())
         await run_kb_store(
             ctx, KbStore(name="d.md", title="Draft", tags=["wip"], description="x"),
-            settings=settings, store=store, preset="emb", lite_preset="lite",
+            settings=settings, store=store, preset="emb",
         )
         out = await run_kb_modify(
             ctx, KbModify(title="Draft", target_title="Report",
@@ -304,7 +304,7 @@ def test_kb_store_converts_non_text(tmp_path) -> None:
         ctx = _StubCtx("usr_pdf", files, _StubLlm(), peers=_StubPeers(files))
         out = await run_kb_store(
             ctx, KbStore(name="report.pdf", title="Report", tags=["t"], description="d"),
-            settings=settings, store=store, preset="emb", lite_preset="lite",
+            settings=settings, store=store, preset="emb",
         )
         # Non-text routed through md_converter, then chunked + stored.
         assert "Stored 'Report'" in out.content

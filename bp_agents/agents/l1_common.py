@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from bp_agents import slots
 from bp_agents.common import (
     INCOMING_FILE_NOTE,
     LocalToolset,
@@ -37,7 +38,6 @@ from bp_agents.common import (
     estimate_context_tokens,
     make_recall_tool_history_tool,
     make_send_file_tool,
-    multimodal_preset_for,
     persist_tool_exchanges,
     run_llm_loop,
     text_output,
@@ -120,7 +120,10 @@ class L1Config:
     agent_id: str
     subagent_system: str
     delegation_system: str
-    preset_field: str = "preset_balanced"
+    # Router preset SLOT this agent's turns run on (`bp_agents.slots`). The
+    # user's preference for the slot is resolved router-side against their
+    # tier gate — the agent neither reads nor stores a preset name.
+    slot: str = slots.BALANCED
     local_tools: LocalToolsFactory | None = None
     # SDK file-tools bundle ("read_only" / "full") for file-capable l1s;
     # None disables file tools. `read_file` feeds a file to the model
@@ -132,12 +135,6 @@ class L1Config:
     # used by deep_reasoning's `plan_mode`.
     extra_terminal: list[ToolSpec] = field(default_factory=list)
     on_extra_terminal: ExtraTerminalHandler | None = None
-
-
-def _preset(cfg, settings: SuiteSettings, field: str) -> str:
-    if cfg is not None:
-        return getattr(cfg, field)
-    return getattr(settings, f"default_{field}")
 
 
 async def _local_tools(
@@ -188,15 +185,12 @@ async def run_subagent(
     ]
     timezone = cfg.timezone if cfg else settings.default_timezone
     local = await _local_tools(ctx, settings, config, timezone)
-    preset = _preset(cfg, settings, config.preset_field)
     resp = await run_llm_loop(
         ctx, messages=messages,
-        preset=preset, local_tools=local,
+        slot=config.slot, local_tools=local,
         file_tools=config.file_tools,
-        multimodal_preset=multimodal_preset_for(
-            configured=settings.default_preset_multimodal,
-            text_only=settings.text_only_presets, preset=preset,
-        ),
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
     )
     return text_output(resp.text)
 
@@ -265,16 +259,13 @@ async def run_delegated_turn(
     if not first_turn:
         extra_specs.append(END_DELEGATION_SPEC)
         terminal.add(END_DELEGATION_TOOL)
-    preset = _preset(cfg, settings, config.preset_field)
     resp = await run_llm_loop(
         ctx, messages=messages,
-        preset=preset, local_tools=local,
+        slot=config.slot, local_tools=local,
         extra_tools=extra_specs or None, terminal_tools=terminal or None,
         file_tools=config.file_tools,
-        multimodal_preset=multimodal_preset_for(
-            configured=settings.default_preset_multimodal,
-            text_only=settings.text_only_presets, preset=preset,
-        ),
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
         detail_chars=settings.verbose_detail_chars,
     )
 

@@ -38,7 +38,6 @@ from bp_agents.common.tools import (
     LocalToolset,
     make_current_time_tool,
     make_send_file_tool,
-    multimodal_preset_for,
     peer_tool_specs,
 )
 
@@ -57,7 +56,6 @@ __all__ = [
     "make_current_time_tool",
     "make_recall_tool_history_tool",
     "make_send_file_tool",
-    "multimodal_preset_for",
     "peer_tool_specs",
     "persist_tool_exchanges",
     "run_llm_loop",

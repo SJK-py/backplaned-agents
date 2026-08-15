@@ -7,19 +7,22 @@ up-to-30s `deliver_frame(await_ack=True)`. ~10 concurrent
 delegations to slow/dead destinations exhausted the default
 10-conn pool and stalled every other router DB operation.
 
-The fix splits it into three phases: validate under a short-lived
-lock → release → ack with no connection held → re-lock →
-re-validate ("still non-terminal, still mine?" — the only
-concurrent mutator during the ack window is cancel/timeout,
-because the delegating socket is frozen and no other agent can
-delegate the task) → flip. The optimistic
-`reassign_active_agent` WHERE-guard backstops the flip.
+The fix releases the connection across the ack: validate + flip
+under a short-lived lock → release → ack with no connection held,
+unwinding the flip if the destination never takes the task.
 
-The refactor slightly widens the rare window where the delegate
-reports a Result between its ack and the Phase-C flip commit;
-`complete_task` drops it (it isn't the active executor yet) and
-the task hangs until the deadline sweep. That silent drop is now
-counted via `result_from_wrong_agent_total{reporter=...}`.
+The flip moved BEFORE the ack (a later fix). Acking first left a
+window in which the delegate was already executing while the router
+still recorded the caller as active — so the delegate's first
+preset-slot resolution, tier-gated call, named-file op, or
+`SessionOp` was refused `not_active_executor`, sporadically, on the
+opening turn of every hand-off. The tests below pin the NET effect
+that matters: on success the task ends on the destination; on
+rejection / disconnect / ack-timeout it ends back on the caller.
+
+`result_from_wrong_agent_total{reporter=...}` counts a Result that
+arrives from a non-active agent (now mainly the caller's own stale
+Result after a hand-off, which the design drops on purpose).
 """
 from __future__ import annotations
 
@@ -222,9 +225,9 @@ def test_connection_released_during_ack(monkeypatch: pytest.MonkeyPatch) -> None
         "a pooled connection was still checked out during the ack "
         "wait — the pool-exhaustion bug is back"
     )
-    # Three acquires total: caller/callee lookup, Phase A, Phase C —
-    # and never more than ONE concurrently.
-    assert pool.acquires == 3
+    # Two acquires on the happy path: caller/callee lookup, then the
+    # validate+flip transaction — and never more than ONE concurrently.
+    assert pool.acquires == 2
     assert pool.max_live == 1
 
 
@@ -281,27 +284,34 @@ def test_deliver_frame_not_inside_transaction_block() -> None:
 
 
 # ===========================================================================
-# 3. Re-validate rejects a cancel that lands during the ack window
+# 3. A cancelled / drifted task is refused BEFORE the flip
 # ===========================================================================
 
 
-def test_phase_c_rejects_terminal_after_ack(
+def test_terminal_task_is_refused_before_any_flip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The terminal check runs under the same lock as the flip, so a
+    cancelled task can never be delegated onto.
+
+    A cancel that lands AFTER the flip commits is no longer a special
+    case: the cancel path reads the same column and now finds the
+    delegate, so it cancels the agent that is actually running the
+    task instead of leaving it orphaned until the deadline sweep."""
     from bp_router import tasks as tasks_mod
 
-    valid = _make_task_row(state=TaskState.RUNNING)
     cancelled = _make_task_row(state=TaskState.CANCELLED)
-
     scope = MagicMock()
-    # Phase A sees RUNNING; Phase C re-lock sees CANCELLED.
-    scope.lock_task_for_delegation = AsyncMock(side_effect=[valid, cancelled])
+    scope.lock_task_for_delegation = AsyncMock(return_value=cancelled)
     scope.reassign_active_agent = AsyncMock(return_value=True)
     scope.insert_task_event = AsyncMock()
     scope.list_delegation_destinations = AsyncMock(return_value=[])
-    state = _make_state(task_row=valid, scope=scope)
+    state = _make_state(task_row=cancelled, scope=scope)
+
+    delivered: list[Any] = []
 
     async def _deliver(_s, a, f, *, await_ack, timeout_s=None):  # type: ignore[no-untyped-def]
+        delivered.append(a)
         return AckFrame(
             agent_id="agt_l1", trace_id="0" * 32, span_id="0" * 16,
             ref_correlation_id="x", accepted=True,
@@ -314,38 +324,31 @@ def test_phase_c_rejects_terminal_after_ack(
             tasks_mod._admit_delegation(state, _make_frame(), caller_agent_id="agt_l0")
         )
     assert exc.value.code == "task_terminal"
-    # The flip must NOT have run — no delegating onto a cancelled task.
     scope.reassign_active_agent.assert_not_awaited()
     scope.insert_task_event.assert_not_awaited()
-    # Both Phase A and Phase C re-locked.
-    assert scope.lock_task_for_delegation.await_count == 2
+    assert delivered == [], "a terminal task must not be dispatched"
 
 
 # ===========================================================================
-# 4. Re-validate rejects active-agent drift
+# 4. Active-agent drift is refused before the flip
 # ===========================================================================
 
 
-def test_phase_c_rejects_active_agent_drift(
+def test_active_agent_drift_is_refused_before_any_flip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from bp_router import tasks as tasks_mod
 
-    valid = _make_task_row(active_agent_id="agt_l0")
     drifted = _make_task_row(active_agent_id="agt_someone_else")
-
     scope = MagicMock()
-    scope.lock_task_for_delegation = AsyncMock(side_effect=[valid, drifted])
+    scope.lock_task_for_delegation = AsyncMock(return_value=drifted)
     scope.reassign_active_agent = AsyncMock(return_value=True)
     scope.insert_task_event = AsyncMock()
     scope.list_delegation_destinations = AsyncMock(return_value=[])
-    state = _make_state(task_row=valid, scope=scope)
+    state = _make_state(task_row=drifted, scope=scope)
 
     async def _deliver(_s, a, f, *, await_ack, timeout_s=None):  # type: ignore[no-untyped-def]
-        return AckFrame(
-            agent_id="agt_l1", trace_id="0" * 32, span_id="0" * 16,
-            ref_correlation_id="x", accepted=True,
-        )
+        raise AssertionError("must not dispatch")
 
     _patch(monkeypatch, state, caller=_CALLER, callee=_CALLEE, deliver=_deliver)
 
@@ -362,7 +365,11 @@ def test_phase_c_rejects_active_agent_drift(
 # ===========================================================================
 
 
-def test_happy_path_flips_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_happy_path_flips_once_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One flip, and it is committed BEFORE the destination is told to
+    run — otherwise the delegate races the router for its own identity."""
     from bp_router import tasks as tasks_mod
 
     task_row = _make_task_row()
@@ -376,6 +383,9 @@ def test_happy_path_flips_once(monkeypatch: pytest.MonkeyPatch) -> None:
     delivered: list[Any] = []
 
     async def _deliver(_s, agent_id, frame, *, await_ack, timeout_s=None):  # type: ignore[no-untyped-def]
+        # The flip must already have happened by the time the
+        # destination is asked to run.
+        scope.reassign_active_agent.assert_awaited_once()
         delivered.append((agent_id, frame))
         return AckFrame(
             agent_id="agt_l1", trace_id="0" * 32, span_id="0" * 16,
@@ -396,13 +406,14 @@ def test_happy_path_flips_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert kw["new_active_agent_id"] == "agt_l1"
     assert kw["expected_current_agent_id"] == "agt_l0"
     scope.insert_task_event.assert_awaited_once()
-    # Phase A + Phase C each re-locked.
-    assert scope.lock_task_for_delegation.await_count == 2
+    # One lock, one flip — no re-lock phase after the ack.
+    assert scope.lock_task_for_delegation.await_count == 1
 
 
-def test_rejected_ack_no_flip(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Destination rejects → AdmitError('rejected'), no flip, and
-    Phase C never runs (no second lock)."""
+def test_rejected_ack_unwinds_the_flip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Destination rejects → AdmitError('rejected') and the task ends
+    back on the caller. The flip happened, so it has to be undone —
+    the net effect an observer sees is unchanged."""
     from bp_router import tasks as tasks_mod
 
     task_row = _make_task_row()
@@ -426,10 +437,11 @@ def test_rejected_ack_no_flip(monkeypatch: pytest.MonkeyPatch) -> None:
             tasks_mod._admit_delegation(state, _make_frame(), caller_agent_id="agt_l0")
         )
     assert exc.value.code == "rejected"
-    scope.reassign_active_agent.assert_not_awaited()
-    # Only Phase A locked; Phase C unreached because the ack was a
-    # rejection.
-    assert scope.lock_task_for_delegation.await_count == 1
+    calls = [c.kwargs for c in scope.reassign_active_agent.await_args_list]
+    assert calls == [
+        {"new_active_agent_id": "agt_l1", "expected_current_agent_id": "agt_l0"},
+        {"new_active_agent_id": "agt_l0", "expected_current_agent_id": "agt_l1"},
+    ], "a refused delegation must leave the caller as the active executor"
 
 
 # ===========================================================================
@@ -504,3 +516,41 @@ def test_complete_task_drop_increments_metric_by_reporter() -> None:
 
     asyncio.run(_run("agt_random"))
     assert _val("other") == other_before + 1
+
+
+# ===========================================================================
+# 7. The flip-before-ack invariant, pinned at the source
+# ===========================================================================
+
+
+def test_flip_is_committed_before_the_destination_is_dispatched() -> None:
+    """Source pin for the ordering the runtime tests above assert.
+
+    A hand-off's whole point is that the delegate immediately does
+    work: it resolves a preset slot, makes a tier-gated call, reads a
+    stash file, writes a session row. Every one of those derives the
+    caller's identity from `tasks.active_agent_id`
+    (`attachments.derive_task_file_scope`), so if the column still
+    says "caller" while the delegate is running, they all fail
+    `not_active_executor` — non-deterministically, because it is a
+    race between the delegate's first frame and the router's own
+    commit. Flipping first removes the window entirely.
+    """
+    from bp_router import tasks as tasks_mod
+
+    src = textwrap.dedent(inspect.getsource(tasks_mod._admit_delegation))
+    flip = src.index("reassign_active_agent(")
+    deliver = src.index("await deliver_frame(")
+    assert flip < deliver, (
+        "active_agent_id must be flipped (and committed) BEFORE the "
+        "destination is dispatched — otherwise the delegate races the "
+        "router for its own identity on its opening turn"
+    )
+    # The authz cache must be refreshed on the same side of the line.
+    recache = src.index("_recache_active_agent(")
+    assert recache < deliver
+
+    # And the failure paths must unwind it.
+    assert src.count("_unflip(") >= 4, (
+        "every delivery-failure path must return the task to the caller"
+    )

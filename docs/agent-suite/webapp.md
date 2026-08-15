@@ -207,12 +207,19 @@ structured forms over the DB**, not NL round-trips:
   via `queries.update_user_config` with the **same validation as the config
   agent's `set_config`** (factored into the shared `bp_agents.config_edit`
   helper so the form and the agent agree). The chat pane still handles NL
-  ("change my timezone"). The LLM-tier preset fields (`preset_pro` /
-  `preset_balanced` / `preset_lite`) are **opt-in and tier-gated**: each
-  renders as a `<select>` only when the operator configures a non-empty
-  allow-list for that tier (`SuiteSettings.selectable_presets_*`), and a
-  submitted value must be one of those names — the same gate the config
-  agent applies. With no allow-list the tier stays system-managed and hidden.
+  ("change my timezone").
+- **Models pane** — the one part of Settings that does NOT touch the suite
+  DB. Each preset **slot** (`pro` / `balanced` / `lite`) renders a `<select>`
+  filled from `GET /v1/llm/presets`, which the router has already filtered to
+  what this caller's tier admits, and saves via `PUT /v1/llm/preferences` —
+  both under the **user's own access token**
+  ([`../design/router-resolved-preset-slots.md`] §4). This is the suite's only
+  model-selection surface: the router enforces policy on the stored value, so
+  no agent may write it, and the webapp is the only suite process holding the
+  user's own authority. A choice the tier forbids is refused **here**, at
+  selection time, with a message on the page — instead of arriving on the
+  user's next message as an un-retriable LLM error. An empty selection clears
+  the preference back to the operator default.
 - **Cron pane** — list/add/remove over `cron_jobs` (croniter-validated),
   reusing `bp_agents/cron_manage.py` helpers (factor the add/remove/validate
   out of the LLM toolset so the form calls the same code).

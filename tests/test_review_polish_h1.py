@@ -52,18 +52,22 @@ def test_fail_task_cascade_reason_tracks_terminal_state() -> None:
     assert '"message": cascade_reason' in src
 
 
-# --- preset_embedding default alignment -------------------------------------
+# --- embedding preset is operator config, never a user slot -----------------
 
 
-def test_preset_embedding_default_aligned() -> None:
-    mig = (
-        _REPO / "bp_agents/migrations/versions/0001_suite_initial.py"
-    ).read_text()
-    assert "preset_embedding         text NOT NULL DEFAULT 'default_embedding'" in mig
-    from bp_agents.db import queries
-    sig = inspect.signature(queries.create_user_config)
-    assert sig.parameters["preset_embedding"].default == "default_embedding"
+def test_embedding_preset_is_operator_config_only() -> None:
+    """The embedding model must stay an explicit, operator-set preset.
+
+    Making it user-selectable silently invalidates every vector already
+    written to that user's LanceDB — a wrong-answer bug with no error and no
+    migration path ([docs/design/router-resolved-preset-slots.md] §12). So it
+    is absent from the slot taxonomy and absent from `user_config`."""
+    from bp_agents import slots
+    from bp_agents.db.models import UserConfigRow
     from bp_agents.settings import SuiteSettings
+
+    assert "embedding" not in slots.SLOTS
+    assert not [f for f in UserConfigRow.model_fields if f.startswith("preset")]
     assert (
         SuiteSettings.model_fields["default_preset_embedding"].default
         == "default_embedding"

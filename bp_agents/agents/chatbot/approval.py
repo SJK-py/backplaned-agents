@@ -27,7 +27,6 @@ from bp_agents.db import queries
 if TYPE_CHECKING:
     import asyncpg
 
-    from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ async def reconcile_serviced_sessions(
     pool: asyncpg.Pool,
     records: list[ServicedSession],
     *,
-    settings: SuiteSettings,
     platform: str = PLATFORM,
     channel: str = CHANNEL,
     default_language: str = "en",
@@ -55,10 +53,9 @@ async def reconcile_serviced_sessions(
     `default_language` seeds a first-time `user_config.language` (e.g. `ko`
     for the Korea-only KakaoTalk channel); the user can change it later.
 
-    A first-time `user_config` row seeds its per-tier LLM presets from
-    `settings.default_preset_*` (`SUITE_DEFAULT_PRESET_{PRO,BALANCED,LITE,
-    EMBEDDING}`), so an operator's configured tier defaults actually take
-    effect at registration."""
+    Model choice is NOT seeded here any more: it is a router-resolved preset
+    slot with an operator default, so a user with no preference simply gets
+    that default ([../../../docs/design/router-resolved-preset-slots.md])."""
     newly_mapped = 0
     for rec in records:
         if not rec.external_id:
@@ -74,14 +71,10 @@ async def reconcile_serviced_sessions(
                 conn, platform=platform, chat_id=rec.external_id,
                 user_id=rec.user_id, session_id=rec.session_id,
             )
-            # Seeds default_session_id + per-tier presets on first create;
-            # a no-op for an existing config (so a later /new isn't clobbered).
+            # Seeds default_session_id on first create; a no-op for an
+            # existing config (so a later /new isn't clobbered).
             await queries.create_user_config(
                 conn, user_id=rec.user_id, default_session_id=rec.session_id,
-                preset_pro=settings.default_preset_pro,
-                preset_balanced=settings.default_preset_balanced,
-                preset_lite=settings.default_preset_lite,
-                preset_embedding=settings.default_preset_embedding,
                 language=default_language,
             )
             await queries.create_session_info(
@@ -105,7 +98,6 @@ async def approval_poll_loop(
     *,
     credentials: ChannelCredentials,
     pool: asyncpg.Pool,
-    settings: SuiteSettings,
     stop: asyncio.Event,
     interval_s: float = 30.0,
     channel: str = CHANNEL,
@@ -127,7 +119,7 @@ async def approval_poll_loop(
             )
             if records:
                 await reconcile_serviced_sessions(
-                    pool, records, settings=settings,
+                    pool, records,
                     platform=platform, channel=channel,
                     default_language=default_language,
                 )

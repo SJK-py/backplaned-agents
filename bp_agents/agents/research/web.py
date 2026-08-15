@@ -20,7 +20,7 @@
 The chosen backend's key must be set; if it isn't, the suite falls back to
 SearXNG with a logged warning. `html_fetch` returns Markdown (or raw HTML for
 `raw=true`) for a list of URLs — and, given an `extract_query`, distils each
-page to just the query-relevant facts via the lite preset; `web_download`
+page to just the query-relevant facts via the LITE slot; `web_download`
 saves a URL to the file store.
 The core functions take injectable fetchers so they are testable without a
 network; `make_web_tools` wraps them as `LocalTool`s closing over settings —
@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from bp_agents import slots
 from bp_agents.common import LocalTool
 from bp_agents.common.urlsafe import safe_stream_get
 from bp_agents.settings import load_suite_settings
@@ -503,7 +504,7 @@ def _join_blocks(pairs: list[tuple[str, str]], *, headered: bool) -> str:
 
 # Query-focused distillation: turn a fetched page into just the facts that
 # bear on the caller's question, so a long page doesn't flood the loop's
-# context with boilerplate. Runs on the research agent's lite preset.
+# context with boilerplate. Runs on the LITE slot.
 _EXTRACT_SYSTEM = (
     "You pull only the information relevant to the user's query out of a web "
     "page. Keep concrete facts, figures, dates, names, quotes, and any source "
@@ -513,18 +514,14 @@ _EXTRACT_SYSTEM = (
 )
 
 
-async def _distill(
-    ctx: TaskContext, content: str, query: str, *,
-    lite_preset: str | None, settings: SuiteSettings,
-) -> str:
+async def _distill(ctx: TaskContext, content: str, query: str) -> str:
     content = content.strip()
     if not content:
         return "[No content to extract.]"
-    preset = lite_preset or settings.default_preset_lite
     resp = await ctx.llm.generate(
         [Message(role="system", content=_EXTRACT_SYSTEM),
          Message(role="user", content=f"Query: {query}\n\nPage content:\n{content}")],
-        preset=preset,
+        slot=slots.LITE,
     )
     return resp.text.strip() or "[Nothing relevant found.]"
 
@@ -548,7 +545,7 @@ async def _fetch_one(
 async def html_fetch(
     ctx: TaskContext, *, urls: list[str] | str, raw: bool = False,
     truncate: int = 2000, extract_query: str | None = None,
-    lite_preset: str | None = None, settings: SuiteSettings,
+    settings: SuiteSettings,
     get_bytes: BytesGetter | None = None, request_json: ApiRequester | None = None,
 ) -> str:
     if isinstance(urls, str):
@@ -599,9 +596,7 @@ async def html_fetch(
 
     if extracting:
         pairs = [
-            (url, await _distill(
-                ctx, body, extract_query, lite_preset=lite_preset, settings=settings,
-            ))
+            (url, await _distill(ctx, body, extract_query))
             for url, body in pairs
         ]
         return _join_blocks(pairs, headered=True) or "No content extracted."
@@ -793,8 +788,7 @@ def _deep_policy(settings: SuiteSettings) -> str:
 
 
 def make_web_tools(
-    settings: SuiteSettings, *,
-    lite_preset: str | None = None, embedding_preset: str | None = None,
+    settings: SuiteSettings, *, embedding_preset: str | None = None,
 ) -> list[LocalTool]:
     backend = _resolve_backend(settings)
     search_desc, search_params = _search_tool_schema(backend)
@@ -874,7 +868,7 @@ def make_web_tools(
             ctx, urls=args["urls"], raw=bool(args.get("raw", False)),
             truncate=int(args.get("truncate", 2000)),
             extract_query=args.get("extract_query") or None,
-            lite_preset=lite_preset, settings=settings,
+            settings=settings,
         )
 
     async def _download(ctx: TaskContext, args: dict[str, Any]) -> str:

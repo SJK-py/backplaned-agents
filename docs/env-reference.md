@@ -170,11 +170,8 @@ Environment prefix: `SUITE_`
 | `SUITE_DB_STATEMENT_TIMEOUT_MS` | `30000` |  |
 | `SUITE_DEFAULT_LANGUAGE` | `'en'` |  |
 | `SUITE_DEFAULT_MAX_CONTEXT_TOKEN_LIMIT` | `120000` |  |
-| `SUITE_DEFAULT_PRESET_BALANCED` | `'default'` |  |
 | `SUITE_DEFAULT_PRESET_EMBEDDING` | `'default_embedding'` |  |
-| `SUITE_DEFAULT_PRESET_LITE` | `'default'` |  |
 | `SUITE_DEFAULT_PRESET_MULTIMODAL` | `''` |  |
-| `SUITE_DEFAULT_PRESET_PRO` | `'default'` |  |
 | `SUITE_DEFAULT_TIMEZONE` | `'UTC'` |  |
 | `SUITE_DELEGATABLE_AGENTS` | `['research', 'computer_use', 'deep_reasoning']` |  |
 | `SUITE_DISPATCH_RESULT_TIMEOUT_S` | `600.0` |  |
@@ -236,9 +233,6 @@ Environment prefix: `SUITE_`
 | `SUITE_SANDBOX_UID_BASE` | `2000` |  |
 | `SUITE_SANDBOX_UID_MAX` | `60000` |  |
 | `SUITE_SEARXNG_URL` | `None` |  |
-| `SUITE_SELECTABLE_PRESETS_BALANCED` | `[]` |  |
-| `SUITE_SELECTABLE_PRESETS_LITE` | `[]` |  |
-| `SUITE_SELECTABLE_PRESETS_PRO` | `[]` |  |
 | `SUITE_SESSION_GC_INTERVAL_S` | `86400.0` |  |
 | `SUITE_SESSION_GC_RETENTION_DAYS` | `90` |  |
 | `SUITE_TELEGRAM_BASE_URL` | `'https://api.telegram.org'` |  |

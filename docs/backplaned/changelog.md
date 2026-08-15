@@ -18,6 +18,57 @@
 
 ---
 
+## 2026-08-15
+
+> Suite cutover to router-resolved preset slots. The four
+> `user_config.preset_*` columns are gone; agents name a SLOT and the router
+> resolves it from the user's own preference and their tier gate. Design:
+> [`../design/router-resolved-preset-slots.md`](../design/router-resolved-preset-slots.md)
+> (§5.1 and §8.1 record where the implementation departed from the text).
+>
+> Only one platform change was needed, and it was a latent bug the cutover
+> surfaced rather than caused.
+
+### Fixed — `_admit_delegation` flips the active executor BEFORE the ack
+
+- **The bug:** the flip of `tasks.active_agent_id` to the delegate ran
+  *after* awaiting the delegate's ack. But the SDK acks and then starts the
+  handler, so for the width of the router's own commit the delegate is
+  running while the task row still names the caller. Every identity the
+  router derives from that column — `attachments.derive_task_file_scope` —
+  refuses it: preset-slot resolution, tier-gated presets, named-file
+  operations, and `SessionOp`, all on the delegate's opening turn, which is
+  exactly when a hand-off does its work.
+- **How it surfaced:** `tests/test_delegation_e2e.py` began failing ~60% of
+  runs with `preset_not_allowed: caller could not be verified for slot
+  resolution` the moment the suite's l1 agents started passing `slot=`.
+  Nothing about slots is at fault — the previous common path used an ungated
+  preset, which skips identity derivation entirely, so the window existed and
+  simply had nothing looking through it.
+- **The fix:** flip inside the same short-lived transaction that validates
+  (with the `delegated` task_event and audit row), commit, refresh the
+  per-frame authz cache, *then* deliver — unwinding with a guarded flip-back
+  on disconnect / ack-timeout / rejection. This is the shape `admit_task` has
+  always used for a fresh task (insert with the destination already active,
+  force-fail on rejection); delegation was the inconsistent one. The
+  connection is still released across the ack, so the R8 pool-exhaustion fix
+  is untouched.
+- **Bonus:** the old ordering documented an accepted loss — a cancel landing
+  during the ack window left the delegate running orphaned until the deadline
+  sweep. Now the cancel path reads the same column, finds the delegate, and
+  cancels it.
+- **Tests:** `test_review_delegation_pool_release.py` rewritten to pin the
+  net effect (success → destination active; any failure → caller active)
+  plus a source pin that the flip precedes `deliver_frame`.
+
+### Changed — `bp_sdk` is untouched; the suite does the rest
+
+- No further platform changes. `ctx.llm.generate(slot=…)` and
+  `LlmResponse.resolved_preset` / `.preset_downgraded` shipped with the
+  router half on 2026-08-11 and needed nothing new.
+
+---
+
 ## 2026-08-12
 
 > Deployment: agents run in **groups**, one process each, and the twelve

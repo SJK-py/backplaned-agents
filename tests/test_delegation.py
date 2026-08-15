@@ -476,11 +476,21 @@ def test_admit_delegation_rejects_when_task_terminal(
     assert exc_info.value.code == "task_terminal"
 
 
-def test_admit_delegation_no_flip_when_l1_disconnected(
+def _final_active(state: Any) -> str | None:
+    """Where `active_agent_id` ended up, from the recorded flips."""
+    calls = [c.kwargs for c in state._scope.reassign_active_agent.await_args_list]
+    return calls[-1]["new_active_agent_id"] if calls else None
+
+
+def test_admit_delegation_unwinds_when_l1_disconnected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the destination has no live socket, the active executor
-    must NOT change — L0 retains the task."""
+    """If the destination has no live socket, L0 retains the task.
+
+    The flip now runs BEFORE delivery (so the delegate is never asked
+    to work under an identity the router hasn't committed), which
+    makes this an unwind rather than a no-op — the observable end
+    state is the same."""
     pytest.importorskip("fastapi")
     from bp_router import tasks as tasks_mod
     from bp_router.delivery import AgentNotConnected
@@ -505,15 +515,15 @@ def test_admit_delegation_no_flip_when_l1_disconnected(
             )
         )
     assert exc_info.value.code == "agent_disconnected"
-    state._scope.reassign_active_agent.assert_not_awaited()
+    assert _final_active(state) == "agt_l0"
 
 
-def test_admit_delegation_no_flip_when_l1_rejects(
+def test_admit_delegation_unwinds_when_l1_rejects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If L1 sends Ack(accepted=False), the active executor must
-    NOT change. L0 retains the task; the caller's `peers.delegate()`
-    raises SpawnRejected."""
+    """If L1 sends Ack(accepted=False), L0 retains the task and the
+    caller's `peers.delegate()` raises SpawnRejected. The flip is
+    unwound (see the disconnected case above)."""
     pytest.importorskip("fastapi")
     from bp_router import tasks as tasks_mod
 
@@ -546,7 +556,7 @@ def test_admit_delegation_no_flip_when_l1_rejects(
         )
     assert exc_info.value.code == "rejected"
     assert "too busy" in str(exc_info.value)
-    state._scope.reassign_active_agent.assert_not_awaited()
+    assert _final_active(state) == "agt_l0"
 
 
 # ===========================================================================

@@ -313,17 +313,38 @@ async def _admit_delegation(
 
     Ordering:
       1. SELECT FOR UPDATE the task row (also serialises vs cancel).
-      2. Validate caller, destination, ACL.
-      3. Dispatch to the new destination and AWAIT its ack.
-      4. On accept: atomic UPDATE of `active_agent_id` guarded by the
-         caller's view, plus an `agent.delegated` audit row, plus an
-         `agent.delegated` task_event.
-      5. On reject: raise `AdmitError`. The task row is unchanged;
-         the original L0 remains the active executor.
+      2. Validate caller, destination, ACL, cycle/depth.
+      3. Flip `active_agent_id` to the destination in that SAME
+         transaction, with the `agent.delegated` audit row and
+         task_event. Commit, then refresh the per-frame authz cache.
+      4. Dispatch to the destination and AWAIT its ack.
+      5. On reject / disconnect / ack-timeout: flip BACK (guarded by
+         the destination) and raise `AdmitError`, leaving the original
+         executor in place.
 
-    The "ack before flip" order matters: if L1 won't accept and we'd
-    flipped first, the task would be stuck pointing at an agent that
-    never received it.
+    **Flip before the ack, not after.** The obvious order — ack, then
+    flip — leaves a window in which the delegate is already running
+    (it acked, and the SDK starts the handler) while the router still
+    records the *caller* as the active executor. Everything the
+    router derives from that column is wrong for the whole window:
+    `attachments.derive_task_file_scope` refuses the delegate, so its
+    first LLM preset-slot resolution, first tier-gated call, first
+    named-file operation, and first `SessionOp` all fail
+    `not_active_executor` — sporadically, on the delegate's opening
+    turn, which is exactly when a hand-off does its work. Spawn
+    (`admit_task`) has never had this problem because it inserts the
+    row with the destination already active and force-fails on
+    rejection; this is the same shape, and the flip-back is the
+    delegation-shaped equivalent of that force-fail.
+
+    The cost is a window in the other direction: between the flip and
+    a rejection, the task points at an agent that has not accepted it.
+    Nothing can observe it — the caller is blocked inside its own
+    `delegate()` call for the whole window, and the destination has
+    either not been reached or is about to refuse. A router crash mid
+    window leaves the task assigned to an agent that never got the
+    frame, where before it left the task with a caller that had
+    already given up on it; both are reaped by the deadline sweep.
     """
     assert frame.task_id is not None
 
@@ -371,7 +392,7 @@ async def _admit_delegation(
             f"'{frame.destination_agent_id}' (rule={decision.rule_name})",
         )
 
-    # Phase A — validate under a SHORT-LIVED FOR UPDATE lock.
+    # Phase A — validate AND flip under a SHORT-LIVED FOR UPDATE lock.
     #
     # Pre-R8 the whole validate → dispatch → flip ran inside ONE
     # transaction that held the `SELECT … FOR UPDATE` row lock across
@@ -387,14 +408,10 @@ async def _admit_delegation(
     # serialise the read-validate-flip; a Postgres row lock IS the
     # transaction IS the connection.
     #
-    # So: validate (short lock) → release → ack (no conn) → re-lock
-    # → re-validate → flip. The re-validation only needs to re-check
-    # "still non-terminal, still mine?" because `_recv_loop`
-    # processes a socket's frames sequentially (the delegating
-    # executor is frozen for the whole of `_admit_delegation`) and
-    # the active-executor check means no other agent can delegate
-    # this task — so the ONLY concurrent mutation possible during
-    # the ack window is `cancel_task` / deadline-timeout.
+    # So: validate + flip (short lock) → release → ack (no conn),
+    # compensating with a guarded flip-back if the ack never comes.
+    # The lock is held only for the two SELECTs and the UPDATE, never
+    # across the wait.
     async with pool.acquire() as conn:
         async with conn.transaction():
             scope = queries.Scope.user(conn, frame.user_id)
@@ -452,7 +469,7 @@ async def _admit_delegation(
                     f"passed through that agent",
                 )
 
-            # Capture the immutable fields Phase B/C need. task_id,
+            # Capture the immutable fields Phase B needs. task_id,
             # parent_task_id, priority, deadline never change for a
             # task once created, so reading them here (before the
             # lock is released) is safe.
@@ -460,15 +477,91 @@ async def _admit_delegation(
             parent_task_id = task_row.parent_task_id
             priority = task_row.priority
             deadline = task_row.deadline
-    # conn + FOR UPDATE lock released here — the Phase A transaction
-    # was read-only (two SELECTs), so commit just drops the lock and
-    # returns the connection to the pool. Nothing to roll back.
+
+            # The flip, under the same lock that validated it. The
+            # WHERE-guard is redundant with the FOR UPDATE read above
+            # and kept as a belt-and-braces assertion.
+            flipped = await scope.reassign_active_agent(
+                task_id,
+                new_active_agent_id=frame.destination_agent_id,
+                expected_current_agent_id=caller_agent_id,
+            )
+            if not flipped:  # pragma: no cover - defensive
+                raise AdmitError(
+                    "internal_error",
+                    "active_agent_id reassignment lost the optimistic "
+                    "concurrency check; investigate",
+                )
+            await scope.insert_task_event(
+                task_id=task_id,
+                kind="delegated",
+                actor_agent_id=caller_agent_id,
+                payload={
+                    "from": caller_agent_id,
+                    "to": frame.destination_agent_id,
+                },
+            )
+            await queries.append_audit_event(
+                conn,
+                actor_kind="agent",
+                actor_id=caller_agent_id,
+                event="task.delegated",
+                target_kind="task",
+                target_id=task_id,
+                payload={
+                    "from": caller_agent_id,
+                    "to": frame.destination_agent_id,
+                },
+            )
+    # conn + FOR UPDATE lock released (and the flip committed) here.
+
+    # The executor changed: the delegate is now the only agent
+    # authorised to emit Progress/Result for this task. Refresh the
+    # per-frame authz cache BEFORE delivery, so the delegate's very
+    # first frame — which can arrive the moment it acks — is judged
+    # against the committed state rather than the stale one.
+    _recache_active_agent(state, task_id, frame.destination_agent_id)
+
+    async def _unflip(reason: str) -> None:
+        """Return the task to its original executor after a delegation
+        the destination never took. Guarded on the destination, so a
+        cancel or a competing mutation that already moved the column
+        wins and this is a no-op."""
+        try:
+            async with pool.acquire() as conn:
+                reverted = await queries.Scope.user(
+                    conn, frame.user_id
+                ).reassign_active_agent(
+                    task_id,
+                    new_active_agent_id=caller_agent_id,
+                    expected_current_agent_id=frame.destination_agent_id,
+                )
+            if reverted:
+                _recache_active_agent(state, task_id, caller_agent_id)
+            logger.warning(
+                "delegation_reverted",
+                extra={
+                    "event": "delegation_reverted",
+                    "bp.task_id": task_id,
+                    "from": frame.destination_agent_id,
+                    "to": caller_agent_id,
+                    "reverted": reverted,
+                    "reason": reason,
+                },
+            )
+        except Exception:  # noqa: BLE001 - never mask the AdmitError
+            logger.exception(
+                "delegation_revert_errored",
+                extra={
+                    "event": "delegation_revert_errored",
+                    "bp.task_id": task_id,
+                },
+            )
 
     # Phase B — dispatch + await the destination's ack with NO
     # connection held. This is the up-to-30s wait that previously
-    # starved the pool. The error handlers below just raise
-    # `AdmitError`; Phase A made no mutations so there is nothing to
-    # undo.
+    # starved the pool. Every failure path below unwinds Phase A's
+    # flip before raising.
     delivery_frame = NewTaskFrame(
         agent_id="router",
         trace_id=frame.trace_id,
@@ -494,107 +587,24 @@ async def _admit_delegation(
             timeout_s=state.settings.pending_ack_timeout_s,  # type: ignore[attr-defined]
         )
     except AgentNotConnected as exc:
+        await _unflip("agent_disconnected")
         raise AdmitError(
             "agent_disconnected",
             "destination agent has no live socket",
         ) from exc
     except TimeoutError as exc:
+        await _unflip("ack_timeout")
         raise AdmitError(
             "ack_timeout",
             "destination agent did not ack delegation in time",
         ) from exc
 
     if ack is not None and not ack.accepted:
+        await _unflip("rejected")
         raise AdmitError(
             "rejected",
             ack.reason or "destination rejected the delegation",
         )
-
-    # Phase C — re-acquire, re-lock, re-validate, flip. A fresh
-    # FOR UPDATE serialises the flip the same way Phase A's lock did,
-    # but only for these few fast statements rather than the whole
-    # ack wait.
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            scope = queries.Scope.user(conn, frame.user_id)
-            task_row = await scope.lock_task_for_delegation(task_id)
-            if task_row is None:
-                # Defensive — a task can't be deleted, but a
-                # cross-user scope drift would land here too.
-                raise AdmitError(
-                    "task_unknown",
-                    f"task '{task_id}' not found in caller's user scope",
-                )
-            if task_row.state in (
-                TaskState.SUCCEEDED, TaskState.FAILED,
-                TaskState.CANCELLED, TaskState.TIMED_OUT,
-            ):
-                # A cancel / deadline-timeout landed while the
-                # destination was being asked to accept. Refuse —
-                # the task is gone. Accepted tradeoff: the
-                # destination already acked and now has an orphaned
-                # execution; the deadline sweep reaps it (TIMED_OUT).
-                # Strictly better than holding a pooled connection +
-                # row lock for the entire 30s ack window.
-                raise AdmitError(
-                    "task_terminal",
-                    f"task '{task_id}' reached terminal state "
-                    f"{task_row.state.value} while the destination was "
-                    f"being asked to accept the delegation",
-                )
-            if task_row.active_agent_id != caller_agent_id:
-                # Defensive: per the concurrency model this can't
-                # happen (no concurrent delegation possible). The
-                # reassign WHERE-guard below also backstops it.
-                raise AdmitError(
-                    "not_active_executor",
-                    f"caller '{caller_agent_id}' is no longer the active "
-                    f"executor for task '{task_id}' "
-                    f"(current active: '{task_row.active_agent_id}')",
-                )
-
-            flipped = await scope.reassign_active_agent(
-                task_id,
-                new_active_agent_id=frame.destination_agent_id,
-                expected_current_agent_id=caller_agent_id,
-            )
-            if not flipped:
-                # The re-lock + re-validate should have prevented
-                # this; treat as internal_error so we don't silently
-                # swallow.
-                raise AdmitError(
-                    "internal_error",
-                    "active_agent_id reassignment lost the optimistic "
-                    "concurrency check; investigate",
-                )
-            # The executor changed: the delegate is now the only
-            # agent authorised to emit Progress/Result for this task.
-            # Keep the per-frame authz cache correct so the delegate's
-            # Progress is fanned out and the old agent's is dropped.
-            _recache_active_agent(
-                state, task_id, frame.destination_agent_id
-            )
-            await scope.insert_task_event(
-                task_id=task_id,
-                kind="delegated",
-                actor_agent_id=caller_agent_id,
-                payload={
-                    "from": caller_agent_id,
-                    "to": frame.destination_agent_id,
-                },
-            )
-            await queries.append_audit_event(
-                conn,
-                actor_kind="agent",
-                actor_id=caller_agent_id,
-                event="task.delegated",
-                target_kind="task",
-                target_id=task_id,
-                payload={
-                    "from": caller_agent_id,
-                    "to": frame.destination_agent_id,
-                },
-            )
 
     return task_id
 

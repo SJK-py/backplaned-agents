@@ -63,8 +63,8 @@ class _StubLlm:
         self.calls: list[tuple] = []
         self.embed_calls: list[tuple] = []
 
-    async def generate(self, messages, *, preset=None, **kw):
-        self.calls.append((messages, preset))
+    async def generate(self, messages, *, preset=None, slot=None, **kw):
+        self.calls.append((messages, preset, slot))
         return SimpleNamespace(text=self._reply)
 
     @staticmethod
@@ -314,13 +314,14 @@ def test_html_fetch_extract_query_distills_each_page() -> None:
         ctx = _Ctx(peers=peers, llm=llm)
         out = await html_fetch(
             ctx, urls=["http://a"], extract_query="what is X?",
-            lite_preset="lite-x", settings=SuiteSettings(),
+            settings=SuiteSettings(),
         )
         # Distilled (not raw) content, headered for source attribution.
         assert "just the relevant facts" in out and "## http://a" in out
-        # The distiller ran on the resolved lite preset, and the query rode
-        # along in the user message.
-        assert llm.calls and llm.calls[0][1] == "lite-x"
+        # The distiller runs on the LITE SLOT — it names a preference the
+        # router resolves, never a preset name the suite picked.
+        assert llm.calls and llm.calls[0][1] is None
+        assert llm.calls[0][2] == "lite"
         assert "what is X?" in llm.calls[0][0][1].content
 
     asyncio.run(_drive())

@@ -5,6 +5,14 @@ Reads the row directly; writes via `queries.update_user_config` with the
 SAME validation the config agent's `set_config` uses
 (`bp_agents.config_edit`), so the form and the NL path can't disagree. The
 chat pane still handles "change my timezone" conversationally.
+
+**Model selection is the exception** and lives only here
+([../../../../docs/design/router-resolved-preset-slots.md]). The router
+resolves a preset SLOT from the user's own preference and enforces their
+tier gate on it, so the value must be written under the user's own
+authority — a session JWT — and never by an agent acting in their session.
+The webapp is the suite's only surface holding that token, which is why the
+config agent can read settings but points at this page for models.
 """
 
 from __future__ import annotations
@@ -17,14 +25,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from bp_agents.agents.webapp.auth import session_user_id
 from bp_agents.agents.webapp.pages._common import ensure_user_config
 from bp_agents.agents.webapp.upstream import UpstreamError
-from bp_agents.config_edit import (
-    PRESET_FIELDS,
-    ConfigError,
-    coerce_config_value,
-    editable_fields,
-    preset_choices_from_settings,
-)
+from bp_agents.config_edit import ConfigError, coerce_config_value, editable_fields
 from bp_agents.db import queries
+from bp_agents.slots import SLOT_HELP, SLOT_LABELS, SLOTS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -67,37 +70,66 @@ async def _oidc_pane(request: Request) -> dict:
         "oidc_has_password": body.get("has_password", True),
     }
 
-# Friendly labels for the opt-in LLM-tier <select>s.
-_PRESET_LABELS = {
-    "preset_pro": "Model — deep reasoning (pro)",
-    "preset_balanced": "Model — assistant & research (balanced)",
-    "preset_lite": "Model — quick helpers (lite)",
+# Errors for a failed `POST /config/models`, keyed by the code on the
+# redirect. A 403 is the design working as intended: the gate refuses at
+# SELECTION time, where the user can act on it, instead of on their next
+# message ([../../../../docs/design/router-resolved-preset-slots.md] §2.2).
+_MODEL_ERRORS = {
+    "not_allowed": "That model isn’t available on your plan. Pick another.",
+    "unknown": "That model is no longer configured — pick another.",
+    "failed": "Couldn’t save your model choice. Please try again.",
 }
 
 
-def _preset_choices(request: Request) -> dict[str, list[str]]:
-    return preset_choices_from_settings(request.app.state.suite_settings)
+async def _model_slots(request: Request) -> list[dict[str, object]]:
+    """The model-selection pane: one row per slot, each carrying the presets
+    THIS user's tier admits.
 
+    Everything here comes from the router under the user's own token — the
+    suite holds no allow-list of its own. That is the point: a menu built
+    from the same gate the call path enforces cannot offer a model that would
+    then be refused, and a suite-side copy of entitlement policy would drift
+    the moment a user changed tier."""
+    upstream = request.app.state.upstream
+    access = request.session.get("access_token")
+    if upstream is None or not access:
+        return []
+    try:
+        presets = await upstream.list_llm_presets(access_token=access)
+        prefs = await upstream.get_llm_preferences(access_token=access)
+    except UpstreamError:
+        # A settings page that 500s because the router blipped is worse than
+        # one that hides the model pane for a refresh.
+        logger.info(
+            "webapp_model_slots_unavailable",
+            extra={"event": "webapp_model_slots_unavailable"},
+        )
+        return []
 
-def _preset_fields_for_template(
-    cfg: object, preset_choices: dict[str, list[str]]
-) -> list[dict[str, object]]:
-    """Every model tier to render — name, label, current value, allowed
-    options, and `editable`. A tier with a non-empty allow-list renders as an
-    editable <select>; a tier with none still shows its CURRENT model as
-    read-only text (so the user always sees which model each tier uses — only
-    changing it is gated)."""
-    out: list[dict[str, object]] = []
-    for field in PRESET_FIELDS:
-        choices = preset_choices.get(field) or []
-        out.append({
-            "name": field,
-            "label": _PRESET_LABELS.get(field, field),
-            "current": getattr(cfg, field, None) if cfg else None,
+    rows: list[dict[str, object]] = []
+    for slot in SLOTS:
+        choices = [
+            {
+                "name": p["name"],
+                "description": p.get("description") or "",
+                "is_default": slot in (p.get("default_for") or []),
+            }
+            for p in presets
+        ]
+        if not choices:
+            continue
+        default_name = next(
+            (c["name"] for c in choices if c["is_default"]), None
+        )
+        rows.append({
+            "slot": slot,
+            "label": SLOT_LABELS.get(slot, slot),
+            "help": SLOT_HELP.get(slot, ""),
+            "current": prefs.get(slot),
+            "default_name": default_name,
             "choices": choices,
-            "editable": bool(choices),
         })
-    return out
+    return rows
 
 
 # Messages for a failed `POST /change-password` (auth_pages), keyed by the
@@ -123,7 +155,7 @@ _SSO_UNLINK_ERRORS = {
 @router.get("/config", response_class=HTMLResponse)
 async def config_view(
     request: Request, saved: int = 0, pw_error: str | None = None,
-    sso_error: str | None = None,
+    sso_error: str | None = None, model_error: str | None = None,
 ) -> HTMLResponse:
     pool = request.app.state.pool
     user_id = session_user_id(request)
@@ -134,7 +166,6 @@ async def config_view(
     await ensure_user_config(request)
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, user_id)
-    preset_choices = _preset_choices(request)
     linked = await _linked_platforms(pool, user_id)
     return request.app.state.templates.TemplateResponse(
         request,
@@ -142,7 +173,8 @@ async def config_view(
         {"cfg": cfg, "saved": bool(saved), "error": None,
          "active_section": "config",
          "pw_error": _PW_ERRORS.get(pw_error or ""),
-         "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+         "model_slots": await _model_slots(request),
+         "model_error": _MODEL_ERRORS.get(model_error or ""),
          "linkable_platforms": _LINKABLE_PLATFORMS,
          "linked_platforms": linked,
          "link_token": None,
@@ -180,7 +212,6 @@ async def mint_link_token(request: Request) -> HTMLResponse:
     access = request.session.get("access_token")
     if pool is None or not user_id or not access:
         raise HTTPException(status_code=404)
-    preset_choices = _preset_choices(request)
     link_token: str | None = None
     error: str | None = None
     try:
@@ -205,7 +236,7 @@ async def mint_link_token(request: Request) -> HTMLResponse:
         "config/form.html",
         {"cfg": cfg, "saved": False, "error": None,
          "active_section": "config", "pw_error": None,
-         "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+         "model_slots": await _model_slots(request), "model_error": None,
          "linkable_platforms": _LINKABLE_PLATFORMS,
          "linked_platforms": linked,
          "link_token": link_token,
@@ -223,11 +254,10 @@ async def config_save(request: Request) -> HTMLResponse:
     # the save silently does nothing (web/OIDC accounts start without it).
     await ensure_user_config(request)
     form = await request.form()
-    preset_choices = _preset_choices(request)
 
     updates: dict[str, object] = {}
     errors: list[str] = []
-    for field, typ in editable_fields(preset_choices).items():
+    for field, typ in editable_fields().items():
         if typ is bool:
             raw = "true" if field in form else "false"  # checkbox semantics
         elif field not in form:
@@ -235,9 +265,7 @@ async def config_save(request: Request) -> HTMLResponse:
         else:
             raw = form[field]
         try:
-            updates[field] = coerce_config_value(
-                field, raw, preset_choices=preset_choices
-            )
+            updates[field] = coerce_config_value(field, raw)
         except ConfigError as exc:
             errors.append(str(exc))
 
@@ -250,7 +278,7 @@ async def config_save(request: Request) -> HTMLResponse:
             "config/form.html",
             {"cfg": cfg, "saved": False, "error": "; ".join(errors),
              "active_section": "config", "pw_error": None,
-             "preset_fields": _preset_fields_for_template(cfg, preset_choices),
+             "model_slots": await _model_slots(request), "model_error": None,
              "linkable_platforms": _LINKABLE_PLATFORMS,
              "linked_platforms": linked,
              "link_token": None},
@@ -260,4 +288,42 @@ async def config_save(request: Request) -> HTMLResponse:
     if updates:
         async with pool.acquire() as conn:
             await queries.update_user_config(conn, user_id, **updates)
+    return RedirectResponse(url="/config?saved=1", status_code=303)
+
+
+@router.post("/config/models")
+async def models_save(
+    request: Request, slot: str = Form(...), preset_name: str = Form(""),
+) -> RedirectResponse:
+    """Set (or clear) one slot's model preference.
+
+    One slot per submit, not a whole-form save: the router validates each
+    choice against the caller's tier and refuses individually, so a batch
+    would have to report "two saved, one refused" — and the refusal message
+    is the useful half of this endpoint.
+
+    An empty `preset_name` clears the preference, returning the slot to the
+    operator's default. The call goes out under the USER's access token; the
+    webapp has no service authority over this value and must not gain one
+    (design §4).
+    """
+    access = request.session.get("access_token")
+    if not access:
+        return RedirectResponse(url="/login", status_code=303)
+    if slot not in SLOTS:
+        raise HTTPException(status_code=404)
+    try:
+        await request.app.state.upstream.set_llm_preference(
+            access_token=access, slot=slot, preset_name=preset_name or None,
+        )
+    except UpstreamError as exc:
+        code = {403: "not_allowed", 404: "unknown"}.get(exc.status_code, "failed")
+        logger.info(
+            "webapp_model_preference_refused",
+            extra={"event": "webapp_model_preference_refused",
+                   "slot": slot, "status_code": exc.status_code},
+        )
+        return RedirectResponse(
+            url=f"/config?model_error={code}", status_code=303
+        )
     return RedirectResponse(url="/config?saved=1", status_code=303)

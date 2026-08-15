@@ -15,7 +15,7 @@ a doc's status changes, update it in both places.
 | --- | --- |
 | [`router-managed-file-store.md`](./router-managed-file-store.md) | Named per-user/per-session file stash; `File*` frames, `ctx.files`, LLM `file_ref` resolution. Replaced `ProxyFile`. |
 | [`router-managed-session-store.md`](./router-managed-session-store.md) | Conversation log + session state + hand-over queue + FIFO turn lease. `SessionOp` frames, `ctx.history`. Carries two known warts (§5.2, §9.4) and one shipped-then-fixed bug (§6.4). |
-| [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | Router half landed: the tier gate and the user's model choice resolved as one decision from an opaque slot key. Suite cutover outstanding. |
+| [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | The tier gate and the user's model choice resolved as one decision from an opaque slot key. Both halves landed; three `[shipped]` deviations (§5.1, §8.1, §8.2). |
 | [`deployment-agent-host.md`](./deployment-agent-host.md) | One process per agent *group*, a roster token instead of twelve invitations, one `init`. 22 compose services → 11. |
 | [`agent-tool-history-recall.md`](./agent-tool-history-recall.md) | `recall_tool_history` — an agent re-reading its own earlier tool results on demand. |
 | [`oidc-webapp.md`](./oidc-webapp.md) | SSO against an external OpenID Provider; router as relying party, webapp as BFF. |
@@ -44,7 +44,8 @@ router, then collapsing what the suite still needs to deploy:
 1. `router-managed-session-store.md` §13 — how a suite maps onto the store
    (also the target shape for the suite rebuild).
 2. `router-resolved-preset-slots.md` — the part of `user_config` the router
-   must *interpret* rather than merely store.
+   must *interpret* rather than merely store. §5.1 is the one that decides
+   where a user-facing setting can live at all.
 3. `deployment-agent-host.md` — what is left to run once the suite's
    database dependency is mostly gone.
 

@@ -1229,7 +1229,7 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                 channel="chatbot_kakao", opened_at=datetime.now(UTC),
             )
             n = await kapproval.reconcile_serviced_sessions(
-                pool, [rec], settings=_settings(),
+                pool, [rec],
                 platform="kakao", channel="chatbot_kakao",
                 default_language="ko",
             )

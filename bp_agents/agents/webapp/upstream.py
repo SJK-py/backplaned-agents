@@ -58,6 +58,49 @@ class UpstreamClient:
             return None
         return resp.json()
 
+    # -- llm preset slots ----------------------------------------------
+    #
+    # The router resolves a preset SLOT ("pro" / "balanced" / "lite") from
+    # the user's own preference, gated by their tier
+    # ([../../../docs/design/router-resolved-preset-slots.md]). Both calls go
+    # under the USER's token — deliberately: the router acts on this value,
+    # so nothing that is merely an agent may write it. That is also why the
+    # webapp is the only model-selection surface in the suite.
+
+    async def list_llm_presets(
+        self, *, access_token: str, slot: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Presets this user's level actually admits. Filtered router-side by
+        the same gate the call path enforces, so the menu cannot offer a model
+        that would then be refused."""
+        body = await self.request(
+            "GET", "/v1/llm/presets", access_token=access_token,
+            params={"slot": slot} if slot else None,
+        )
+        return body or []
+
+    async def get_llm_preferences(
+        self, *, access_token: str
+    ) -> dict[str, str]:
+        """The user's slot → preset choices. A slot they've never touched is
+        simply absent (the operator's default applies)."""
+        body = await self.request(
+            "GET", "/v1/llm/preferences", access_token=access_token
+        )
+        return {row["slot"]: row["preset_name"] for row in (body or [])}
+
+    async def set_llm_preference(
+        self, *, access_token: str, slot: str, preset_name: str | None
+    ) -> dict[str, str]:
+        """Set (`preset_name`) or clear (`None`) one slot. A 403 here is the
+        whole point of the design: the refusal lands at selection time, where
+        the user can act on it, instead of on their next message."""
+        body = await self.request(
+            "PUT", "/v1/llm/preferences", access_token=access_token,
+            json={"slot": slot, "preset_name": preset_name},
+        )
+        return {row["slot"]: row["preset_name"] for row in (body or [])}
+
     # -- tasks ---------------------------------------------------------
 
     async def cancel_task(self, *, access_token: str, task_id: str) -> None:

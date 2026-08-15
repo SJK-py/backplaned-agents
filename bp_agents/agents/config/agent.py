@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from bp_agents import slots
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.config_edit import (
@@ -12,7 +13,6 @@ from bp_agents.config_edit import (
     coerce_config_value,
     displayable_fields,
     editable_fields,
-    preset_choices_from_settings,
 )
 from bp_agents.cron_manage import run_cron_management
 from bp_agents.db import queries
@@ -29,19 +29,22 @@ logger = logging.getLogger(__name__)
 CONFIG_AGENT_ID = "config"
 
 # Editable fields + value coercion are shared with the webapp config form
-# (bp_agents.config_edit) so the NL path and the structured form agree. The
-# per-tier LLM-preset fields are added only when the operator opts in via
-# `SuiteSettings.selectable_presets_*` (an allow-list per tier).
+# (bp_agents.config_edit) so the NL path and the structured form agree.
+#
+# Model selection is NOT here: it is a router-side preference the user sets
+# under their own authority on the web Settings page
+# ([../../../docs/design/router-resolved-preset-slots.md] §4). No agent has a
+# write path to a value the router enforces policy on, so this agent's job on
+# the subject is to say where the switch lives.
 
 _SYSTEM_BASE = (
     "You manage the user's settings. Use `get_config` to read current values "
     "and `set_config` to change one. Editable fields: full_name, timezone "
     "(IANA), language, verbose_default (true/false), custom_note, "
-    "max_context_token_limit. The user also has three LLM model tiers — "
-    "preset_pro (deep reasoning), preset_balanced (general), preset_lite "
-    "(quick helpers); always report their current values on a read. They are "
-    "only CHANGEABLE when listed as selectable below; if a tier isn't listed, "
-    "tell the user it's set by their administrator and can't be changed here."
+    "max_context_token_limit. If the user asks to change which AI MODEL they "
+    "use, explain that model choice lives on the web Settings page — it is "
+    "checked against their plan there — and that you can't change it from "
+    "chat. Never guess which model they are on."
 )
 _SYSTEM_TAIL = (
     " ALWAYS end your reply by stating the relevant settings in plain "
@@ -52,22 +55,11 @@ _SYSTEM_TAIL = (
 )
 
 
-def _system_prompt(
-    preset_choices: dict[str, list[str]], language: str | None = None
-) -> str:
-    """The config system prompt, with a sentence per opted-in preset tier
-    listing the names the user may pick (so the model offers real choices).
-    When the user has a `language` preference, instruct the model to write its
-    reply in it (the `/config` dispatch bypasses the orchestrator, which would
-    otherwise carry the language)."""
-    lines = [_SYSTEM_BASE]
-    for field, choices in preset_choices.items():
-        if choices:
-            lines.append(
-                f" The {field} (LLM model tier) may be set to one of: "
-                f"{', '.join(choices)}."
-            )
-    lines.append(_SYSTEM_TAIL)
+def _system_prompt(language: str | None = None) -> str:
+    """The config system prompt. When the user has a `language` preference,
+    instruct the model to write its reply in it (the `/config` dispatch
+    bypasses the orchestrator, which would otherwise carry the language)."""
+    lines = [_SYSTEM_BASE, _SYSTEM_TAIL]
     if language:
         lines.append(
             f" Write your entire reply in the user's preferred language "
@@ -77,37 +69,24 @@ def _system_prompt(
     return "".join(lines)
 
 
-def _format_config(cfg: Any, preset_choices: dict[str, list[str]]) -> str:
+def _format_config(cfg: Any) -> str:
     if cfg is None:
         return "No settings found."
-    # Show every displayable field, including the model tiers. A tier the
-    # operator hasn't opened for editing (empty allow-list) is tagged
-    # "(set by your administrator)" so its value is visible but clearly not
-    # user-changeable. Without this a bare read hid the model entirely.
-    editable = editable_fields(preset_choices)
-    lines = []
-    for f in displayable_fields():
-        suffix = "" if f in editable else "  (set by your administrator)"
-        lines.append(f"{f}: {getattr(cfg, f)}{suffix}")
-    return "\n".join(lines)
+    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in displayable_fields())
 
 
-async def _build_tools(
-    pool: asyncpg.Pool, preset_choices: dict[str, list[str]]
-) -> LocalToolset:
-    fields = editable_fields(preset_choices)
+async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
+    fields = editable_fields()
 
     async def _get(ctx: TaskContext, args: dict[str, Any]) -> str:
         async with pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, ctx.user_id)
-        return _format_config(cfg, preset_choices)
+        return _format_config(cfg)
 
     async def _set(ctx: TaskContext, args: dict[str, Any]) -> str:
         field = args.get("field")
         try:
-            value = coerce_config_value(
-                field, args.get("value"), preset_choices=preset_choices
-            )
+            value = coerce_config_value(field, args.get("value"))
         except ConfigError as exc:
             return str(exc)
         async with pool.acquire() as conn:
@@ -118,7 +97,7 @@ async def _build_tools(
             cfg = await queries.get_user_config(conn, ctx.user_id)
         return (
             f"Set {field} = {value}.\n\nCurrent settings:\n"
-            f"{_format_config(cfg, preset_choices)}"
+            f"{_format_config(cfg)}"
         )
 
     return LocalToolset([
@@ -180,20 +159,16 @@ async def run_config(
 ) -> AgentOutput:
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_lite if cfg else settings.default_preset_lite
-    preset_choices = preset_choices_from_settings(settings)
-    tools = await _build_tools(pool, preset_choices)
+    tools = await _build_tools(pool)
     messages = [
         Message(
             role="system",
-            content=_system_prompt(
-                preset_choices, language=cfg.language if cfg else None
-            ),
+            content=_system_prompt(language=cfg.language if cfg else None),
         ),
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset, local_tools=tools,
+        ctx, messages=messages, slot=slots.LITE, local_tools=tools,
         use_peer_tools=False,
     )
     if resp.text and resp.text.strip():
@@ -202,7 +177,7 @@ async def run_config(
     # the current settings rather than a bare "Done." that hides the result.
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    return text_output(_format_config(cfg, preset_choices))
+    return text_output(_format_config(cfg))
 
 
 @agent.handler(
@@ -230,10 +205,8 @@ async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     async with _pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_lite if cfg else _settings.default_preset_lite
     return await run_cron_management(
-        ctx, payload, pool=_pool, preset=preset,
-        language=cfg.language if cfg else None,
+        ctx, payload, pool=_pool, language=cfg.language if cfg else None,
     )
 
 

@@ -32,11 +32,10 @@ def test_suite_db_round_trips(suite_db_url: str) -> None:
                 # --- user_config: create + defaults + allowlist update ---
                 cfg = await queries.create_user_config(
                     conn, user_id="usr_a", full_name="Ada",
-                    timezone="Europe/London", preset_balanced="balanced",
+                    timezone="Europe/London",
                 )
                 assert cfg.full_name == "Ada"
                 assert cfg.timezone == "Europe/London"
-                assert cfg.preset_balanced == "balanced"
                 assert cfg.verbose_default is False
                 assert cfg.max_context_token_limit == 120_000
 

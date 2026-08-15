@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from bp_agents import slots
 from bp_agents.common import (
     LocalToolset,
     emit_loop_progress,
@@ -229,7 +230,6 @@ async def run_plan(
     `plan_max_steps` / `plan_max_iters` so it always terminates."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_pro if cfg else settings.default_preset_pro
     timezone = cfg.timezone if cfg else settings.default_timezone
 
     steps: list[str] = [s for s in initial_steps if s][: settings.plan_max_steps]
@@ -252,7 +252,7 @@ async def run_plan(
                     Message(role="system", content=_final_system(objective, results)),
                     Message(role="user", content="Write the final answer now."),
                 ],
-                preset=preset, local_tools=_tools(), use_peer_tools=False,
+                slot=slots.PRO, local_tools=_tools(), use_peer_tools=False,
                 extra_tools=_FINAL_SPECS, terminal_tools=_FINAL_NAMES,
                 file_tools="read_only", detail_chars=settings.verbose_detail_chars,
             )
@@ -267,7 +267,7 @@ async def run_plan(
                 Message(role="system", content=_planner_system(objective, steps, results)),
                 Message(role="user", content=_planner_user(steps, cursor)),
             ],
-            preset=preset, local_tools=_tools(), use_peer_tools=False,
+            slot=slots.PRO, local_tools=_tools(), use_peer_tools=False,
             extra_tools=_DECISION_SPECS, terminal_tools=_DECISION_NAMES,
             file_tools="read_only", detail_chars=settings.verbose_detail_chars,
         )

@@ -33,8 +33,7 @@ async def _seed_user(pool, user_id: str, session_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id,
-            preset_pro="p", preset_balanced="b", preset_lite="l",
-            preset_embedding="e", language="en",
+            language="en",
         )
         await queries.create_session_info(
             conn, session_id=session_id, user_id=user_id, channel="webapp",

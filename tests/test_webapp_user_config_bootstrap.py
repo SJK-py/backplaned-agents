@@ -44,7 +44,7 @@ def test_update_without_create_is_a_silent_noop(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
-def test_ensure_user_config_seeds_from_settings_then_update_persists(
+def test_ensure_user_config_creates_the_row_then_update_persists(
     suite_db_url: str,
 ) -> None:
     from bp_agents.agents.webapp.pages._common import ensure_user_config
@@ -56,21 +56,14 @@ def test_ensure_user_config_seeds_from_settings_then_update_persists(
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM user_config WHERE user_id = $1", uid)
 
-            settings = SimpleNamespace(
-                default_preset_pro="seed-pro",
-                default_preset_balanced="seed-bal",
-                default_preset_lite="seed-lite",
-                default_preset_embedding="seed-emb",
-            )
-            req = _stub_request(pool, uid, settings)
+            req = _stub_request(pool, uid, SimpleNamespace())
 
-            # First ensure creates the row, seeded from settings.
+            # First ensure creates the row.
             await ensure_user_config(req)
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, uid)
             assert cfg is not None
-            assert cfg.preset_pro == "seed-pro"
-            assert cfg.preset_embedding == "seed-emb"
+            assert cfg.timezone == "UTC"
 
             # Idempotent: a second ensure doesn't duplicate or reset.
             await ensure_user_config(req)
@@ -80,7 +73,6 @@ def test_ensure_user_config_seeds_from_settings_then_update_persists(
                 await queries.update_user_config(conn, uid, full_name="Ada")
                 cfg2 = await queries.get_user_config(conn, uid)
             assert cfg2 is not None and cfg2.full_name == "Ada"
-            assert cfg2.preset_pro == "seed-pro"  # unchanged by the patch
         finally:
             await pool.close()
 

@@ -137,7 +137,7 @@ async def _startup() -> None:
         )
         _approval_task = asyncio.create_task(
             approval_poll_loop(
-                credentials=_credentials, pool=_pool, settings=_settings, stop=_stop
+                credentials=_credentials, pool=_pool, stop=_stop
             )
         )
         # Deployment-wide maintenance (not channel-specific): reap suite-side
@@ -180,7 +180,7 @@ async def _startup() -> None:
         if _credentials is not None:
             _kakao_approval_task = asyncio.create_task(
                 approval_poll_loop(
-                    credentials=_credentials, pool=_pool, settings=_settings,
+                    credentials=_credentials, pool=_pool,
                     stop=_stop, channel="chatbot_kakao", platform="kakao",
                     # KakaoTalk is a Korea-only product → default new users to
                     # Korean (they can change it via /config).

@@ -104,8 +104,12 @@ automatically for a local router.
   `brave` (`SUITE_BRAVE_API_KEY` → Brave's LLM-Context API), or `kagi`
   (`SUITE_KAGI_API_KEY` → Kagi FastGPT for search + Extract for `html_fetch`).
   See [Web search](#web-search) below.
-- LLM presets are router-side (`llm_presets` table); the suite only names
-  presets (`SUITE_DEFAULT_PRESET_*` / per-user `user_config`).
+- LLM presets are router-side (`llm_presets` table). The suite names a
+  **slot** (`pro` / `balanced` / `lite`) and the router resolves it from the
+  user's own preference and their tier gate, defaulting to
+  `ROUTER_LLM_DEFAULT_PRESETS`. The one preset the suite still names outright
+  is `SUITE_DEFAULT_PRESET_EMBEDDING` — not a slot, because changing an
+  embedding model invalidates every vector already stored.
 
 ## ACL
 

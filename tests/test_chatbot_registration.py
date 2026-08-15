@@ -95,7 +95,7 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 user_id="usr_a", session_id="ses_1", external_id="tg1",
                 channel="chatbot_telegram", opened_at=datetime.now(UTC),
             )
-            n = await reconcile_serviced_sessions(pool, [rec], settings=settings)
+            n = await reconcile_serviced_sessions(pool, [rec])
             assert n == 1
 
             async with pool.acquire() as conn:
@@ -109,16 +109,14 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 assert await queries.get_session_info(conn, "ses_1") is not None
 
             # Idempotent: a re-poll maps nothing new.
-            assert await reconcile_serviced_sessions(
-                pool, [rec], settings=settings
-            ) == 0
+            assert await reconcile_serviced_sessions(pool, [rec]) == 0
 
             # A later /new moved the default; reconcile must NOT clobber it.
             async with pool.acquire() as conn:
                 await queries.set_default_session_id(
                     conn, user_id="usr_a", session_id="ses_2"
                 )
-            await reconcile_serviced_sessions(pool, [rec], settings=settings)
+            await reconcile_serviced_sessions(pool, [rec])
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, "usr_a")
             assert cfg.default_session_id == "ses_2"
@@ -128,17 +126,15 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
-def test_reconcile_seeds_tier_presets_from_settings(suite_db_url: str) -> None:
-    """A first-time user_config row picks up the operator's configured
-    per-tier preset defaults (`SUITE_DEFAULT_PRESET_*`)."""
+def test_reconcile_does_not_seed_a_model_choice(suite_db_url: str) -> None:
+    """A first-time `user_config` row carries no model preference at all.
+
+    Model choice is a router-side slot with an operator default, so a user
+    who has never picked one simply resolves to that default. Seeding a
+    per-user copy at registration is what pinned every user to whatever the
+    operator happened to have configured on the day they signed up."""
     async def _drive() -> None:
-        settings = SuiteSettings(
-            database_url=suite_db_url,
-            default_preset_pro="claude-opus",
-            default_preset_balanced="claude",
-            default_preset_lite="gemini-lite",
-            default_preset_embedding="text-embedding-3-small",
-        )
+        settings = SuiteSettings(database_url=suite_db_url)
         pool = await open_pool(settings)
         try:
             await _truncate(pool)
@@ -146,13 +142,11 @@ def test_reconcile_seeds_tier_presets_from_settings(suite_db_url: str) -> None:
                 user_id="usr_a", session_id="ses_1", external_id="tg1",
                 channel="chatbot_telegram", opened_at=datetime.now(UTC),
             )
-            await reconcile_serviced_sessions(pool, [rec], settings=settings)
+            await reconcile_serviced_sessions(pool, [rec])
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, "usr_a")
-            assert cfg.preset_pro == "claude-opus"
-            assert cfg.preset_balanced == "claude"
-            assert cfg.preset_lite == "gemini-lite"
-            assert cfg.preset_embedding == "text-embedding-3-small"
+            assert cfg is not None
+            assert not [f for f in type(cfg).model_fields if f.startswith("preset")]
         finally:
             await pool.close()
 

@@ -53,10 +53,6 @@ class UserConfigRow(_Row):
     user_id: str
     full_name: str
     timezone: str
-    preset_pro: str
-    preset_balanced: str
-    preset_lite: str
-    preset_embedding: str
     max_context_token_limit: int
     verbose_default: bool
     language: str

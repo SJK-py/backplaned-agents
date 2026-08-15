@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from croniter import croniter
 
+from bp_agents import slots
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.db import queries
@@ -165,7 +166,7 @@ plain language, and when listing jobs, present them clearly.\
 
 
 async def run_cron_management(
-    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool, preset: str,
+    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool,
     language: str | None = None,
 ) -> AgentOutput:
     # /cron dispatches straight here, bypassing the orchestrator that would
@@ -181,7 +182,7 @@ async def run_cron_management(
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset,
+        ctx, messages=messages, slot=slots.LITE,
         local_tools=LocalToolset(make_cron_tools(pool)), use_peer_tools=False,
     )
     if resp.text and resp.text.strip():

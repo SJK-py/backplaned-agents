@@ -18,6 +18,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents import slots
 from bp_agents.agents.l1_common import compose_subagent_system
 from bp_agents.agents.orchestrator.prompts import (
     CRON_INSTRUCTION,
@@ -31,7 +32,6 @@ from bp_agents.common import (
     make_current_time_tool,
     make_recall_tool_history_tool,
     make_send_file_tool,
-    multimodal_preset_for,
     persist_tool_exchanges,
     run_llm_loop,
     text_output,
@@ -153,7 +153,6 @@ async def run_orchestrator_message(
         info = await queries.get_session_info(conn, ctx.session_id)
 
     summary = info.history_summary if info else None
-    preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
     timezone = cfg.timezone if cfg else settings.default_timezone
     config_note = user_config_note(cfg) if cfg else ""
 
@@ -185,14 +184,12 @@ async def run_orchestrator_message(
     )
     destinations = _l1_destinations(ctx)
     extra = [_hand_off_spec(destinations)] if destinations else []
-    mm_preset = multimodal_preset_for(
-        configured=settings.default_preset_multimodal,
-        text_only=settings.text_only_presets, preset=preset,
-    )
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset, local_tools=local_tools,
+        ctx, messages=messages, slot=slots.BALANCED, local_tools=local_tools,
         extra_tools=extra, terminal_tools={_HAND_OFF_TOOL} if extra else None,
-        file_tools="full", multimodal_preset=mm_preset,
+        file_tools="full",
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
         detail_chars=settings.verbose_detail_chars,
     )
 
@@ -214,7 +211,7 @@ async def run_orchestrator_message(
                        "reason": str(exc)},
             )
             return await _run_hand_off_fallback(
-                ctx, pool, messages, hand_off, preset=preset,
+                ctx, pool, messages, hand_off,
                 local_tools=local_tools, outbound=outbound,
                 context_tokens=context_tokens, settings=settings,
             )
@@ -295,7 +292,6 @@ async def _run_hand_off_fallback(
     messages: list[Message],
     hand_off: ToolCall,
     *,
-    preset: str | None,
     local_tools: LocalToolset,
     outbound: list[str],
     context_tokens: int,
@@ -313,12 +309,10 @@ async def _run_hand_off_fallback(
         response="The specialist is unavailable right now. Answer the user directly.",
     ))
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset, local_tools=local_tools,
+        ctx, messages=messages, slot=slots.BALANCED, local_tools=local_tools,
         file_tools="full",
-        multimodal_preset=multimodal_preset_for(
-            configured=settings.default_preset_multimodal,
-            text_only=settings.text_only_presets, preset=preset,
-        ),
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
     )
     async with pool.acquire() as conn:
         await persist_tool_exchanges(
@@ -346,7 +340,6 @@ async def run_orchestrator_subagent(
     Stateless — no session history; full toolset."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
     timezone = cfg.timezone if cfg else settings.default_timezone
     messages = [
         Message(
@@ -356,13 +349,11 @@ async def run_orchestrator_subagent(
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset,
+        ctx, messages=messages, slot=slots.BALANCED,
         local_tools=LocalToolset([make_current_time_tool(timezone)]),
         file_tools="full",
-        multimodal_preset=multimodal_preset_for(
-            configured=settings.default_preset_multimodal,
-            text_only=settings.text_only_presets, preset=preset,
-        ),
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
     )
     return text_output(resp.text)
 
@@ -459,7 +450,6 @@ async def run_orchestrator_cron_message(
     Returns the message + a `{report, reason}` decision in metadata."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_balanced if cfg else settings.default_preset_balanced
     timezone = cfg.timezone if cfg else settings.default_timezone
     system = compose_system_prompt(
         CRON_INSTRUCTION, config_note=user_config_note(cfg) if cfg else "",
@@ -471,15 +461,13 @@ async def run_orchestrator_cron_message(
     # Full toolset, but NO hand_off — a cron never delegates ([cron.md] §2).
     outbound: list[str] = []
     resp = await run_llm_loop(
-        ctx, messages=messages, preset=preset,
+        ctx, messages=messages, slot=slots.BALANCED,
         local_tools=LocalToolset(
             [make_current_time_tool(timezone), make_send_file_tool(outbound)]
         ),
         file_tools="full",
-        multimodal_preset=multimodal_preset_for(
-            configured=settings.default_preset_multimodal,
-            text_only=settings.text_only_presets, preset=preset,
-        ),
+        multimodal_preset=settings.default_preset_multimodal or None,
+        text_only_presets=settings.text_only_presets,
     )
 
     # Decide whether to report (the channel's apply step uses this for
@@ -491,7 +479,7 @@ async def run_orchestrator_cron_message(
                 Message(role="system", content=_REPORT_DECISION),
                 Message(role="user", content=resp.text or "(no output)"),
             ],
-            preset=(cfg.preset_lite if cfg else settings.default_preset_lite),
+            slot=slots.LITE,
         )
         parsed = json.loads(decision.text.strip().removeprefix("```json").strip("`").strip())
         report = bool(parsed.get("report", True))

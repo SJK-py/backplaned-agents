@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents import slots
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.agents.research.web import make_web_tools
 from bp_agents.common import (
@@ -14,7 +15,6 @@ from bp_agents.common import (
     make_current_time_tool,
 )
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
@@ -66,22 +66,15 @@ knowledge base.
 async def _tools(
     ctx: TaskContext, settings: SuiteSettings, timezone: str
 ) -> LocalToolset:
-    # Resolve the user's presets so the web tools can close over them:
-    # `html_fetch`'s extract_query distillation runs on the lite preset, and
-    # the SearXNG deep-search content ranker embeds on the embedding preset.
-    lite_preset = settings.default_preset_lite
-    embedding_preset = settings.default_preset_embedding
-    if _pool is not None:
-        async with _pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, ctx.user_id)
-        if cfg is not None:
-            lite_preset = cfg.preset_lite
-            embedding_preset = cfg.preset_embedding
+    # `html_fetch`'s extract_query distillation runs on the LITE slot (the
+    # router resolves the user's preference for it per call); the SearXNG
+    # deep-search content ranker embeds on the operator's embedding preset,
+    # which is not a slot and must not be — see `bp_agents.slots`.
     return LocalToolset(
         [
             make_current_time_tool(timezone),
             *make_web_tools(
-                settings, lite_preset=lite_preset, embedding_preset=embedding_preset
+                settings, embedding_preset=settings.default_preset_embedding
             ),
         ]
     )
@@ -91,7 +84,7 @@ _CONFIG = L1Config(
     agent_id=RESEARCH_AGENT_ID,
     subagent_system=_SUBAGENT_SYSTEM,
     delegation_system=_DELEGATION_SYSTEM,
-    preset_field="preset_balanced",
+    slot=slots.BALANCED,
     local_tools=_tools,
     file_tools="full",
 )

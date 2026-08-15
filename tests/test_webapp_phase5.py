@@ -26,17 +26,46 @@ def _fake_jwt(sub: str) -> str:
 
 
 class _Upstream:
+    """Stands in for the router. The LLM-preset half models what the real
+    endpoints do: the listing is ALREADY filtered to what this caller's tier
+    admits (the router applies the gate), and `set_llm_preference` refuses
+    anything outside it with the same 403 the router raises."""
+
+    def __init__(self, *, presets=None) -> None:
+        self.presets = presets if presets is not None else [
+            {"name": "default", "description": "Everyday", "default_for": ["balanced", "lite"]},
+            {"name": "claude", "description": "Claude", "default_for": ["pro"]},
+        ]
+        self.preferences: dict[str, str] = {}
+
     async def login(self, *, email: str, password: str) -> dict:
         return {
             "access_token": _fake_jwt("usr_a"), "refresh_token": "r",
             "expires_at": "2999-01-01T00:00:00+00:00", "level": "tier1",
         }
 
+    async def list_llm_presets(self, *, access_token, slot=None):
+        return list(self.presets)
+
+    async def get_llm_preferences(self, *, access_token):
+        return dict(self.preferences)
+
+    async def set_llm_preference(self, *, access_token, slot, preset_name):
+        from bp_agents.agents.webapp.upstream import UpstreamError  # noqa: PLC0415
+
+        if preset_name is None:
+            self.preferences.pop(slot, None)
+        elif preset_name not in {p["name"] for p in self.presets}:
+            raise UpstreamError(403, "preset_not_allowed")
+        else:
+            self.preferences[slot] = preset_name
+        return dict(self.preferences)
+
     async def aclose(self):
         pass
 
 
-def _build_app(*, pool, suite_settings=None):
+def _build_app(*, pool, suite_settings=None, upstream=None):
     pytest.importorskip("fastapi")
     pytest.importorskip("itsdangerous")
     pytest.importorskip("jinja2")
@@ -47,7 +76,7 @@ def _build_app(*, pool, suite_settings=None):
 
     cfg = WebappConfig(session_secret=SecretStr("x" * 32), session_cookie_secure=False)
     return create_app(
-        cfg, upstream=_Upstream(), pool=pool, core=None,
+        cfg, upstream=upstream or _Upstream(), pool=pool, core=None,
         suite_settings=suite_settings,
     )
 
@@ -90,95 +119,70 @@ def test_config_edit_coercion_and_rejection() -> None:
     with pytest.raises(ConfigError):
         coerce_config_value("max_context_token_limit", "not-an-int")
     with pytest.raises(ConfigError):
-        coerce_config_value("preset_pro", "x")  # not user-editable
+        # Model choice is not a `user_config` field at all any more — it is a
+        # router-side slot preference set through /config/models.
+        coerce_config_value("preset_pro", "x")
 
 
-def test_preset_fields_are_tier_gated() -> None:
-    """A preset/tier field is editable only when the operator opts in with a
-    non-empty allow-list, and only to a value in that list."""
-    from bp_agents.config_edit import (  # noqa: PLC0415
-        editable_fields,
-        preset_choices_from_settings,
-    )
-
-    # Off by default: empty allow-lists → preset fields not editable.
-    empty = preset_choices_from_settings(SuiteSettings())
-    assert "preset_balanced" not in editable_fields(empty)
-    with pytest.raises(ConfigError):
-        coerce_config_value("preset_balanced", "claude", preset_choices=empty)
-
-    # Opted in via settings: the tier becomes editable, gated to the list.
-    choices = preset_choices_from_settings(
-        SuiteSettings(selectable_presets_balanced=["default", "claude"])
-    )
-    assert "preset_balanced" in editable_fields(choices)
-    assert (
-        coerce_config_value("preset_balanced", "claude", preset_choices=choices)
-        == "claude"
-    )
-    # A name outside the allow-list is rejected, even though it's a real tier.
-    with pytest.raises(ConfigError):
-        coerce_config_value("preset_balanced", "gpt", preset_choices=choices)
-    # Other tiers stay closed unless they too have a list.
-    with pytest.raises(ConfigError):
-        coerce_config_value("preset_pro", "default", preset_choices=choices)
-
-
-def test_model_tiers_always_shown_on_read_even_when_not_editable() -> None:
-    """A bare read must SHOW the current model for every tier regardless of the
-    allow-lists — only changing it is gated. Regression: bare /config showed no
-    model at all when the operator hadn't opened any tier."""
-    from types import SimpleNamespace  # noqa: PLC0415
-
-    from bp_agents.agents.config.agent import _format_config  # noqa: PLC0415
+def test_model_choice_is_not_a_user_config_field() -> None:
+    """The four `preset_*` columns are gone. Nothing in the suite's editable
+    or displayable surface may name a model — the choice lives router-side
+    ([docs/design/router-resolved-preset-slots.md] §8)."""
     from bp_agents.config_edit import (  # noqa: PLC0415
         displayable_fields,
         editable_fields,
-        preset_choices_from_settings,
     )
+    from bp_agents.db.models import UserConfigRow  # noqa: PLC0415
 
-    empty = preset_choices_from_settings(SuiteSettings())
-    # Not editable, but always displayable.
-    assert "preset_pro" not in editable_fields(empty)
-    assert "preset_pro" in displayable_fields()
-
-    cfg = SimpleNamespace(
-        full_name="Ada", timezone="UTC", language="en", verbose_default=False,
-        custom_note="", max_context_token_limit=8000,
-        preset_pro="claude-opus", preset_balanced="default", preset_lite="lite",
-        preset_embedding="default_embedding",
-    )
-    out = _format_config(cfg, empty)
-    # Every tier's current model is present, tagged as admin-managed.
-    assert "preset_pro: claude-opus" in out
-    assert "preset_balanced: default" in out
-    assert "preset_lite: lite" in out
-    assert "set by your administrator" in out
+    assert not [f for f in editable_fields() if f.startswith("preset")]
+    assert not [f for f in displayable_fields() if f.startswith("preset")]
+    assert not [f for f in UserConfigRow.model_fields if f.startswith("preset")]
 
 
-def test_webapp_renders_every_tier_readonly_or_editable() -> None:
-    """The webapp form lists EVERY tier: opted-in → editable, else read-only
-    with the current value (not omitted)."""
+def test_model_slots_are_built_from_the_router_listing() -> None:
+    """The menu is whatever the router says this caller may run — the suite
+    contributes the slot taxonomy and nothing else. A slot the user has never
+    touched reports `current=None` so the form can select "Default"."""
     from types import SimpleNamespace  # noqa: PLC0415
 
-    from bp_agents.agents.webapp.pages.config import (  # noqa: PLC0415
-        _preset_fields_for_template,
-    )
-    from bp_agents.config_edit import preset_choices_from_settings  # noqa: PLC0415
+    from bp_agents.agents.webapp.pages.config import _model_slots  # noqa: PLC0415
 
-    cfg = SimpleNamespace(
-        preset_pro="claude-opus", preset_balanced="default", preset_lite="lite",
+    upstream = _Upstream()
+    upstream.preferences["pro"] = "claude"
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(upstream=upstream)),
+        session={"access_token": "tok"},
     )
-    choices = preset_choices_from_settings(
-        SuiteSettings(selectable_presets_pro=["claude-opus", "default"])
+    rows = {r["slot"]: r for r in asyncio.run(_model_slots(request))}
+
+    assert list(rows) == ["pro", "balanced", "lite"]
+    assert rows["pro"]["current"] == "claude"
+    assert rows["balanced"]["current"] is None
+    # `default_for` from the router marks which option is the operator default.
+    assert rows["pro"]["default_name"] == "claude"
+    assert rows["balanced"]["default_name"] == "default"
+    # Every admitted preset is offered for every slot — the router already
+    # filtered by entitlement, and slots have no per-slot allow-list.
+    assert {c["name"] for c in rows["lite"]["choices"]} == {"default", "claude"}
+
+
+def test_model_slots_degrade_when_the_router_is_unreachable() -> None:
+    """A settings page that 500s because the router blipped is worse than one
+    that hides the model pane for a refresh."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from bp_agents.agents.webapp.pages.config import _model_slots  # noqa: PLC0415
+    from bp_agents.agents.webapp.upstream import UpstreamError  # noqa: PLC0415
+
+    class _Broken(_Upstream):
+        async def list_llm_presets(self, *, access_token, slot=None):
+            raise UpstreamError(503, "down")
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(upstream=_Broken())),
+        session={"access_token": "tok"},
     )
-    fields = {f["name"]: f for f in _preset_fields_for_template(cfg, choices)}
-    # All three rendered (none omitted).
-    assert set(fields) == {"preset_pro", "preset_balanced", "preset_lite"}
-    assert fields["preset_pro"]["editable"] is True
-    assert fields["preset_balanced"]["editable"] is False
-    # Read-only tier still carries its current value for display.
-    assert fields["preset_balanced"]["current"] == "default"
+    assert asyncio.run(_model_slots(request)) == []
 
 
 def test_config_agent_uses_shared_editable_fields() -> None:
@@ -265,48 +269,76 @@ def test_config_save_persists_via_shared_validation(suite_db_url: str) -> None:
     assert cfg.custom_note == "be concise"
 
 
-def test_config_preset_select_renders_and_persists(suite_db_url: str) -> None:
-    """An opted-in tier renders an editable <select>; a NON-opted-in tier is
-    still shown read-only (current model visible, not changeable). A POST
-    persists a value in the opted-in list; a disallowed value is rejected."""
+def test_config_model_pane_renders_and_persists(suite_db_url: str) -> None:
+    """The Models pane offers exactly what the router says the caller may run,
+    and each slot saves on its own through the router — never into
+    `user_config`. A refusal comes back as a message on the page, which is the
+    whole point of moving the gate to selection time."""
     pytest.importorskip("fastapi")
 
-    settings = SuiteSettings(selectable_presets_balanced=["default", "claude"])
+    upstream = _Upstream()
 
     async def _drive() -> object:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(pool=pool, suite_settings=settings)
+            app = _build_app(pool=pool, upstream=upstream)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
                 page = await client.get("/config")
-                # Opted-in tier → editable <select name="preset_balanced">.
-                assert '<select id="preset_balanced" name="preset_balanced"' in page.text
-                # Non-opted-in tiers are SHOWN (label present) but read-only —
-                # no editable <select> for them, and the admin-managed note.
-                assert "Model — deep reasoning (pro)" in page.text
-                assert 'name="preset_pro"' not in page.text  # not an input/select
-                assert "set by your administrator" in page.text
+                # One <select> per slot, plus the "leave it to the operator"
+                # option naming the default.
+                for slot in ("pro", "balanced", "lite"):
+                    assert 'name="preset_name"' in page.text
+                    assert f'value="{slot}"' in page.text
+                assert "Deep reasoning" in page.text
+                assert "Default (claude)" in page.text
+                # No model field may ride the user_config form any more.
+                assert 'name="preset_balanced"' not in page.text
 
                 token = await _csrf(client, "/config")
                 ok = await client.post(
-                    "/config",
-                    data={"csrf_token": token, "preset_balanced": "claude"},
+                    "/config/models",
+                    data={"csrf_token": token, "slot": "pro", "preset_name": "claude"},
                     follow_redirects=False,
                 )
                 assert ok.status_code == 303, ok.text[:300]
+                assert upstream.preferences == {"pro": "claude"}
 
-                # A name outside the allow-list is rejected (400, not saved).
+                # A preset the router refuses → the page says so; nothing saved.
                 token = await _csrf(client, "/config")
                 bad = await client.post(
-                    "/config",
-                    data={"csrf_token": token, "preset_balanced": "gpt"},
+                    "/config/models",
+                    data={"csrf_token": token, "slot": "pro", "preset_name": "gpt"},
                     follow_redirects=False,
                 )
-                assert bad.status_code == 400, bad.text[:300]
+                assert bad.status_code == 303
+                assert "model_error=not_allowed" in bad.headers["location"]
+                assert upstream.preferences == {"pro": "claude"}
+
+                page = await client.get("/config?model_error=not_allowed")
+                assert "isn’t available on your plan" in page.text
+
+                # Empty value clears the preference back to the default.
+                token = await _csrf(client, "/config")
+                cleared = await client.post(
+                    "/config/models",
+                    data={"csrf_token": token, "slot": "pro", "preset_name": ""},
+                    follow_redirects=False,
+                )
+                assert cleared.status_code == 303
+                assert upstream.preferences == {}
+
+                # An unknown slot is a 404, not a pass-through to the router.
+                token = await _csrf(client, "/config")
+                unknown = await client.post(
+                    "/config/models",
+                    data={"csrf_token": token, "slot": "nope", "preset_name": "claude"},
+                    follow_redirects=False,
+                )
+                assert unknown.status_code == 404
 
                 async with pool.acquire() as conn:
                     cfg = await queries.get_user_config(conn, "usr_a")
@@ -315,7 +347,8 @@ def test_config_preset_select_renders_and_persists(suite_db_url: str) -> None:
             await pool.close()
 
     cfg = asyncio.run(_drive())
-    assert cfg.preset_balanced == "claude"
+    # The suite row is untouched by model selection.
+    assert not [f for f in type(cfg).model_fields if f.startswith("preset")]
 
 
 def test_config_save_unchecked_checkbox_is_false(suite_db_url: str) -> None:

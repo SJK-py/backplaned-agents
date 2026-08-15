@@ -177,8 +177,7 @@ def _failed_result_frame(code: str, message: str = "") -> ResultFrame:
 def _user_config(**overrides) -> UserConfigRow:
     base = dict(
         user_id="usr_a", full_name="Ada", timezone="Europe/London",
-        preset_pro="default", preset_balanced="default", preset_lite="default",
-        preset_embedding="default", max_context_token_limit=120_000,
+        max_context_token_limit=120_000,
         verbose_default=False, language="en", custom_note="be terse",
         created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )

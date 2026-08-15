@@ -31,9 +31,8 @@ CHATBOT_CHANNELS = frozenset({TELEGRAM_CHANNEL, KAKAO_CHANNEL})
 
 
 async def ensure_user_config(request: Request) -> None:
-    """Idempotently create the logged-in user's suite-side `user_config` row,
-    seeded from suite settings — mirrors the chatbot approval reconcile
-    (`create_user_config`).
+    """Idempotently create the logged-in user's suite-side `user_config` row
+    — mirrors the chatbot approval reconcile (`create_user_config`).
 
     Chat users get this row when the approval poller reconciles their serviced
     session; web-first and OIDC accounts never go through that path, so without
@@ -46,18 +45,8 @@ async def ensure_user_config(request: Request) -> None:
     user_id = session_user_id(request)
     if pool is None or not user_id:
         return
-    settings = request.app.state.suite_settings
     async with pool.acquire() as conn:
-        await queries.create_user_config(
-            conn,
-            user_id=user_id,
-            preset_pro=getattr(settings, "default_preset_pro", "default"),
-            preset_balanced=getattr(settings, "default_preset_balanced", "default"),
-            preset_lite=getattr(settings, "default_preset_lite", "default"),
-            preset_embedding=getattr(
-                settings, "default_preset_embedding", "default_embedding"
-            ),
-        )
+        await queries.create_user_config(conn, user_id=user_id)
 
 
 async def owned_session(request: Request, session_id: str) -> SessionInfoRow | None:

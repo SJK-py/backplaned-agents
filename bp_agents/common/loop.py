@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.progress import emit_loop_progress, relay_subagent_progress
@@ -293,6 +294,28 @@ def _detail_tail(text: str | None, limit: int) -> str | None:
     return f"…{tail[-limit:]}" if len(tail) > limit else tail
 
 
+def _sidecar_applies(
+    resp: LlmResponse, text_only_presets: Sequence[str] | None
+) -> bool:
+    """Whether the vision sidecar should serve THIS round's tool calls
+    ([../../docs/design/multimodal-vision-sidecar.md] §3.1).
+
+    The decision keys on the preset that ACTUALLY ran, which only the router
+    knows: the agent sends a slot and the router resolves it against the
+    user's preference and tier. So it is made per response, not per turn — a
+    multimodal main preset is never sent through the proxy, and mixed tiers
+    each behave correctly.
+
+    An empty `text_only_presets` (the operator declared nothing text-only)
+    means the sidecar never engages. A response with no `resolved_preset`
+    engages it: feeding an image to a possibly-text-only model is the worse
+    of the two failures."""
+    if not text_only_presets:
+        return False
+    resolved = getattr(resp, "resolved_preset", None)
+    return resolved is None or resolved in text_only_presets
+
+
 # Injected when the loop hits `max_rounds` mid-tool-use, to force a final
 # text answer instead of returning an empty tool-call turn.
 _FINAL_ANSWER_NUDGE = (
@@ -350,6 +373,7 @@ async def _generate_resilient(
     messages: list[Message],
     *,
     preset: str | None,
+    slot: str | None = None,
     tools: list[ToolSpec] | None,
     tool_choice: Any | None = None,
     temperature: float | None = None,
@@ -368,6 +392,7 @@ async def _generate_resilient(
             return await ctx.llm.generate(
                 messages,
                 preset=preset,
+                slot=slot,
                 tools=tools,
                 tool_choice=tool_choice,
                 temperature=temperature,
@@ -394,6 +419,7 @@ async def run_llm_loop(
     *,
     messages: list[Message],
     preset: str | None = None,
+    slot: str | None = None,
     local_tools: LocalToolset | None = None,
     use_peer_tools: bool = True,
     tool_choice: Any | None = None,
@@ -406,6 +432,7 @@ async def run_llm_loop(
     terminal_tools: set[str] | None = None,
     file_tools: str | None = None,
     multimodal_preset: str | None = None,
+    text_only_presets: Sequence[str] | None = None,
     detail_chars: int = 100,
 ) -> LlmResponse:
     """Run the tool-calling loop until the model returns no tool calls
@@ -433,12 +460,25 @@ async def run_llm_loop(
     bytes attach on the next turn, router-resolved). Only file-capable
     agents (those with `ctx.files`) should pass it.
 
+    `slot` names a router PRESET SLOT ([../docs/design/router-resolved-preset-slots.md])
+    — the user's own preference for that slot, resolved router-side against
+    their tier gate. Mutually exclusive with `preset`, which stays the way
+    to pin a specific model (the vision sidecar, embeddings).
+
     `multimodal_preset` (when set) turns on the **vision sidecar** for
-    `read_file` ([../docs/design/multimodal-vision-sidecar.md]): the agent
-    passes its configured vision preset here only when the turn's own
-    preset is text-only, so `read_file` advertises an optional `purpose`
-    arg and routes image/PDF reads through `multimodal_preset` (returning
-    text) instead of feeding raw bytes the text-only model can't ingest.
+    `read_file` ([../docs/design/multimodal-vision-sidecar.md]): `read_file`
+    advertises an optional `purpose` arg and routes image/PDF reads through
+    `multimodal_preset` (returning text) instead of feeding raw bytes the
+    text-only model can't ingest.
+
+    `text_only_presets` (the operator's list of presets declared NOT
+    multimodal-capable) defers the sidecar's *engagement* decision to the
+    preset that actually ran — see `_sidecar_applies`. The caller cannot
+    know that up front, because a `slot` is resolved router-side. The tool
+    SPEC (the optional `purpose` arg) is still decided before round one, so
+    it is advertised whenever a vision preset is configured at all; an unused
+    optional argument costs far less than feeding an image to a text-only
+    model.
     """
     peer_specs = peer_tool_specs(ctx) if use_peer_tools else []
     local_specs = local_tools.specs() if local_tools is not None else []
@@ -459,6 +499,7 @@ async def run_llm_loop(
         resp = await _generate_resilient(
             ctx, messages,
             preset=preset,
+            slot=slot,
             tools=tools or None,
             tool_choice=tool_choice,
             temperature=temperature,
@@ -506,7 +547,11 @@ async def run_llm_loop(
             result_msg = await _dispatch_tool_call(
                 ctx, tc, local_tools, file_tools_enabled=bool(file_tools),
                 forward_subagent_progress=forward_subagent_progress,
-                multimodal_preset=multimodal_preset if proxy_on else None,
+                multimodal_preset=(
+                    multimodal_preset
+                    if proxy_on and _sidecar_applies(resp, text_only_presets)
+                    else None
+                ),
                 vision_context=vision_context,
             )
             messages.append(result_msg)
@@ -530,7 +575,7 @@ async def run_llm_loop(
         )
     messages.append(Message(role="user", content=_FINAL_ANSWER_NUDGE))
     final = await _generate_resilient(
-        ctx, messages, preset=preset, tools=None,
+        ctx, messages, preset=preset, slot=slot, tools=None,
         temperature=temperature, max_tokens=max_tokens,
     )
     messages.append(Message.assistant_from_response(final))

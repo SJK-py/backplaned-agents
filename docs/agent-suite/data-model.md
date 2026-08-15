@@ -43,16 +43,24 @@ Index `(session_id, agent_id, incumbent, created_at)` to serve the reload query 
 | `user_id` | text PK | |
 | `full_name` | text | |
 | `timezone` | text | IANA tz |
-| `preset_pro` | text | deep_reasoning; user-selectable iff `SuiteSettings.selectable_presets_pro` is non-empty (tier-gated allow-list), else system-managed |
-| `preset_balanced` | text | orchestrator / research; user-selectable iff `selectable_presets_balanced` non-empty |
-| `preset_lite` | text | summarizer / memory / knowledge / config; user-selectable iff `selectable_presets_lite` non-empty |
-| `preset_embedding` | text | vector search (distinct from chat presets); always system-managed |
 | `max_context_token_limit` | int | soft summarization trigger |
 | `verbose_default` | bool | default verbose mode ([channel.md](./channel.md) §5); `verbose` is a reserved word in Postgres |
 | `language` | text | preference |
 | `sandbox_uid` | int | maps to the container uid / `/home/{user_id}` |
 | `default_session_id` | text null | cron fallback target ([cron.md](./cron.md)) |
 | `custom_note` | text | injected into system prompts |
+
+**No model choice lives here.** Four `preset_*` columns did until migration
+`0004_drop_user_config_presets`; which model a user runs on is now a router
+preset **slot** ([`../design/router-resolved-preset-slots.md`]) — the agent
+names an opaque slot (`pro` / `balanced` / `lite`, `bp_agents/slots.py`) and
+the router resolves it from the user's own preference intersected with their
+tier gate. The preference is stored router-side in `user_llm_preferences` and
+written only under the user's session JWT, because the router *acts* on it;
+`user_config` is agent-writable and therefore the wrong home for a value that
+gates spend. The embedding preset is operator configuration
+(`SUITE_DEFAULT_PRESET_EMBEDDING`) and deliberately not a slot — changing it
+invalidates every vector already written.
 
 ### 1.4 `cron_jobs`
 

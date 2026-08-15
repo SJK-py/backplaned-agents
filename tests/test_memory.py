@@ -75,7 +75,7 @@ def test_memory_add_new_fact(tmp_path) -> None:
         ])
         await run_memory_add(
             _Ctx(llm), MemAdd(user_prompt="i love cats", assistant_response="noted"),
-            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+            settings=_settings(), store=store, embed_preset="e",
         )
         facts = await store.all_facts()
         assert [f["fact"] for f in facts] == ["likes cats"]
@@ -96,7 +96,7 @@ def test_memory_add_updates_existing(tmp_path) -> None:
         await run_memory_add(
             _Ctx(llm, "usr_u"),
             MemAdd(user_prompt="also dogs now", assistant_response="ok"),
-            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+            settings=_settings(), store=store, embed_preset="e",
         )
         facts = await store.all_facts()
         assert len(facts) == 1
@@ -113,7 +113,7 @@ def test_memory_add_extracts_nothing(tmp_path) -> None:
         await run_memory_add(
             _Ctx(llm, "usr_n"),
             MemAdd(user_prompt="hi", assistant_response="hello"),
-            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+            settings=_settings(), store=store, embed_preset="e",
         )
         assert await store.all_facts() == []
         assert llm.generate_calls == 1  # only the extract call
@@ -273,7 +273,7 @@ def test_extract_prompt_carries_current_time(tmp_path) -> None:
         await run_memory_add(
             _Ctx(llm),
             MemAdd(user_prompt="ship it next monday 9am", assistant_response="ok"),
-            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+            settings=_settings(), store=store, embed_preset="e",
         )
         return llm.systems[0]
 
@@ -387,7 +387,7 @@ def test_memory_manual_add_bypasses_extraction(tmp_path) -> None:
         llm = _ScriptLlm(['{"action": "NEW", "related": []}'])
         out = await run_memory_manual_add(
             _Ctx(llm), MemManualAdd(fact="allergic to peanuts", kind="personal_info"),
-            settings=_settings(), store=store, lite_preset="l", embed_preset="e",
+            settings=_settings(), store=store, embed_preset="e",
         )
         return json.loads(out.content), await store.all_facts()
 

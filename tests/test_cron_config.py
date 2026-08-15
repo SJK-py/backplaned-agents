@@ -295,7 +295,7 @@ def test_cron_management_adds_job(suite_db_url: str) -> None:
                 LlmResponse(text="Scheduled your morning digest."),
             ])
             ctx = _Ctx(llm)
-            out = await run_cron_management(ctx, MessagePayload(prompt="digest at 9"), pool=pool, preset="lite")
+            out = await run_cron_management(ctx, MessagePayload(prompt="digest at 9"), pool=pool)
             assert "morning digest" in out.content.lower() or "scheduled" in out.content.lower()
             async with pool.acquire() as conn:
                 jobs = await queries.list_cron_jobs(conn, user_id="usr_a")
@@ -321,7 +321,7 @@ def test_cron_management_empty_reply_lists_jobs(suite_db_url: str) -> None:
                 LlmResponse(text=""),  # empty final turn
             ])
             out = await run_cron_management(
-                _Ctx(llm), MessagePayload(prompt="standup at 8"), pool=pool, preset="lite"
+                _Ctx(llm), MessagePayload(prompt="standup at 8"), pool=pool
             )
             assert "0 8 * * *" in out.content and "standup" in out.content
             assert "Done." not in out.content
@@ -423,8 +423,8 @@ def test_config_system_prompt_has_language_directive() -> None:
     """No language → no directive; a language → an explicit 'reply in it'."""
     from bp_agents.agents.config.agent import _system_prompt
 
-    assert "preferred language" not in _system_prompt({})
-    p = _system_prompt({}, language="ko")
+    assert "preferred language" not in _system_prompt()
+    p = _system_prompt(language="ko")
     assert "preferred language" in p
     assert "ko" in p
 
@@ -477,7 +477,7 @@ def test_cron_reply_uses_user_language(suite_db_url: str) -> None:
             llm = _CapturingLlm([LlmResponse(text="예약된 작업이 없어요.")])
             await run_cron_management(
                 _Ctx(llm), MessagePayload(prompt="list my jobs"),
-                pool=pool, preset="lite", language="ko",
+                pool=pool, language="ko",
             )
             assert "ko" in captured["system"]
             assert "preferred language" in captured["system"]

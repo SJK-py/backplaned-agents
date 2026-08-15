@@ -394,10 +394,6 @@ async def create_user_config(
     user_id: str,
     full_name: str = "",
     timezone: str = "UTC",
-    preset_pro: str = "default",
-    preset_balanced: str = "default",
-    preset_lite: str = "default",
-    preset_embedding: str = "default_embedding",
     max_context_token_limit: int = 120_000,
     verbose_default: bool = False,
     language: str = "en",
@@ -411,21 +407,16 @@ async def create_user_config(
         """
         INSERT INTO user_config (
             user_id, full_name, timezone,
-            preset_pro, preset_balanced, preset_lite, preset_embedding,
             max_context_token_limit, verbose_default, language,
             sandbox_uid, default_session_id, custom_note
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (user_id) DO NOTHING
         RETURNING *
         """,
         user_id,
         full_name,
         timezone,
-        preset_pro,
-        preset_balanced,
-        preset_lite,
-        preset_embedding,
         max_context_token_limit,
         verbose_default,
         language,
@@ -456,10 +447,6 @@ _USER_CONFIG_MUTABLE = frozenset(
     {
         "full_name",
         "timezone",
-        "preset_pro",
-        "preset_balanced",
-        "preset_lite",
-        "preset_embedding",
         "max_context_token_limit",
         "verbose_default",
         "language",

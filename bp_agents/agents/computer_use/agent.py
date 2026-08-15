@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents import slots
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.common import LocalToolset, make_current_time_tool
 from bp_agents.common.payloads import MessagePayload
@@ -60,7 +61,7 @@ _CONFIG = L1Config(
     agent_id=COMPUTER_USE_AGENT_ID,
     subagent_system=_SUBAGENT_SYSTEM,
     delegation_system=_DELEGATION_SYSTEM,
-    preset_field="preset_balanced",
+    slot=slots.BALANCED,
     local_tools=_tools,
     file_tools="full",
 )

@@ -1,14 +1,16 @@
 # Router-resolved preset slots
 
-> **Status: implemented** (router side). Shipped as
-> `LlmRequestFrame.preset_slot` + `LlmResultFrame.resolved_preset` /
-> `preset_downgraded`, `LlmService.resolve_slot`, migration
-> `0011_user_llm_preferences`, `Settings.llm_default_presets`, the
-> `/v1/llm/presets` + `/v1/llm/preferences` endpoints, and
-> `ctx.llm.generate(slot=…)`. Covered by `tests/test_preset_slots.py`.
-> **Step 7 (the suite cutover, §8) is outstanding** — the suite still
-> reads `user_config.preset_*` and passes explicit names, so nothing has
-> been deleted there yet.
+> **Status: implemented**, both halves. Router: `LlmRequestFrame.preset_slot`
+> + `LlmResultFrame.resolved_preset` / `preset_downgraded`,
+> `LlmService.resolve_slot`, migration `0011_user_llm_preferences`,
+> `Settings.llm_default_presets`, the `/v1/llm/presets` +
+> `/v1/llm/preferences` endpoints, `ctx.llm.generate(slot=…)`. Suite (step 7):
+> `bp_agents/slots.py`, `run_llm_loop(slot=…)`, every agent call site,
+> the webapp Models pane, and migration `0004_drop_user_config_presets`.
+> Covered by `tests/test_preset_slots.py` + `tests/test_webapp_phase5.py`.
+> Carries three `[shipped]` deviations: §5.1 (where selection lives), §8.1
+> (the vision sidecar's engagement decision), §8.2 (a delegation race the
+> cutover exposed).
 >
 > Companion to [`router-managed-session-store.md`](./router-managed-session-store.md),
 > which moved conversation into the router and left `user_config` — including
@@ -201,6 +203,32 @@ The admin view (`GET /v1/admin/llm/presets`, with key refs and provider
 detail) stays exactly as it is. The new endpoint is a projection for end
 users: name, description, slot defaults — never credentials.
 
+### 5.1 `[shipped]` Selection lives in the webapp, not in chat
+
+§8 below says "the config agent now validates through the router". It
+cannot, and §4/§9 are why: both endpoints require a **session JWT**, and an
+agent does not hold one. Deliberately — the whole argument for a separate
+table is that a value the router *acts* on must not be writable by anything
+acting merely on the user's behalf. Minting a user token for the config
+agent would hand it exactly the authority the design removes.
+
+So model selection lives on the **webapp Settings page**, the only suite
+process holding the user's own access token, as a Models pane: one `<select>`
+per slot from `GET /v1/llm/presets`, one `PUT /v1/llm/preferences` per save,
+with the router's 403 rendered as a message beside the field. The config
+agent keeps every other `user_config` field and, asked about models, says
+where the switch is rather than guessing at a value it cannot read.
+
+This does narrow the README's *"a user swaps Gemini↔Claude from chat — no
+redeploy"* to *"from Settings"*. What it buys is worth more than the
+sentence: the menu is filtered by entitlement instead of by a hand-kept
+list, and the refusal lands at selection time (§2.2) instead of on the next
+message. A chat path could be restored later through the **channel** rather
+than an agent — a chatbot gateway already mints per-user tokens under its
+`serviced_by` rights, so a `/model` command would carry the user's own
+authority. Not built: it would need the same pane's logic in two gateways,
+and Settings covers it.
+
 ## 6. Protocol
 
 `LlmRequestFrame` gains one field:
@@ -268,10 +296,51 @@ and costs a slot call nothing beyond the lookup it already needs.
     `session_state`).
 
 And it improves the feature the README advertises — *"a user swaps
-Gemini↔Claude from chat — no redeploy"*. The config agent now validates
-through the router, so an unentitled request is refused **in the
-conversation**, with the required level in hand, instead of being accepted and
-then failing on the next turn.
+Gemini↔Claude from chat — no redeploy"*. The selection surface now validates
+through the router, so an unentitled request is refused **at selection**,
+with the required level in hand, instead of being accepted and then failing
+on the next turn. (Which surface, exactly: see §5.1.)
+
+### 8.1 `[shipped]` The vision sidecar decides per response
+
+The sidecar engages when the turn's preset is declared text-only
+([`multimodal-vision-sidecar.md`] §3.1) — but with a slot, the agent cannot
+know the resolved preset before the call. `multimodal_preset_for` (which
+computed it agent-side) is deleted; `run_llm_loop` now takes the configured
+vision preset plus the operator's `text_only_presets` and decides per
+response from `resolved_preset`, before dispatching that round's tool calls.
+
+One honest cost: the tool SPEC — whether `read_file` advertises the optional
+`purpose` arg — is still fixed before round one, so a slot caller advertises
+it whenever a vision preset is configured, including on turns that resolve to
+a multimodal preset. An unused optional argument is a far smaller cost than
+either alternative (feeding an image to a text-only model, or a pre-flight
+round trip just to learn the preset).
+
+### 8.2 `[shipped]` The cutover exposed a delegation race
+
+The first hosted run of a slot-based hand-off failed sporadically with
+`preset_not_allowed: caller could not be verified for slot resolution`. The
+cause was not slots. `_admit_delegation` flipped `tasks.active_agent_id` to
+the delegate **after** awaiting its ack — and the SDK acks, then starts the
+handler. For the width of the router's own commit, the delegate is executing
+while the router still records the caller as active, so everything derived
+from that column via `attachments.derive_task_file_scope` refuses it: preset
+slots, tier-gated presets, named-file operations, and `SessionOp` — on the
+delegate's opening turn, which is precisely when a hand-off does its work.
+
+Slot resolution only made it *visible*: before, the common path used an
+ungated preset, which skips the identity derivation entirely.
+
+The fix flips inside the same short-lived transaction that validates, then
+delivers, then unwinds with a guarded flip-back if the destination
+disconnects, times out, or refuses. That is the shape `admit_task` has always
+used for a fresh task (insert with the destination active, force-fail on
+rejection); delegation was the inconsistent one. It also improves the case
+the old ordering called out as an accepted loss: a cancel arriving during the
+ack window now finds the delegate and cancels it, instead of leaving an
+orphaned execution for the deadline sweep. Pinned by
+`tests/test_review_delegation_pool_release.py`.
 
 ## 9. Security
 

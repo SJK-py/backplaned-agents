@@ -57,27 +57,20 @@ class SuiteSettings(BaseSettings):
     """Soft summarization trigger; keep headroom below the provider's
     real window ([sessions.md] §3.2)."""
 
-    default_preset_pro: str = "default"
-    default_preset_balanced: str = "default"
-    default_preset_lite: str = "default"
     default_preset_embedding: str = "default_embedding"
-    """Router LLM-preset names per tier (deep_reasoning / orchestrator /
-    lite helpers / embeddings). The three chat tiers default to the router's
-    seeded `default` chat preset; embeddings default to `default_embedding`
-    (a real embedding model — `default` is chat-only and can't embed)."""
+    """Router preset used for EMBEDDINGS. Deliberately not a slot
+    ([../docs/design/router-resolved-preset-slots.md] §12): changing an
+    embedding model invalidates every vector already written, and the
+    per-user LanceDB stores would return garbage similarity with no error
+    and no migration path. It stays operator configuration, passed as an
+    explicit `preset=`, and never appears in the user's model menu.
+    Defaults to `default_embedding` (a real embedding model — the seeded
+    `default` chat preset can't embed).
 
-    selectable_presets_pro: list[str] = []
-    selectable_presets_balanced: list[str] = []
-    selectable_presets_lite: list[str] = []
-    """Preset names a user may self-select for each chat tier (deep_reasoning
-    / orchestrator+research / lite helpers), via the config agent or the
-    webapp settings form. EMPTY (the default) means that tier's preset is
-    system-managed and NOT user-editable — preserving the prior behaviour.
-    Populate per tier to opt in, e.g.
-    `SUITE_SELECTABLE_PRESETS_BALANCED='["default","claude"]'`. Only list
-    presets the router has actually seeded and that suit your users' level —
-    the router still enforces each preset's `min_user_level` at call time as
-    a backstop. Embeddings stay system-managed (not exposed)."""
+    The three CHAT tiers used to live here as `default_preset_{pro,
+    balanced,lite}`; they are now router slots (`pro` / `balanced` /
+    `lite`), so their defaults are `ROUTER_LLM_DEFAULT_PRESETS` and the
+    user's own choice is a router-side preference resolved per call."""
 
     # ------------------------------------------------------------------
     # multimodal vision sidecar ([../docs/design/multimodal-vision-sidecar.md])

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from bp_agents import slots
 from bp_agents.common import text_output
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -118,10 +119,6 @@ async def _summarize(
         # Nothing to fold — preserve the existing summary unchanged.
         return text_output(previous_summary or "")
 
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_lite if cfg else settings.default_preset_lite
-
     user_parts: list[str] = []
     if previous_summary:
         user_parts.append(f"## Previous summary\n{previous_summary}")
@@ -130,7 +127,7 @@ async def _summarize(
         Message(role="system", content=_SYSTEM),
         Message(role="user", content="\n\n".join(user_parts)),
     ]
-    resp = await ctx.llm.generate(messages, preset=preset)
+    resp = await ctx.llm.generate(messages, slot=slots.LITE)
     return text_output(resp.text)
 
 
@@ -177,14 +174,11 @@ async def run_name_session(
     pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    preset = cfg.preset_lite if cfg else settings.default_preset_lite
     messages = [
         Message(role="system", content=_NAME_SYSTEM),
         Message(role="user", content=payload.user_prompt),
     ]
-    resp = await ctx.llm.generate(messages, preset=preset)
+    resp = await ctx.llm.generate(messages, slot=slots.LITE)
     return text_output(_clean_title(resp.text))
 
 

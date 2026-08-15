@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from bp_agents import slots
 from bp_agents.agents.deep_reasoning.plan import run_plan
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn, run_subagent
 from bp_agents.common import (
@@ -91,7 +92,7 @@ _CONFIG = L1Config(
     agent_id=DEEP_REASONING_AGENT_ID,
     subagent_system=_SUBAGENT_SYSTEM,
     delegation_system=_DELEGATION_SYSTEM,
-    preset_field="preset_pro",
+    slot=slots.PRO,
     local_tools=_tools,
     file_tools="full",
     extra_terminal=[_PLAN_MODE_SPEC],

@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from bp_agents import slots
 from bp_agents.common import text_output
 from bp_agents.common.payloads import (
     MAX_PAGE,
@@ -236,20 +237,9 @@ async def gc_sweep(pool: asyncpg.Pool, settings: SuiteSettings) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def _presets(ctx: TaskContext, settings: SuiteSettings) -> tuple[str, str]:
-    """(lite_preset, embedding_preset) for this user."""
-    if _pool is None:
-        return settings.default_preset_lite, settings.default_preset_embedding
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    if cfg is None:
-        return settings.default_preset_lite, settings.default_preset_embedding
-    return cfg.preset_lite, cfg.preset_embedding
-
-
 async def _user_timezone(ctx: TaskContext) -> str:
     """The user's IANA timezone (for resolving relative time in extraction);
-    UTC when there's no pool/config — mirrors `_presets`' degradation."""
+    UTC when there's no pool/config."""
     if _pool is None:
         return "UTC"
     async with _pool.acquire() as conn:
@@ -263,11 +253,14 @@ async def _store_for(ctx: TaskContext, settings: SuiteSettings) -> MemoryStore:
 
 
 async def _llm_json(
-    ctx: TaskContext, *, preset: str, system: str, user: str
+    ctx: TaskContext, *, system: str, user: str
 ) -> dict[str, Any]:
+    """One short structured call on the LITE slot — the router resolves the
+    user's preference for it. (Extraction/reconciliation is mechanical work;
+    the model choice is the user's, the embedding model is not.)"""
     resp = await ctx.llm.generate(
         [Message(role="system", content=system), Message(role="user", content=user)],
-        preset=preset,
+        slot=slots.LITE,
     )
     text = resp.text.strip()
     if text.startswith("```"):
@@ -313,8 +306,7 @@ async def run_memory_retrieve(
     embed_preset: str | None = None,
 ) -> AgentOutput:
     store = store or await _store_for(ctx, settings)
-    if embed_preset is None:
-        _lite, embed_preset = await _presets(ctx, settings)
+    embed_preset = embed_preset or settings.default_preset_embedding
 
     limit = settings.memory_retrieve_pool
     qv = (await ctx.llm.embed([payload.query], preset=embed_preset))[0]
@@ -378,7 +370,6 @@ async def _propagate(
     *,
     anchor_uid: str,
     system: str,
-    lite_preset: str,
     embed_preset: str,
 ) -> None:
     """1-hop neighbor propagation (phases 3/4). Best-effort."""
@@ -393,7 +384,7 @@ async def _propagate(
         f"Anchor: {anchor['fact'] if anchor else anchor_uid}\n\nNeighbors:\n"
         + _enumerate(neighbors)
     )
-    decision = await _llm_json(ctx, preset=lite_preset, system=system, user=user)
+    decision = await _llm_json(ctx, system=system, user=user)
     for d in decision.get("decisions", []):
         n = d.get("fact_number")
         if not isinstance(n, int) or not (1 <= n <= len(neighbors)):
@@ -417,18 +408,16 @@ async def run_memory_add(
     *,
     settings: SuiteSettings,
     store: MemoryStore | None = None,
-    lite_preset: str | None = None,
     embed_preset: str | None = None,
 ) -> AgentOutput:
     store = store or await _store_for(ctx, settings)
-    if lite_preset is None or embed_preset is None:
-        lite_preset, embed_preset = await _presets(ctx, settings)
+    embed_preset = embed_preset or settings.default_preset_embedding
 
     # Phase 1 — extract (+ batch dedup). The system prompt carries the
     # current time so the LLM resolves relative dates to absolute ones.
     now_line = _now_line(await _user_timezone(ctx))
     extracted = await _llm_json(
-        ctx, preset=lite_preset, system=_extract_system(now_line),
+        ctx, system=_extract_system(now_line),
         user=f"User: {payload.user_prompt}\nAssistant: {payload.assistant_response}",
     )
     raw = extracted.get("facts", []) or []
@@ -444,8 +433,7 @@ async def run_memory_add(
         return text_output("")
 
     await _reconcile_and_store(
-        ctx, store, facts, settings=settings,
-        lite_preset=lite_preset, embed_preset=embed_preset,
+        ctx, store, facts, settings=settings, embed_preset=embed_preset,
     )
     return text_output("")
 
@@ -456,7 +444,6 @@ async def _reconcile_and_store(
     facts: list[dict[str, str]],
     *,
     settings: SuiteSettings,
-    lite_preset: str,
     embed_preset: str,
 ) -> None:
     """Phases 2–4: reconcile each candidate fact against its nearest
@@ -473,7 +460,7 @@ async def _reconcile_and_store(
         )
         cand_uids = [c["uid"] for c in cands]
         decision = await _llm_json(
-            ctx, preset=lite_preset, system=_RECONCILE_SYSTEM,
+            ctx, system=_RECONCILE_SYSTEM,
             user=f"Candidate fact: {item['fact']}\n\nExisting facts:\n"
             + (_enumerate(cands) or "(none)"),
         )
@@ -510,7 +497,7 @@ async def _reconcile_and_store(
         try:
             await _propagate(
                 ctx, store, anchor_uid=anchor, system=_RELATE_SYSTEM,
-                lite_preset=lite_preset, embed_preset=embed_preset,
+                embed_preset=embed_preset,
             )
         except Exception:  # noqa: BLE001
             logger.debug("memory_phase3_failed", exc_info=True)
@@ -520,7 +507,7 @@ async def _reconcile_and_store(
         try:
             await _propagate(
                 ctx, store, anchor_uid=anchor, system=_UPDATE_PROP_SYSTEM,
-                lite_preset=lite_preset, embed_preset=embed_preset,
+                embed_preset=embed_preset,
             )
         except Exception:  # noqa: BLE001
             logger.debug("memory_phase4_failed", exc_info=True)
@@ -569,8 +556,7 @@ async def run_memory_list(
 
     # Query → hybrid pool ranked by the retrieval formula (relevance × decay),
     # without graph expansion or touch (browsing must not reset decay).
-    if embed_preset is None:
-        _lite, embed_preset = await _presets(ctx, settings)
+    embed_preset = embed_preset or settings.default_preset_embedding
     limit = settings.memory_retrieve_pool
     qv = (await ctx.llm.embed([query], preset=embed_preset))[0]
     vec_pool = await store.search(query_vector=qv, limit=limit)
@@ -617,19 +603,17 @@ async def run_memory_manual_add(
     *,
     settings: SuiteSettings,
     store: MemoryStore | None = None,
-    lite_preset: str | None = None,
     embed_preset: str | None = None,
 ) -> AgentOutput:
     store = store or await _store_for(ctx, settings)
-    if lite_preset is None or embed_preset is None:
-        lite_preset, embed_preset = await _presets(ctx, settings)
+    embed_preset = embed_preset or settings.default_preset_embedding
     fact = payload.fact.strip()
     if not fact:
         return text_output(json.dumps({"added": False}))
     kind = payload.kind if payload.kind in _VALID_KINDS else "personal_info"
     await _reconcile_and_store(
         ctx, store, [{"fact": fact, "kind": kind}],
-        settings=settings, lite_preset=lite_preset, embed_preset=embed_preset,
+        settings=settings, embed_preset=embed_preset,
     )
     return text_output(json.dumps({"added": True}))
 

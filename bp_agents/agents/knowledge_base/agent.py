@@ -2,8 +2,10 @@
 
 `store` ingests a file-store document (chunk → embed → dedup → persist);
 `retrieve` embeds a query and returns the nearest chunks; `list` /
-`remove` manage the document set. Embeddings use the user's embedding
-preset; the per-user LanceDB resolves from the authoritative `user_id`.
+`remove` manage the document set. Embeddings run on the OPERATOR's
+embedding preset — never a per-user slot, since changing it would
+invalidate every vector already stored; the per-user LanceDB resolves
+from the authoritative `user_id`.
 """
 
 from __future__ import annotations
@@ -16,10 +18,10 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from bp_agents import slots
 from bp_agents.agents.knowledge_base.chunking import chunk_markdown
 from bp_agents.common import text_output
 from bp_agents.common.payloads import MAX_PAGE, KbBrowse, KbDelete
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
 from bp_agents.lance.knowledge import KnowledgeStore
@@ -122,22 +124,6 @@ async def _shutdown() -> None:
         await _pool.close()
 
 
-async def _presets(ctx: TaskContext, settings: SuiteSettings) -> tuple[str, str]:
-    """(embedding_preset, lite_preset) for this user."""
-    if _pool is None:
-        return settings.default_preset_embedding, settings.default_preset_lite
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    if cfg is None:
-        return settings.default_preset_embedding, settings.default_preset_lite
-    return cfg.preset_embedding, cfg.preset_lite
-
-
-async def _embedding_preset(ctx: TaskContext, settings: SuiteSettings) -> str:
-    embed, _lite = await _presets(ctx, settings)
-    return embed
-
-
 async def _store_for(ctx: TaskContext, settings: SuiteSettings) -> KnowledgeStore:
     db = await connect(settings.lance_root, ctx.user_id)
     return KnowledgeStore(db, embedding_dim=settings.embedding_dim)
@@ -175,7 +161,7 @@ def _parse_meta(text: str) -> dict:
 
 
 async def _generate_metadata(
-    ctx: TaskContext, text: str, *, preset: str, settings: SuiteSettings
+    ctx: TaskContext, text: str, *, settings: SuiteSettings
 ) -> dict:
     """LLM-generate {title, tags, description} from the document's head +
     tail window ([agents.md])."""
@@ -189,7 +175,7 @@ async def _generate_metadata(
     resp = await ctx.llm.generate(
         [Message(role="system", content=_META_SYSTEM),
          Message(role="user", content=excerpt)],
-        preset=preset,
+        slot=slots.LITE,
     )
     return _parse_meta(resp.text)
 
@@ -218,13 +204,12 @@ async def run_kb_store(
     settings: SuiteSettings,
     store: KnowledgeStore | None = None,
     preset: str | None = None,
-    lite_preset: str | None = None,
 ) -> AgentOutput:
     store = store or await _store_for(ctx, settings)
-    if preset is None or lite_preset is None:
-        embed_default, lite_default = await _presets(ctx, settings)
-        preset = preset or embed_default
-        lite_preset = lite_preset or lite_default
+    # Embeddings pin an explicit preset — never a slot, never per-user: a
+    # different model would silently mismatch every vector already stored
+    # ([../../../docs/design/router-resolved-preset-slots.md] §12).
+    preset = preset or settings.default_preset_embedding
 
     # Content-addressed dedup over the ORIGINAL file bytes (so re-storing
     # the same source — even a non-text one — dedups before conversion).
@@ -247,7 +232,7 @@ async def run_kb_store(
     # LLM-generate any metadata the caller omitted ([agents.md]).
     title, tags, description = payload.title, payload.tags, payload.description
     if title is None or tags is None or description is None:
-        gen = await _generate_metadata(ctx, text, preset=lite_preset, settings=settings)
+        gen = await _generate_metadata(ctx, text, settings=settings)
         if title is None:
             title = gen.get("title")
         if tags is None and isinstance(gen.get("tags"), list):
@@ -280,7 +265,7 @@ async def run_kb_retrieve(
     preset: str | None = None,
 ) -> AgentOutput:
     store = store or await _store_for(ctx, settings)
-    preset = preset or await _embedding_preset(ctx, settings)
+    preset = preset or settings.default_preset_embedding
     qv = (await ctx.llm.embed([payload.query], preset=preset))[0]
     hits = await store.retrieve(
         query=payload.query, query_vector=qv, search_type=payload.search_type,

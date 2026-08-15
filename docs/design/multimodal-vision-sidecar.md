@@ -40,8 +40,9 @@ points at a text-only model the provider 400s. Today that is handled
 it to text or Markdown first."* The file is effectively lost to the model
 unless it then routes around it (e.g. via the `md_converter` agent).
 
-The operator's only lever is the agent's chat preset
-(`default_preset_pro/balanced/lite`, `bp_agents/settings.py:60`). To read
+The operator's only lever is the agent's chat preset (at the time of
+writing `default_preset_pro/balanced/lite` on `SuiteSettings`; now the
+router's `llm_default_presets` slot map). To read
 images they must make the **whole reasoning model** multimodal — they
 can't pair a strong text reasoner with a cheap vision model.
 
@@ -92,9 +93,19 @@ text_only_presets: list[str] = []         # env: SUITE_TEXT_ONLY_PRESETS
   * **`text_only_presets`** — the presets the operator declares
     **not multimodal-capable**. The gate keys on the **resolved preset
     name** of the turn, so heterogeneous tiers (a text-only orchestrator
-    preset, a multimodal `pro` preset, user-selected overrides via
-    `selectable_presets_*`) each get the right `read_file` independently —
-    no single "current preset" assumption.
+    preset, a multimodal `pro` preset, a user's own slot preference) each
+    get the right `read_file` independently — no single "current preset"
+    assumption.
+
+    **[shipped, revised]** With router-resolved preset slots the agent no
+    longer knows the resolved preset up front, so the *engagement* decision
+    moved into the loop and keys on `LlmResultFrame.resolved_preset`, per
+    response (`bp_agents/common/loop.py:_sidecar_applies`). The tool SPEC is
+    still fixed before round one, so the optional `purpose` arg is advertised
+    whenever a vision preset is configured at all — an unused optional
+    argument costs far less than feeding an image to a text-only model. A
+    response that reports no `resolved_preset` engages the sidecar, failing
+    towards the readable outcome.
 
 **The gate.** For a given turn the vision proxy engages iff
 `default_preset_multimodal` is set **AND** the turn's resolved preset ∈
@@ -112,9 +123,9 @@ provider 400. That's the key win over a reactive trigger, and it lets the
 tool surface itself honestly (§3.3): the model only sees the `purpose` arg
 when the proxy is actually active.
 
-  * Later, a per-user `preset_multimodal` `user_config` column +
-    `selectable_presets_multimodal`, paralleling the existing chat-tier
-    preset plumbing. Out of scope for phase 1.
+  * Later, a per-user vision choice — now expressible as a `multimodal`
+    preset slot rather than a `user_config` column. Out of scope for
+    phase 1.
 
 ### 3.2 The core risk — perception decoupled from intent
 
@@ -281,9 +292,9 @@ context-less reactive seam follows as a safety net.
    Degraded but non-blind; the model escalates via an intentful
    `read_file(purpose=…)`.
 3. **Phase 3 — caching + per-user.** Cache a file's transcription in the
-   stash keyed by `(name, purpose)` so repeat reads are free; add the
-   `preset_multimodal` user_config column + `selectable_presets_multimodal`,
-   paralleling the existing chat-tier preset plumbing.
+   stash keyed by `(name, purpose)` so repeat reads are free; add a
+   `multimodal` preset slot so a user can pick their own vision model the
+   same way they pick a chat one.
 
 ## 6. Alternatives considered
 
