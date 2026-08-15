@@ -156,11 +156,11 @@ Rolling summarization; reached only by the channel.
 
 | Mode | Payload | Tool? |
 | --- | --- | --- |
-| `summarize_incumbent` | `{agent_id, up_to, previous_summary?}` | no |
+| `summarize_thread` | `{agent_id, up_to?}` | no |
 | `summarize_all` | `{agent_id?, summarize_after?}` | no |
 | `session_name` | `{user_prompt}` | no |
 
-Read-only over `session_history`; returns `AgentOutput(content=<summary>)`. The **channel** applies the result (writes the summary, flips `incumbent`). `session_name` returns a short conversation title generated from the first user message (lite preset) — the channel writes it to `session_info.session_name` ([webapp.md](./webapp.md) §4). See [sessions.md](./sessions.md). `non_tool_modes`: all.
+Read-only over the router's session store; returns `AgentOutput(content=<summary>)`. It reads the target thread and that thread's own rolling summary (`owner_agent_id` is a parameter on reads and deliberately not on writes) and **never applies** what it produces — only a thread's owner may move its own floor, so the owner applies it mid-turn (`common.thread.maybe_fold`) or the channel uses the text as a delegation seed / hand-back recap. `session_name` returns a short conversation title generated from the first user message (LITE slot) — the channel writes it to the session's `metadata.title` ([webapp.md](./webapp.md) §4). See [sessions.md](./sessions.md). `non_tool_modes`: all.
 
 ---
 

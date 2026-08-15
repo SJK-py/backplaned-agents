@@ -12,6 +12,7 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
 
 
 class _FakeTelegram:
@@ -51,7 +52,7 @@ class _ProgressDispatcher:
 async def _seed(pool, *, verbose_default: bool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
@@ -61,15 +62,12 @@ async def _seed(pool, *, verbose_default: bool) -> None:
             conn, user_id="usr_a", default_session_id="ses_1",
             verbose_default=verbose_default,
         )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="chatbot_telegram",
-            chat_id="tg1",
-        )
 
 
 def _gw(pool):
     return ChatbotGateway(
-        dispatcher=_ProgressDispatcher(), pool=pool, telegram=_FakeTelegram()
+        dispatcher=_ProgressDispatcher(), pool=pool, telegram=_FakeTelegram(),
+        store=FakeChannelStore(FakeStore()),
     )
 
 
@@ -122,8 +120,10 @@ def test_delegated_messages_carry_agent_tag(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool, verbose_default=True)
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=_DelegatedDispatcher(), pool=pool, telegram=_FakeTelegram()
+                dispatcher=_DelegatedDispatcher(), pool=pool, telegram=_FakeTelegram(),
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "do the thing")
             sent = gw._telegram.sent
@@ -246,7 +246,8 @@ def test_typing_indicator_sent_during_turn(suite_db_url: str) -> None:
         try:
             await _seed(pool, verbose_default=False)
             tg = _TgTyping()
-            gw = ChatbotGateway(dispatcher=_SlowDispatcher(), pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=_SlowDispatcher(), pool=pool, telegram=tg, store=FakeChannelStore(store))
             await gw.handle_update("tg1", "hello")
             assert "typing" in tg.actions       # indicator was sent
             assert tg.sent[-1] == "done"

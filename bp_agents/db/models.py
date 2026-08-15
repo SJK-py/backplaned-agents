@@ -18,35 +18,6 @@ class _Row(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
-class SessionInfoRow(_Row):
-    """One row per session — channel-written ([data-model.md] §1.1)."""
-
-    session_id: str
-    user_id: str
-    channel: str | None = None  # chatbot_telegram | webapp | None (released)
-    session_name: str | None = None  # human-friendly title (auto + rename)
-    chat_id: str | None = None
-    delegated_to: str | None = None
-    history_summary: str | None = None
-    delegate_summary: str | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
-class SessionHistoryRow(_Row):
-    """The conversation log ([data-model.md] §1.2). `agent_id` is the
-    thread key (set on `user` rows too)."""
-
-    id: int
-    session_id: str
-    agent_id: str
-    role: str  # user | assistant | tool_call | tool_result
-    message: str
-    created_at: datetime
-    incumbent: bool
-    hidden: bool
-
-
 class UserConfigRow(_Row):
     """One row per user ([data-model.md] §1.3)."""
 

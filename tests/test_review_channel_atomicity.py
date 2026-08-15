@@ -1,46 +1,64 @@
-"""ChannelCore multi-write sequences are crash-atomic.
+"""ChannelCore multi-write sequences are atomic.
 
-Pre-release review: `maybe_summarize`, `delegate`, and `_fold_back` each
-perform several dependent writes on a single acquired connection but without
-`conn.transaction()`, so every statement autocommits independently. A crash
-between them leaves inconsistent state (a summary written but the folded rows
-not demoted; a delegate seed with no `delegated_to`; a cleared delegation
-whose recap rows never landed; etc.).
+Pre-release review found `maybe_summarize`, `delegate`, and `_fold_back` each
+performing several dependent writes that autocommitted independently, so a
+crash between them left inconsistent state (a delegate seed with no
+`delegated_to`; a cleared delegation whose recap never landed).
 
-Fix: each sequence is wrapped in `async with conn.transaction():`.
-
-The behavioural test drives the real `ChannelCore.delegate` against the suite
-DB and forces the second write to fail, asserting the first is rolled back.
-Source pins cover the other two where `SUITE_DATABASE_URL` is unset.
+The session-store cutover removed the class of bug rather than the instances:
+the channel no longer writes a suite database at all, and a `SessionOp` batch
+IS one transaction — any refusal rolls the whole list back. What is left to
+pin is that each sequence is still expressed as ONE batch, because splitting
+one into two would silently reintroduce the window.
 """
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-from unittest.mock import AsyncMock
-
-import pytest
 
 from bp_agents.channel.core import ChannelCore
-from bp_agents.db import queries
+from tests.fake_store import FakeChannelStore, FakeStore
 
 
-def _txn_wraps_writes(fn) -> bool:  # type: ignore[no-untyped-def]
-    src = inspect.getsource(fn)
-    return "async with conn.transaction():" in src
+def _single_batch(fn) -> int:  # type: ignore[no-untyped-def]
+    """How many store round trips the function's own body makes."""
+    return inspect.getsource(fn).count("self._store.ops(")
 
 
-def test_maybe_summarize_is_transactional() -> None:
-    assert _txn_wraps_writes(ChannelCore.maybe_summarize)
+def test_delegate_seeds_and_flags_in_one_batch() -> None:
+    """The seed and the routing flag commit together, or a crash leaves a
+    seed nobody will be routed to — or a delegation flag with no context."""
+    assert _single_batch(ChannelCore.delegate) == 1
 
 
-def test_delegate_is_transactional() -> None:
-    assert _txn_wraps_writes(ChannelCore.delegate)
+def test_fold_back_recaps_retires_and_clears_in_one_batch() -> None:
+    """Three writes — recap to the orchestrator, retire to the delegate,
+    clear the flag — that are only correct together. The `StatThread` read
+    that precedes them is a separate call on purpose: it feeds the payload."""
+    src = inspect.getsource(ChannelCore._fold_back)
+    assert src.count("self._store.ops(") == 2  # the stat read, then the batch
+    apply = src[src.index("recap = "):]
+    assert apply.count("self._store.ops(") == 1
 
 
-def test_fold_back_is_transactional() -> None:
-    assert _txn_wraps_writes(ChannelCore._fold_back)
+def test_channel_cannot_write_a_thread_at_all() -> None:
+    """The strongest form of the original fix: there is no append path from
+    the channel to pair with anything. `ChannelCore` names no `AppendOp`, and
+    the store refuses one from a caller with no thread of its own."""
+    src = inspect.getsource(ChannelCore)
+    assert "AppendOp" not in src
+
+    from bp_protocol.frames import AppendOp
+    from bp_sdk.history import SessionStoreError
+
+    store = FakeStore()
+    try:
+        store.execute([AppendOp(role="user", content="x")], owner=None)
+    except SessionStoreError as exc:
+        assert exc.code == "denied"
+    else:  # pragma: no cover - the guard is the test
+        raise AssertionError("the steward surface must refuse a thread write")
 
 
 class _SummDispatcher:
@@ -57,53 +75,38 @@ class _SummDispatcher:
         )
 
 
-def test_delegate_rolls_back_on_mid_sequence_failure(
-    suite_db_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`delegate` writes the delegate seed row and then sets `delegated_to`
-    in one transaction. If the second write fails, the seed row must NOT
-    persist (and `delegated_to` stays clear)."""
-    from bp_agents.db.connection import open_pool
-    from bp_agents.settings import SuiteSettings
+def test_delegate_rolls_back_the_whole_batch_on_a_refusal() -> None:
+    """A refused op fails the batch, so the seed does not land half-applied.
+
+    Modelled by refusing the state write: the hand-over that precedes it in
+    the same batch must not survive."""
+    from bp_protocol.frames import SetStateOp
+    from bp_sdk.history import SessionStoreError
 
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        store = FakeStore()
+        real_execute = store.execute
+
+        def _refuse_state(ops, *, owner):  # type: ignore[no-untyped-def]
+            if any(isinstance(op, SetStateOp) for op in ops):
+                raise SessionStoreError("version_conflict")
+            return real_execute(ops, owner=owner)
+
+        core = ChannelCore(
+            dispatcher=_SummDispatcher(), store=FakeChannelStore(store),
+            delegatable_agents=frozenset({"research"}),
+        )
+        store.execute = _refuse_state  # type: ignore[method-assign]
         try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
-                    "suite_platform_mappings RESTART IDENTITY CASCADE"
-                )
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a", channel="webapp"
-                )
-
-            core = ChannelCore(
-                dispatcher=_SummDispatcher(), pool=pool,
-                delegatable_agents=frozenset({"research"}),
-            )
-
-            # Make the SECOND write in delegate's transaction fail. The seed
-            # `append_history` (first write) must roll back with it.
-            monkeypatch.setattr(
-                queries, "update_session_info",
-                AsyncMock(side_effect=RuntimeError("boom")),
-            )
-
-            with pytest.raises(RuntimeError):
-                await core.delegate("usr_a", "ses_1", "research")
-
-            # Rollback proof: no delegate seed row landed, delegation not set.
-            async with pool.acquire() as conn:
-                seed_rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="research"
-                )
-                # get_session_info is read with the REAL query (we only
-                # patched the writer), so this reflects committed state.
-                info = await queries.get_session_info(conn, "ses_1")
-            assert seed_rows == [], "delegate seed row must roll back with the failed flag write"
-            assert info is not None and info.delegated_to is None
+            await core.delegate("usr_a", "ses_1", "research")
+        except SessionStoreError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("expected the refused batch to propagate")
         finally:
-            await pool.close()
+            store.execute = real_execute  # type: ignore[method-assign]
+
+        assert store.handovers.get("research", []) == []
+        assert "delegated_to" not in store.session_state
 
     asyncio.run(_drive())

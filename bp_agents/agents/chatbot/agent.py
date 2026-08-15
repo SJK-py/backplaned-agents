@@ -33,6 +33,7 @@ from bp_agents.agents.chatbot.telegram import (
     FileOffsetStore,
     HttpTelegramClient,
 )
+from bp_agents.channel import HttpSessionStore, StoreError
 from bp_agents.db.connection import open_pool, open_redis
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo
@@ -120,6 +121,20 @@ def _http_url() -> str:
     return url
 
 
+async def _user_token(user_id: str) -> str:
+    """Token source for the session store. The chatbot acts for a user
+    through its `serviced_by` rights; with no service principal provisioned
+    there is no user authority to act under, and a conversation is not
+    something to fake."""
+    if _credentials is None:
+        raise StoreError("no_service_principal")
+    return await _credentials.user_access_token(user_id)
+
+
+def _session_store() -> HttpSessionStore:
+    return HttpSessionStore(http_url=_http_url(), token_for=_user_token)
+
+
 @agent.on_startup
 async def _startup() -> None:
     global _pool, _redis, _telegram, _credentials, _poll_task, _approval_task, _session_gc_task  # noqa: PLW0603
@@ -167,6 +182,7 @@ async def _startup() -> None:
             client=_kakao,
             registry=KakaoTaskRegistry(_redis, ttl_s=_settings.kakao_carry_ttl_s),
             settings=_settings,
+            store=_session_store(),
             credentials=_credentials,
             egress=_egress,
             redis=_redis,
@@ -212,20 +228,21 @@ async def _startup() -> None:
         dispatcher=agent,
         pool=_pool,
         telegram=_telegram,
+        store=_session_store(),
         credentials=_credentials,
         result_timeout_s=_settings.dispatch_result_timeout_s,
         fire_memory=True,
-        redis=_redis,
         delegatable_agents=frozenset(_settings.delegatable_agents),
     )
     offset_store = FileOffsetStore(Path(agent.config.state_dir) / "telegram_offset")
     _poll_task = asyncio.create_task(_poll_loop(gateway, offset_store))
 
-    # Cron scheduler (v1 lives in the chatbot). Shares the gateway's
-    # per-session lock so the apply step serializes with user turns.
+    # Cron scheduler (v1 lives in the chatbot). It no longer needs the
+    # session serialized: the orchestrator records its own run, so this only
+    # delivers.
     scheduler = CronScheduler(
         dispatcher=agent, pool=_pool, settings=_settings, telegram=_telegram,
-        session_lock=gateway.session_lock, credentials=_credentials,
+        store=_session_store(), credentials=_credentials,
     )
     global _cron_task  # noqa: PLW0603
     _cron_task = asyncio.create_task(scheduler.run_loop(_stop))

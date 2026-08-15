@@ -1,40 +1,21 @@
 # Agent Suite — Data Model
 
 > Consolidated schema reference. The suite keeps its own **Postgres**
-> (sessions / config / cron) and **per-user LanceDB** (knowledge + memory),
-> joined to the platform only by `user_id` / `session_id`. Types are
+> (per-user config / cron / chat mappings) and **per-user LanceDB**
+> (knowledge + memory), joined to the platform only by `user_id` /
+> `session_id`. The conversation itself is the ROUTER's (§1.1). Types are
 > indicative; tune for your DB.
 
 ## 1. Postgres
 
-### 1.1 `session_info` — one row per session (channel-written)
+### 1.1 The conversation is NOT here
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `session_id` | text PK | router session id |
-| `user_id` | text, indexed | end-user (FK-ish to the router's user) |
-| `channel` | enum(`chatbot_telegram`,`webapp`) **null** | origin channel; **NULL = released** — the chatbot clears it on `/new` close so the web app can reopen/remove the session ([webapp.md](./webapp.md) §4) |
-| `session_name` | text null | human-friendly title shown in the webapp list; auto-generated from the first user message (history_summarizer `session_name` mode) and editable via webapp Rename ([webapp.md](./webapp.md) §4) |
-| `chat_id` | text null | channel-native id for outbound sends |
-| `delegated_to` | text null | active delegate `agent_id`; channel-maintained ([delegation.md](./delegation.md)) |
-| `history_summary` | text null | rolling summary of the orchestrator thread |
-| `delegate_summary` | text null | rolling summary of the current delegation thread |
-| `created_at` / `updated_at` | timestamptz | |
-
-### 1.2 `session_history` — the conversation log
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | bigserial PK | |
-| `session_id` | text, indexed | |
-| `agent_id` | text, indexed | thread key; set on `user` rows too |
-| `role` | enum(`user`,`assistant`,`tool_call`,`tool_result`) | (a delegation **seed** row is a `user` row carrying `delegate_prompt`) |
-| `message` | text | |
-| `created_at` | timestamptz, indexed | reload order |
-| `incumbent` | bool | include in LLM-context reload |
-| `hidden` | bool | render in the webapp |
-
-Index `(session_id, agent_id, incumbent, created_at)` to serve the reload query ([sessions.md §2.1](./sessions.md)).
+`session_info` and `session_history` are gone (migration
+`0005_drop_session_tables`). Conversation, its rolling summaries,
+`delegated_to`, and a session's channel/title all live in the router's
+session store — see [sessions.md §1](./sessions.md) for the mapping and
+[`../design/router-managed-session-store.md`](../design/router-managed-session-store.md)
+for why. What follows is what the suite still keeps.
 
 ### 1.3 `user_config` — one row per user
 
@@ -140,8 +121,8 @@ No mode defines a bespoke `produces_schema`; all outputs validate as `AgentOutpu
 
 | Store | Writer(s) |
 | --- | --- |
-| `session_info` | channel only (`session.management`) |
-| `session_history` | channel (user rows, summaries-flip, recap) + worker agents (their own turn rows) — all within the per-session queue |
+| router session store — threads | each agent, its OWN thread only; the router stamps the owner from the task's active executor, so another agent's thread is unwritable rather than merely forbidden |
+| router session store — session state / metadata | the channel, as a steward under the user's token |
 | `user_config` | `config` agent (+ channel for `default_session_id`) |
 | `cron_jobs` / `cron_executions` | chatbot (`cron` mode + scheduler) |
 | KB LanceDB | `knowledge_base` |

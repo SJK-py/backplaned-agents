@@ -17,11 +17,11 @@ import httpx
 import pytest
 
 from bp_agents.channel import ChannelCore
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, UpstreamSessionMixin, state_value
 
 
 def _fake_jwt(sub: str) -> str:
@@ -29,7 +29,7 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     """Fake router client: login + the file-stash surface."""
 
     def __init__(self, *, sub: str = "usr_a") -> None:
@@ -98,11 +98,8 @@ def _build_app(*, upstream, pool, core):
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
         )
 
 
@@ -116,9 +113,9 @@ async def _csrf(client, path: str) -> str:
     return m.group(1) if m else ""
 
 
-def _core(pool):
+def _core(upstream):
     return ChannelCore(
-        dispatcher=_SummDispatcher(), pool=pool,
+        dispatcher=_SummDispatcher(), store=FakeChannelStore(upstream.store),
         delegatable_agents=frozenset({"research", "computer_use"}),
     )
 
@@ -135,14 +132,16 @@ def test_chat_view_shows_delegation_picker_then_return_button(suite_db_url: str)
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
                 not_delegated = (await client.get("/chat/ses_1")).text
-                async with pool.acquire() as conn:
-                    await queries.update_session_info(conn, "ses_1", delegated_to="research")
+                up.store.session_state["delegated_to"] = state_value(
+                    "delegated_to", "research"
+                )
                 delegated = (await client.get("/chat/ses_1")).text
             return not_delegated, delegated
         finally:
@@ -165,7 +164,8 @@ def test_delegate_endpoint_sets_delegated_to(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -175,9 +175,8 @@ def test_delegate_endpoint_sets_delegated_to(suite_db_url: str) -> None:
                     "/chat/ses_1/delegate", data={"agent": "research"},
                     headers={"X-CSRF-Token": token},
                 )
-                async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_1")
-            return r.status_code, r.headers.get("HX-Redirect"), info.delegated_to
+            entry = up.store.session_state.get("delegated_to")
+            return r.status_code, r.headers.get("HX-Redirect"), entry and entry.value
         finally:
             await pool.close()
 
@@ -194,9 +193,11 @@ def test_undelegate_endpoint_clears_delegated_to(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            async with pool.acquire() as conn:
-                await queries.update_session_info(conn, "ses_1", delegated_to="research")
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            up.store.session_state["delegated_to"] = state_value(
+                "delegated_to", "research"
+            )
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -205,9 +206,8 @@ def test_undelegate_endpoint_clears_delegated_to(suite_db_url: str) -> None:
                 await client.post(
                     "/chat/ses_1/undelegate", headers={"X-CSRF-Token": token},
                 )
-                async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_1")
-            return info.delegated_to
+            entry = up.store.session_state.get("delegated_to")
+            return entry and entry.value
         finally:
             await pool.close()
 
@@ -226,7 +226,8 @@ def test_stash_view_lists_both_scopes(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -256,7 +257,7 @@ def test_stash_upload_posts_to_upstream(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             upstream = _Upstream()
-            app = _build_app(upstream=upstream, pool=pool, core=_core(pool))
+            app = _build_app(upstream=upstream, pool=pool, core=_core(upstream))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -285,7 +286,8 @@ def test_stash_download_streams_bytes(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -330,7 +332,8 @@ def test_stash_download_unicode_filename_does_not_500(suite_db_url: str) -> None
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -353,7 +356,8 @@ def test_stash_404_for_unowned_session(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -381,7 +385,8 @@ def test_stash_download_archive_zips_session_tab(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -407,7 +412,8 @@ def test_stash_download_archive_strips_persist_prefix(suite_db_url: str) -> None
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -429,7 +435,7 @@ def test_stash_download_archive_empty_tab_is_404(suite_db_url: str) -> None:
             await _seed(pool)
             up = _Upstream()
             up.session_names = []  # nothing to bundle
-            app = _build_app(upstream=up, pool=pool, core=_core(pool))
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -451,7 +457,7 @@ def test_stash_delete_unbinds_via_upstream(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             up = _Upstream()
-            app = _build_app(upstream=up, pool=pool, core=_core(pool))
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -477,7 +483,8 @@ def test_stash_view_renders_delete_button(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(upstream=_Upstream(), pool=pool, core=_core(pool))
+            up = _Upstream()
+            app = _build_app(upstream=up, pool=pool, core=_core(up))
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:

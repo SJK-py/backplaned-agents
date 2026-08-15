@@ -12,6 +12,9 @@ The pieces every l0/l1 agent reuses:
     `ProgressFrame.metadata` ([data-model.md] §3).
   - prompt composition (`compose_system_prompt`, `user_config_note`)
     and output helpers (`text_output`, `estimate_context_tokens`).
+  - `thread` — the three-beat turn against the router session store
+    (`open_turn` → `maybe_fold` → `close_turn`) every conversational agent
+    shares, including hand-over materialisation and summary folding.
 """
 
 from bp_agents.common.chunking import chunk_markdown
@@ -29,10 +32,17 @@ from bp_agents.common.prompts import (
     compose_system_prompt,
     user_config_note,
 )
-from bp_agents.common.tool_history import (
-    make_recall_tool_history_tool,
-    persist_tool_exchanges,
+from bp_agents.common.thread import (
+    CONTEXT_ROLES,
+    ThreadTurn,
+    append_rows,
+    close_turn,
+    context_tokens_of,
+    maybe_fold,
+    open_turn,
+    redact_rows,
 )
+from bp_agents.common.tool_history import make_recall_tool_history_tool
 from bp_agents.common.tools import (
     LocalTool,
     LocalToolset,
@@ -42,22 +52,29 @@ from bp_agents.common.tools import (
 )
 
 __all__ = [
+    "CONTEXT_ROLES",
     "LocalTool",
     "LocalToolset",
     "LoopProgress",
+    "ThreadTurn",
     "FILE_DELIVERY_NOTE",
     "INCOMING_FILE_NOTE",
     "SUBAGENT_FILE_NOTE",
+    "append_rows",
     "chunk_markdown",
+    "close_turn",
     "compose_system_prompt",
+    "context_tokens_of",
     "emit_loop_progress",
     "estimate_context_tokens",
     "estimate_tokens",
     "make_current_time_tool",
     "make_recall_tool_history_tool",
     "make_send_file_tool",
+    "maybe_fold",
+    "open_turn",
     "peer_tool_specs",
-    "persist_tool_exchanges",
+    "redact_rows",
     "run_llm_loop",
     "text_output",
     "user_config_note",

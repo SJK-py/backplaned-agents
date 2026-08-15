@@ -20,6 +20,7 @@ from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.types import AgentOutput
+from tests.fake_store import UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -30,7 +31,7 @@ def _fake_jwt(sub: str) -> str:
 _OPEN = [{"session_id": "ses_1", "opened_at": "2026-05-01T00:00:00Z", "closed_at": None}]
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     def __init__(self, *, sub: str = "usr_a", sessions: list[dict] | None = None) -> None:
         self._sub = sub
         self._sessions = _OPEN if sessions is None else sessions
@@ -80,14 +81,11 @@ def _build_app(*, upstream, pool, core):
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, cron_jobs, session_info, user_config, "
+            "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
         )
         await queries.create_user_config(
             conn, user_id="usr_a", default_session_id="ses_1"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp"
         )
 
 

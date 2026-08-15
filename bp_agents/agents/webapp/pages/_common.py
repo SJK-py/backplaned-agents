@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import Request
 
@@ -12,22 +13,59 @@ from bp_agents.agents.webapp.auth import session_user_id
 from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.db import queries
 
-if TYPE_CHECKING:
-    from bp_agents.db.models import SessionInfoRow
-
 logger = logging.getLogger(__name__)
 
-# session_info.channel values the chatbot writes for chat-origin sessions —
-# flagged in the UI (list badge + a one-time note on open) so the user knows
-# progress won't mirror back to the chat if continued here. A chat-origin
-# session is retired only from the chatbot (`/new`, which releases its channel
-# to NULL); the web app must NOT close/remove it while the channel is still
-# set, or it would yank the cron-fallback `default_session_id` out from under
-# the chat.
+# `metadata.kind` values the chatbot sets for chat-origin sessions — flagged
+# in the UI (list badge + a one-time note on open) so the user knows progress
+# won't mirror back to the chat if continued here. A chat-origin session is
+# retired only from the chatbot (`/new`, which deletes the key); the web app
+# must NOT close/remove it while it is still set, or it would yank the
+# cron-fallback `default_session_id` out from under the chat.
+#
+# These live in the ROUTER's session metadata — the same field its
+# serviced-session discovery reads — rather than in a suite table shadowing
+# the session row.
 TELEGRAM_CHANNEL = "chatbot_telegram"
 KAKAO_CHANNEL = "chatbot_kakao"
+WEBAPP_CHANNEL = "webapp"
 # Channels owned by a chatbot gateway — protected from web-app close/remove.
 CHATBOT_CHANNELS = frozenset({TELEGRAM_CHANNEL, KAKAO_CHANNEL})
+
+
+@dataclass
+class SessionView:
+    """One session as the webapp sees it: the router's row, with the suite's
+    reading of its metadata."""
+
+    session_id: str
+    opened_at: str | None = None
+    closed_at: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> SessionView:
+        return cls(
+            session_id=row["session_id"],
+            opened_at=row.get("opened_at"),
+            closed_at=row.get("closed_at"),
+            metadata=row.get("metadata") or {},
+        )
+
+    @property
+    def channel(self) -> str | None:
+        return self.metadata.get("kind")
+
+    @property
+    def chat_id(self) -> str | None:
+        return self.metadata.get("external_id")
+
+    @property
+    def title(self) -> str | None:
+        return self.metadata.get("title")
+
+    @property
+    def closed(self) -> bool:
+        return bool(self.closed_at)
 
 
 async def ensure_user_config(request: Request) -> None:
@@ -49,19 +87,24 @@ async def ensure_user_config(request: Request) -> None:
         await queries.create_user_config(conn, user_id=user_id)
 
 
-async def owned_session(request: Request, session_id: str) -> SessionInfoRow | None:
-    """The user's `session_info` row for `session_id`, or None (→ 404). The
-    router's `admit_task` / file-scope check is the ultimate ownership gate;
-    this is the local UX guard + the source of the active thread."""
-    pool = request.app.state.pool
-    user_id = session_user_id(request)
-    if pool is None or not user_id:
+async def owned_session(request: Request, session_id: str) -> SessionView | None:
+    """The user's session row for `session_id`, or None (→ 404).
+
+    Ownership is the ROUTER's answer now, not a suite table's: the endpoint
+    404s a session that isn't the caller's, which is both the check and the
+    non-enumerable posture we want. The router's `admit_task` / file-scope
+    check remains the ultimate gate; this is the UX guard."""
+    upstream = request.app.state.upstream
+    access = request.session.get("access_token")
+    if upstream is None or not access:
         return None
-    async with pool.acquire() as conn:
-        info = await queries.get_session_info(conn, session_id)
-    if info is None or info.user_id != user_id:
+    try:
+        row = await upstream.get_session(
+            access_token=access, session_id=session_id
+        )
+    except UpstreamError:
         return None
-    return info
+    return SessionView.from_row(row) if row else None
 
 
 async def carrier_session(request: Request) -> str | None:

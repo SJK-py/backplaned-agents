@@ -20,11 +20,11 @@ The webapp is a **new suite process** (compose service `webapp`, agent_id
    `await_root_result(on_progress=…)`).
 2. **Web server** — FastAPI + Jinja2 + HTMX + Alpine + Tailwind (mirrors
    `bp_admin`), `SessionMiddleware` + CSRF, **SSE** for live progress.
-3. **Direct clients** — the suite Postgres pool (read `session_info` /
-   `user_config` / `cron_jobs` / history for display; delegation
-   bookkeeping; suite-side purge cleanup) **and** a per-user router HTTP
-   client carrying *the logged-in user's own token* (sessions lifecycle,
-   files).
+3. **Direct clients** — the suite Postgres pool (read `user_config` /
+   `cron_jobs` for display; suite-side purge cleanup) **and** a per-user
+   router HTTP client carrying *the logged-in user's own token* (sessions
+   lifecycle, files, and the **session store**: transcript, session state,
+   metadata, the turn lease).
 
 ```
 browser ⇄ (HTTPS + SSE) ⇄ webapp server ─┬─ agent WS ──▶ router  (inject turn, stream progress)
@@ -60,11 +60,12 @@ Extract a **transport-agnostic `ChannelCore`** holding the logic, with a thin
 **`Channel` frontend protocol** the transports implement:
 
 ```
-ChannelCore(dispatcher, pool, session_locks, *, delegatable_agents, …)
+ChannelCore(dispatcher, store, *, delegatable_agents, …)
   .handle_turn(user_id, session_id, text, attachments, *, on_progress, verbose) -> Reply
   .delegate(user_id, session_id, agent) / .undelegate(...)
-  .update_delegation_from_result(...)            # §2 result-source maintenance
-  # plus the helpers: _summarize_thread, _fold_back, _maybe_summarize
+  .after_result(...)                             # §2 result-source maintenance
+  .turn(user_id, session_id)                     # the router's FIFO lease
+  # plus the helpers: _summarize_thread, _fold_back
 
 Channel (frontend) provides: identity (chat_id/login → user_id+session_id),
   send_text / send_file / send_progress, and the command surface.
@@ -119,13 +120,14 @@ current default is a non-pushable webapp session.
 present on every authenticated page) hosts the list, loaded as an HTMX partial
 (`GET /sidebar/sessions`, `hx-trigger="load, sessionsChanged from:body"`); the
 full `/` page renders the same data as a table and self-refreshes on the same
-event. Source: `GET /v1/sessions` (user token) enriched with `session_info`
-(channel / `delegated_to` / `session_name`). Each row is labelled by its
-**`session_name`** (falling back to the raw `session_id` when unset). The name
-is **auto-generated from the first user message** — the channel fires a lite
-`history_summarizer` (`session_name` mode) post-turn, once, and writes the
-title — and **editable** on open rows via **Rename** (`POST …/rename`, the new
-name carried in the `HX-Prompt` header). Rows are grouped **Open / Closed**:
+event. Source: `GET /v1/sessions` (user token) — everything on the row is that
+session's own `metadata` (`kind` for the channel flag, `title` for the label),
+so nothing shadows it. Each row is labelled by its **title**, falling back to
+the raw `session_id` when unset. The title is **auto-generated from the first
+user message** — the channel fires a lite `history_summarizer` (`session_name`
+mode) post-turn, once, and PATCHes it onto the session — and **editable** on
+open rows via **Rename** (`POST …/rename`, the new name carried in the
+`HX-Prompt` header). Rows are grouped **Open / Closed**:
 
   - **Open** — clickable (→ `/chat/{id}`), shows the **channel flag** (a
     **"Telegram"** badge for `channel=chatbot_telegram`), and a **Close**
@@ -134,18 +136,18 @@ name carried in the `HX-Prompt` header). Rows are grouped **Open / Closed**:
     from the chatbot.
   - **Closed** — **not** clickable, no flag; exposes **Reopen**
     (`POST …/reopen` — clears `closed_at`, lands in the chat) and **Remove**
-    (`DELETE …?purge=true` + suite-side cleanup of `session_history` /
-    `session_info` / `cron_jobs`, which the router purge doesn't reach).
-    Remove is **closed-only** (close first, then remove).
+    (`DELETE …?purge=true` + suite-side cleanup of `cron_jobs`, the only
+    per-session table the router purge doesn't reach — the conversation goes
+    with it). Remove is **closed-only** (close first, then remove).
 
-New (`POST /sessions`) opens a router session + `session_info` and lands in
-the chat. Close/Remove reply `204` + `HX-Trigger: sessionsChanged` to refresh
+New (`POST /sessions`) opens a router session tagged `metadata.kind=webapp`
+and lands in the chat. Close/Remove reply `204` + `HX-Trigger: sessionsChanged` to refresh
 the panel in place (no full navigation).
 
 **Channel release on chatbot `/new`** — a Telegram session is "owned" by the
 chatbot while open; the web app only flags it. When the user runs `/new` in
 the chatbot, the gateway **closes the previous session** (router `DELETE`) and
-**clears its `session_info.channel`** (now nullable) — *releasing* it. Once
+**deletes its `metadata.kind`** — *releasing* it. Once
 released the row is a plain closed session the web app can **Reopen** or
 **Remove** (and a reopened one is webapp-controllable, so closable). This is
 the only path that closes a Telegram session.
@@ -155,10 +157,16 @@ the only path that closes a Telegram session.
     web app runs there, and Telegram won't mirror it — the flag is the UX
     warning.
 
-**Main chat pane** — history from `bp_suite` (`reload_incumbent` for the
-active thread: orchestrator or current delegate) + input. Send → HTMX
-`POST /chat` → `ChannelCore.handle_turn` under the session lock → "pending"
-bubble + an **SSE** stream.
+**Main chat pane** — the transcript from the router: `GET
+/v1/sessions/{id}/threads`, then `GET …/messages` per thread, merged by the
+session-wide message id. A conversation is not one thread (a hand-off moves it
+to a specialist and back, and each agent owns its own), and the ids reconstruct
+the real order without the suite tracking it. Read with `include_retired=True`
+— the floor governs what an AGENT still carries in context, not what happened
+— and `include_hidden=False`, which is what keeps seeds, recaps and hand-off
+markers out of the user's view. Send → HTMX `POST /chat` →
+`ChannelCore.turn` (the router's FIFO lease) → "pending" bubble + an **SSE**
+stream.
 
 **Progress UX (SSE)** — the `on_progress` callback forwards each
 `LoopProgress` over SSE; render a **collapsible activity strip** above the
@@ -171,8 +179,8 @@ delegated); `output.files` render as download chips.
 **Delegation control** — a **dropdown** of `delegatable_agents` + a
 **"Return to assistant"** button → `ChannelCore.delegate/undelegate` (the
 deterministic path, [delegation.md §6 (b)]). A persistent **status badge**
-("Talking to: Research Agent" / "Main assistant") from
-`session_info.delegated_to`.
+("Talking to: Research Agent" / "Main assistant") from the session state key
+`delegated_to`.
 
 **Memory pane** (`/memory`) and **Knowledge base pane** (`/knowledge`) —
 unlike config/cron (suite-DB forms), memory and the KB live in **per-user

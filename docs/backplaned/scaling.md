@@ -94,7 +94,7 @@ The suite per-session lock detail lives in
 Findings from the second-pass perf/scale review. Each is a ceiling that
 bites at a stated scale, not a current defect. Ordered by "realistic
 deployment impact". The two pure-index quick-wins from this list were
-already shipped (`session_info` list index + `registration_attempts` GC
+already shipped (`registration_attempts` GC
 index); what remains:
 
 ### ① Catalog broadcast fan-out — **HIGH** (bites at low hundreds of agents)
@@ -196,4 +196,4 @@ sweep (batched, partial-index-backed), the file GC (batched, storage I/O
 outside the txn), the user-level / caller-agent / preset / adapter caches
 (bounded LRU + TTL, correct invalidation), recursive-CTE depth bounds, and
 the admit-path idempotency lookup (fully index-backed). The two quick-win
-indexes (`session_info` list, `registration_attempts` GC) are shipped.
+indexes (`registration_attempts` GC) are shipped.

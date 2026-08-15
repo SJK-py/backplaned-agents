@@ -12,12 +12,12 @@ from bp_agents.agents.deep_reasoning.plan import (
     run_plan,
 )
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, LLMData, TaskStatus
 from bp_sdk import LlmResponse, ToolCall, ToolSpec
+from tests.fake_store import FakeHistory, FakeStore
 
 
 def _settings(url: str, **kw) -> SuiteSettings:
@@ -72,7 +72,8 @@ class _Files:
 
 
 class _Ctx:
-    def __init__(self, llm, peers, *, files=None, user_id="usr_a", session_id="ses_1"):
+    def __init__(self, llm, peers, *, files=None, user_id="usr_a",
+                 session_id="ses_1", store=None, owner="deep_reasoning"):
         self.llm = llm
         self.peers = peers
         self.progress = _Progress()
@@ -81,6 +82,8 @@ class _Ctx:
         self.session_id = session_id
         self.user_level = "tier0"
         self.delegating_agent_id = None
+        self.store = store if store is not None else FakeStore()
+        self.history = FakeHistory(self.store, owner)
 
 
 def _tc(tool: str, **args) -> ToolCall:
@@ -222,16 +225,11 @@ def test_delegated_turn_invokes_extra_terminal(suite_db_url: str) -> None:
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY"
                 )
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a", channel="chatbot_telegram"
-                )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="deep_reasoning",
-                    role="user", message="plan something complex",
-                )
+            store = FakeStore()
+            store.add("deep_reasoning", "user", "plan something complex")
 
             seen: list[ToolCall] = []
 
@@ -249,7 +247,8 @@ def test_delegated_turn_invokes_extra_terminal(suite_db_url: str) -> None:
                 LlmResponse(text="", tool_calls=[_tc("plan_mode")]),
             ])
             out = await run_delegated_turn(
-                _Ctx(llm, _PlanPeers(), files=_Files()), config=cfg, pool=pool,
+                _Ctx(llm, _PlanPeers(), files=_Files(), store=store),
+                config=cfg, pool=pool,
                 settings=_settings(suite_db_url), first_turn=True,
             )
             assert out is _SENTINEL

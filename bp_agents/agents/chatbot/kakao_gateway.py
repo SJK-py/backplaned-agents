@@ -35,7 +35,12 @@ from bp_agents.agents.chatbot.credentials import LinkRefused
 from bp_agents.agents.chatbot.kakao_client import _MAX_CALLBACK_OUTPUTS, KakaoClient
 from bp_agents.agents.chatbot.kakao_files import detect_image_mime, egress_key
 from bp_agents.agents.chatbot.kakao_registry import KakaoTaskRegistry
-from bp_agents.channel import ChannelCore, agent_tag, progress_producer
+from bp_agents.channel import (
+    ChannelCore,
+    SessionStore,
+    agent_tag,
+    progress_producer,
+)
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
 from bp_protocol.types import TaskStatus
@@ -202,7 +207,7 @@ HELP_TEXT = (
 
 class KakaoGateway:
     """Handles one pulled KakaoTalk job end-to-end. One instance per
-    process; the per-session locks and the parked-turn registry are shared."""
+    process; the parked-turn registry is shared."""
 
     def __init__(
         self,
@@ -212,6 +217,7 @@ class KakaoGateway:
         client: KakaoClient,
         registry: KakaoTaskRegistry,
         settings: SuiteSettings,
+        store: SessionStore,
         credentials: ChannelCredentials | None = None,
         egress: R2FileEgress | None = None,
         redis: Any | None = None,
@@ -226,11 +232,10 @@ class KakaoGateway:
         self._char_limit = settings.kakao_msg_char_limit
         self._core = ChannelCore(
             dispatcher=dispatcher,
-            pool=pool,
+            store=store,
             delegatable_agents=frozenset(settings.delegatable_agents),
             result_timeout_s=settings.dispatch_result_timeout_s,
             fire_memory=True,
-            redis=redis,
         )
         # Background (parked) turn tasks, tracked for shutdown cleanup.
         self._turns: set[asyncio.Task] = set()
@@ -499,14 +504,21 @@ class KakaoGateway:
         the user-facing reply (+ any outbound images). Delivery (now vs
         parked) is the caller's call."""
         image_url = body.get("image_url")
-        async with self._core.session_lock(session_id):
-            dest, mode = await self._core.route(session_id)
-            # Inbound image (before dispatch, so the agent's reload sees it).
-            if image_url and self._credentials is not None:
-                await self._save_inbound_image(user_id, session_id, dest, image_url)
-            if text:
-                await self._core.record_user_turn(session_id, dest, text)
-            prompt = text or (
+        async with self._core.turn(user_id, session_id):
+            dest, mode = await self._core.route(user_id, session_id)
+            # Inbound image: stash it before dispatch and name it in the
+            # prompt, so the executing agent discovers it and records its own
+            # input row (the channel owns no thread to write).
+            saved = (
+                await self._save_inbound_image(user_id, session_id, image_url)
+                if image_url and self._credentials is not None else None
+            )
+            parts = [text] if text else []
+            if saved:
+                parts.append(
+                    f"(the user attached an image, saved to your stash as {saved})"
+                )
+            prompt = "\n\n".join(parts) or (
                 "(the user sent an image — see the attached file.)"
                 if image_url
                 else "(the user sent a message with no text.)"
@@ -547,8 +559,7 @@ class KakaoGateway:
             )
             if not reply_text and not file_links:
                 reply_text = _NO_RESPONSE_TEXT
-            context_tokens = await self._core.after_result(session_id, dest, result)
-            await self._core.maybe_summarize(session_id, dest, context_tokens)
+            await self._core.after_result(user_id, session_id, dest, result)
 
         self._core.fire_memory_add(user_id, session_id, text, reply)
         self._core.fire_name_session(user_id, session_id, text)
@@ -582,11 +593,12 @@ class KakaoGateway:
         return TurnReply(reply, [])
 
     async def _save_inbound_image(
-        self, user_id: str, session_id: str, dest: str, image_url: str
-    ) -> None:
-        """Fetch a Kakao-provided image url → router named store → (T,T)
-        hidden history row, so the agent discovers it. Best-effort: a file
-        failure never breaks the turn (mirrors the Telegram inbound path)."""
+        self, user_id: str, session_id: str, image_url: str
+    ) -> str | None:
+        """Fetch a Kakao-provided image url into the router's named store and
+        return its stash NAME, which the turn's prompt then carries to the
+        agent. Best-effort: a file failure never breaks the turn (mirrors the
+        Telegram inbound path)."""
         assert self._credentials is not None
         try:
             data = await self._client.fetch_inbound_image(image_url)
@@ -595,11 +607,11 @@ class KakaoGateway:
                 "kakao_inbound_image_fetch_failed",
                 extra={"event": "kakao_inbound_image_fetch_failed"},
             )
-            return
+            return None
         try:
             mime = detect_image_mime(data)
             filename = f"image{mimetypes.guess_extension(mime) or '.jpg'}"
-            saved = await self._credentials.store_named_file(
+            return await self._credentials.store_named_file(
                 user_id=user_id, session_id=session_id, filename=filename,
                 data=data, mime_type=mime,
             )
@@ -608,13 +620,7 @@ class KakaoGateway:
                 "kakao_inbound_image_store_failed",
                 extra={"event": "kakao_inbound_image_store_failed"},
             )
-            return
-        async with self._pool.acquire() as conn:
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=dest, role="user",
-                message=f"user-attached image saved as {saved}",
-                incumbent=True, hidden=True,
-            )
+            return None
 
     async def _upload_outbound(
         self, user_id: str, session_id: str, names: list[str]
@@ -941,10 +947,6 @@ class KakaoGateway:
                 user_id=user_id, metadata={"kind": CHANNEL, "external_id": chat_id}
             )
             async with self._pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id=new_session, user_id=user_id,
-                    channel=CHANNEL, chat_id=chat_id,
-                )
                 await queries.set_mapping_session_id(
                     conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
                 )
@@ -981,8 +983,11 @@ class KakaoGateway:
                 await self._credentials.close_session(
                     user_id=user_id, session_id=prev_session
                 )
-                async with self._pool.acquire() as conn:
-                    await queries.update_session_info(conn, prev_session, channel=None)
+                # Release the channel-origin flag (a null value deletes the
+                # metadata key) so the webapp may reopen or remove it.
+                await self._core.store.patch_metadata(
+                    user_id=user_id, session_id=prev_session, patch={"kind": None},
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "kakao_new_close_prev_failed",
@@ -992,10 +997,6 @@ class KakaoGateway:
             user_id=user_id, metadata={"kind": CHANNEL, "external_id": chat_id}
         )
         async with self._pool.acquire() as conn:
-            await queries.create_session_info(
-                conn, session_id=new_session, user_id=user_id,
-                channel=CHANNEL, chat_id=chat_id,
-            )
             # This chat rides the fresh session; it also becomes the cron
             # fallback (the re-pointing rule — newest conversation wins).
             await queries.set_mapping_session_id(

@@ -18,6 +18,19 @@ class MessagePayload(BaseModel):
     prompt: str
 
 
+class CronMessage(BaseModel):
+    """A scheduled run's input ([cron.md] §2).
+
+    `report` is the JOB's policy, carried here rather than applied by the
+    scheduler afterwards: the orchestrator is this task's active executor and
+    is therefore the only thing that can append the run's result to the
+    conversation. Deciding and recording in one place also removes the window
+    where the scheduler decided to report and then failed to write the row."""
+
+    prompt: str
+    report: str = "case_by_case"  # always | never | case_by_case
+
+
 class MemAdd(BaseModel):
     """memory `add` payload — channel fire-and-forget after a turn. Lives
     here (not in the memory agent) so the channel can build it without

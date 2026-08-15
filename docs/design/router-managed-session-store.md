@@ -16,11 +16,12 @@
 > the suite's known behaviours onto the primitives — as a completeness
 > check on this spec, and as a target for that rebuild.
 >
-> **The suite rebuild (§13) has NOT started.** `bp_agents` still keeps its
-> conversation in `session_history` / `session_info` and serialises turns
-> with `session_lock.py`. §13.1 records what the preset-slot cutover
-> settled about the shape that rebuild has to take, and §13.2 the order to
-> do it in — both written down because they were paid for once already.
+> **The suite rebuild (§13) has landed.** `session_history`, `session_info`
+> and `session_lock.py` are gone (suite migration `0005_drop_session_tables`);
+> the suite's remaining Postgres is per-user config, cron, and chat
+> mappings. §13.1 records what the preset-slot cutover settled first, §13.2
+> the order it was done in, and §13.3 where the implementation departed from
+> §13's table.
 
 The router already owns identity, tasks, files, and sessions. It does not
 own what happens *inside* a session — the conversation. That gap is why
@@ -883,22 +884,59 @@ suite half that this rebuild inherits rather than re-derives:
 The dependency is real, not stylistic — each step's callers are the next
 step's tests:
 
-  1. **Store client seam.** One protocol the channel engine talks to, two
-     implementations (chatbot `RouterCredentials`, webapp `UpstreamClient`)
-     over §8's endpoints. Nothing behavioural changes yet.
-  2. **`ChannelCore`.** `HandOver(kind="input")` for the user turn, the
-     §6.4 lease for `session_lock`, session state for `delegated_to`,
-     session `metadata` for title/channel/chat_id.
-  3. **Agent side.** Orchestrator + `l1_common` consume hand-overs and
-     append their own rows; `tool_history` reads by role; the summarizer
-     writes `[SetState, SetFloor]` in one batch.
-  4. **Edges.** Gateways, `cron.py`, the webapp transcript
-     (`GET /v1/sessions/{id}/messages`), `session_gc`.
-  5. **Delete.** `session_history`, `session_info`, `session_lock.py`, and
-     the queries module they anchor.
-  6. **`user_config`.** Only now: until step 5 the suite still needs its
-     pool, so moving these fields earlier buys nothing and costs a network
-     round trip per turn on the hot path.
+  1. ~~**Store client seam.**~~ `bp_agents/channel/store.py` — one protocol,
+     two token sources (the chatbot's `serviced_by` mint, the webapp's
+     per-request `TokenRegistry`).
+  2. ~~**`ChannelCore`.**~~ The §6.4 lease replaces `session_lock`, session
+     state holds `delegated_to`, session `metadata` holds
+     title/channel/chat_id.
+  3. ~~**Agent side.**~~ `common/thread.py` is the shared three-beat turn
+     (`open_turn` → `maybe_fold` → `close_turn`) the orchestrator and
+     `l1_common` both run; `tool_history` reads by role with
+     `include_retired=True`; the summarizer became `summarize_thread` and
+     reads the target thread itself.
+  4. ~~**Edges.**~~ Both gateways, `cron.py`, the webapp transcript,
+     `session_gc` (now keyed on `cron_jobs`).
+  5. ~~**Delete.**~~ Migration `0005_drop_session_tables`; `session_lock.py`
+     removed; `db/queries.py` down to config, cron and mappings.
+  6. **`user_config`.** Still outstanding — deliberately last: until step 5
+     the suite needed its pool anyway, so moving these fields earlier bought
+     nothing and cost a network round trip per turn on the hot path. Now it
+     would close the pool, which is the point.
+
+### 13.3 `[shipped]` Where the cutover departed from the table
+
+Three rows resolved differently once built. Each trades a hop for the same
+guarantee.
+
+  * **The user's turn rides the task payload, not `HandOver(kind="input")`.**
+    The payload already carries the text, so a hand-over would duplicate it
+    and add a synchronous round trip to the user-visible path.
+    `common.thread.open_turn` appends it as the turn's opening act — under
+    the agent's own authorship either way, which is the property the row was
+    protecting. The queue keeps the items that have no task to ride on: the
+    `/delegate` seed and the hand-back recap/retire, both of which happen
+    *between* turns.
+  * **The thread's owner decides to summarize, not the steward.** §13 had the
+    channel decide via `StatThread` and the owner apply. But the apply has to
+    be owner-written regardless, and the owner already measures its context —
+    so routing the decision through the channel bought a hand-over hop and a
+    one-turn delay before the fold took effect. The owner now folds at the
+    START of its own turn (`common.thread.maybe_fold`), which is what makes
+    it useful: the fold shrinks *this* turn's context.
+  * **The cron report policy is applied by the orchestrator, not the
+    scheduler.** §13 said "pass the report policy in the task payload"; it
+    does, and the orchestrator then also *records* the run. It is that task's
+    active executor, so it is the only thing that can — and deciding and
+    recording in one place removes the window where the scheduler decided to
+    report and then failed to write the row.
+
+One row landed with a wart worth naming: the webapp transcript needs `GET
+/v1/sessions/{id}/threads` and then `GET …/messages` per thread, merged by
+id, because a conversation spans threads and the messages endpoint takes one
+`owner_agent_id`. The merge is correct (ids are session-wide and monotonic)
+but it is N+1 for a conversation that changed hands N times. An
+`owner_agent_id=*` mode on the messages endpoint would collapse it.
 
 Two failure modes disappear rather than move. The orphan-seed rollback
 (`orchestrator/agent.py:270-277`) exists only because the seed is written

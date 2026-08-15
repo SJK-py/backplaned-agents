@@ -15,9 +15,9 @@ import json
 import httpx
 import pytest
 
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
+from tests.fake_store import UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -25,7 +25,7 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     async def login(self, *, email: str, password: str) -> dict:
         return {
             "access_token": _fake_jwt("usr_a"), "refresh_token": "r",
@@ -40,7 +40,7 @@ class _Upstream:
         pass
 
 
-def _build_app(*, pool, use_built_css: bool = False):
+def _build_app(*, pool, upstream=None, use_built_css: bool = False):
     pytest.importorskip("fastapi")
     pytest.importorskip("itsdangerous")
     pytest.importorskip("jinja2")
@@ -53,21 +53,14 @@ def _build_app(*, pool, use_built_css: bool = False):
         session_secret=SecretStr("x" * 32), session_cookie_secure=False,
         use_built_css=use_built_css,
     )
-    return create_app(cfg, upstream=_Upstream(), pool=pool, core=None)
+    return create_app(cfg, upstream=upstream or _Upstream(), pool=pool, core=None)
 
 
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_tg", user_id="usr_a", channel="chatbot_telegram",
-            chat_id="tg1",
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_web", user_id="usr_a", channel="webapp",
         )
 
 
@@ -75,12 +68,20 @@ async def _login(client) -> None:
     await client.post("/login", data={"email": "a@b.c", "password": "x", "next": "/"})
 
 
-def _chat(suite_db_url: str, session_id: str) -> str:
+def _chat(suite_db_url: str, session_id: str, *, channel: str) -> str:
     async def _drive() -> str:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(pool=pool)
+            up = _Upstream()
+            up.sessions.clear()
+            up.sessions[session_id] = {
+                "session_id": session_id,
+                "opened_at": "2026-05-01T00:00:00Z",
+                "closed_at": None,
+                "metadata": {"kind": channel},
+            }
+            app = _build_app(pool=pool, upstream=up)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -101,7 +102,7 @@ def _chat(suite_db_url: str, session_id: str) -> str:
 
 def test_telegram_session_shows_one_time_note(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
-    html = _chat(suite_db_url, "ses_tg")
+    html = _chat(suite_db_url, "ses_tg", channel="chatbot_telegram")
     assert "started on Telegram" in html
     # Per-session, per-browser dismissal via localStorage (channel-agnostic key).
     assert "chatnote:ses_tg" in html
@@ -110,7 +111,7 @@ def test_telegram_session_shows_one_time_note(suite_db_url: str) -> None:
 
 def test_web_session_has_no_telegram_note(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
-    html = _chat(suite_db_url, "ses_web")
+    html = _chat(suite_db_url, "ses_web", channel="webapp")
     assert "started on Telegram" not in html
 
 

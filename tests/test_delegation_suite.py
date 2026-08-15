@@ -25,6 +25,7 @@ from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, LLMData, TaskStatus
 from bp_sdk import LlmResponse, ToolCall  # noqa: E402
 from bp_sdk.peers import SpawnRejected
+from tests.fake_store import FakeChannelStore, FakeHistory, FakeStore, state_value
 
 _L1 = "deep_reasoning"
 _CATALOG = {
@@ -73,7 +74,7 @@ class _StubFiles:
 
 class _Ctx:
     def __init__(self, llm, peers, *, user_id="usr_a", session_id="ses_1",
-                 delegating=None, files=None):
+                 delegating=None, files=None, store=None, owner="orchestrator"):
         self.llm = llm
         self.peers = peers
         self.progress = _StubProgress()
@@ -82,6 +83,8 @@ class _Ctx:
         self.user_level = "tier0"
         self.delegating_agent_id = delegating
         self.files = files
+        self.store = store if store is not None else FakeStore()
+        self.history = FakeHistory(self.store, owner)
 
 
 def _settings(url: str) -> SuiteSettings:
@@ -91,11 +94,8 @@ def _settings(url: str) -> SuiteSettings:
 async def _reset(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="chatbot_telegram"
         )
 
 
@@ -124,20 +124,19 @@ def test_orchestrator_hand_off(suite_db_url: str) -> None:
             dest, payload, mode = peers.delegations[0]
             assert dest == _L1 and mode == "on_delegation"
             assert isinstance(payload, LLMData)
-            # The delegate_prompt seed row landed in the l1's thread.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=_L1
-                )
-                orch = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-            assert rows and rows[0].role == "user"
-            assert "reason about X" in rows[0].message
+            # NO seed row is written into the delegate's thread — the
+            # orchestrator cannot write it, and the hand-off carries the
+            # `LLMData` the delegate composes its own opening row from.
+            assert ctx.store.thread(_L1) == []
+            assert payload.agent_instruction == "reason about X"
             # Hand-off closed the orchestrator's open turn with a hidden
-            # `assistant` marker attributing the work to the delegate.
-            assert orch and orch[-1].role == "assistant" and orch[-1].hidden
-            assert f"Delegated to {_L1}" in orch[-1].message
+            # `assistant` marker attributing the work to the delegate —
+            # written BEFORE the delegate call, because the router flips the
+            # active executor before delivering and this agent stops being
+            # able to write its own thread at that moment.
+            orch = ctx.store.thread("orchestrator")
+            assert orch[-1].role == "assistant" and orch[-1].hidden
+            assert f"Delegated to {_L1}" in orch[-1].content
         finally:
             await pool.close()
 
@@ -203,18 +202,20 @@ def test_orchestrator_hand_off_fallback_on_admit_failure(suite_db_url: str) -> N
             assert out.content == "Here's my direct answer."
             assert len(peers.delegations) == 1  # one (failed) attempt
 
-            async with pool.acquire() as conn:
-                # The orchestrator persisted its own assistant turn.
-                orch_rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-                # The orphan seed row in the l1 thread was retired.
-                l1_rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=_L1
-                )
-            assert [r.role for r in orch_rows][-1] == "assistant"
-            assert orch_rows[-1].message == "Here's my direct answer."
-            assert l1_rows == []
+            # The orchestrator persisted its own assistant turn.
+            orch_rows = ctx.store.thread("orchestrator")
+            assert orch_rows[-1].role == "assistant"
+            assert orch_rows[-1].content == "Here's my direct answer."
+            # The "Delegated to …" marker is now a lie, so it was redacted —
+            # its id survives (floors and cursors stay valid) and it drops
+            # out of every read.
+            marker = next(
+                r for r in orch_rows if r.hidden and r.role == "assistant"
+            )
+            assert marker.redacted and marker.content == ""
+            # Nothing was ever written into the delegate's thread, so there
+            # is no orphan seed to roll back.
+            assert ctx.store.thread(_L1) == []
         finally:
             await pool.close()
 
@@ -268,28 +269,23 @@ def test_l1_delegated_turn_normal_and_end(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            # Seed the delegate thread (the orchestrator's seed row).
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="## Delegated task\nthink",
-                )
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
 
             # Normal subsequent turn → appends assistant row, no hand-back.
             peers = _StubPeers()
-            ctx = _Ctx(_StubLlm([LlmResponse(text="here is my reasoning")]), peers)
+            store = FakeStore()
+            store.add(_L1, "user", "## Delegated task\nthink")
+            ctx = _Ctx(
+                _StubLlm([LlmResponse(text="here is my reasoning")]), peers,
+                store=store, owner=_L1,
+            )
             out = await run_delegated_turn(
                 ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
                 first_turn=False,
             )
             assert out.content == "here is my reasoning"
             assert peers.delegations == []
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=_L1
-                )
-            assert [r.role for r in rows][-1] == "assistant"
+            assert store.roles(_L1)[-1] == "assistant"
 
             # end_delegation on a subsequent turn → hands back, result-less.
             peers2 = _StubPeers()
@@ -320,31 +316,24 @@ def test_l1_first_turn_never_hands_back(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="## Delegated task\nthink",
-                )
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
             peers = _StubPeers()
+            store = FakeStore()
+            store.add(_L1, "user", "## Delegated task\nthink")
             # The model "tries" to end on its first turn; the tool isn't
             # advertised, so it isn't terminal and isn't dispatched as a
             # hand-back. The stub then falls through to a plain "done".
             ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
                 id="c1", name="end_delegation",
                 args={"delegation_summary": "x", "exit_reason": "y"},
-            )])]), peers)
+            )])]), peers, store=store, owner=_L1)
             out = await run_delegated_turn(
                 ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
                 first_turn=True,
             )
             assert peers.delegations == []           # no hand-back on T
             assert out.content == "done"             # turn terminates T itself
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=_L1
-                )
-            assert [r.role for r in rows][-1] == "assistant"
+            assert store.roles(_L1)[-1] == "assistant"
         finally:
             await pool.close()
 
@@ -356,48 +345,35 @@ def test_orchestrator_end_delegation_recap(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                # Post-hand-off orchestrator thread: the open user prompt was
-                # already closed by the hidden "Delegated to …" marker.
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="do the thing",
-                )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
-                )
-                # An l1 episode to retire.
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="seed",
-                )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="assistant", message="work",
-                )
-            ctx = _Ctx(_StubLlm([]), _StubPeers(), delegating=_L1)
+            store = FakeStore()
+            # Post-hand-off orchestrator thread: the open user prompt was
+            # already closed by the hidden "Delegated to …" marker.
+            store.add("orchestrator", "user", "do the thing")
+            store.add("orchestrator", "assistant", f"Delegated to {_L1}.", hidden=True)
+            # An l1 episode to retire.
+            store.add(_L1, "user", "seed")
+            last_l1 = store.add(_L1, "assistant", "work")
+            ctx = _Ctx(_StubLlm([]), _StubPeers(), delegating=_L1, store=store)
             out = await run_orchestrator_end_delegation(
                 ctx,
                 {"delegation_summary": "solved it", "exit_reason": "done"},
                 pool=pool, settings=_settings(suite_db_url),
             )
             assert out.content == ""
-            async with pool.acquire() as conn:
-                main = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-                # The delegate episode was retired (no incumbent rows).
-                l1_rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=_L1
-                )
-            assert l1_rows == []
+            main = [m for m in store.thread("orchestrator")]
+            # Retiring the delegate's episode is the DELEGATE's to do: the
+            # orchestrator can't move another thread's floor, so it hands a
+            # `retire` cutoff over instead.
+            retire = store.handovers[_L1][0]
+            assert retire.item_kind == "retire"
+            assert retire.payload["through_id"] == last_l1.id
+            assert store.floors == {}
             # Recap is a hidden `user` row (results as external input); a hidden
             # `assistant` "Acknowledged." closes it — the thread alternates.
             assert [r.role for r in main] == ["user", "assistant", "user", "assistant"]
             recap, ack = main[-2], main[-1]
-            assert recap.role == "user" and recap.hidden and "solved it" in recap.message
-            assert ack.role == "assistant" and ack.hidden and ack.message == "Acknowledged."
+            assert recap.role == "user" and recap.hidden and "solved it" in recap.content
+            assert ack.role == "assistant" and ack.hidden and ack.content == "Acknowledged."
         finally:
             await pool.close()
 
@@ -412,26 +388,17 @@ def test_l1_end_delegation_auto_forwards_user_message(suite_db_url: str) -> None
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="## Delegated task\nthink",
-                )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="assistant", message="reasoned",
-                )
-                # The current (out-of-remit) user message that triggered the turn.
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="what's the weather in Paris?",
-                )
+            store = FakeStore()
+            store.add(_L1, "user", "## Delegated task\nthink")
+            store.add(_L1, "assistant", "reasoned")
+            # The current (out-of-remit) user message that triggered the turn.
+            store.add(_L1, "user", "what's the weather in Paris?")
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
             peers = _StubPeers()
             ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
                 id="c1", name="end_delegation",
                 args={"delegation_summary": "done reasoning", "exit_reason": "off-topic"},
-            )])]), peers)
+            )])]), peers, store=store, owner=_L1)
             await run_delegated_turn(
                 ctx, config=cfg, pool=pool, settings=_settings(suite_db_url),
                 first_turn=False,
@@ -452,11 +419,8 @@ def test_l1_end_delegation_explicit_user_prompt_wins(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="actual user message",
-                )
+            store = FakeStore()
+            store.add(_L1, "user", "actual user message")
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
             peers = _StubPeers()
             ctx = _Ctx(_StubLlm([LlmResponse(text="", tool_calls=[ToolCall(
@@ -483,11 +447,8 @@ def test_l1_end_delegation_carries_queued_file(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=_L1,
-                    role="user", message="make me a chart",
-                )
+            store = FakeStore()
+            store.add(_L1, "user", "make me a chart")
             cfg = L1Config(agent_id=_L1, subagent_system="s", delegation_system="d")
             peers = _StubPeers()
             # Round 1: queue the file; round 2: hand back.
@@ -523,16 +484,10 @@ def test_orchestrator_end_delegation_delivers_handback_files(suite_db_url: str) 
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="do the thing",
-                )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
-                )
-            ctx = _Ctx(_StubLlm([]), _StubPeers(), delegating=_L1)
+            store = FakeStore()
+            store.add("orchestrator", "user", "do the thing")
+            store.add("orchestrator", "assistant", f"Delegated to {_L1}.", hidden=True)
+            ctx = _Ctx(_StubLlm([]), _StubPeers(), delegating=_L1, store=store)
             out = await run_orchestrator_end_delegation(
                 ctx,
                 {"delegation_summary": "made it", "exit_reason": "done",
@@ -554,17 +509,11 @@ def test_orchestrator_end_delegation_merges_files_with_followup(suite_db_url: st
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="earlier", )
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="assistant", message=f"Delegated to {_L1}.", hidden=True,
-                )
+            store = FakeStore()
+            store.add("orchestrator", "assistant", f"Delegated to {_L1}.", hidden=True)
             # The orchestrator's loop answers inline (no hand_off).
             ctx = _Ctx(_StubLlm([LlmResponse(text="Here you go.")]),
-                       _StubPeers(), delegating=_L1)
+                       _StubPeers(), delegating=_L1, store=store)
             out = await run_orchestrator_end_delegation(
                 ctx,
                 {"delegation_summary": "s", "exit_reason": "r",
@@ -592,24 +541,31 @@ def test_gateway_delegated_to_maintenance(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _reset(pool)
-            gw = ChatbotGateway(dispatcher=None, pool=pool, telegram=None)
+            store = FakeStore()
+            gw = ChatbotGateway(
+                dispatcher=None, pool=pool, telegram=None,
+                store=FakeChannelStore(store),
+            )
+            core = gw._core
+
+            def delegated_to():
+                entry = store.session_state.get("delegated_to")
+                return entry.value if entry else None
 
             # Hand-off: dispatched orchestrator, delegate produced result.
-            await gw._core._update_delegation("ses_1", "orchestrator", _result(_L1))
-            async with pool.acquire() as conn:
-                assert (await queries.get_session_info(conn, "ses_1")).delegated_to == _L1
+            await core.after_result("usr_a", "ses_1", "orchestrator", _result(_L1))
+            assert delegated_to() == _L1
 
             # Hand-back: dispatched delegate, orchestrator produced result.
-            await gw._core._update_delegation("ses_1", _L1, _result("orchestrator"))
-            async with pool.acquire() as conn:
-                assert (await queries.get_session_info(conn, "ses_1")).delegated_to is None
+            await core.after_result("usr_a", "ses_1", _L1, _result("orchestrator"))
+            assert delegated_to() is None
 
             # F2: a delegated turn FAILED → revert to orchestrator.
-            async with pool.acquire() as conn:
-                await queries.update_session_info(conn, "ses_1", delegated_to=_L1)
-            await gw._core._update_delegation("ses_1", _L1, _result(_L1, TaskStatus.FAILED))
-            async with pool.acquire() as conn:
-                assert (await queries.get_session_info(conn, "ses_1")).delegated_to is None
+            store.session_state["delegated_to"] = state_value("delegated_to", _L1)
+            await core.after_result(
+                "usr_a", "ses_1", _L1, _result(_L1, TaskStatus.FAILED)
+            )
+            assert delegated_to() is None
         finally:
             await pool.close()
 

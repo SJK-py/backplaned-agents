@@ -1,69 +1,27 @@
 """Unit tests for on-demand tool-history recall
-([agent-tool-history-recall.md]) — extraction, paging glue, rendering,
-and the local tool's clamping. DB-free: the paging query is exercised
-with a fake connection that emulates the `ORDER BY id DESC LIMIT` tail,
-so the Python pairing/skip/limit slicing is what's under test.
+([agent-tool-history-recall.md]) — extraction, paging, rendering, and the
+local tool's clamping, over the fake session store.
+
+Recall reads with `include_retired=True`: a summarization fold moves the
+thread's floor past old turns, and their tool detail is exactly what the
+model needs recall for once the prose has been compressed away.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from bp_agents.common import tool_history as th
-from bp_agents.db import queries
 from bp_sdk import Message
-
-_T0 = datetime(2026, 1, 1, 12, 0, 0)
-
-
-def _row(rid: int, role: str, message: str) -> dict:
-    return {
-        "id": rid,
-        "session_id": "ses_1",
-        "agent_id": "orchestrator",
-        "role": role,
-        "message": message,
-        "created_at": _T0 + timedelta(seconds=rid),
-        "incumbent": False,
-        "hidden": True,
-    }
+from tests.fake_store import FakeHistory, FakeStore
 
 
-class _FakeConn:
-    """Emulates the `recent_tool_exchanges` query: returns the newest
-    `limit` tool rows by id, ascending (mirrors the inner DESC+LIMIT,
-    outer ASC SQL)."""
-
-    def __init__(self, rows: list[dict]) -> None:
-        self._rows = rows
-
-    async def fetch(self, _sql: str, session_id, agent_id, fetch_rows):
-        tool = [
-            r for r in self._rows
-            if r["session_id"] == session_id
-            and r["agent_id"] == agent_id
-            and r["role"] in ("tool_call", "tool_result")
-        ]
-        tool.sort(key=lambda r: r["id"])
-        return tool[-fetch_rows:]
-
-
-class _FakePool:
-    def __init__(self, conn: _FakeConn) -> None:
-        self._conn = conn
-
-    def acquire(self):
-        conn = self._conn
-
-        class _Ctx:
-            async def __aenter__(self):
-                return conn
-
-            async def __aexit__(self, *a):
-                return False
-
-        return _Ctx()
+def _ctx(store: FakeStore, owner: str = "orchestrator"):  # noqa: ANN202
+    return SimpleNamespace(
+        user_id=store.user_id, session_id=store.session_id,
+        history=FakeHistory(store, owner),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -125,83 +83,85 @@ def test_recall_exchange_stored_as_marker_not_digest() -> None:
         "[1 exchange back] read_file({}) →\nbody"
     )
     ex = th.ToolExchange(name="recall_tool_history", args={"count": 2}, result=digest)
-    stored = th._storable_result(ex)
+    stored = th.storable_result(ex)
     assert "recalled 2 earlier tool exchanges" in stored
     assert "H" * 50 not in stored  # the digest body is NOT re-stored
     assert len(stored) < 200
 
     # a normal tool keeps its real result
     other = th.ToolExchange(name="web_search", args={}, result="hits-and-more")
-    assert th._storable_result(other) == "hits-and-more"
+    assert th.storable_result(other) == "hits-and-more"
 
     # empty recall → "nothing matched", not a count
     empty = th.ToolExchange(
         name="recall_tool_history", args={},
         result="No earlier tool calls in this conversation to recall.",
     )
-    assert "nothing matched" in th._storable_result(empty)
+    assert "nothing matched" in th.storable_result(empty)
 
 
 # --------------------------------------------------------------------------
-# paging query (pairing + skip + limit)
+# paging (pairing + skip + limit)
 # --------------------------------------------------------------------------
 
-def _seed_exchanges(n: int) -> list[dict]:
-    """n exchanges, ids 1..2n, exchange k = call(2k-1)/result(2k)."""
-    rows: list[dict] = []
+
+def _seed_exchanges(store: FakeStore, n: int, *, owner: str = "orchestrator") -> None:
+    """n exchanges on `owner`'s thread; exchange k = call then result."""
     for k in range(1, n + 1):
-        rows.append(_row(2 * k - 1, "tool_call",
-                         f'{{"name": "t{k}", "args": {{"i": {k}}}}}'))
-        rows.append(_row(2 * k, "tool_result", f"result-{k}"))
-    return rows
+        store.add(owner, "tool_call", f'{{"name": "t{k}", "args": {{"i": {k}}}}}',
+                  hidden=True)
+        store.add(owner, "tool_result", f"result-{k}", hidden=True)
+
+
+async def _recall(store: FakeStore, **args) -> str:
+    tool = th.make_recall_tool_history_tool(agent_id="orchestrator")
+    return await tool.handler(_ctx(store), args)
 
 
 def test_paging_newest_first_and_skip() -> None:
     async def _drive() -> None:
-        conn = _FakeConn(_seed_exchanges(5))  # exchanges 1..5 (5 newest)
+        store = FakeStore()
+        _seed_exchanges(store, 5)
 
-        # newest one
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=1
-        )
-        assert len(page) == 1
-        assert page[0][1].message == "result-5"
-
+        assert "result-5" in await _recall(store, count=1)
         # skip=1 → next older, no overlap
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=1, skip=1
-        )
-        assert len(page) == 1 and page[0][1].message == "result-4"
-
-        # a 2-wide page, ascending (newest last)
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=2, skip=1
-        )
-        assert [p[1].message for p in page] == ["result-3", "result-4"]
-
-        # skip past the start → empty
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=2, skip=10
-        )
-        assert page == []
+        page = await _recall(store, count=1, skip=1)
+        assert "result-4" in page and "result-5" not in page
+        # a 2-wide page carries both, newest last
+        page = await _recall(store, count=2, skip=1)
+        assert "result-3" in page and "result-4" in page
+        # skip past the start → the empty-state message
+        assert "reached the start" in await _recall(store, count=2, skip=10)
 
     asyncio.run(_drive())
 
 
-def test_paging_scopes_to_thread() -> None:
+def test_paging_scopes_to_the_callers_own_thread() -> None:
+    """Structural, not checked: a `Read` with no owner defaults to the
+    caller's own thread, and the router derives that from the task's active
+    executor. There is no parameter through which another agent's thread
+    could be named."""
     async def _drive() -> None:
-        rows = _seed_exchanges(2)
-        # a different agent's exchange must not leak in
-        other = _row(99, "tool_call", '{"name": "leak", "args": {}}')
-        other["agent_id"] = "computer_use"
-        other2 = _row(100, "tool_result", "LEAK")
-        other2["agent_id"] = "computer_use"
-        conn = _FakeConn(rows + [other, other2])
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=10
-        )
-        assert all("LEAK" not in p[1].message for p in page)
-        assert len(page) == 2
+        store = FakeStore()
+        _seed_exchanges(store, 2)
+        store.add("computer_use", "tool_call", '{"name": "leak", "args": {}}',
+                  hidden=True)
+        store.add("computer_use", "tool_result", "LEAK", hidden=True)
+        out = await _recall(store, count=10)
+        assert "LEAK" not in out
+        assert "result-1" in out and "result-2" in out
+
+    asyncio.run(_drive())
+
+
+def test_recall_reaches_past_a_summarization_floor() -> None:
+    """The point of recall: once a fold retires the prose, the tool detail
+    behind it is what the model still needs."""
+    async def _drive() -> None:
+        store = FakeStore()
+        _seed_exchanges(store, 2)
+        store.floors[("orchestrator", "")] = store.messages[-1].id
+        assert "result-2" in await _recall(store, count=2)
 
     asyncio.run(_drive())
 
@@ -210,13 +170,12 @@ def test_paging_scopes_to_thread() -> None:
 # rendering
 # --------------------------------------------------------------------------
 
+
 def test_render_labels_distance_back_skip_aware() -> None:
     async def _drive() -> None:
-        conn = _FakeConn(_seed_exchanges(5))
-        page = await queries.recent_tool_exchanges(
-            conn, session_id="ses_1", agent_id="orchestrator", limit=2, skip=1
-        )
-        out = th.render_recall(page, skip=1)
+        store = FakeStore()
+        _seed_exchanges(store, 5)
+        out = await _recall(store, count=2, skip=1)
         # newest returned is exchange 4 → 2 back (skip 1 + 1); older is 3 back
         assert "[2 exchanges back] t4(" in out
         assert "[3 exchanges back] t3(" in out
@@ -226,51 +185,39 @@ def test_render_labels_distance_back_skip_aware() -> None:
 
 
 def test_render_truncates_large_result() -> None:
-    big = _row(1, "tool_call", '{"name": "t", "args": {}}')
-    res = _row(2, "tool_result", "Z" * (th.PER_RESULT_CHARS + 500))
+    async def _drive() -> None:
+        store = FakeStore()
+        store.add("orchestrator", "tool_call", '{"name": "t", "args": {}}',
+                  hidden=True)
+        store.add("orchestrator", "tool_result", "Z" * (th.PER_RESULT_CHARS + 500),
+                  hidden=True)
+        out = await _recall(store, count=1)
+        assert "more chars)" in out
+        assert len(out) < th.PER_RESULT_CHARS + 300
 
-    class _Row:
-        def __init__(self, d): self.message = d["message"]
-
-    out = th.render_recall([(_Row(big), _Row(res))], skip=0)
-    assert "more chars)" in out
-    assert len(out) < th.PER_RESULT_CHARS + 300
+    asyncio.run(_drive())
 
 
 # --------------------------------------------------------------------------
 # the local tool — clamping + empty-state messaging
 # --------------------------------------------------------------------------
 
+
 def test_tool_clamps_count_and_skip() -> None:
     async def _drive() -> None:
-        captured = {}
+        store = FakeStore()
+        _seed_exchanges(store, 20)
 
-        async def _stub(conn, *, session_id, agent_id, limit, skip):
-            captured["limit"] = limit
-            captured["skip"] = skip
-            return []
+        # over-cap count is clamped to MAX_RECALL exchanges
+        out = await _recall(store, count=999, skip=0)
+        assert out.count("exchanges back]") + out.count("exchange back]") == th.MAX_RECALL
+        # a negative skip is floored at 0 — the newest is still included
+        assert "result-20" in await _recall(store, count=1, skip=-3)
+        # non-int args fall back to the defaults rather than crashing
+        assert "result-20" in await _recall(store, count="abc")
 
-        orig = queries.recent_tool_exchanges
-        queries.recent_tool_exchanges = _stub
-        try:
-            tool = th.make_recall_tool_history_tool(
-                _FakePool(_FakeConn([])), session_id="ses_1", agent_id="orchestrator"
-            )
-            # over-cap count, negative skip
-            msg = await tool.handler(None, {"count": 999, "skip": -3})
-            assert captured["limit"] == th.MAX_RECALL
-            assert captured["skip"] == 0
-            assert "No earlier tool calls" in msg
-
-            # skip>0 empty → "older" wording
-            await tool.handler(None, {"count": 1, "skip": 2})
-            msg2 = await tool.handler(None, {"skip": 2})
-            assert "older" in msg2.lower()
-
-            # non-int args fall back to defaults, not crash
-            await tool.handler(None, {"count": "abc"})
-            assert captured["limit"] == 1
-        finally:
-            queries.recent_tool_exchanges = orig
+        empty = FakeStore()
+        assert "No earlier tool calls" in await _recall(empty, count=1)
+        assert "reached the start" in await _recall(empty, count=1, skip=2)
 
     asyncio.run(_drive())

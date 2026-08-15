@@ -19,6 +19,7 @@ import pytest
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
+from tests.fake_store import UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -26,12 +27,15 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     def __init__(self, *, sub: str = "usr_a", sessions: list[dict] | None = None) -> None:
         self._sub = sub
-        self._sessions = sessions or []
-        self.created: list[dict | None] = []
+        self.created: list[str] = []
         self.deleted: list[tuple[str, bool]] = []
+        if sessions is not None:
+            self.sessions.clear()
+            for row in sessions:
+                self.sessions[row["session_id"]] = {"metadata": {}, **row}
 
     async def login(self, *, email: str, password: str) -> dict:
         return {
@@ -39,13 +43,13 @@ class _Upstream:
             "expires_at": "2999-01-01T00:00:00+00:00", "level": "tier1",
         }
 
-    async def list_sessions(self, *, access_token):
-        return self._sessions
-
     async def create_session(self, *, access_token, metadata=None):
-        self.created.append(metadata)
-        return {"session_id": "ses_new", "opened_at": "2026-05-01T00:00:00Z",
-                "closed_at": None}
+        self.sessions["ses_new"] = {
+            "session_id": "ses_new", "opened_at": "2026-05-01T00:00:00Z",
+            "closed_at": None, "metadata": dict(metadata or {}),
+        }
+        self.created.append("ses_new")
+        return dict(self.sessions["ses_new"])
 
     async def delete_session(self, *, access_token, session_id, purge=False):
         self.deleted.append((session_id, purge))
@@ -70,11 +74,8 @@ def _build_app(*, upstream, pool):
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, cron_jobs, session_info, user_config, "
+            "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
         )
 
 
@@ -92,7 +93,7 @@ async def _csrf(client, path: str = "/") -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_purge_session_suite_data_reclaims_all_three_tables(suite_db_url: str) -> None:
+def test_purge_session_suite_data_reclaims_the_suite_side(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
 
     async def _drive() -> tuple[dict, dict]:
@@ -100,36 +101,26 @@ def test_purge_session_suite_data_reclaims_all_three_tables(suite_db_url: str) -
         try:
             await _seed(pool)
             async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="hi",
-                )
                 await queries.create_cron_job(
                     conn, cron_id="c1", user_id="usr_a", session_id="ses_1",
                     cron_expression="0 8 * * *", cron_message="x",
                 )
-                # A second user's session must be untouched.
-                await queries.create_session_info(
-                    conn, session_id="ses_2", user_id="usr_b", channel="webapp",
+                # Another session's job must be untouched.
+                await queries.create_cron_job(
+                    conn, cron_id="c2", user_id="usr_a", session_id="ses_2",
+                    cron_expression="0 9 * * *", cron_message="y",
                 )
                 counts = await queries.purge_session_suite_data(conn, "ses_1")
-                remaining_info = await queries.get_session_info(conn, "ses_1")
-                other = await queries.get_session_info(conn, "ses_2")
                 jobs = await queries.list_cron_jobs(conn, user_id="usr_a")
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-            return counts, {"info": remaining_info, "other": other,
-                            "jobs": len(jobs), "rows": len(rows)}
+            return counts, {"jobs": [j.cron_id for j in jobs]}
         finally:
             await pool.close()
 
     counts, after = asyncio.run(_drive())
-    assert counts["session_history"] == 1
-    assert counts["cron_jobs"] == 1
-    assert counts["session_info"] == 1
-    assert after["info"] is None and after["jobs"] == 0 and after["rows"] == 0
-    assert after["other"] is not None  # other user's session intact
+    # The conversation is the ROUTER's now and goes with its purge; cron is
+    # all the suite still keys by session.
+    assert counts == {"cron_jobs": 1}
+    assert after["jobs"] == ["c2"]
 
 
 # ---------------------------------------------------------------------------
@@ -152,16 +143,18 @@ def test_new_session_opens_router_and_creates_session_info(suite_db_url: str) ->
                 await _login(client)
                 token = await _csrf(client, "/")
                 r = await client.post("/sessions", headers={"X-CSRF-Token": token})
-                async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_new")
-            return r.status_code, r.headers.get("HX-Redirect"), info, up.created
+            new_id = up.created[-1] if up.created else None
+            metadata = (up.sessions.get(new_id) or {}).get("metadata")
+            return r.status_code, r.headers.get("HX-Redirect"), metadata, up.created
         finally:
             await pool.close()
 
-    status, redirect, info, created = asyncio.run(_drive())
+    status, redirect, metadata, created = asyncio.run(_drive())
     assert status == 204
     assert redirect == "/chat/ses_new"
-    assert info is not None and info.channel == "webapp" and info.user_id == "usr_a"
+    # Channel origin is the ROUTER session's own metadata — no suite row
+    # shadows it any more.
+    assert metadata == {"kind": "webapp"}
     assert len(created) == 1  # create_session called exactly once
 
 
@@ -182,16 +175,14 @@ def test_close_session_archives_via_router(suite_db_url: str) -> None:
                 r = await client.post(
                     "/sessions/ses_1/close", headers={"X-CSRF-Token": token}
                 )
-                async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_1")
-            return r.status_code, up.deleted, info
+            return r.status_code, up.deleted, up.sessions.get("ses_1")
         finally:
             await pool.close()
 
-    status, deleted, info = asyncio.run(_drive())
+    status, deleted, row = asyncio.run(_drive())
     assert status == 204
     assert deleted == [("ses_1", False)]  # archive, not purge
-    assert info is not None  # suite session_info kept on close
+    assert row is not None  # the session (and its history) survive a close
 
 
 def test_remove_session_purges_router_and_suite(suite_db_url: str) -> None:
@@ -202,10 +193,6 @@ def test_remove_session_purges_router_and_suite(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="hi",
-                )
                 await queries.create_cron_job(
                     conn, cron_id="c1", user_id="usr_a", session_id="ses_1",
                     cron_expression="0 8 * * *", cron_message="x",
@@ -221,17 +208,16 @@ def test_remove_session_purges_router_and_suite(suite_db_url: str) -> None:
                     "/sessions/ses_1/remove", headers={"X-CSRF-Token": token}
                 )
                 async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_1")
                     jobs = await queries.list_cron_jobs(conn, user_id="usr_a")
-            return r.status_code, r.headers.get("HX-Trigger"), up.deleted, info, len(jobs)
+            return r.status_code, r.headers.get("HX-Trigger"), up.deleted, None, len(jobs)
         finally:
             await pool.close()
 
-    status, trigger, deleted, info, n_jobs = asyncio.run(_drive())
+    status, trigger, deleted, _unused, n_jobs = asyncio.run(_drive())
     assert status == 204
     assert trigger == "sessionsChanged"  # refreshes the sidebar / list in place
     assert deleted == [("ses_1", True)]  # purge
-    assert info is None and n_jobs == 0  # suite rows reclaimed
+    assert n_jobs == 0  # the suite rows the router purge can't reach
 
 
 def test_close_remove_404_for_unowned_session(suite_db_url: str) -> None:

@@ -349,6 +349,7 @@ def _poll_gateway(client, reg, *, credentials=None) -> KakaoGateway:
     return KakaoGateway(
         dispatcher=object(), pool=None, client=client, registry=reg,
         settings=_settings(), credentials=credentials, redis=None,
+        store=FakeChannelStore(FakeStore()),
     )
 
 
@@ -524,8 +525,13 @@ class _FakeDispatcher:
         self.reply = reply
         self.delay = delay
         self.files = files or []
+        # Turn dispatches only — the fire-and-forget `memory.add` spawn
+        # rides the same method and would otherwise be the last entry.
+        self.spawned: list[tuple] = []
 
     async def spawn_root_for_user(self, dest, payload, *, user_id, session_id, mode=None, **kw):
+        if hasattr(payload, "prompt"):
+            self.spawned.append((dest, payload, mode))
         return f"tsk:{getattr(payload, 'prompt', None)}"
 
     async def await_root_result(self, task_id, *, timeout_s=None, **kw):
@@ -542,7 +548,7 @@ class _FakeDispatcher:
 async def _seed(pool, *, chat_id="kc1", user_id="usr_k", session_id="ses_k") -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
@@ -552,15 +558,13 @@ async def _seed(pool, *, chat_id="kc1", user_id="usr_k", session_id="ses_k") -> 
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id
         )
-        await queries.create_session_info(
-            conn, session_id=session_id, user_id=user_id, channel="chatbot_kakao"
-        )
 
 
-def _gateway(pool, client, disp, reg, settings) -> KakaoGateway:
+def _gateway(pool, client, disp, reg, settings, store=None) -> KakaoGateway:
     return KakaoGateway(
         dispatcher=disp, pool=pool, client=client, registry=reg,
         settings=settings, credentials=None, redis=None,
+        store=FakeChannelStore(store or FakeStore()),
     )
 
 
@@ -571,18 +575,19 @@ def test_turn_delivers_in_time(suite_db_url: str) -> None:
             await _seed(pool)
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-            gw = _gateway(pool, client, _FakeDispatcher(reply="hi back"), reg, _settings())
+            store = FakeStore()
+            disp = _FakeDispatcher(reply="hi back")
+            gw = _gateway(pool, client, disp, reg, _settings(), store)
 
             await gw.handle_job(_job(utterance="hello?"))
 
             # delivered on the callback, no buttons, no parked state left
             assert client.posts == [("https://cb.kakao/x", "hi back", None, None, None)]
             assert await reg.get_turn("kc1") is None
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_k", agent_id="orchestrator"
-                )
-            assert [(r.role, r.message) for r in rows] == [("user", "hello?")]
+            # The channel wrote NO history: the user's words ride the task
+            # payload and the executing agent records them itself.
+            assert store.messages == []
+            assert disp.spawned and disp.spawned[-1][1].prompt == "hello?"
         finally:
             await pool.close()
 
@@ -599,17 +604,14 @@ def test_bare_confirm_word_is_a_normal_message(suite_db_url: str) -> None:
             await _seed(pool)
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
-            gw = _gateway(pool, client, _FakeDispatcher(reply="네"), reg, _settings())
+            disp = _FakeDispatcher(reply="네")
+            gw = _gateway(pool, client, disp, reg, _settings())
 
             await gw.handle_job(_job(utterance="확인"))
 
             # A turn ran and delivered the reply — not the idle poll response.
             assert client.posts == [("https://cb.kakao/x", "네", None, None, None)]
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_k", agent_id="orchestrator"
-                )
-            assert [(r.role, r.message) for r in rows] == [("user", "확인")]
+            assert disp.spawned and disp.spawned[-1][1].prompt == "확인"
         finally:
             await pool.close()
 
@@ -862,25 +864,22 @@ def test_inbound_image_stored_and_recorded(suite_db_url: str) -> None:
             client.inbound_bytes = _PNG
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
             creds = _FakeCreds(saved="image.png")
+            store = FakeStore()
+            disp = _FakeDispatcher(reply="nice pic")
             gw = KakaoGateway(
-                dispatcher=_FakeDispatcher(reply="nice pic"), pool=pool,
+                dispatcher=disp, pool=pool,
                 client=client, registry=reg, settings=_settings(),
                 credentials=creds, egress=None, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="", image_url="https://img.kakao/x.png"))
 
             # stored to the router named store as image/png
             assert creds.stored and creds.stored[0][1] == "image/png"
-            # a hidden (T,T) row records the saved name
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT role, message, hidden FROM session_history "
-                    "WHERE session_id='ses_k' ORDER BY id"
-                )
-            assert any(
-                r["hidden"] and "image saved as image.png" in r["message"]
-                for r in rows
-            )
+            # The saved NAME reaches the agent in the turn's prompt — the
+            # channel has no thread to record it on, and the agent writes its
+            # own input row anyway.
+            assert "image.png" in disp.spawned[-1][1].prompt
             # the reply is still delivered on the callback
             assert client.posts[-1][1] == "nice pic"
         finally:
@@ -899,9 +898,11 @@ def test_outbound_image_uploaded_and_delivered(suite_db_url: str) -> None:
             creds = _FakeCreds(file_bytes=_PNG)
             egress = _FakeEgress("https://r2.example/chart.png")
             disp = _FakeDispatcher(reply="here is your chart", files=["chart.png"])
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=disp, pool=pool, client=client, registry=reg,
                 settings=_settings(), credentials=creds, egress=egress, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="make a chart"))
 
@@ -931,9 +932,11 @@ def test_outbound_nonimage_file_delivered_as_link(suite_db_url: str) -> None:
             creds = _FakeCreds(file_bytes=b"%PDF-1.4 hello")
             egress = _FakeEgress("https://r2.example/report.pdf")
             disp = _FakeDispatcher(reply="여기 보고서예요", files=["report.pdf"])
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=disp, pool=pool, client=client, registry=reg,
                 settings=_settings(), credentials=creds, egress=egress, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="보고서 만들어줘"))
 
@@ -965,10 +968,12 @@ def test_long_answer_offloaded_to_download_link(suite_db_url: str) -> None:
             egress = _FakeEgress("https://r2.example/answer.md")
             long_answer = "가" * 5000  # >> 3×1000-char budget
             disp = _FakeDispatcher(reply=long_answer)
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=disp, pool=pool, client=client, registry=reg,
                 settings=_settings(), credentials=_FakeCreds(), egress=egress,
                 redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="긴 답 주세요"))
 
@@ -992,6 +997,7 @@ from datetime import UTC, datetime  # noqa: E402
 
 from bp_agents.agents.chatbot import approval as kapproval  # noqa: E402
 from bp_agents.agents.chatbot.credentials import ServicedSession  # noqa: E402
+from tests.fake_store import FakeChannelStore, FakeStore  # noqa: E402
 
 
 class _CredsForCmds:
@@ -1024,10 +1030,12 @@ def test_password_command(suite_db_url: str) -> None:
             await _seed(pool)
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(), pool=pool, client=client,
                 registry=reg, settings=_settings(),
                 credentials=_CredsForCmds(token="tok-xyz"), redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="/password"))
             assert "tok-xyz" in client.posts[-1][1]
@@ -1068,9 +1076,11 @@ def test_link_binds_unmapped_chat(suite_db_url: str) -> None:
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
             creds = _LinkCreds(user_id="usr_k", new_session="ses_link")
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(), pool=pool, client=client,
                 registry=reg, settings=_settings(), credentials=creds, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(chat_id="kc_new", utterance="/link tok-abc"))
 
@@ -1102,18 +1112,16 @@ def test_setdefault_points_default_at_this_chats_session(suite_db_url: str) -> N
             await _seed(pool)  # kc1 -> ses_k, default ses_k
             # Point the user's default elsewhere so the move is observable.
             async with pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id="ses_other", user_id="usr_k",
-                    channel="chatbot_telegram", chat_id="tg9",
-                )
                 await queries.set_default_session_id(
                     conn, user_id="usr_k", session_id="ses_other"
                 )
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(), pool=pool, client=client,
                 registry=reg, settings=_settings(), credentials=None, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(chat_id="kc1", utterance="/setdefault"))
 
@@ -1135,9 +1143,11 @@ def test_link_invalid_token_does_not_map(suite_db_url: str) -> None:
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
             creds = _LinkCreds(user_id=None)
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(), pool=pool, client=client,
                 registry=reg, settings=_settings(), credentials=creds, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(chat_id="kc_new", utterance="/link bad"))
 
@@ -1172,9 +1182,11 @@ def test_config_command_dispatches_to_config_agent(suite_db_url: str) -> None:
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
             disp = _ConfigDispatcher()
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=disp, pool=pool, client=client, registry=reg,
                 settings=_settings(), credentials=None, redis=None,
+                store=FakeChannelStore(store),
             )
             await gw.handle_job(_job(utterance="/config"))
             assert ("config", "message") == disp.spawns[0][:2]
@@ -1192,23 +1204,21 @@ def test_delegate_and_reject(suite_db_url: str) -> None:
             await _seed(pool)
             client = _RecordingClient()
             reg = KakaoTaskRegistry(_redis(), ttl_s=60)
+            store = FakeStore()
             gw = KakaoGateway(
                 dispatcher=_FakeDispatcher(reply="summary"), pool=pool,
                 client=client, registry=reg, settings=_settings(),
                 credentials=None, redis=None,
+                store=FakeChannelStore(store),
             )
             # unknown target → rejected, no state change
             await gw.handle_job(_job(utterance="/delegate nope"))
             assert "delegate" in client.posts[-1][1].lower()
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_k")
-            assert info.delegated_to is None
+            assert "delegated_to" not in store.session_state
 
             # valid target (research is in the default allow-list)
             await gw.handle_job(_job(msg_id="m2", utterance="/delegate research"))
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_k")
-            assert info.delegated_to == "research"
+            assert store.session_state["delegated_to"].value == "research"
         finally:
             await pool.close()
 
@@ -1221,7 +1231,7 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY"
                 )
             rec = ServicedSession(
@@ -1238,10 +1248,8 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                 uid = await queries.resolve_user_id(
                     conn, platform="kakao", chat_id="kchat2"
                 )
-                info = await queries.get_session_info(conn, "ses_k2")
                 cfg = await queries.get_user_config(conn, "usr_k2")
             assert uid == "usr_k2"
-            assert info.channel == "chatbot_kakao"
             # KakaoTalk seeds Korean as the user's default language.
             assert cfg.language == "ko"
         finally:

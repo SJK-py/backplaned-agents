@@ -346,6 +346,41 @@ class TestRouter:
             row = await queries.Scope.user(conn, user_id).open_session()
         return row.session_id
 
+    async def session_messages(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        owner: str,
+        thread: str = "",
+        roles: list[str] | None = None,
+        include_hidden: bool = True,
+        include_retired: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Read one thread out of the session store.
+
+        The e2e assertion surface for "did the agent record its turn?" — now
+        that conversation lives in the router rather than in whatever database
+        a suite happens to keep. Reads as a STEWARD (no owning agent), which
+        is why `owner` is a parameter: reads take one, writes cannot."""
+        from bp_protocol.frames import ReadOp  # noqa: PLC0415
+        from bp_router.session_store import StoreScope, execute_batch  # noqa: PLC0415
+
+        pool = self._app.state.bp.db_pool
+        scope = StoreScope(user_id=user_id, session_id=session_id, agent_id=None)
+        async with pool.acquire() as conn, conn.transaction():
+            outcome = await execute_batch(
+                conn,
+                scope,
+                [ReadOp(
+                    owner_agent_id=owner, thread_key=thread, roles=roles,
+                    include_hidden=include_hidden,
+                    include_retired=include_retired, limit=500,
+                )],
+                budget_bytes=1_000_000,
+            )
+        return [m.model_dump(mode="json") for m in (outcome.results[0].messages or [])]
+
     async def call(
         self,
         agent_id: str,

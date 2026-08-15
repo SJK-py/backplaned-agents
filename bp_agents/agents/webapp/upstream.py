@@ -58,6 +58,87 @@ class UpstreamClient:
             return None
         return resp.json()
 
+    # -- session store (steward surface, user token) ---------------------
+    #
+    # The conversation lives in the router ([../../../docs/design/
+    # router-managed-session-store.md]); the webapp reads it as a steward.
+    # It can read any thread in the session and drive session state, and it
+    # cannot append to a thread — there is no endpoint for that, deliberately.
+
+    async def get_session(
+        self, *, access_token: str, session_id: str
+    ) -> dict[str, Any]:
+        """One session's view (id, timestamps, metadata).
+
+        An empty metadata patch, which is a read: the store has no
+        single-session GET, and this 404s on a session that isn't the
+        caller's — the ownership answer we want anyway."""
+        return await self.request(
+            "PATCH", f"/v1/sessions/{session_id}", access_token=access_token,
+            json={"patch": {}},
+        )
+
+    async def patch_session(
+        self, *, access_token: str, session_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Shallow-merge session metadata; a null value deletes a key. Title,
+        channel and chat id live here rather than in a suite table."""
+        return await self.request(
+            "PATCH", f"/v1/sessions/{session_id}", access_token=access_token,
+            json={"patch": patch},
+        )
+
+    async def session_threads(
+        self, *, access_token: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Every thread in the session with its stats — the orchestrator's
+        plus any delegate's. A conversation spans threads, so rendering it
+        means asking which exist rather than assuming."""
+        return await self.request(
+            "GET", f"/v1/sessions/{session_id}/threads", access_token=access_token
+        ) or []
+
+    async def session_messages(
+        self,
+        *,
+        access_token: str,
+        session_id: str,
+        owner: str,
+        roles: list[str] | None = None,
+        include_retired: bool = True,
+        include_hidden: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """One thread's messages for rendering.
+
+        `include_retired=True` by default: a reader wants the whole
+        conversation, and the floor is about what an AGENT still carries in
+        context, not about what happened. `include_hidden=False` drops the
+        machinery — delegation seeds, hand-back recaps, hand-off markers."""
+        params: dict[str, Any] = {
+            "owner_agent_id": owner,
+            "include_retired": str(include_retired).lower(),
+            "include_hidden": str(include_hidden).lower(),
+            "limit": limit,
+        }
+        if roles:
+            params["roles"] = ",".join(roles)
+        return await self.request(
+            "GET", f"/v1/sessions/{session_id}/messages",
+            access_token=access_token, params=params,
+        ) or []
+
+    async def session_state(
+        self, *, access_token: str, session_id: str, keys: list[str] | None = None
+    ) -> dict[str, str | None]:
+        """Session-scoped state (`delegated_to` and friends) as a plain map."""
+        params = {"keys": ",".join(keys)} if keys else None
+        rows = await self.request(
+            "GET", f"/v1/sessions/{session_id}/state",
+            access_token=access_token, params=params,
+        ) or []
+        return {r["key"]: r.get("value") for r in rows}
+
     # -- llm preset slots ----------------------------------------------
     #
     # The router resolves a preset SLOT ("pro" / "balanced" / "lite") from

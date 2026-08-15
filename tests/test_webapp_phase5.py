@@ -18,6 +18,7 @@ from bp_agents.config_edit import ConfigError, coerce_config_value
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
+from tests.fake_store import UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -25,7 +26,7 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     """Stands in for the router. The LLM-preset half models what the real
     endpoints do: the listing is ALREADY filtered to what this caller's tier
     admits (the router applies the gate), and `set_llm_preference` refuses
@@ -83,14 +84,11 @@ def _build_app(*, pool, upstream=None):
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE cron_jobs, session_info, user_config, "
+            "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
         )
         await queries.create_user_config(
             conn, user_id="usr_a", full_name="Ada", timezone="UTC",
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
         )
 
 

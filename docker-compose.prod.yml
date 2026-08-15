@@ -69,30 +69,19 @@ x-suite-agent: &suite-agent
     AGENT_STATE_DIR: /state
     SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
     SUITE_LANCE_ROOT: /lancedb
-    # Suite Valkey (db 1; the router uses db 0). Consumed only by the channel
-    # agents (chatbot, webapp): it makes the per-session turn lock a
-    # DISTRIBUTED lock so the two channels serialize turns on a shared
-    # session, and it backs the KakaoTalk deadline/next-touch registry.
-    # Defaults to the in-cluster valkey (on the `suite` network); the lock
-    # fails open if it's unreachable. Worker agents inherit but ignore it.
+    # Suite Valkey (db 1; the router uses db 0). Consumed only by the
+    # KakaoTalk channel, which backs its deadline/next-touch registry on it.
+    # Turn ordering is NOT here — that is the router's per-session lease, so
+    # the chatbot and the webapp serialize against each other through the
+    # router with nothing shared. Worker agents inherit but ignore it.
     # (Valkey is Redis-wire-compatible, so the URL scheme stays redis://.)
     SUITE_VALKEY_URL: ${SUITE_VALKEY_URL:-redis://valkey:6379/1}
-    # Per-tier preset defaults seeded into a new user's config (chatbot
-    # approval). prod.sh wires these to the chosen provider's
-    # aliases; empty → the seeded `default` (Gemini).
-    SUITE_DEFAULT_PRESET_PRO: ${SUITE_DEFAULT_PRESET_PRO:-default}
-    SUITE_DEFAULT_PRESET_BALANCED: ${SUITE_DEFAULT_PRESET_BALANCED:-default}
-    SUITE_DEFAULT_PRESET_LITE: ${SUITE_DEFAULT_PRESET_LITE:-default}
+    # The one preset the suite still names outright. Chat models are router
+    # preset SLOTS (ROUTER_LLM_DEFAULT_PRESETS on the router service): the user
+    # picks their own from the web Settings page, filtered to what their tier
+    # admits. Embeddings deliberately are not — changing the model invalidates
+    # every vector already in the LanceDB volume.
     SUITE_DEFAULT_PRESET_EMBEDDING: ${SUITE_DEFAULT_PRESET_EMBEDDING:-default_embedding}
-    # Per-tier USER-SELECTABLE preset allow-lists. JSON arrays of preset names a
-    # user may switch their own tier to via /config or the webapp Settings page.
-    # Empty (default) → that tier is system-managed: the current model is still
-    # SHOWN, but not user-changeable. e.g. SUITE_SELECTABLE_PRESETS_PRO=
-    # ["gpt-pro","claude-opus","gemini-pro"]. (config agent + webapp read these
-    # off SuiteSettings; the embedding tier is never user-selectable.)
-    SUITE_SELECTABLE_PRESETS_PRO: ${SUITE_SELECTABLE_PRESETS_PRO:-[]}
-    SUITE_SELECTABLE_PRESETS_BALANCED: ${SUITE_SELECTABLE_PRESETS_BALANCED:-[]}
-    SUITE_SELECTABLE_PRESETS_LITE: ${SUITE_SELECTABLE_PRESETS_LITE:-[]}
     # Vision sidecar: lets a TEXT-ONLY chat preset read image/PDF files via a
     # separate multimodal preset. SUITE_DEFAULT_PRESET_MULTIMODAL is the vision
     # preset name; SUITE_TEXT_ONLY_PRESETS is the JSON array of presets declared
@@ -324,6 +313,10 @@ services:
       # admin-UI edit to a managed preset is overwritten on the next boot.
       # An empty array (the example default) is a no-op.
       ROUTER_LLM_PRESET_OVERLAY_PATH: /app/deploy/presets.custom.jsonc
+      # Which preset each SLOT (`pro` / `balanced` / `lite`) resolves to when
+      # the user has no preference of their own. prod.sh writes this from the
+      # provider you chose.
+      ROUTER_LLM_DEFAULT_PRESETS: ${ROUTER_LLM_DEFAULT_PRESETS:-{"pro":"default","balanced":"default","lite":"default"}}
       ROUTER_FILE_STORE: s3
       # file_store_options is parsed as JSON (pydantic-settings).
       ROUTER_FILE_STORE_OPTIONS: >-

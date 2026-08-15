@@ -34,12 +34,14 @@ class SuiteSettings(BaseSettings):
     a pool connection indefinitely."""
 
     valkey_url: str | None = None
-    """Optional Valkey DSN (`SUITE_VALKEY_URL`). When set, the channel's
-    per-session lock becomes cross-process (a distributed lock) instead of
-    an in-process `asyncio.Lock` — the prerequisite for running more than
-    one channel instance (e.g. a webapp alongside the Telegram bot). When
-    unset, the lock is in-process only (correct for a single instance).
-    May point at the same Redis the router uses; keys are prefixed."""
+    """Optional Valkey DSN (`SUITE_VALKEY_URL`). Required only by the
+    KakaoTalk channel, whose parked-turn registry is Redis-backed.
+
+    It is NO LONGER the prerequisite for a second channel instance: turn
+    ordering is the router's per-session FIFO lease
+    ([../docs/design/router-managed-session-store.md] §6.4), so a webapp and
+    a Telegram bot serialize against each other through the router with
+    nothing shared between them."""
 
     delegatable_agents: list[str] = ["research", "computer_use", "deep_reasoning"]
     """Agent ids a user may hand the conversation to via `/delegate <id>`
@@ -252,11 +254,12 @@ class SuiteSettings(BaseSettings):
     decay path keeps surfaced facts alive, so a daily sweep suffices)."""
 
     session_gc_retention_days: int = Field(default=90, ge=0)
-    """Suite-side conversation-history retention. The reconcile sweep purges
-    `session_history`/`session_info`/`cron_jobs` for sessions the router has
-    already hard-deleted (its closed-session GC, keyed on the SAME default).
-    Only sessions older than this (by `created_at`) are even considered, so a
-    live session is never probed. 0 disables the suite reaper."""
+    """Suite-side session-row retention. The reconcile sweep purges the
+    suite's remaining per-session rows (`cron_jobs`) for sessions the router
+    has already hard-deleted (its closed-session GC, keyed on the SAME
+    default) — the conversation itself goes with the router's own purge now.
+    Only sessions older than this are even considered, so a live session is
+    never probed. 0 disables the suite reaper."""
     session_gc_interval_s: float = Field(default=86_400.0, gt=0)
     """Period of the suite session-GC reconcile sweep (daily by default)."""
 

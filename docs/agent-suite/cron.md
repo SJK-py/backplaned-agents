@@ -24,14 +24,14 @@ Nothing in the platform fires crons — the suite owns a scheduler. **v1:** a ba
 
 1. **Resolve the target session** (where the result lands + which channel/`chat_id` to send to): `job.session_id` if open → else the user's `default_session_id` → else a terminal fallback (open a fresh session under the user, move the default pointer there). The cron needs a session only for *landing*, not for context — config/presets come from `user_id`.
 2. **Run under the end-user's identity** (`serviced_by` mint), like any dispatch.
-3. **Run `orchestrator(cron_message, {prompt: job.cron_message})` _outside_ the session queue.** It builds a **fresh** context — the cron system prompt + user-config (name/tz/note) but **no session history** — and runs the full orchestrator loop (it keeps the toolset: spawn subagents, retrieve memory, etc.). Its intermediate steps are **not** written to the conversation thread. It **never delegates** and **bypasses `delegated_to`** (a cron is not a user message). It terminates with structured output → `AgentOutput(content=message, metadata={report, reason})`.
-4. **Apply (a brief session-queue op).** Only this step touches `session_history`, so only this is serialized:
-   - **`effective_report`** = `job.report=="always" → true` / `"never" → false` / `"case-by-case" → metadata.report`.
-   - **report ⇒** append an assistant conversation row to the **main** thread (`incumbent=T, hidden=F`) and send `message` to the session's `channel`+`chat_id`.
-   - **no report ⇒** write a `cron_executions` log row (with `reason`) and drop the message — no conversation row, no context pollution.
+3. **Run `orchestrator(cron_message, {prompt: job.cron_message, report: job.report})`.** It builds a **fresh** context — the cron system prompt + user-config (name/tz/note) but **no session history** — and runs the full orchestrator loop (it keeps the toolset: spawn subagents, retrieve memory, etc.). It **never delegates** and **bypasses `delegated_to`** (a cron is not a user message).
+   - **`effective_report`** = `job.report=="always" → true` / `"never" → false` / `"case-by-case" → the model's own decision`.
+   - **The orchestrator records its own run**: when reporting, it appends the message to its thread before returning. It is that task's active executor, so it is the only thing that *can*; the scheduler carries the job's policy in the payload precisely so the decision and the record happen in one place.
+   - Returns `AgentOutput(content=message, metadata={report, reason})`.
+4. **Deliver.** The scheduler sends `message` to the session's channel (from the router session's `metadata.external_id`), or nudges a reachable channel when the target session isn't live-reachable (§6). Nothing is serialized: the canonical record already landed, and delivery races nothing.
 5. **Update the job:** `last_executed_at` (claimed in §1); flip `status=inactive` if now past `execute_until`. Always write a `cron_executions` row (fired/report/reason/error) for audit.
 
-> Running the **loop outside the queue** and queuing only the **apply** mirrors summarization: a heavy cron (e.g. a research digest) never blocks the user's next message.
+> The cron loop never takes the session's turn lease, so a heavy cron (e.g. a research digest) never blocks the user's next message.
 
 ## 3. Report policy (spam control)
 

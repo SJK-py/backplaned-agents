@@ -2,10 +2,12 @@
 
 Scheduler ([cron.md]): poll active jobs each minute, compute the most
 recent due time in the job's timezone, atomically claim it (no
-double-fire), run `orchestrator(cron_message)` for the resolved session
-*outside* the session queue, then apply the result under the session lock
-(report → append an assistant row + send to the channel; else log only).
-Always writes a `cron_executions` row.
+double-fire), and run `orchestrator(cron_message)` for the resolved
+session. The job's `report` policy rides the payload, so the orchestrator —
+the task's active executor, and the only thing that can write its own
+thread — decides and records the result itself; the scheduler then only
+DELIVERS (send to the channel, or nudge an unreachable one) and always
+writes a `cron_executions` row.
 
 Management: `make_cron_tools` builds the add/list/remove/modify local
 tools the chatbot's `cron` mode loop uses.
@@ -15,28 +17,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
 from bp_agents.agents.chatbot.gateway import send_named_file
-from bp_agents.common.payloads import MessagePayload
-from bp_agents.cron_manage import REPORT_ALWAYS as _REPORT_ALWAYS
-from bp_agents.cron_manage import REPORT_NEVER as _REPORT_NEVER
+from bp_agents.channel.store import StoreError
+from bp_agents.common.payloads import CronMessage
 from bp_agents.db import queries
 
 if TYPE_CHECKING:
-    from contextlib import AbstractAsyncContextManager
-    from typing import Any
-
     import asyncpg
 
     from bp_agents.agents.chatbot.credentials import ChannelCredentials
     from bp_agents.agents.chatbot.gateway import RootDispatcher
     from bp_agents.agents.chatbot.telegram import TelegramClient
+    from bp_agents.channel.store import SessionStore
     from bp_agents.db.models import CronJobRow
     from bp_agents.settings import SuiteSettings
 
@@ -60,14 +58,14 @@ class CronScheduler:
         pool: asyncpg.Pool,
         settings: SuiteSettings,
         telegram: TelegramClient | None,
-        session_lock: Callable[[str], AbstractAsyncContextManager[Any]],
+        store: SessionStore,
         credentials: ChannelCredentials | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._pool = pool
         self._settings = settings
         self._telegram = telegram
-        self._session_lock = session_lock
+        self._store = store
         self._credentials = credentials
 
     async def run_loop(self, stop: asyncio.Event, *, interval_s: float = 60.0) -> None:
@@ -117,12 +115,25 @@ class CronScheduler:
         await self._execute(job, now)
         return True
 
+    async def _session_metadata(
+        self, user_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """The router's metadata for a session, or None if it isn't the
+        user's / doesn't exist. An empty patch is a read that also 404s on a
+        session that is gone, which is the other thing we need to know."""
+        try:
+            return await self._store.patch_metadata(
+                user_id=user_id, session_id=session_id, patch={}
+            )
+        except StoreError:
+            return None
+
     async def _resolve_session(self, job: CronJobRow) -> str:
         """job.session_id if it's a real session, else the user's default
         ([cron.md] §2). (C4 open-a-fresh-session fallback is deferred.)"""
+        if await self._session_metadata(job.user_id, job.session_id) is not None:
+            return job.session_id
         async with self._pool.acquire() as conn:
-            if await queries.get_session_info(conn, job.session_id) is not None:
-                return job.session_id
             cfg = await queries.get_user_config(conn, job.user_id)
         if cfg and cfg.default_session_id:
             return cfg.default_session_id
@@ -137,7 +148,7 @@ class CronScheduler:
         try:
             task_id = await self._dispatcher.spawn_root_for_user(
                 ORCHESTRATOR_AGENT_ID,
-                MessagePayload(prompt=job.cron_message),
+                CronMessage(prompt=job.cron_message, report=job.report),
                 user_id=job.user_id, session_id=session_id, mode="cron_message",
             )
             result = await self._dispatcher.await_root_result(
@@ -148,7 +159,9 @@ class CronScheduler:
             out_files = list(out.files) if out else []
             meta = out.metadata if out else {}
             reason = meta.get("reason")
-            reported = _effective_report(job.report, bool(meta.get("report", False)))
+            # The orchestrator already applied the job's policy and recorded
+            # the row; this is the delivery decision only.
+            reported = bool(meta.get("report", False))
         except Exception as exc:  # noqa: BLE001
             # C3: log the error, mark executed anyway (no retry storm).
             logger.exception("cron_execute_failed", extra={"event": "cron_execute_failed"})
@@ -156,30 +169,23 @@ class CronScheduler:
             out_files = []
 
         if reported and (message or out_files):
-            # Apply step — serialized with the user's turns ([cron.md] §2). The
-            # assistant row is the canonical record; it lands regardless of
-            # which channel (if any) can deliver a live notification.
-            async with self._session_lock(session_id):
-                async with self._pool.acquire() as conn:
-                    if message:
-                        await queries.append_history(
-                            conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                            role="assistant", message=message,
-                        )
-                    info = await queries.get_session_info(conn, session_id)
-            if self._telegram is not None and info and info.chat_id:
+            # Delivery only — the orchestrator wrote the canonical row, which
+            # is why this no longer needs the session serialized.
+            metadata = await self._session_metadata(job.user_id, session_id) or {}
+            chat_id = metadata.get("external_id")
+            if self._telegram is not None and chat_id:
                 # The target session is itself Telegram-reachable — deliver
                 # the full result there.
                 if message:
                     try:
-                        await self._telegram.send_message(chat_id=info.chat_id, text=message)
+                        await self._telegram.send_message(chat_id=chat_id, text=message)
                     except Exception:  # noqa: BLE001 — C5: row already appended
                         logger.exception("cron_send_failed", extra={"event": "cron_send_failed"})
                 # Deliver any files the run produced for the user ([channel.md] §7).
                 for name in out_files:
                     await send_named_file(
                         telegram=self._telegram, credentials=self._credentials,
-                        chat_id=info.chat_id, user_id=job.user_id,
+                        chat_id=chat_id, user_id=job.user_id,
                         session_id=session_id, name=name,
                     )
             else:
@@ -188,7 +194,7 @@ class CronScheduler:
                 # result is already persisted there; route a pointer nudge to
                 # the user's reachable channel so they know to open it
                 # ([cron.md] §6, channel-agnostic routing).
-                await self._nudge_unreachable(job, session_id, info)
+                await self._nudge_unreachable(job, metadata)
 
         async with self._pool.acquire() as conn:
             await queries.record_cron_execution(
@@ -200,7 +206,7 @@ class CronScheduler:
                 await queries.deactivate_cron_job(conn, job.cron_id)
 
     async def _nudge_unreachable(
-        self, job: CronJobRow, session_id: str, info: Any
+        self, job: CronJobRow, metadata: dict[str, Any]
     ) -> None:
         """Channel-agnostic fallback ([cron.md] §6): the cron's result landed
         in a session this scheduler can't deliver to live (e.g. a webapp
@@ -216,7 +222,10 @@ class CronScheduler:
             )
         if not mappings:
             return  # no out-of-band channel — the persisted row is the record
-        where = "your web app" if info and info.channel == "webapp" else "another session"
+        where = (
+            "your web app" if metadata.get("kind") == "webapp"
+            else "another session"
+        )
         nudge = f"⏰ A scheduled task just ran in {where}. Open it to see the result."
         for m in mappings:
             try:
@@ -226,10 +235,3 @@ class CronScheduler:
                     "cron_nudge_failed", extra={"event": "cron_nudge_failed"}
                 )
 
-
-def _effective_report(policy: str, llm_report: bool) -> bool:
-    if policy == _REPORT_ALWAYS:
-        return True
-    if policy == _REPORT_NEVER:
-        return False
-    return llm_report

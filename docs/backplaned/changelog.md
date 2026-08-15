@@ -18,6 +18,48 @@
 
 ---
 
+## 2026-08-16
+
+> The suite's conversation moved into the router's session store. The suite
+> no longer has a `session_history` or a `session_info`; agents write only
+> their own threads, and the channel — which can write none — drives session
+> state, hand-overs and the turn lease as a steward. Design:
+> [`../design/router-managed-session-store.md`](../design/router-managed-session-store.md)
+> §13 (and §13.3, where the implementation departed from the table).
+>
+> Almost all of this is suite work. One platform addition, one platform
+> nicety.
+
+### Added — `TestRouter.session_messages`
+
+- **What:** read one thread straight out of the session store, as a steward
+  (`owner_agent_id` is a parameter; reads take one, writes cannot).
+- **Why:** the e2e assertion surface for *"did the agent record its turn?"*
+  used to be a suite table a test could query directly. It isn't one any
+  more, and an e2e that can see the frames but not the conversation can only
+  assert that a reply came back — not that it landed anywhere.
+
+### Changed — the suite no longer needs Valkey for a second channel
+
+- Turn ordering was an in-process `asyncio.Lock` plus an optional
+  Valkey lock with a renewal watchdog (`bp_agents/session_lock.py`, deleted).
+  It is now the router's per-session FIFO lease, so a webapp and a Telegram
+  bot serialize against each other **through the router with nothing shared
+  between them**. `SUITE_VALKEY_URL` is now required only by the KakaoTalk
+  channel, for its parked-turn registry. `.env.example`, the prod compose and
+  the settings docstring all said "needed to run more than one channel
+  instance"; they no longer do.
+
+### Note — no `bp_router` change was needed for the cutover
+
+- The store, its steward HTTP surface, and `ctx.history` shipped on
+  2026-08-09; the delegate's active-executor race was fixed on 2026-08-15 as
+  part of the preset-slot work. Between them the suite side needed nothing
+  new from the platform, which is the outcome a platform service is supposed
+  to have.
+
+---
+
 ## 2026-08-15
 
 > Suite cutover to router-resolved preset slots. The four

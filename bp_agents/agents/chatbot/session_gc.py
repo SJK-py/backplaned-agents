@@ -1,11 +1,11 @@
-"""chatbot.session_gc — suite-side reaper for GC'd sessions' history.
+"""chatbot.session_gc — suite-side reaper for GC'd sessions' rows.
 
 The router's closed-session GC hard-deletes old **closed** sessions from its
-own store but can't reach the suite Postgres, where the conversation history
-lives. This loop reconciles the gap: it lists the suite's old `session_info`
-rows, asks the router which still exist (`filter_existing_sessions`), and
-purges `session_history` / `session_info` / `cron_jobs` for the ones the
-router has already dropped.
+own store — conversation included, now that the session store owns it — but
+can't reach the suite Postgres, where a session's cron jobs still live. This
+loop reconciles the gap: it lists the sessions the suite still holds rows
+for, asks the router which still exist (`filter_existing_sessions`), and
+purges the suite side for the ones the router has already dropped.
 
 Self-healing (stateless — no cursor) and privilege-light: it holds NO
 cross-user purge authority. It only ever deletes the SUITE store, and only for

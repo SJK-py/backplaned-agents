@@ -5,7 +5,7 @@ its provisioned users by polling `GET /v1/admin/serviced-sessions`
 (`credentials.list_serviced_sessions`). For each session carrying a
 channel-native `external_id`, the channel writes the suite-side identity:
 `suite_platform_mappings` (chat_id → user_id), a `user_config` row (seeding
-`default_session_id`), and a `session_info` row. All writes are idempotent,
+`default_session_id`). All writes are idempotent,
 so re-polling is safe.
 
 Channel-agnostic: `reconcile_serviced_sessions` / `approval_poll_loop` take
@@ -76,10 +76,6 @@ async def reconcile_serviced_sessions(
             await queries.create_user_config(
                 conn, user_id=rec.user_id, default_session_id=rec.session_id,
                 language=default_language,
-            )
-            await queries.create_session_info(
-                conn, session_id=rec.session_id, user_id=rec.user_id,
-                channel=channel, chat_id=rec.external_id,
             )
         if existing is None:
             newly_mapped += 1

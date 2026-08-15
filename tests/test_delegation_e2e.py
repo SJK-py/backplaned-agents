@@ -111,15 +111,11 @@ def test_delegation_round_trip(test_db_url: str, suite_db_url: str, tmp_path) ->
                 session_id = await router.open_session(user_id=user.user_id)
                 async with suite_pool.acquire() as conn:
                     await conn.execute(
-                        "TRUNCATE TABLE session_history, session_info, user_config, "
+                        "TRUNCATE TABLE user_config, "
                         "suite_platform_mappings RESTART IDENTITY"
                     )
                     await queries.create_user_config(
                         conn, user_id=user.user_id, default_session_id=session_id
-                    )
-                    await queries.create_session_info(
-                        conn, session_id=session_id, user_id=user.user_id,
-                        channel="chatbot_telegram",
                     )
 
                 task_id = await channel.spawn_root_for_user(
@@ -134,12 +130,14 @@ def test_delegation_round_trip(test_db_url: str, suite_db_url: str, tmp_path) ->
                 assert result.agent_id == "deep_reasoning"
                 assert result.output.content == "delegated reasoning result"
 
-                # Seed row + deep_reasoning's assistant turn landed.
-                async with suite_pool.acquire() as conn:
-                    rows = await queries.reload_incumbent(
-                        conn, session_id=session_id, agent_id="deep_reasoning"
-                    )
-                assert [r.role for r in rows][-1] == "assistant"
+                # The delegate composed its own seed from the hand-off's
+                # LLMData and appended its answer — both on ITS thread.
+                rows = await router.session_messages(
+                    user_id=user.user_id, session_id=session_id,
+                    owner="deep_reasoning",
+                )
+                assert [r["role"] for r in rows] == ["user", "assistant"]
+                assert "reason it out" in rows[0]["content"]
             finally:
                 await channel.aclose()
                 await orchestrator_agent.aclose()

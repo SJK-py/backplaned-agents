@@ -35,13 +35,6 @@ async def _seed_user(pool, user_id: str, session_id: str) -> None:
             conn, user_id=user_id, default_session_id=session_id,
             language="en",
         )
-        await queries.create_session_info(
-            conn, session_id=session_id, user_id=user_id, channel="webapp",
-        )
-        await queries.append_history(
-            conn, session_id=session_id, agent_id="orchestrator",
-            role="user", message="hi",
-        )
         await queries.upsert_platform_mapping(
             conn, platform="telegram", chat_id=f"chat_{user_id}",
             user_id=user_id, session_id=session_id,
@@ -57,17 +50,13 @@ async def _counts(pool, user_id: str, session_id: str) -> dict[str, int]:
         return {
             "user_config": await conn.fetchval(
                 "SELECT count(*) FROM user_config WHERE user_id=$1", user_id),
-            "session_info": await conn.fetchval(
-                "SELECT count(*) FROM session_info WHERE user_id=$1", user_id),
-            "session_history": await conn.fetchval(
-                "SELECT count(*) FROM session_history WHERE session_id=$1", session_id),
             "mappings": await conn.fetchval(
                 "SELECT count(*) FROM suite_platform_mappings WHERE user_id=$1", user_id),
         }
 
 
 def _truncate_sql() -> str:
-    return ("TRUNCATE session_history, session_info, cron_jobs, "
+    return ("TRUNCATE cron_jobs, "
             "user_config, suite_platform_mappings RESTART IDENTITY")
 
 
@@ -83,7 +72,7 @@ def test_purge_user_suite_data_erases_all_rows(suite_db_url: str) -> None:
 
             async with pool.acquire() as conn, conn.transaction():
                 counts = await queries.purge_user_suite_data(conn, "usr_a")
-            assert counts["user_config"] == 1 and counts["session_history"] == 1
+            assert counts["user_config"] == 1
 
             after = await _counts(pool, "usr_a", "ses_a")
             assert all(v == 0 for v in after.values())

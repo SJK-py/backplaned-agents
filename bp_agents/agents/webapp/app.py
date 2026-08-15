@@ -42,7 +42,7 @@ from bp_agents.agents.webapp.upstream import UpstreamClient
 if TYPE_CHECKING:
     import asyncpg
 
-    from bp_agents.channel import ChannelCore
+    from bp_agents.channel import ChannelCore, TokenRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ def create_app(
     upstream: UpstreamClient,
     pool: asyncpg.Pool | None = None,
     core: ChannelCore | None = None,
+    token_registry: TokenRegistry | None = None,
 ) -> FastAPI:
     """Build the webapp. `upstream` (router HTTP, user-token) is required;
     `pool` (suite DB) and `core` (the channel engine; required for the chat
@@ -90,6 +91,7 @@ def create_app(
         redoc_url=None,
     )
     app.state.config = config
+    app.state.token_registry = token_registry
     app.state.upstream = upstream
     app.state.pool = pool
     app.state.core = core
@@ -117,6 +119,23 @@ def create_app(
     # Request path: SessionMiddleware → Auth → CSRF → handler. Session must
     # be outermost so `request.session` is populated before Auth reads it
     # (the bp_admin Bug-4 ordering contract).
+
+    @app.middleware("http")
+    async def _token_registry(request, call_next):  # type: ignore[no-untyped-def]
+        """Hand the channel engine this user's access token.
+
+        The engine drives the router's session store on the user's own
+        authority, but it is a process-wide object and only a REQUEST knows
+        whose token to use — so each request deposits it. Innermost, after
+        Auth has refreshed an expiring token, so what lands is the one that
+        will still be valid when a detached turn uses it."""
+        registry = getattr(app.state, "token_registry", None)
+        if registry is not None:
+            user_id = request.session.get("user_id")
+            token = request.session.get("access_token")
+            if user_id and token:
+                registry.remember(user_id, token)
+        return await call_next(request)
 
     @app.middleware("http")
     async def _csrf_dispatch(request, call_next):  # type: ignore[no-untyped-def]

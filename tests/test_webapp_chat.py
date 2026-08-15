@@ -21,11 +21,11 @@ import pytest
 
 from bp_agents.channel import ChannelCore
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -33,7 +33,7 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _FakeUpstream:
+class _FakeUpstream(UpstreamSessionMixin):
     def __init__(self, *, sub: str = "usr_a") -> None:
         self._sub = sub
         self.cancels: list[tuple[str, str]] = []  # (access_token, task_id)
@@ -101,32 +101,19 @@ def _build_app(*, upstream, pool, core):
     return create_app(cfg, upstream=upstream, pool=pool, core=core)
 
 
-async def _seed(pool) -> None:
+async def _seed(pool, upstream=None) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
         )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
-        )
-        # A visible exchange + a hidden internal row (must NOT render).
-        await queries.append_history(
-            conn, session_id="ses_1", agent_id="orchestrator", role="user",
-            message="earlier question",
-        )
-        await queries.append_history(
-            conn, session_id="ses_1", agent_id="orchestrator", role="assistant",
-            message="earlier answer",
-        )
-        await queries.append_history(
-            conn, session_id="ses_1", agent_id="orchestrator", role="user",
-            message="SECRET SEED ROW", incumbent=True, hidden=True,
-        )
-        # A session owned by someone else (ownership guard).
-        await queries.create_session_info(
-            conn, session_id="ses_other", user_id="usr_b", channel="webapp",
-        )
+    if upstream is None:
+        return
+    # A visible exchange + a hidden internal row (must NOT render), on the
+    # orchestrator's own thread in the router's session store.
+    upstream.store.add("orchestrator", "user", "earlier question")
+    upstream.store.add("orchestrator", "assistant", "earlier answer")
+    upstream.store.add("orchestrator", "user", "SECRET SEED ROW", hidden=True)
 
 
 async def _login(client) -> None:
@@ -153,9 +140,13 @@ def test_chat_view_renders_visible_history_only(suite_db_url: str) -> None:
     async def _drive() -> str:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            await _seed(pool, up)
+            core = ChannelCore(
+                dispatcher=_ChatDispatcher(content="x", progress=[]),
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -177,9 +168,13 @@ def test_chat_view_404_for_unowned_session(suite_db_url: str) -> None:
     async def _drive() -> int:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            await _seed(pool, up)
+            core = ChannelCore(
+                dispatcher=_ChatDispatcher(content="x", progress=[]),
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -207,13 +202,18 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
                 ],
                 files=["report.md"],
             )
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 await _login(client)
                 token = await _csrf(client)
+                seeded_max = up.store.messages[-1].id if up.store.messages else 0
                 send = await client.post(
                     "/chat/ses_1", data={"message": "do the thing"},
                     headers={"X-CSRF-Token": token},
@@ -223,12 +223,12 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
                 turn_id = _turn_id(send.text)
                 stream = await client.get(f"/chat/ses_1/stream/{turn_id}")
                 stream_text = stream.text
-            # The user turn was recorded by the channel.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-            return send.text, stream_text, [r.message for r in rows]
+            # The channel recorded NO turn: the text rides the task payload
+            # and the executing agent appends it to its own thread.
+            channel_rows = [
+                m.content for m in up.store.messages if m.id > seeded_max
+            ]
+            return send.text, stream_text, channel_rows
         finally:
             await pool.close()
 
@@ -243,9 +243,10 @@ def test_chat_send_then_stream_progress_and_result(suite_db_url: str) -> None:
     assert "Thinking" in stream_text
     assert "knowledge_base" in stream_text  # call_ prefix stripped by renderer
     assert "the assistant reply" in stream_text
+    # The channel wrote nothing to the store: the user's words ride the task
+    # payload, and the executing agent records them under its own authorship.
+    assert messages == []
     assert "report.md" in stream_text  # produced file → download chip
-    # The channel recorded the user turn verbatim.
-    assert "do the thing" in messages
 
 
 def test_chat_stream_no_active_turn_closes(suite_db_url: str) -> None:
@@ -256,9 +257,13 @@ def test_chat_stream_no_active_turn_closes(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, str]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            await _seed(pool, up)
+            core = ChannelCore(
+                dispatcher=_ChatDispatcher(content="x", progress=[]),
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -279,9 +284,13 @@ def test_chat_stream_unowned_session_is_404(suite_db_url: str) -> None:
     async def _drive() -> int:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            await _seed(pool, up)
+            core = ChannelCore(
+                dispatcher=_ChatDispatcher(content="x", progress=[]),
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -302,9 +311,9 @@ def test_chat_stop_cancels_active_turn(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
             up = _FakeUpstream()
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            await _seed(pool, up)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), store=FakeChannelStore(up.store))
             app = _build_app(upstream=up, pool=pool, core=core)
             # Simulate a turn in flight for this session (a runner with its
             # router task spawned but not yet done).
@@ -334,9 +343,9 @@ def test_chat_stop_unowned_session_is_404(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)
             up = _FakeUpstream()
-            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), pool=pool)
+            await _seed(pool, up)
+            core = ChannelCore(dispatcher=_ChatDispatcher(content="x", progress=[]), store=FakeChannelStore(up.store))
             app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -367,8 +376,12 @@ def test_chat_stream_cancelled_renders_stopped(suite_db_url: str) -> None:
             disp = _ChatDispatcher(
                 content="ignored", progress=[], status=TaskStatus.CANCELLED
             )
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -419,8 +432,12 @@ def test_chat_view_resumes_in_flight_bubble(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             disp = _BlockingDispatcher()
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -465,8 +482,12 @@ def test_chat_stream_resume_skips_seen_events(suite_db_url: str) -> None:
                     {"kind": "tool_call", "tool": "call_x", "round": 1},
                 ],
             )
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -506,8 +527,12 @@ def test_chat_send_while_in_flight_opens_no_second_stream(suite_db_url: str) -> 
         try:
             await _seed(pool)
             disp = _BlockingDispatcher()
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -546,8 +571,12 @@ def test_chat_stream_stale_turn_id_does_not_attach_to_current(suite_db_url: str)
         try:
             await _seed(pool)
             disp = _BlockingDispatcher()
-            core = ChannelCore(dispatcher=disp, pool=pool)
-            app = _build_app(upstream=_FakeUpstream(), pool=pool, core=core)
+            up = _FakeUpstream()
+            core = ChannelCore(
+                dispatcher=disp,
+                store=FakeChannelStore(up.store),
+            )
+            app = _build_app(upstream=up, pool=pool, core=core)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:

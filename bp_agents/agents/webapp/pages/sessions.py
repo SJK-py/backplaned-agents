@@ -1,10 +1,10 @@
 """bp_agents.agents.webapp.pages.sessions — session list + lifecycle.
 
-The authoritative session list comes from the router (`GET /v1/sessions`,
-user token); the channel badge + delegation status are enriched from the
-suite's `session_info` ([webapp.md] §4). New opens a router session +
-`session_info`; close archives it; remove hard-deletes via the router
-purge AND reclaims the suite-side rows the purge doesn't reach.
+The session list comes from the router (`GET /v1/sessions`, user token),
+and so does everything on it: the channel badge and the title are that
+session's own `metadata` ([webapp.md] §4). New opens a router session;
+close archives it; remove hard-deletes via the router purge AND reclaims
+the suite-side rows the purge doesn't reach (cron jobs, chat mappings).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from bp_agents.agents.webapp.pages._common import (
     CHATBOT_CHANNELS,
     KAKAO_CHANNEL,
     TELEGRAM_CHANNEL,
+    WEBAPP_CHANNEL,
     owned_session,
 )
 from bp_agents.agents.webapp.upstream import UpstreamError
@@ -27,8 +28,6 @@ from bp_agents.db import queries
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-WEBAPP_CHANNEL = "webapp"
 
 # Cap a user-supplied title to the same length as auto-generated ones.
 _MAX_NAME_LEN = 60
@@ -65,35 +64,27 @@ class SessionRow:
 
 
 async def _load_rows(request: Request) -> list[SessionRow]:
+    """The session list, entirely from the router.
+
+    Channel and title come from each session's own `metadata` rather than a
+    suite table shadowing the row — one source, and it cannot drift. The
+    delegation badge does not: reading `delegated_to` is a per-session state
+    call, and a list of thirty sessions is not worth thirty round trips for a
+    badge. It shows on the conversation itself, where it matters."""
     upstream = request.app.state.upstream
-    pool = request.app.state.pool
     access = request.session["access_token"]
-
     sessions = await upstream.list_sessions(access_token=access)
-
-    # Enrich each session with its suite-side channel + delegation status.
-    info_by_id: dict[str, object] = {}
-    user_id = session_user_id(request)
-    if pool is not None and user_id:
-        async with pool.acquire() as conn:
-            for info in await queries.list_session_info_for_user(conn, user_id):
-                info_by_id[info.session_id] = info
-
-    rows: list[SessionRow] = []
-    for s in sessions:
-        sid = s["session_id"]
-        info = info_by_id.get(sid)
-        rows.append(
-            SessionRow(
-                session_id=sid,
-                opened_at=s.get("opened_at"),
-                closed=bool(s.get("closed_at")),
-                channel=getattr(info, "channel", None),
-                delegated_to=getattr(info, "delegated_to", None),
-                name=getattr(info, "session_name", None),
-            )
+    return [
+        SessionRow(
+            session_id=s["session_id"],
+            opened_at=s.get("opened_at"),
+            closed=bool(s.get("closed_at")),
+            channel=(s.get("metadata") or {}).get("kind"),
+            delegated_to=None,
+            name=(s.get("metadata") or {}).get("title"),
         )
-    return rows
+        for s in sessions
+    ]
 
 
 async def _needs_telegram_link(request: Request) -> bool:
@@ -159,17 +150,18 @@ async def sidebar_sessions(request: Request) -> HTMLResponse:
 
 @router.post("/sessions")
 async def new_session(request: Request) -> Response:
-    """Open a router session (user token) + its suite `session_info`, then
-    land the user in the new chat. Does NOT touch `default_session_id` —
-    that's the chatbot's inbound-routing target, not the webapp's."""
+    """Open a router session (user token), tagged as webapp-origin, then land
+    the user in the new chat. Does NOT touch `default_session_id` — that's the
+    chatbot's inbound-routing target, not the webapp's."""
     upstream = request.app.state.upstream
-    pool = request.app.state.pool
     user_id = session_user_id(request)
-    if pool is None or not user_id:
+    if not user_id:
         raise HTTPException(status_code=404)
     access = request.session["access_token"]
     try:
-        view = await upstream.create_session(access_token=access)
+        view = await upstream.create_session(
+            access_token=access, metadata={"kind": WEBAPP_CHANNEL}
+        )
     except UpstreamError as exc:
         logger.warning(
             "webapp_session_new_failed",
@@ -177,32 +169,30 @@ async def new_session(request: Request) -> Response:
         )
         raise HTTPException(status_code=502) from exc
     session_id = view["session_id"]
-    async with pool.acquire() as conn:
-        await queries.create_session_info(
-            conn, session_id=session_id, user_id=user_id, channel=WEBAPP_CHANNEL,
-        )
     return Response(status_code=204, headers={"HX-Redirect": f"/chat/{session_id}"})
 
 
 @router.post("/sessions/{session_id}/rename")
 async def rename_session(session_id: str, request: Request) -> Response:
-    """Set the conversation title (suite-side `session_info.session_name`).
-    The new name arrives in the `HX-Prompt` header (HTMX `hx-prompt`)."""
+    """Set the conversation title (the session's `metadata.title`). The new
+    name arrives in the `HX-Prompt` header (HTMX `hx-prompt`)."""
     if await owned_session(request, session_id) is None:
         raise HTTPException(status_code=404)
     name = (request.headers.get("HX-Prompt") or "").strip()[:_MAX_NAME_LEN]
     if not name:
         raise HTTPException(status_code=400, detail="empty name")
-    async with request.app.state.pool.acquire() as conn:
-        await queries.update_session_info(conn, session_id, session_name=name)
+    await request.app.state.upstream.patch_session(
+        access_token=request.session["access_token"], session_id=session_id,
+        patch={"title": name},
+    )
     return Response(status_code=204, headers={"HX-Trigger": "sessionsChanged"})
 
 
 @router.post("/sessions/{session_id}/reopen")
 async def reopen_session(session_id: str, request: Request) -> Response:
     """Re-open a closed session (router `POST …/reopen`), then land in the
-    chat to resume it. History/config are retained; the suite `session_info`
-    row was kept on close, so nothing suite-side needs restoring."""
+    chat to resume it. History and state are the router's and were kept on
+    close, so nothing suite-side needs restoring."""
     if await owned_session(request, session_id) is None:
         raise HTTPException(status_code=404)
     access = request.session["access_token"]

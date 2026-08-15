@@ -20,6 +20,8 @@ from bp_agents.agents.chatbot.telegram import TelegramClient
 from bp_agents.channel import (
     VERBOSE_PREFIX,
     ChannelCore,
+    SessionBusy,
+    SessionStore,
     agent_tag,
     progress_producer,
     render_progress_line,
@@ -156,7 +158,22 @@ _NO_SESSION = (
     "administrator."
 )
 _DISPATCH_FAILED = "Sorry — something went wrong handling that. Please try again."
+_SESSION_BUSY = (
+    "I'm still working on your previous message. Give me a moment, then "
+    "send that again."
+)
 _TYPING_REFRESH_S = 4.0  # Telegram "typing…" lasts ~5s; refresh just under that.
+
+def _compose_prompt(text: str, saved_files: list[str]) -> str:
+    """The turn's prompt: the user's text plus a note naming any files they
+    attached. The names ride the prompt rather than a history row the
+    channel writes — the channel owns no thread, and the executing agent
+    records its own input either way."""
+    parts = [text] if text else []
+    for name in saved_files:
+        parts.append(f"(the user attached a file, saved to your stash as {name})")
+    return "\n\n".join(parts) or "(the user sent a file — see the attached file.)"
+
 
 class RootDispatcher(Protocol):
     """The slice of the SDK `Agent` the gateway needs — root-task
@@ -179,8 +196,7 @@ class RootDispatcher(Protocol):
 
 
 class ChatbotGateway:
-    """Handles one inbound message end-to-end. One instance per process;
-    the per-session locks live here."""
+    """Handles one inbound message end-to-end. One instance per process."""
 
     def __init__(
         self,
@@ -188,10 +204,10 @@ class ChatbotGateway:
         dispatcher: RootDispatcher,
         pool: asyncpg.Pool,
         telegram: TelegramClient,
+        store: SessionStore,
         credentials: ChannelCredentials | None = None,
         result_timeout_s: float = 180.0,
         fire_memory: bool = False,
-        redis: Any | None = None,
         delegatable_agents: frozenset[str] = frozenset(),
     ) -> None:
         self._dispatcher = dispatcher
@@ -204,19 +220,19 @@ class ChatbotGateway:
         # and `memory.add` ([channel.md], shared with the webapp frontend).
         self._core = ChannelCore(
             dispatcher=dispatcher,
-            pool=pool,
+            store=store,
             delegatable_agents=delegatable_agents,
             result_timeout_s=result_timeout_s,
             fire_memory=fire_memory,
-            redis=redis,
         )
         # chat_id → (user_id, task_id) of the in-flight turn, for /stop.
         self._current_task: dict[str, tuple[str, str]] = {}
 
-    def session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
-        """The per-session lock, shared with the cron scheduler so its
-        applied turns serialize with inbound user turns ([sessions.md] §4)."""
-        return self._core.session_lock(session_id)
+    def turn(self, user_id: str, session_id: str):  # noqa: ANN202 — async-ctx
+        """The session's turn lease — the router's, so a second channel
+        instance no longer needs a shared Valkey to serialize with this
+        one ([sessions.md] §4)."""
+        return self._core.turn(user_id, session_id)
 
     async def handle_update(
         self,
@@ -487,10 +503,6 @@ class ChatbotGateway:
                 metadata={"kind": CHANNEL, "external_id": chat_id},
             )
             async with self._pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id=new_session, user_id=user_id,
-                    channel=CHANNEL, chat_id=chat_id,
-                )
                 await queries.set_mapping_session_id(
                     conn, platform=PLATFORM, chat_id=chat_id, session_id=new_session,
                 )
@@ -503,11 +515,11 @@ class ChatbotGateway:
                 # default to Telegram on link. An existing Telegram default
                 # from another chat is left untouched.
                 cfg = await queries.get_user_config(conn, user_id)
-                cur_default = (
-                    await queries.get_session_info(conn, cfg.default_session_id)
-                    if cfg and cfg.default_session_id else None
-                )
-                if cur_default is None or cur_default.channel != CHANNEL:
+            cur_channel = await self._session_channel(
+                user_id, cfg.default_session_id
+            ) if cfg and cfg.default_session_id else None
+            if cur_channel != CHANNEL:
+                async with self._pool.acquire() as conn:
                     await queries.set_default_session_id(
                         conn, user_id=user_id, session_id=new_session,
                     )
@@ -543,10 +555,12 @@ class ChatbotGateway:
                 await self._credentials.close_session(
                     user_id=user_id, session_id=prev_session
                 )
-                async with self._pool.acquire() as conn:
-                    await queries.update_session_info(
-                        conn, prev_session, channel=None
-                    )
+                # Release the channel-origin flag so the webapp may reopen or
+                # remove the conversation ([webapp.md] §4). A null value
+                # deletes the key from the session's metadata.
+                await self._core.store.patch_metadata(
+                    user_id=user_id, session_id=prev_session, patch={"kind": None}
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "new_close_prev_failed",
@@ -558,10 +572,6 @@ class ChatbotGateway:
             metadata={"kind": CHANNEL, "external_id": chat_id},
         )
         async with self._pool.acquire() as conn:
-            await queries.create_session_info(
-                conn, session_id=new_session, user_id=user_id,
-                channel=CHANNEL, chat_id=chat_id,
-            )
             # This chat now rides the fresh session; it also becomes the cron
             # fallback (the re-pointing rule — the newest conversation wins).
             await queries.set_mapping_session_id(
@@ -670,92 +680,123 @@ class ChatbotGateway:
         *,
         verbose: bool = False,
     ) -> None:
-        """Serialize on the session, write the user turn, inject the task,
-        await the result, and relay it. The channel logic (routing,
-        delegated_to maintenance, summarization, memory) lives in
-        `ChannelCore`; this keeps only Telegram I/O + /stop tracking."""
+        """Take the session's turn, inject the task, await the result, and
+        relay it. The channel logic (routing, delegated_to maintenance,
+        memory) lives in `ChannelCore`; this keeps only Telegram I/O + /stop
+        tracking."""
         reply = ""
-        async with self._core.session_lock(session_id):
-            dest, mode = await self._core.route(session_id)
-
-            # Inbound files: save to the session stash + record a (T,T)
-            # history row BEFORE dispatch so the agent discovers them
-            # ([channel.md] §7). agent_id = the dispatch target.
-            for tg_file_id, filename in attachments or []:
-                await self._save_inbound_file(
-                    user_id, session_id, dest, tg_file_id, filename
+        try:
+            async with self._core.turn(user_id, session_id):
+                reply = await self._run_turn(
+                    chat_id, user_id, session_id, text, attachments,
+                    verbose=verbose,
                 )
-
-            # The channel is the sole writer of user turns, written verbatim
-            # BEFORE dispatch so the agent's reload sees it. (Skip an empty
-            # turn for a file-only message — the file row above is the input.)
-            if text:
-                await self._core.record_user_turn(session_id, dest, text)
-
-            prompt = text or "(the user sent a file — see the attached file.)"
-            try:
-                task_id = await self._core.spawn(
-                    user_id, session_id, dest, mode, prompt
-                )
-                # Record the in-flight task so /stop can cancel it.
-                self._current_task[chat_id] = (user_id, task_id)
-                async with self._typing(chat_id):
-                    result = await self._core.await_result(
-                        task_id,
-                        on_progress=self._progress_callback(chat_id) if verbose else None,
-                    )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "dispatch_failed",
-                    extra={
-                        "event": "dispatch_failed",
-                        "bp.session_id": session_id,
-                    },
-                )
-                await self._telegram.send_message(
-                    chat_id=chat_id, text=_DISPATCH_FAILED
-                )
-                return
-            finally:
-                self._current_task.pop(chat_id, None)
-
-            reply = (result.output.content if result.output else "") or ""
-            # Tag the final reply with the specialist when the session is
-            # delegated (producer = result.agent_id), so it's clear who
-            # answered ([delegation.md] §2).
-            reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
-            await self._telegram.send_message(chat_id=chat_id, text=reply_text)
-
-            # Outbound files: the agent returned file-store NAMES; resolve
-            # each + send the bytes ([channel.md] §7).
-            out_files = list(result.output.files) if result.output else []
-            for name in out_files:
-                await self._send_outbound_file(chat_id, user_id, session_id, name)
-
-            # delegated_to maintenance + post-turn summarization, still inside
-            # the session lock so they serialize with the next turn
-            # ([delegation.md] §2, [sessions.md] §3.1).
-            context_tokens = await self._core.after_result(session_id, dest, result)
-            await self._core.maybe_summarize(session_id, dest, context_tokens)
+        except SessionBusy:
+            # Nothing else raises this, and the router's queue is already
+            # FIFO — a silent retry would just go to the back of it.
+            await self._telegram.send_message(chat_id=chat_id, text=_SESSION_BUSY)
+            return
 
         # memory.add is per-USER (not per-session) and a multi-LLM-call
-        # extraction, so it runs OUTSIDE the session lock, fire-and-forget
+        # extraction, so it runs OUTSIDE the turn lease, fire-and-forget
         # ([overview.md] §2.2). No-op unless `fire_memory` and a real reply.
         self._core.fire_memory_add(user_id, session_id, text, reply)
         # Title the conversation from its first message (first turn only).
         self._core.fire_name_session(user_id, session_id, text)
 
+    async def _run_turn(
+        self,
+        chat_id: str,
+        user_id: str,
+        session_id: str,
+        text: str,
+        attachments: list[tuple[str, str]] | None,
+        *,
+        verbose: bool,
+    ) -> str:
+        """One turn, inside the lease. Returns the reply text (empty on a
+        failure the user was already told about)."""
+        dest, mode = await self._core.route(user_id, session_id)
+
+        # Inbound files: save to the session stash BEFORE dispatch and name
+        # them in the prompt, so the executing agent discovers them
+        # ([channel.md] §7) and records its own input row.
+        saved: list[str] = []
+        for tg_file_id, filename in attachments or []:
+            name = await self._save_inbound_file(
+                user_id, session_id, tg_file_id, filename
+            )
+            if name:
+                saved.append(name)
+
+        prompt = _compose_prompt(text, saved)
+        try:
+            task_id = await self._core.spawn(
+                user_id, session_id, dest, mode, prompt
+            )
+            # Record the in-flight task so /stop can cancel it.
+            self._current_task[chat_id] = (user_id, task_id)
+            async with self._typing(chat_id):
+                result = await self._core.await_result(
+                    task_id,
+                    on_progress=self._progress_callback(chat_id) if verbose else None,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "dispatch_failed",
+                extra={"event": "dispatch_failed", "bp.session_id": session_id},
+            )
+            await self._telegram.send_message(
+                chat_id=chat_id, text=_DISPATCH_FAILED
+            )
+            return ""
+        finally:
+            self._current_task.pop(chat_id, None)
+
+        reply = (result.output.content if result.output else "") or ""
+        # Tag the final reply with the specialist when the session is
+        # delegated (producer = result.agent_id), so it's clear who
+        # answered ([delegation.md] §2).
+        reply_text = f"{agent_tag(result.agent_id)}{reply}" if reply else "(no response)"
+        await self._telegram.send_message(chat_id=chat_id, text=reply_text)
+
+        # Outbound files: the agent returned file-store NAMES; resolve each
+        # + send the bytes ([channel.md] §7).
+        out_files = list(result.output.files) if result.output else []
+        for name in out_files:
+            await self._send_outbound_file(chat_id, user_id, session_id, name)
+
+        # delegated_to maintenance, still inside the turn lease so it
+        # serializes with the next turn ([delegation.md] §2).
+        await self._core.after_result(user_id, session_id, dest, result)
+        return reply
+
+    async def _session_channel(self, user_id: str, session_id: str) -> str | None:
+        """Which channel a session belongs to, from the router's own session
+        metadata (`kind`) — the same field the serviced-session discovery
+        endpoint reads, so there is one answer, not a suite copy of one."""
+        try:
+            metadata = await self._core.store.patch_metadata(
+                user_id=user_id, session_id=session_id, patch={}
+            )
+        except Exception:  # noqa: BLE001 — a missing session is "no channel"
+            return None
+        return metadata.get("kind")
+
     async def _save_inbound_file(
-        self, user_id: str, session_id: str, dest: str,
-        tg_file_id: str, filename: str,
-    ) -> None:
-        """Download a Telegram attachment → session stash → (T,T) history
-        row. Best-effort: a file failure never breaks the turn."""
+        self, user_id: str, session_id: str, tg_file_id: str, filename: str
+    ) -> str | None:
+        """Download a Telegram attachment into the session stash and return
+        its stash NAME. Best-effort: a file failure never breaks the turn.
+
+        The name reaches the agent in the turn's prompt rather than as a
+        history row the channel writes — the channel has no thread to write
+        to, and the executing agent records its own input anyway."""
         if self._credentials is None:
-            return
+            return None
         try:
             data = await self._telegram.download_file(tg_file_id)
-            saved = await self._credentials.store_named_file(
+            return await self._credentials.store_named_file(
                 user_id=user_id, session_id=session_id, filename=filename, data=data,
                 mime_type=_detect_mime(data, filename),
             )
@@ -763,13 +804,7 @@ class ChatbotGateway:
             logger.exception(
                 "inbound_file_failed", extra={"event": "inbound_file_failed"}
             )
-            return
-        async with self._pool.acquire() as conn:
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=dest, role="user",
-                message=f"user-attached file saved as {saved}",
-                incumbent=True, hidden=True,
-            )
+            return None
 
     async def _send_outbound_file(
         self, chat_id: str, user_id: str, session_id: str, name: str

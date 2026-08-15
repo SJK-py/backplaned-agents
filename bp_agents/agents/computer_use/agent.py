@@ -113,7 +113,8 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
-        ctx, config=_CONFIG, pool=_pool, settings=_settings, first_turn=True
+        ctx, config=_CONFIG, pool=_pool, settings=_settings,
+        first_turn=True, seed=payload,
     )
 
 
@@ -125,7 +126,8 @@ async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
     return await run_delegated_turn(
-        ctx, config=_CONFIG, pool=_pool, settings=_settings, first_turn=False
+        ctx, config=_CONFIG, pool=_pool, settings=_settings,
+        first_turn=False, user_text=payload.prompt,
     )
 
 

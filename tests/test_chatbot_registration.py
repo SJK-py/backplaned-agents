@@ -23,6 +23,7 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
 
 
 class _FakeTelegram:
@@ -80,7 +81,7 @@ class _FakeCredentials:
 async def _truncate(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
 
@@ -106,7 +107,6 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 assert cfg is not None and cfg.default_session_id == "ses_1"
                 # No default_language passed → the en default (Telegram path).
                 assert cfg.language == "en"
-                assert await queries.get_session_info(conn, "ses_1") is not None
 
             # Idempotent: a re-poll maps nothing new.
             assert await reconcile_serviced_sessions(pool, [rec]) == 0
@@ -159,6 +159,7 @@ def _gateway(pool, *, creds=None, tg=None):
         pool=pool,
         telegram=tg or _FakeTelegram(),
         credentials=creds,
+        store=FakeChannelStore(FakeStore()),
     )
 
 
@@ -227,7 +228,6 @@ def test_new_opens_session_and_moves_default(suite_db_url: str) -> None:
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, "usr_a")
                 assert cfg.default_session_id == "ses_new"
-                assert await queries.get_session_info(conn, "ses_new") is not None
             assert tg.sent == [("tg1", "Started a new conversation.")]
         finally:
             await pool.close()

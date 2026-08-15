@@ -7,9 +7,10 @@ The runner buffers each rendered progress row plus the final answer, so a
 which is what lets `chat_view` rebuild the in-flight bubble (Stop button +
 progress) when the user navigates back mid-turn.
 
-Single-process: the `active_turns` registry is in-memory, matching the
-webapp's single-instance assumption (running a second webapp instance would
-need a shared bus, like the Valkey-backed session lock).
+Single-process: the `active_turns` registry is in-memory. Turn ORDERING is
+not — that is the router's session lease — so a second webapp instance would
+serialize correctly against this one and only need a shared bus for the SSE
+replay buffer.
 """
 
 from __future__ import annotations
@@ -18,7 +19,12 @@ import asyncio
 import logging
 from typing import Any
 
-from bp_agents.channel import agent_tag, progress_producer, render_progress_line
+from bp_agents.channel import (
+    SessionBusy,
+    agent_tag,
+    progress_producer,
+    render_progress_line,
+)
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_protocol.types import TaskStatus
 
@@ -31,8 +37,9 @@ _MAX_ACTIVE_TURNS = 256
 
 class TurnRunner:
     """One chat turn, detached from any HTTP connection. `run()` executes it
-    (under the session lock) and publishes rendered SSE events; subscribers
-    attach via `subscribe()` and replay the backlog before following live."""
+    (holding the router's turn lease) and publishes rendered SSE events;
+    subscribers attach via `subscribe()` and replay the backlog before
+    following live."""
 
     def __init__(
         self, *, session_id: str, turn_id: str, user_id: str, text: str,
@@ -119,9 +126,8 @@ class TurnRunner:
 
         reply = ""
         try:
-            async with core.session_lock(self.session_id):
-                dest, mode = await core.route(self.session_id)
-                await core.record_user_turn(self.session_id, dest, self.text)
+            async with core.turn(self.user_id, self.session_id):
+                dest, mode = await core.route(self.user_id, self.session_id)
                 self.task_id = await core.spawn(
                     self.user_id, self.session_id, dest, mode, self.text
                 )
@@ -134,11 +140,19 @@ class TurnRunner:
                     return
                 reply = (result.output.content if result.output else "") or ""
                 files = list(result.output.files) if result.output else []
-                ctx = await core.after_result(self.session_id, dest, result)
-                await core.maybe_summarize(self.session_id, dest, ctx)
+                await core.after_result(
+                    self.user_id, self.session_id, dest, result
+                )
             core.fire_memory_add(self.user_id, self.session_id, self.text, reply)
             core.fire_name_session(self.user_id, self.session_id, self.text)
             self._publish("result", self._answer(result.agent_id, reply, files))
+        except SessionBusy:
+            self._publish("result", self._answer(
+                None,
+                "I'm still working on your previous message — give me a "
+                "moment, then send that again.",
+                [],
+            ))
         except Exception:  # noqa: BLE001
             logger.exception(
                 "webapp_turn_failed",

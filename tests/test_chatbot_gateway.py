@@ -31,6 +31,8 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
+from tests.fake_store import state_value as _state
 
 
 class _FakeTelegram:
@@ -70,7 +72,7 @@ class _FakeDispatcher:
 async def _seed(pool, *, chat_id="tg1", user_id="usr_a", session_id="ses_1") -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
@@ -79,9 +81,6 @@ async def _seed(pool, *, chat_id="tg1", user_id="usr_a", session_id="ses_1") -> 
         )
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id
-        )
-        await queries.create_session_info(
-            conn, session_id=session_id, user_id=user_id, channel="chatbot_telegram"
         )
 
 
@@ -92,7 +91,8 @@ def test_gateway_dispatches_and_relays(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             disp = _FakeDispatcher(reply="the answer")
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "what's up?")
 
@@ -102,12 +102,10 @@ def test_gateway_dispatches_and_relays(suite_db_url: str) -> None:
             ]
             # Reply relayed.
             assert tg.sent == [("tg1", "the answer")]
-            # User turn written verbatim to the orchestrator thread.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-            assert [(r.role, r.message) for r in rows] == [("user", "what's up?")]
+            # The channel wrote NO history — the user's words ride the task
+            # payload and the executing agent records them under its own
+            # authorship. There is no endpoint through which it could.
+            assert store.messages == []
         finally:
             await pool.close()
 
@@ -121,7 +119,8 @@ def test_gateway_unmapped_chat_gets_register_prompt(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             disp = _FakeDispatcher()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg_unknown", "hello")
             assert tg.sent == [("tg_unknown", REGISTER_PROMPT)]
@@ -139,7 +138,8 @@ def test_gateway_help_command(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             disp = _FakeDispatcher()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "/help")
             assert tg.sent == [("tg1", HELP_TEXT)]
@@ -157,7 +157,8 @@ def test_gateway_dispatch_failure_is_surfaced(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             disp = _FakeDispatcher(fail=True)
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "boom please")
             assert len(tg.sent) == 1
@@ -197,7 +198,8 @@ def test_gateway_serializes_per_session(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             disp = _OrderingDispatcher()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram())
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
 
             await asyncio.gather(
                 gw.handle_update("tg1", "a"),
@@ -262,7 +264,8 @@ def test_cron_routes_to_config_agent(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             disp = _FakeDispatcher(reply="your jobs: none")
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram())
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
             await gw.handle_update("tg1", "/cron")
             assert disp.spawns == [
                 ("config", "List my scheduled jobs.", "usr_a", "ses_1", "cron")
@@ -288,7 +291,8 @@ def test_cmd_agent_surfaces_failed_task(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             tg = _FakeTelegram()
-            gw = ChatbotGateway(dispatcher=_FailingDispatcher(), pool=pool, telegram=tg)
+            store = FakeStore()
+            gw = ChatbotGateway(dispatcher=_FailingDispatcher(), pool=pool, telegram=tg, store=FakeChannelStore(store))
             await gw.handle_update("tg1", "/config")
             assert len(tg.sent) == 1
             assert "went wrong" in tg.sent[0][1]
@@ -304,9 +308,11 @@ def test_cmd_agent_surfaces_failed_task(suite_db_url: str) -> None:
 _DELEGATABLE = frozenset({"research", "computer_use", "deep_reasoning"})
 
 
-def _deleg_gw(pool, tg, disp):
+def _deleg_gw(pool, tg, disp, store=None):
     return ChatbotGateway(
-        dispatcher=disp, pool=pool, telegram=tg, delegatable_agents=_DELEGATABLE
+        dispatcher=disp, pool=pool, telegram=tg,
+        store=FakeChannelStore(store or FakeStore()),
+        delegatable_agents=_DELEGATABLE,
     )
 
 
@@ -315,23 +321,24 @@ def test_delegate_sets_state_and_seeds_delegate_thread(suite_db_url: str) -> Non
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            async with pool.acquire() as conn:
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="orchestrator",
-                    role="user", message="help me plan a trip",
-                )
+            store = FakeStore()
+            store.add("orchestrator", "user", "help me plan a trip")
             tg = _FakeTelegram()
-            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="trip-planning summary"))
+            gw = _deleg_gw(
+                pool, tg, _FakeDispatcher(reply="trip-planning summary"), store
+            )
             await gw.handle_update("tg1", "/delegate research")
 
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
-                seed_rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="research"
-                )
-            assert info.delegated_to == "research"
-            assert seed_rows and "delegated this conversation" in seed_rows[-1].message
-            assert "trip-planning summary" in seed_rows[-1].message  # summarizer output
+            assert store.session_state["delegated_to"].value == "research"
+            # The seed is a HAND-OVER, not a write into the delegate's
+            # thread: the channel cannot reach it, and the delegate
+            # materialises this under its own authorship on its first turn.
+            queued = store.handovers["research"]
+            assert [i.item_kind for i in queued] == ["seed"]
+            seed = queued[0].payload["text"]
+            assert "delegated this conversation" in seed
+            assert "trip-planning summary" in seed  # summarizer output
+            assert store.thread("research") == []
             assert "Research" in tg.sent[-1][1]
         finally:
             await pool.close()
@@ -345,12 +352,11 @@ def test_delegate_rejects_unknown_agent(suite_db_url: str) -> None:
         try:
             await _seed(pool)
             tg = _FakeTelegram()
-            gw = _deleg_gw(pool, tg, _FakeDispatcher())
+            store = FakeStore()
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(), store)
             await gw.handle_update("tg1", "/delegate memory")
             assert "Can't delegate" in tg.sent[-1][1]
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
-            assert info.delegated_to is None
+            assert "delegated_to" not in store.session_state
         finally:
             await pool.close()
 
@@ -362,28 +368,24 @@ def test_undelegate_folds_back_to_main(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            async with pool.acquire() as conn:
-                await queries.update_session_info(conn, "ses_1", delegated_to="research")
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="research",
-                    role="assistant", message="found 3 flights",
-                )
+            store = FakeStore()
+            store.session_state["delegated_to"] = _state("delegated_to", "research")
+            last = store.add("research", "assistant", "found 3 flights")
             tg = _FakeTelegram()
-            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="did the research"))
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="did the research"), store)
             await gw.handle_update("tg1", "/undelegate")
 
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
-                main = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-                deleg = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="research"
-                )
-            assert info.delegated_to is None
-            assert info.delegate_summary is None
-            assert any("Returned from Research" in r.message for r in main)
-            assert deleg == []  # delegate episode demoted
+            assert "delegated_to" not in store.session_state
+            # Both halves are hand-overs: the recap for the orchestrator to
+            # materialise, and a retire cutoff for the delegate to apply to
+            # its OWN floor. Neither thread is touched by the channel.
+            recap = store.handovers["orchestrator"][0]
+            assert recap.item_kind == "recap"
+            assert "Returned from Research" in recap.payload["text"]
+            retire = store.handovers["research"][0]
+            assert retire.item_kind == "retire"
+            assert retire.payload["through_id"] == last.id
+            assert store.floors == {}, "only the delegate may move its floor"
         finally:
             await pool.close()
 
@@ -410,31 +412,26 @@ def test_delegate_switch_folds_old_then_seeds_new(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            async with pool.acquire() as conn:
-                await queries.update_session_info(conn, "ses_1", delegated_to="research")
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id="research",
-                    role="assistant", message="research output",
-                )
+            store = FakeStore()
+            store.session_state["delegated_to"] = _state("delegated_to", "research")
+            store.add("research", "assistant", "research output")
             tg = _FakeTelegram()
-            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="s"))
+            gw = _deleg_gw(pool, tg, _FakeDispatcher(reply="s"), store)
             await gw.handle_update("tg1", "/delegate computer_use")
 
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
-                main = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-                old = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="research"
-                )
-                new = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="computer_use"
-                )
-            assert info.delegated_to == "computer_use"
-            assert any("Returned from Research" in r.message for r in main)  # old folded
-            assert old == []                                                 # old demoted
-            assert new and "delegated this conversation" in new[-1].message  # new seeded
+            assert store.session_state["delegated_to"].value == "computer_use"
+            kinds = {
+                agent: [i.item_kind for i in items]
+                for agent, items in store.handovers.items() if items
+            }
+            # The old delegate is folded back (recap to the orchestrator,
+            # retire to itself) and the new one seeded — all four via the
+            # queue, since the channel writes no thread.
+            assert kinds["orchestrator"] == ["recap"]
+            assert kinds["research"] == ["retire"]
+            assert kinds["computer_use"] == ["seed"]
+            recap = store.handovers["orchestrator"][0].payload["text"]
+            assert "Returned from Research" in recap
         finally:
             await pool.close()
 
@@ -468,9 +465,11 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
         try:
             await _seed(pool)  # default_session_id = ses_1 (chatbot_telegram)
             creds = _FakeCreds(new_session="ses_2")
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=_FakeTelegram(), credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg1", "/new")
@@ -479,13 +478,14 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
             assert creds.closed == [("usr_a", "ses_1")]
             assert creds.opened == ["usr_a"]
             async with pool.acquire() as conn:
-                prev = await queries.get_session_info(conn, "ses_1")
-                new = await queries.get_session_info(conn, "ses_2")
                 cfg = await queries.get_user_config(conn, "usr_a")
-            # Released: prev row kept (history intact) but channel cleared.
-            assert prev is not None and prev.channel is None
-            # New session tracked + made default.
-            assert new is not None and new.channel == "chatbot_telegram"
+            # Released: the previous session keeps its history (the router's
+            # now) but loses its channel-origin flag, so the webapp may
+            # reopen or remove it.
+            assert "kind" not in store.metadata_by_session["ses_1"]
+            # The fresh session is opened with the channel metadata by the
+            # router itself, and becomes the cron fallback.
+            assert creds.opened == ["usr_a"]
             assert cfg.default_session_id == "ses_2"
         finally:
             await pool.close()
@@ -535,9 +535,14 @@ def test_link_binds_unmapped_chat_to_existing_account(suite_db_url: str) -> None
             await _seed(pool)  # usr_a mapped to chat "tg1", default = ses_1
             tg = _FakeTelegram()
             creds = _LinkCreds(user_id="usr_a", new_session="ses_link")
+            store = FakeStore()
+            # ses_1 is already this channel's, so /link must NOT re-point the
+            # cron default at the new chat's session.
+            store.metadata_by_session["ses_1"] = {"kind": "chatbot_telegram"}
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg_new", "/link tok-abc")
@@ -567,9 +572,11 @@ def test_link_invalid_token_reports_and_does_not_map(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             creds = _LinkCreds(user_id=None)  # router rejected the token
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg_new", "/link bad")
@@ -599,9 +606,11 @@ def test_link_privileged_target_reports_refusal_and_does_not_map(
             await _seed(pool)
             tg = _FakeTelegram()
             creds = _LinkCreds(user_id="usr_a", refuse=True)
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg_new", "/link tok-admin")
@@ -630,21 +639,20 @@ def test_link_promotes_default_when_current_is_webapp(suite_db_url: str) -> None
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY"
                 )
                 # usr_a: a webapp-default account with no Telegram chat yet.
                 await queries.create_user_config(
                     conn, user_id="usr_a", default_session_id="ses_web"
                 )
-                await queries.create_session_info(
-                    conn, session_id="ses_web", user_id="usr_a", channel="webapp"
-                )
             tg = _FakeTelegram()
             creds = _LinkCreds(user_id="usr_a", new_session="ses_tg")
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg_new", "/link tok-xyz")
@@ -667,9 +675,11 @@ def test_link_without_token_shows_usage(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             creds = _LinkCreds(user_id="usr_a")
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg_new", "/link")
@@ -687,17 +697,13 @@ async def _seed_two_chats(pool) -> None:
     user's default) and tg2->ses_2. Models a multi-channel/linked user."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.create_user_config(
             conn, user_id="usr_a", default_session_id="ses_1"
         )
         for chat, sid in (("tg1", "ses_1"), ("tg2", "ses_2")):
-            await queries.create_session_info(
-                conn, session_id=sid, user_id="usr_a", channel="chatbot_telegram",
-                chat_id=chat,
-            )
             await queries.upsert_platform_mapping(
                 conn, platform="telegram", chat_id=chat, user_id="usr_a",
                 session_id=sid,
@@ -714,8 +720,10 @@ def test_each_chat_routes_to_its_own_session(suite_db_url: str) -> None:
         try:
             await _seed_two_chats(pool)
             disp = _FakeDispatcher(reply="ok")
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=disp, pool=pool, telegram=_FakeTelegram()
+                dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg2", "hello from kakao-side")
@@ -740,8 +748,10 @@ def test_setdefault_points_default_at_this_chats_session(suite_db_url: str) -> N
         try:
             await _seed_two_chats(pool)  # default starts at ses_1
             tg = _FakeTelegram()
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=_FakeDispatcher(), pool=pool, telegram=tg
+                dispatcher=_FakeDispatcher(), pool=pool, telegram=tg,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg2", "/setdefault")
@@ -770,9 +780,11 @@ def test_new_repoints_only_this_chats_session(suite_db_url: str) -> None:
         try:
             await _seed_two_chats(pool)
             creds = _FakeCreds(new_session="ses_2b")
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=_FakeTelegram(), credentials=creds,
+                store=FakeChannelStore(store),
             )
 
             await gw.handle_update("tg2", "/new")

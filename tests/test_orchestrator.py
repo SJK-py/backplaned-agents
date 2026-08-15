@@ -15,6 +15,7 @@ from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_sdk import LlmResponse, Message
+from tests.fake_store import FakeHistory, FakeStore, state_value
 
 
 class _StubLlm:
@@ -38,19 +39,21 @@ class _StubProgress:
 
 
 class _StubCtx:
-    def __init__(self, user_id: str, session_id: str, llm) -> None:
+    def __init__(self, user_id: str, session_id: str, llm, store=None) -> None:
         self.user_id = user_id
         self.session_id = session_id
         self.user_level = "tier0"
         self.llm = llm
         self.peers = _StubPeers()
         self.progress = _StubProgress()
+        self.store = store if store is not None else FakeStore()
+        self.history = FakeHistory(self.store, "orchestrator")
 
 
 async def _truncate(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
 
@@ -67,21 +70,13 @@ def test_orchestrator_message_uses_history_and_persists_reply(
                 await queries.create_user_config(
                     conn, user_id="usr_a", full_name="Ada", timezone="UTC",
                 )
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a",
-                    channel="chatbot_telegram",
-                )
-                await queries.update_session_info(
-                    conn, "ses_1", history_summary="prior summary text",
-                )
-                # The channel writes the user turn before dispatch.
-                await queries.append_history(
-                    conn, session_id="ses_1", agent_id=ORCHESTRATOR_AGENT_ID,
-                    role="user", message="hi there",
-                )
+            store = FakeStore()
+            store.thread_state[(ORCHESTRATOR_AGENT_ID, "")] = {
+                "summary": state_value("summary", "prior summary text")
+            }
 
             llm = _StubLlm("hello back")
-            ctx = _StubCtx("usr_a", "ses_1", llm)
+            ctx = _StubCtx("usr_a", "ses_1", llm, store)
             out = await run_orchestrator_message(
                 ctx,  # type: ignore[arg-type]
                 MessagePayload(prompt="hi there"),
@@ -99,17 +94,14 @@ def test_orchestrator_message_uses_history_and_persists_reply(
             assert "Ada" in system.content
             assert "prior summary text" in system.content
 
-            # The pre-written user turn was used, not duplicated.
+            # The agent recorded the user's turn itself, from the payload,
+            # and it appears exactly once in the built context.
             user_msgs = [m for m in llm.captured if m.role == "user"]
             assert [m.content for m in user_msgs] == ["hi there"]
 
-            # The assistant turn was persisted to the orchestrator thread.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id=ORCHESTRATOR_AGENT_ID
-                )
-            assert [r.role for r in rows] == ["user", "assistant"]
-            assert rows[-1].message == "hello back"
+            # Both turns are on the orchestrator's own thread.
+            assert store.roles(ORCHESTRATOR_AGENT_ID) == ["user", "assistant"]
+            assert store.thread(ORCHESTRATOR_AGENT_ID)[-1].content == "hello back"
         finally:
             await pool.close()
 
@@ -124,7 +116,7 @@ def test_orchestrator_message_falls_back_to_payload_when_no_user_row(
         pool = await open_pool(settings)
         try:
             await _truncate(pool)
-            # No user_config, no session_info, no pre-written user row.
+            # No user_config, no no pre-written user row.
             llm = _StubLlm("ok")
             ctx = _StubCtx("usr_x", "ses_x", llm)
             out = await run_orchestrator_message(

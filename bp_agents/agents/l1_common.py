@@ -7,11 +7,17 @@ three modes ([agents.md]):
   - `on_delegation` (LLMData, tool=false) — first delegated turn.
   - `delegated_message` ({prompt}, tool=false) — subsequent delegated turns.
 
-`on_delegation` / `delegated_message` share one core: reload the agent's
-own thread (the orchestrator wrote the `delegate_prompt` seed row + the
-channel writes each user turn), run the loop, and append the assistant
-turn. Per-agent behaviour (system prompt, local tools, preset) is
-supplied via `L1Config`.
+`on_delegation` / `delegated_message` share one core: open this agent's own
+thread in the router session store — draining any hand-over the channel or
+the orchestrator left for it, and recording the user's message from the task
+payload — run the loop, and close the turn. Per-agent behaviour (system
+prompt, local tools, slot) is supplied via `L1Config`.
+
+Nothing here writes another agent's thread, and nothing else writes this
+one: the orchestrator's hand-off arrives as `LLMData` the delegate composes
+its own seed from, and the channel's `/delegate` switch arrives as a
+hand-over item. Both are materialised by `common.thread.open_turn` under
+this agent's authorship.
 
 Delegation is a **persistent** episode, so `end_delegation` is offered
 **only on subsequent turns** (`delegated_message`), never on the first
@@ -34,11 +40,13 @@ from bp_agents import slots
 from bp_agents.common import (
     INCOMING_FILE_NOTE,
     LocalToolset,
+    close_turn,
     compose_system_prompt,
-    estimate_context_tokens,
+    context_tokens_of,
     make_recall_tool_history_tool,
     make_send_file_tool,
-    persist_tool_exchanges,
+    maybe_fold,
+    open_turn,
     run_llm_loop,
     text_output,
     user_config_note,
@@ -202,23 +210,32 @@ async def run_delegated_turn(
     pool: asyncpg.Pool,
     settings: SuiteSettings,
     first_turn: bool,
+    seed: LLMData | None = None,
+    user_text: str | None = None,
 ) -> AgentOutput:
     """First (`on_delegation`, `first_turn=True`) and subsequent
-    (`delegated_message`) delegated turns. Reload this agent's thread, run
-    the loop, and append the assistant turn.
+    (`delegated_message`) delegated turns. Open this agent's thread, run the
+    loop, and close the turn.
 
-    `end_delegation` is offered only when `first_turn` is False. On the
-    first turn the delegate must do work and terminate the hand-off task
-    `T` itself; handing back there would re-delegate `T` to the
-    orchestrator (`T`'s originator) and the router rejects that as a
-    cycle. Subsequent turns run on fresh tasks spawned straight to this
-    agent, so handing back to the orchestrator is cycle-free."""
+    `seed` is the `LLMData` an orchestrator hand-off carries. The delegate
+    composes its own opening row from it rather than being handed one: the
+    orchestrator cannot write here, and composing at this end also removes
+    the orphan-seed rollback the old shape needed — a seed written before a
+    reassignment that can fail.
+
+    `end_delegation` is offered only when `first_turn` is False. On the first
+    turn the delegate must do work and terminate the hand-off task `T`
+    itself; handing back there would re-delegate `T` to the orchestrator
+    (`T`'s originator) and the router rejects that as a cycle. Subsequent
+    turns run on fresh tasks spawned straight to this agent, so handing back
+    to the orchestrator is cycle-free."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-        rows = await queries.reload_incumbent(
-            conn, session_id=ctx.session_id, agent_id=config.agent_id
-        )
-        info = await queries.get_session_info(conn, ctx.session_id)
+
+    turn = await open_turn(
+        ctx, config.agent_id,
+        user_text=_seed_text(seed) if seed is not None else user_text,
+    )
 
     # System prompt = shared harness framing + the agent's own instruction +
     # (subsequent turns, file-capable agents only) the incoming-file mechanic.
@@ -233,14 +250,26 @@ async def run_delegated_turn(
     parts.append(config.delegation_system)
     if not first_turn and config.file_tools:
         parts.append(INCOMING_FILE_NOTE)
+    base_system = "\n\n".join(parts)
+    config_note = user_config_note(cfg) if cfg else ""
+
+    limit = (
+        cfg.max_context_token_limit if cfg
+        else settings.default_max_context_token_limit
+    )
+    turn = await maybe_fold(
+        ctx, turn,
+        system=compose_system_prompt(
+            base_system, config_note=config_note, summary=turn.summary
+        ),
+        limit_tokens=limit,
+    )
     system = compose_system_prompt(
-        "\n\n".join(parts),
-        config_note=user_config_note(cfg) if cfg else "",
-        summary=info.delegate_summary if info else None,
+        base_system, config_note=config_note, summary=turn.summary
     )
     messages: list[Message] = [Message(role="system", content=system)]
-    messages.extend(Message(role=r.role, content=r.message) for r in rows)
-    context_tokens = estimate_context_tokens(messages)
+    messages.extend(turn.context())
+    context_tokens = await context_tokens_of(system, turn)
 
     timezone = cfg.timezone if cfg else settings.default_timezone
     # A delegate talks to the user directly, so it can deliver files via
@@ -248,9 +277,7 @@ async def run_delegated_turn(
     outbound: list[str] = []
     local = await _local_tools(ctx, settings, config, timezone) or LocalToolset()
     local.add(make_send_file_tool(outbound))
-    local.add(make_recall_tool_history_tool(
-        pool, session_id=ctx.session_id, agent_id=config.agent_id
-    ))
+    local.add(make_recall_tool_history_tool(agent_id=config.agent_id))
 
     # Terminal tools: end_delegation (subsequent turns only) + any
     # agent-specific ones (e.g. plan_mode), offered on every turn.
@@ -283,9 +310,7 @@ async def run_delegated_turn(
         # prompt its hand-back handler returns an empty Result and the user
         # sees "(no response)". A prompt the model deliberately set wins.
         if not (args.get("user_prompt") or "").strip():
-            last_user = next(
-                (r.message for r in reversed(rows) if r.role == "user"), None
-            )
+            last_user = turn.last_user_text()
             if last_user:
                 args["user_prompt"] = last_user
         # Safeguard: end_delegation is a hand-off, not a way to report work,
@@ -295,6 +320,13 @@ async def run_delegated_turn(
         # the attachment — the orchestrator delivers it.
         if outbound:
             args["files"] = list(outbound)
+        # Persist BEFORE delegating: `ctx.peers.delegate` flips the task's
+        # active executor to the orchestrator, and this agent stops being
+        # able to write its own thread the moment it does.
+        await close_turn(
+            ctx, turn, messages=messages,
+            assistant_text=resp.text or "(handed back to the main assistant)",
+        )
         await ctx.peers.delegate(
             ORCHESTRATOR_AGENT_ID, args, mode="end_delegation"
         )
@@ -308,15 +340,22 @@ async def run_delegated_turn(
         if extra_call is not None:
             return await config.on_extra_terminal(ctx, extra_call, pool, settings)
 
-    async with pool.acquire() as conn:
-        # Recall-only tool rows (never reloaded) so a later delegated turn
-        # can re-read this turn's full tool results via `recall_tool_history`.
-        await persist_tool_exchanges(
-            conn, session_id=ctx.session_id,
-            agent_id=config.agent_id, messages=messages,
-        )
-        await queries.append_history(
-            conn, session_id=ctx.session_id, agent_id=config.agent_id,
-            role="assistant", message=resp.text,
-        )
+    await close_turn(
+        ctx, turn, messages=messages, assistant_text=resp.text
+    )
     return text_output(resp.text, files=outbound, context_tokens=context_tokens)
+
+
+def _seed_text(seed: LLMData) -> str:
+    """The delegate's own opening row, composed from the hand-off payload.
+
+    The orchestrator used to write this row into the delegate's thread and
+    roll it back if the reassignment failed. Composing it here removes that
+    window entirely — there is nothing to roll back, because nothing is
+    written until the delegate is running."""
+    text = f"## Delegated task\n{seed.agent_instruction or seed.prompt}"
+    if seed.context:
+        text += f"\n\n## Context\n{seed.context}"
+    if seed.prompt:
+        text += f"\n\n## User request\n{seed.prompt}"
+    return text

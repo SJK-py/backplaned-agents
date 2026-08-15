@@ -17,6 +17,7 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
 
 # ---------------------------------------------------------------------------
 # _clean_title — single line, de-quoted, length-capped
@@ -73,10 +74,10 @@ class _Dispatcher:
         )
 
 
-async def _seed(pool, *, session_name: str | None = None) -> None:
+async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
@@ -85,31 +86,26 @@ async def _seed(pool, *, session_name: str | None = None) -> None:
         await queries.create_user_config(
             conn, user_id="usr_a", default_session_id="ses_1"
         )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="chatbot_telegram",
-        )
-        if session_name is not None:
-            await queries.update_session_info(
-                conn, "ses_1", session_name=session_name
-            )
+
 
 
 def test_first_message_titles_the_session(suite_db_url: str) -> None:
     async def _drive() -> tuple[str | None, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool)  # no name yet
+            await _seed(pool)
             disp = _Dispatcher(title="Cat preferences")
+            store = FakeStore()  # no title yet
             gw = ChatbotGateway(
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "i love cats, tell me about them")
             await asyncio.gather(*gw._core._name_tasks)  # drain the detached task
 
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
+            title = store.metadata_by_session.get("ses_1", {}).get("title")
             name_spawns = [s for s in disp.spawns if s[2] == "session_name"]
-            return info.session_name, name_spawns
+            return title, name_spawns
         finally:
             await pool.close()
 
@@ -127,18 +123,20 @@ def test_already_named_session_is_not_retitled(suite_db_url: str) -> None:
     async def _drive() -> tuple[str | None, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, session_name="My existing title")
+            await _seed(pool)
             disp = _Dispatcher(title="Should not be used")
+            store = FakeStore()
+            store.metadata_by_session["ses_1"] = {"title": "My existing title"}
             gw = ChatbotGateway(
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "another message")
             await asyncio.gather(*gw._core._name_tasks)
 
-            async with pool.acquire() as conn:
-                info = await queries.get_session_info(conn, "ses_1")
+            title = store.metadata_by_session.get("ses_1", {}).get("title")
             name_spawns = [s for s in disp.spawns if s[2] == "session_name"]
-            return info.session_name, name_spawns
+            return title, name_spawns
         finally:
             await pool.close()
 

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from bp_agents.agents.chatbot.cron import CronScheduler
 from bp_agents.agents.config.agent import run_config
 from bp_agents.agents.orchestrator.agent import run_orchestrator_cron_message
-from bp_agents.common.payloads import MessagePayload
+from bp_agents.common.payloads import CronMessage, MessagePayload
 from bp_agents.cron_manage import run_cron_management
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
@@ -19,6 +19,11 @@ from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from bp_sdk import LlmResponse, ToolCall  # noqa: E402
+from tests.fake_store import (  # noqa: E402
+    FakeChannelStore,
+    FakeHistory,
+    FakeStore,
+)
 
 
 class _ScriptLlm:
@@ -40,12 +45,14 @@ class _Peers:
 
 
 class _Ctx:
-    def __init__(self, llm, *, user_id="usr_a", session_id="ses_1") -> None:
+    def __init__(self, llm, *, user_id="usr_a", session_id="ses_1", store=None) -> None:
         self.llm = llm
         self.user_id = user_id
         self.session_id = session_id
         self.progress = _Progress()
         self.peers = _Peers()
+        self.store = store if store is not None else FakeStore()
+        self.history = FakeHistory(self.store, "orchestrator")
 
 
 class _Telegram:
@@ -82,7 +89,7 @@ def _settings(url: str) -> SuiteSettings:
 async def _reset(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings, cron_jobs, cron_executions RESTART IDENTITY"
         )
 
@@ -120,11 +127,10 @@ def test_cron_create_list_claim(suite_db_url: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _scheduler(pool, settings, disp, tg):
-    locks: dict[str, asyncio.Lock] = {}
+def _scheduler(pool, settings, disp, tg, store=None):
     return CronScheduler(
         dispatcher=disp, pool=pool, settings=settings, telegram=tg,
-        session_lock=lambda sid: locks.setdefault(sid, asyncio.Lock()),
+        store=FakeChannelStore(store or FakeStore()),
     )
 
 
@@ -134,10 +140,6 @@ def test_scheduler_fires_and_reports(suite_db_url: str) -> None:
         try:
             await _reset(pool)
             async with pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a",
-                    channel="chatbot_telegram", chat_id="tg1",
-                )
                 await queries.create_cron_job(
                     conn, cron_id="c1", user_id="usr_a", session_id="ses_1",
                     cron_expression="* * * * *", cron_message="news?",
@@ -145,21 +147,23 @@ def test_scheduler_fires_and_reports(suite_db_url: str) -> None:
                 )
             tg = _Telegram()
             disp = _CronDispatcher(content="Big news!", report=True)
-            sched = _scheduler(pool, _settings(suite_db_url), disp, tg)
+            store = FakeStore()
+            store.metadata_by_session["ses_1"] = {
+                "kind": "chatbot_telegram", "external_id": "tg1",
+            }
+            sched = _scheduler(pool, _settings(suite_db_url), disp, tg, store)
 
             fired = await sched.tick()
             assert fired == 1
-            # Dispatched orchestrator(cron_message).
+            # Dispatched orchestrator(cron_message), carrying the job's policy
+            # so the ORCHESTRATOR decides and records; this only delivers.
             assert disp.spawns[0][1] == "cron_message"
-            # Reported → relayed + assistant row + execution logged.
             assert tg.sent == [("tg1", "Big news!")]
             async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
                 execs = await conn.fetch("SELECT * FROM cron_executions")
-            assert rows and rows[-1].message == "Big news!"
             assert len(execs) == 1 and execs[0]["reported"] is True
+            # The scheduler wrote no history — it cannot.
+            assert store.messages == []
 
             # A second tick in the same minute does not re-fire (claim guard).
             assert await sched.tick() == 0
@@ -175,10 +179,6 @@ def test_scheduler_no_report_logs_only(suite_db_url: str) -> None:
         try:
             await _reset(pool)
             async with pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a",
-                    channel="chatbot_telegram", chat_id="tg1",
-                )
                 await queries.create_cron_job(
                     conn, cron_id="c1", user_id="usr_a", session_id="ses_1",
                     cron_expression="* * * * *", cron_message="quiet check",
@@ -208,9 +208,6 @@ def test_scheduler_webapp_session_nudges_telegram(suite_db_url: str) -> None:
             await _reset(pool)
             async with pool.acquire() as conn:
                 # Webapp session: channel='webapp', no chat_id.
-                await queries.create_session_info(
-                    conn, session_id="ses_web", user_id="usr_a", channel="webapp",
-                )
                 # The user is also reachable on Telegram.
                 await queries.upsert_platform_mapping(
                     conn, platform="telegram", chat_id="tg1", user_id="usr_a"
@@ -222,20 +219,17 @@ def test_scheduler_webapp_session_nudges_telegram(suite_db_url: str) -> None:
                 )
             tg = _Telegram()
             disp = _CronDispatcher(content="Web digest body", report=True)
-            sched = _scheduler(pool, _settings(suite_db_url), disp, tg)
+            store = FakeStore()
+            store.metadata_by_session["ses_web"] = {"kind": "webapp"}
+            sched = _scheduler(pool, _settings(suite_db_url), disp, tg, store)
 
             assert await sched.tick() == 1
-            # Pointer nudge to Telegram — NOT the full content.
+            # Pointer nudge to Telegram — NOT the full content. The canonical
+            # result was recorded by the orchestrator in its own thread.
             assert len(tg.sent) == 1
             chat_id, text = tg.sent[0]
             assert chat_id == "tg1"
             assert "web app" in text and "Web digest body" not in text
-            # Canonical result still landed in the webapp session.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_web", agent_id="orchestrator"
-                )
-            assert rows and rows[-1].message == "Web digest body"
         finally:
             await pool.close()
 
@@ -250,9 +244,6 @@ def test_scheduler_webapp_session_no_mapping_persists_only(suite_db_url: str) ->
         try:
             await _reset(pool)
             async with pool.acquire() as conn:
-                await queries.create_session_info(
-                    conn, session_id="ses_web", user_id="usr_a", channel="webapp",
-                )
                 await queries.create_cron_job(
                     conn, cron_id="c1", user_id="usr_a", session_id="ses_web",
                     cron_expression="* * * * *", cron_message="digest",
@@ -260,16 +251,14 @@ def test_scheduler_webapp_session_no_mapping_persists_only(suite_db_url: str) ->
                 )
             tg = _Telegram()
             disp = _CronDispatcher(content="Web digest body", report=True)
-            sched = _scheduler(pool, _settings(suite_db_url), disp, tg)
+            store = FakeStore()
+            store.metadata_by_session["ses_web"] = {"kind": "webapp"}
+            sched = _scheduler(pool, _settings(suite_db_url), disp, tg, store)
 
             assert await sched.tick() == 1
             assert tg.sent == []  # no reachable channel
             async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_web", agent_id="orchestrator"
-                )
                 execs = await conn.fetch("SELECT * FROM cron_executions")
-            assert rows and rows[-1].message == "Web digest body"
             assert len(execs) == 1 and execs[0]["reported"] is True
         finally:
             await pool.close()
@@ -498,7 +487,7 @@ def test_orchestrator_cron_message_structured(suite_db_url: str) -> None:
             ])
             ctx = _Ctx(llm)
             out = await run_orchestrator_cron_message(
-                ctx, MessagePayload(prompt="daily digest"),
+                ctx, CronMessage(prompt="daily digest"),
                 pool=pool, settings=_settings(suite_db_url),
             )
             assert out.content == "here is the digest"

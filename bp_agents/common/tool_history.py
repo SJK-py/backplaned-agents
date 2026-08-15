@@ -1,20 +1,24 @@
-"""bp_agents.common.tool_history — persist a turn's tool exchanges and
-recall them on demand.
+"""bp_agents.common.tool_history — recall a turn's tool exchanges on demand.
 
 The live loop (`run_llm_loop`) keeps each turn's `tool_call`/`tool_result`
-sequence in memory and feeds it to the model, but the persisted context
-reload (`queries.reload_incumbent`) drops tool rows to stay bounded
-([sessions.md] §2.1). That makes detail from a *prior* turn's tool result
-unrecoverable unless the model carried it into its self-contained answer.
+sequence in memory and feeds it to the model, but a reloaded context carries
+only `CONTEXT_ROLES` (`user` / `assistant`) to stay bounded ([sessions.md]
+§2.1). That makes detail from a *prior* turn's tool result unrecoverable
+unless the model carried it into its self-contained answer.
 
 Two halves close that gap ([agent-tool-history-recall.md]):
 
-  - `persist_tool_exchanges` — after a stateful turn finishes, write its
-    `tool_call`/`tool_result` rows (write-once, `incumbent=false`,
-    `hidden=true`) so there is something to recall later.
-  - `make_recall_tool_history_tool` — a local tool the model calls to
-    page back through its own thread's past exchanges (`count` + `skip`),
-    with hard caps so recall can never re-bloat context.
+  - the write side lives in `bp_agents.common.thread.close_turn`, which
+    appends each exchange as two hidden rows on the agent's own thread —
+    part of the same batch as the assistant row, so a turn is persisted
+    atomically or not at all.
+  - `make_recall_tool_history_tool` — a local tool the model calls to page
+    back through its own thread's past exchanges (`count` + `skip`), with
+    hard caps so recall can never re-bloat context.
+
+Recall reads with `include_retired=True`: a summarization fold moves the
+thread's floor past old turns, and their tool detail is *exactly* what the
+model needs recall for once the prose has been compressed away.
 """
 
 from __future__ import annotations
@@ -25,12 +29,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from bp_agents.common.tools import LocalTool
-from bp_agents.db import queries
 from bp_sdk import ToolSpec
 
 if TYPE_CHECKING:
-    import asyncpg
-
+    from bp_protocol.frames import SessionMessage
     from bp_sdk import Message, TaskContext
 
 # Caps — the reason count/skip recall is safe. Worst case returned text is
@@ -132,46 +134,13 @@ def _recall_marker(result: str) -> str:
     )
 
 
-def _storable_result(ex: ToolExchange) -> str:
+def storable_result(ex: ToolExchange) -> str:
     """What goes in the `tool_result` row: the recall tool's own output is
     replaced by a marker (see `_recall_marker`); every other tool stores
     its real result."""
     if ex.name == RECALL_TOOL_NAME:
         return _recall_marker(ex.result)
     return ex.result
-
-
-async def persist_tool_exchanges(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    agent_id: str,
-    messages: list[Message],
-) -> int:
-    """Write this turn's tool exchanges to `session_history` so a later
-    turn can recall them. Each exchange is two rows — a `tool_call`
-    (`{name, args}` JSON) then its `tool_result` (text) — both
-    `incumbent=false`, `hidden=true`: never reloaded into context, never
-    rendered, available only via the recall tool. Returns the exchange
-    count. Call inside the same `pool.acquire()` block that writes the
-    terminal assistant row.
-
-    A `recall_tool_history` exchange is stored as a marker, not its digest
-    (`_storable_result`), so recall is not self-amplifying."""
-    exchanges = extract_tool_exchanges(messages)
-    for ex in exchanges:
-        await queries.append_history(
-            conn, session_id=session_id, agent_id=agent_id,
-            role="tool_call",
-            message=json.dumps({"name": ex.name, "args": ex.args}, default=str),
-            incumbent=False, hidden=True,
-        )
-        await queries.append_history(
-            conn, session_id=session_id, agent_id=agent_id,
-            role="tool_result", message=_storable_result(ex),
-            incumbent=False, hidden=True,
-        )
-    return len(exchanges)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -195,7 +164,7 @@ def _render_call(call_message: str) -> str:
 
 
 def render_recall(
-    exchanges: list[tuple[Any, Any]], *, skip: int
+    exchanges: list[tuple[SessionMessage, SessionMessage]], *, skip: int
 ) -> str:
     """Render a recalled page (ascending, newest-last) into a compact text
     digest. Each entry is labelled by its absolute distance back from now
@@ -207,8 +176,8 @@ def render_recall(
     for i, (call_row, result_row) in enumerate(exchanges):
         back = skip + (n - i)  # newest returned = skip+1 back
         label = f"[{back} exchange{'s' if back != 1 else ''} back]"
-        head = _render_call(call_row.message)
-        body = _truncate(result_row.message or "(empty result)", PER_RESULT_CHARS)
+        head = _render_call(call_row.content)
+        body = _truncate(result_row.content or "(empty result)", PER_RESULT_CHARS)
         entries.append(f"{label} {head} →\n{body}")
 
     # Total-budget trim: drop oldest (top) entries until under budget.
@@ -226,19 +195,41 @@ def render_recall(
     return note + "\n\n".join(entries)
 
 
-def make_recall_tool_history_tool(
-    pool: asyncpg.Pool, *, session_id: str, agent_id: str
-) -> LocalTool:
+def _pair_exchanges(
+    rows: list[SessionMessage], *, limit: int, skip: int
+) -> list[tuple[SessionMessage, SessionMessage]]:
+    """Greedy-pair a `tool_call` with the `tool_result` that follows it,
+    then take the requested page.
+
+    Pairing on whole exchanges (rather than on rows) is what keeps `skip` /
+    `count` counting the unit the model reasons about, and stops a page
+    splitting a call from its result. An unpaired result at the window's
+    oldest edge is a boundary orphan and is dropped — the caller over-fetches
+    so the requested page is still whole."""
+    exchanges: list[tuple[SessionMessage, SessionMessage]] = []
+    pending: SessionMessage | None = None
+    for row in rows:
+        if row.role == "tool_call":
+            pending = row
+        elif row.role == "tool_result" and pending is not None:
+            exchanges.append((pending, row))
+            pending = None
+    if skip:
+        exchanges = exchanges[: max(0, len(exchanges) - skip)]
+    return exchanges[-limit:] if limit > 0 else []
+
+
+def make_recall_tool_history_tool(*, agent_id: str) -> LocalTool:
     """A local tool letting an agent re-read its OWN thread's past tool
     exchanges — detail the context reload dropped. `count` exchanges
     starting `skip` back from the most recent; paging with `skip` lets the
     model walk older exchanges without re-receiving ones it has already
-    seen. Scoped to `(session_id, agent_id)` — it can never read another
-    agent's or session's history.
+    seen.
 
-    Constructed per turn (the handler signature is fixed to `(ctx, args)`,
-    so the `pool` / `session_id` / `agent_id` it needs are closed over),
-    mirroring `make_send_file_tool`."""
+    Scoping is structural rather than checked: a `Read` with no owner
+    defaults to the caller's own thread, and the router derives that from
+    the task's active executor. There is no parameter through which this
+    could name another agent's thread or another session's."""
 
     async def _handler(ctx: TaskContext, args: dict[str, Any]) -> str:
         try:
@@ -252,11 +243,14 @@ def make_recall_tool_history_tool(
             skip = 0
         skip = max(0, skip)
 
-        async with pool.acquire() as conn:
-            exchanges = await queries.recent_tool_exchanges(
-                conn, session_id=session_id, agent_id=agent_id,
-                limit=count, skip=skip,
-            )
+        # Over-fetch by a small margin past `2*(skip+count)` rows so a stray
+        # row on the truncation boundary can't clip the requested page.
+        rows = await ctx.history.read(
+            roles=["tool_call", "tool_result"],
+            include_retired=True,
+            limit=2 * (skip + count) + 4,
+        )
+        exchanges = _pair_exchanges(rows, limit=count, skip=skip)
         if not exchanges:
             if skip:
                 return (

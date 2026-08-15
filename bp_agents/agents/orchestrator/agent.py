@@ -27,22 +27,28 @@ from bp_agents.agents.orchestrator.prompts import (
 )
 from bp_agents.common import (
     LocalToolset,
+    ThreadTurn,
+    append_rows,
+    close_turn,
     compose_system_prompt,
-    estimate_context_tokens,
+    context_tokens_of,
     make_current_time_tool,
     make_recall_tool_history_tool,
     make_send_file_tool,
-    persist_tool_exchanges,
+    maybe_fold,
+    open_turn,
+    redact_rows,
     run_llm_loop,
     text_output,
     user_config_note,
 )
-from bp_agents.common.payloads import MessagePayload
+from bp_agents.common.payloads import CronMessage, MessagePayload
+from bp_agents.common.thread import RETIRE_ITEM
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
-from bp_sdk import Agent, Message, TaskContext, ToolSpec
+from bp_sdk import Agent, Message, TaskContext, ToolCall, ToolSpec
 from bp_sdk.peers import PeerCallError
 
 if TYPE_CHECKING:
@@ -137,49 +143,55 @@ async def run_orchestrator_message(
     *,
     pool: asyncpg.Pool,
     settings: SuiteSettings,
+    record_user_turn: bool = True,
 ) -> AgentOutput:
     """Core of the `message` turn — testable without the SDK run loop.
 
-    Reload the orchestrator thread's incumbent history, build the system
-    prompt from user-config + rolling summary, run the tool-calling loop,
-    persist the assistant turn, and return the result with measured
-    `context_tokens`.
+    Open the orchestrator's own thread (draining any hand-over waiting for
+    it and recording the user's message), fold it if the context is
+    oversized, build the system prompt from user-config + rolling summary,
+    run the tool-calling loop, and close the turn.
+
+    `record_user_turn=False` is for the `end_delegation` follow-up, which has
+    already appended the forwarded prompt alongside its recap rows.
     """
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
-        rows = await queries.reload_incumbent(
-            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID
-        )
-        info = await queries.get_session_info(conn, ctx.session_id)
 
-    summary = info.history_summary if info else None
+    turn = await open_turn(
+        ctx, ORCHESTRATOR_AGENT_ID,
+        user_text=payload.prompt if record_user_turn else None,
+    )
     timezone = cfg.timezone if cfg else settings.default_timezone
     config_note = user_config_note(cfg) if cfg else ""
+    limit = (
+        cfg.max_context_token_limit if cfg
+        else settings.default_max_context_token_limit
+    )
+    turn = await maybe_fold(
+        ctx, turn,
+        system=compose_system_prompt(
+            GENERAL_INSTRUCTION, config_note=config_note, summary=turn.summary
+        ),
+        limit_tokens=limit,
+    )
 
     system_prompt = compose_system_prompt(
-        GENERAL_INSTRUCTION, config_note=config_note, summary=summary
+        GENERAL_INSTRUCTION, config_note=config_note, summary=turn.summary
     )
     messages: list[Message] = [Message(role="system", content=system_prompt)]
-    messages.extend(Message(role=r.role, content=r.message) for r in rows)
-    # The channel writes the user turn before dispatch, so it's normally
-    # the last reloaded row. Fall back to the payload when it isn't (the
-    # turn raced behind us, or this orchestrator was invoked directly) so
-    # the current input is never dropped.
-    if not rows or rows[-1].role != "user":
-        messages.append(Message(role="user", content=payload.prompt))
+    messages.extend(turn.context())
 
     # Measure the built context before the loop appends assistant/tool
-    # turns — this is the channel's summarization signal ([sessions.md] §3).
-    context_tokens = estimate_context_tokens(messages)
+    # turns — this is the frontend's reporting signal ([sessions.md] §3).
+    context_tokens = await context_tokens_of(system_prompt, turn)
 
     outbound: list[str] = []
     local_tools = LocalToolset(
         [
             make_current_time_tool(timezone),
             make_send_file_tool(outbound),
-            make_recall_tool_history_tool(
-                pool, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID
-            ),
+            make_recall_tool_history_tool(agent_id=ORCHESTRATOR_AGENT_ID),
         ]
     )
     destinations = _l1_destinations(ctx)
@@ -197,8 +209,17 @@ async def run_orchestrator_message(
         (tc for tc in resp.tool_calls if tc.name == _HAND_OFF_TOOL), None
     )
     if hand_off is not None and hand_off.args.get("agent_id") in destinations:
+        # Everything this agent wants recorded must be written BEFORE the
+        # delegate call: the router flips the task's active executor to the
+        # delegate before delivering it, so an append after this point is no
+        # longer ours to make.
+        marker_ids = await close_turn(
+            ctx, turn, messages=messages,
+            assistant_text=resp.text or "",
+            extra=[("assistant", f"Delegated to {hand_off.args['agent_id']}.")],
+        )
         try:
-            await _do_hand_off(ctx, pool, payload.prompt, hand_off.args)
+            await _do_hand_off(ctx, payload.prompt, hand_off.args)
         except PeerCallError as exc:
             # F1 ([delegation.md] §4): the delegate admit failed (rejected /
             # ack-timeout / disconnected), so the task was NOT reassigned and
@@ -210,8 +231,13 @@ async def run_orchestrator_message(
                 extra={"event": "hand_off_failed", "dest": hand_off.args.get("agent_id"),
                        "reason": str(exc)},
             )
+            # The reassignment never happened, so "Delegated to X." is now a
+            # lie sitting in this thread's context. Blank it: a redacted row
+            # keeps its id (floors and cursors stay valid) and drops out of
+            # every subsequent read.
+            await redact_rows(ctx, *marker_ids)
             return await _run_hand_off_fallback(
-                ctx, pool, messages, hand_off,
+                ctx, turn, messages, hand_off,
                 local_tools=local_tools, outbound=outbound,
                 context_tokens=context_tokens, settings=settings,
             )
@@ -219,76 +245,34 @@ async def run_orchestrator_message(
         # this (now non-active) agent's Result.
         return AgentOutput()
 
-    async with pool.acquire() as conn:
-        # Persist this turn's tool exchanges (recall-only; never reloaded)
-        # before the assistant row, so a later turn can re-read their full
-        # results via `recall_tool_history`.
-        await persist_tool_exchanges(
-            conn, session_id=ctx.session_id,
-            agent_id=ORCHESTRATOR_AGENT_ID, messages=messages,
-        )
-        await queries.append_history(
-            conn,
-            session_id=ctx.session_id,
-            agent_id=ORCHESTRATOR_AGENT_ID,
-            role="assistant",
-            message=resp.text,
-        )
-
+    await close_turn(ctx, turn, messages=messages, assistant_text=resp.text)
     return text_output(resp.text, files=outbound, context_tokens=context_tokens)
 
 
-async def _do_hand_off(
-    ctx: TaskContext, pool: asyncpg.Pool, user_prompt: str, args: dict
-) -> None:
-    """Phase 1 of delegation ([delegation.md]): write the `delegate_prompt`
-    seed row into the delegate's thread, then reassign the task via
-    `delegate(mode=on_delegation)`."""
-    dest = args["agent_id"]
-    instruction = args.get("instruction", "")
-    context = args.get("context") or ""
-    seed = f"## Delegated task\n{instruction}"
-    if context:
-        seed += f"\n\n## Context\n{context}"
-    seed += f"\n\n## User request\n{user_prompt}"
-    async with pool.acquire() as conn:
-        seed_id = await queries.append_history(
-            conn, session_id=ctx.session_id, agent_id=dest,
-            role="user", message=seed, incumbent=True,
-        )
-    try:
-        await ctx.peers.delegate(
-            dest,
-            LLMData(prompt=user_prompt, agent_instruction=instruction, context=context),
-            mode="on_delegation",
-        )
-    except PeerCallError:
-        # The reassignment never happened, so the seed row we just wrote is
-        # an orphan incumbent on a thread that won't run. Retire it before
-        # propagating so the delegate thread isn't polluted (F1 fallback
-        # routes the turn back through the orchestrator).
-        async with pool.acquire() as conn:
-            await queries.demote_incumbent_through(
-                conn, session_id=ctx.session_id, agent_id=dest, up_to_id=seed_id
-            )
-        raise
+async def _do_hand_off(ctx: TaskContext, user_prompt: str, args: dict) -> None:
+    """Phase 2 of delegation ([delegation.md]): reassign the task via
+    `delegate(mode=on_delegation)`.
 
-    # Reassignment succeeded. Close the orchestrator's open user turn with a
-    # hidden `assistant` marker that the work was DELEGATED — not done by the
-    # orchestrator. This keeps the reloaded thread alternating AND frames the
-    # specialist's later results (a hidden `user` recap on hand-back) as
-    # external input, so the model can't narrate them as its own work.
-    async with pool.acquire() as conn:
-        await queries.append_history(
-            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-            role="assistant", message=f"Delegated to {dest}.",
-            incumbent=True, hidden=True,
-        )
+    No seed row is written here any more, and there is nothing to roll back.
+    The orchestrator cannot write the delegate's thread at all — that is the
+    session store's whole point — so the hand-off carries `LLMData` and the
+    delegate composes its own opening row from it (`l1_common._seed_text`).
+    The old shape wrote the seed first and retired it on a failed
+    reassignment; the window that rollback existed for no longer exists."""
+    await ctx.peers.delegate(
+        args["agent_id"],
+        LLMData(
+            prompt=user_prompt,
+            agent_instruction=args.get("instruction", ""),
+            context=args.get("context") or "",
+        ),
+        mode="on_delegation",
+    )
 
 
 async def _run_hand_off_fallback(
     ctx: TaskContext,
-    pool: asyncpg.Pool,
+    turn: ThreadTurn,
     messages: list[Message],
     hand_off: ToolCall,
     *,
@@ -314,18 +298,12 @@ async def _run_hand_off_fallback(
         multimodal_preset=settings.default_preset_multimodal or None,
         text_only_presets=settings.text_only_presets,
     )
-    async with pool.acquire() as conn:
-        await persist_tool_exchanges(
-            conn, session_id=ctx.session_id,
-            agent_id=ORCHESTRATOR_AGENT_ID, messages=messages,
-        )
-        await queries.append_history(
-            conn,
-            session_id=ctx.session_id,
-            agent_id=ORCHESTRATOR_AGENT_ID,
-            role="assistant",
-            message=resp.text,
-        )
+    # The turn's opening id is deliberately stale — `close_turn` already ran
+    # once for the (now redacted) hand-off marker.
+    await close_turn(
+        ctx, turn, messages=messages, assistant_text=resp.text,
+        assert_thread=False,
+    )
     return text_output(resp.text, files=outbound, context_tokens=context_tokens)
 
 
@@ -378,33 +356,26 @@ async def run_orchestrator_end_delegation(
     # send_file itself.
     handback_files = payload.get("files") or []
     recap = f"[Returned from {delegate}] {summary} (reason: {reason})"
-    async with pool.acquire() as conn:
-        # The recap is `user`-role (hidden): the specialist's results return as
-        # EXTERNAL input, not the orchestrator's own work — so the model can't
-        # later claim them as such. A hidden `assistant` ack then closes this
-        # turn so the reloaded thread alternates (the pre-delegation user turn
-        # was already closed by the hand-off marker).
-        await queries.append_history(
-            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-            role="user", message=recap, incumbent=True, hidden=True,
-        )
-        await queries.append_history(
-            conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-            role="assistant", message="Acknowledged.", incumbent=True, hidden=True,
-        )
-        # Retire the whole delegate episode (incl. the seed row).
-        if ctx.delegating_agent_id:
-            await queries.demote_thread(
-                conn, session_id=ctx.session_id, agent_id=ctx.delegating_agent_id
-            )
+    # The recap is `user`-role (hidden): the specialist's results return as
+    # EXTERNAL input, not the orchestrator's own work — so the model can't
+    # later claim them as such. A hidden `assistant` ack then closes this turn
+    # so the reloaded thread alternates (the pre-delegation user turn was
+    # already closed by the hand-off marker). The forwarded prompt rides the
+    # same batch, which is why the follow-up below doesn't record it again.
+    rows = [("user", recap), ("assistant", "Acknowledged.")]
     if user_prompt:
-        async with pool.acquire() as conn:
-            await queries.append_history(
-                conn, session_id=ctx.session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                role="user", message=user_prompt,
-            )
+        rows.append(("user", user_prompt))
+    await append_rows(ctx, rows)
+    # Retiring the delegate's episode is the DELEGATE's to do — the store has
+    # no way for this agent to move another thread's floor. It arrives there
+    # as a `retire` hand-over the next time that agent runs; a delegate that
+    # never runs again simply keeps a window nobody reads.
+    if ctx.delegating_agent_id:
+        await _retire_delegate_thread(ctx, ctx.delegating_agent_id)
+    if user_prompt:
         out = await run_orchestrator_message(
-            ctx, MessagePayload(prompt=user_prompt), pool=pool, settings=settings
+            ctx, MessagePayload(prompt=user_prompt), pool=pool,
+            settings=settings, record_user_turn=False,
         )
         # Merge the handed-back files with whatever the orchestrator produced
         # (de-duped, order-stable) so the specialist's attachment still reaches
@@ -417,6 +388,26 @@ async def run_orchestrator_end_delegation(
     # No follow-up prompt — still deliver any handed-back files. text_output's
     # safeguard supplies a one-line accompaniment when content is empty.
     return text_output("", files=list(handback_files))
+
+
+async def _retire_delegate_thread(ctx: TaskContext, delegate: str) -> None:
+    """Tell a delegate its episode is over.
+
+    A hand-over, not a write: only the delegate can move its own floor. The
+    cutoff is that thread's last id as of now, read the same way anything
+    else reads another agent's thread — with `owner` as a parameter, which
+    exists for reads and deliberately does not for writes."""
+    batch = ctx.history.batch()
+    stat_handle = batch.stat(owner=delegate)
+    await batch.send()
+    stat = stat_handle.stat
+    if stat is None or not stat.last_message_id:
+        return
+    batch = ctx.history.batch()
+    batch.hand_over(
+        delegate, RETIRE_ITEM, {"through_id": stat.last_message_id}
+    )
+    await batch.send()
 
 
 @agent.handler(
@@ -438,16 +429,31 @@ _REPORT_DECISION = (
 )
 
 
+def _effective_report(policy: str, llm_report: bool) -> bool:
+    """The job's policy wins; `case_by_case` defers to the model."""
+    if policy == "always":
+        return True
+    if policy == "never":
+        return False
+    return llm_report
+
+
 async def run_orchestrator_cron_message(
     ctx: TaskContext,
-    payload: MessagePayload,
+    payload: CronMessage,
     *,
     pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
     """Scheduled run ([cron.md] §2): a FRESH context (cron instruction +
     user-config, no session history), full toolset, never delegates.
-    Returns the message + a `{report, reason}` decision in metadata."""
+
+    Records its own result. The scheduler used to append the assistant row
+    after deciding whether to report, but it cannot write a thread it does
+    not own — and it never should have needed to: this agent is the task's
+    active executor, it has the job's `report` policy in the payload, so it
+    decides and records in one place. Returns `{report, reason}` in metadata
+    so the scheduler still knows whether to deliver a live notification."""
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
     timezone = cfg.timezone if cfg else settings.default_timezone
@@ -470,8 +476,7 @@ async def run_orchestrator_cron_message(
         text_only_presets=settings.text_only_presets,
     )
 
-    # Decide whether to report (the channel's apply step uses this for
-    # case_by_case jobs).
+    # Decide whether to report; the scheduler uses this to decide DELIVERY.
     report, reason = True, ""
     try:
         decision = await ctx.llm.generate(
@@ -487,7 +492,14 @@ async def run_orchestrator_cron_message(
     except (json.JSONDecodeError, ValueError, KeyError, AttributeError):
         logger.debug("cron_report_decision_parse_failed", exc_info=True)
 
-    return text_output(resp.text, files=outbound, report=report, reason=reason)
+    reported = _effective_report(payload.report, report)
+    if reported and resp.text:
+        # The conversation's canonical record of the run, written here so it
+        # lands whether or not any channel can deliver a live notification.
+        await append_rows(ctx, [("assistant", resp.text)], hidden=False)
+    return text_output(
+        resp.text, files=outbound, report=reported, reason=reason
+    )
 
 
 @agent.handler(
@@ -519,7 +531,7 @@ async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
     description="A scheduled run on the user's behalf — fresh context, never "
     "delegates; returns the message plus a {report, reason} decision.",
 )
-async def cron_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
+async def cron_message(ctx: TaskContext, payload: CronMessage) -> AgentOutput:
     assert _pool is not None
     return await run_orchestrator_cron_message(
         ctx, payload, pool=_pool, settings=_settings

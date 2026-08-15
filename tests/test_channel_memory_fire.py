@@ -11,6 +11,7 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
 
 
 class _FakeTelegram:
@@ -46,7 +47,7 @@ def test_channel_fires_memory_add(suite_db_url: str) -> None:
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY"
                 )
                 await queries.upsert_platform_mapping(
@@ -55,15 +56,13 @@ def test_channel_fires_memory_add(suite_db_url: str) -> None:
                 await queries.create_user_config(
                     conn, user_id="usr_a", default_session_id="ses_1"
                 )
-                await queries.create_session_info(
-                    conn, session_id="ses_1", user_id="usr_a",
-                    channel="chatbot_telegram",
-                )
 
             disp = _Dispatcher()
+            store = FakeStore()
             gw = ChatbotGateway(
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
                 fire_memory=True,
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "remember I like cats")
             # Drain the detached memory.add task.

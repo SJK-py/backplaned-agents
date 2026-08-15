@@ -5,8 +5,9 @@ its first argument; callers own transaction scope. Row results are
 parsed into the `models` types. Mutable-column allowlists guard the
 few dynamic-SQL paths so column names can never come from caller input.
 
-These cover the core read/write paths the channel + worker agents need;
-cron tables (Phase 4) and their queries land later.
+What is left here after the session store moved conversation into the
+router: per-user config, cron, chat platform mappings, and the GC reclaim
+paths for each.
 """
 
 from __future__ import annotations
@@ -17,8 +18,6 @@ from typing import TYPE_CHECKING, Any
 from bp_agents.db.models import (
     CronJobRow,
     PlatformMappingRow,
-    SessionHistoryRow,
-    SessionInfoRow,
     UserConfigRow,
 )
 
@@ -27,30 +26,28 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# session_info  (channel-owned — session.management)
+# GC / purge reclaim
+#
+# The conversation and its session descriptors live in the ROUTER's session
+# store now, so a purge there takes them with it. What is left here is the
+# suite's own: cron and chat mappings.
 # ---------------------------------------------------------------------------
-
-
-async def get_session_info(
-    conn: asyncpg.Connection, session_id: str
-) -> SessionInfoRow | None:
-    row = await conn.fetchrow(
-        "SELECT * FROM session_info WHERE session_id = $1", session_id
-    )
-    return SessionInfoRow.model_validate(dict(row)) if row else None
 
 
 async def purge_session_suite_data(
     conn: asyncpg.Connection, session_id: str
 ) -> dict[str, int]:
     """Reclaim a session's suite-side rows on a webapp 'remove' — the router
-    purge ([webapp.md] §4) hard-deletes its own session/tasks/files but
-    doesn't reach `bp_suite`. Deletes `session_history`, `cron_jobs`, and
-    `session_info` for `session_id`. Caller MUST have verified ownership
-    (session_ids are router-unique, but this is keyed only by session_id).
-    Run inside a transaction for atomicity. Returns per-table delete counts."""
+    purge ([webapp.md] §4) hard-deletes its own session/tasks/files (which
+    now includes the conversation itself) but doesn't reach `bp_suite`.
+
+    `cron_jobs` is all that is left keyed by session: history and session
+    descriptors moved into the router's session store. Caller MUST have
+    verified ownership (session_ids are router-unique, but this is keyed only
+    by session_id). Run inside a transaction for atomicity. Returns per-table
+    delete counts."""
     counts: dict[str, int] = {}
-    for table in ("session_history", "cron_jobs", "session_info"):
+    for table in ("cron_jobs",):
         status = await conn.execute(
             f"DELETE FROM {table} WHERE session_id = $1", session_id  # noqa: S608
         )
@@ -59,48 +56,19 @@ async def purge_session_suite_data(
     return counts
 
 
-async def list_session_info_for_user(
-    conn: asyncpg.Connection, user_id: str
-) -> list[SessionInfoRow]:
-    """Every session_info row this user owns, newest first. Powers the
-    webapp session list's channel badge + delegation status ([webapp.md]
-    §4); the router's `/v1/sessions` remains the authoritative open/closed
-    list.
-
-    Capped at the 500 most-recent rows: this is webapp display metadata, not
-    the authoritative list, and an unbounded read+sort on every render is a
-    per-heavy-user cost. The `(user_id, created_at DESC)` index serves the cap
-    as a cheap top-N (no sort). Users below the cap see no change."""
-    rows = await conn.fetch(
-        "SELECT * FROM session_info WHERE user_id = $1 "
-        "ORDER BY created_at DESC LIMIT 500",
-        user_id,
-    )
-    return [SessionInfoRow.model_validate(dict(r)) for r in rows]
-
-
 async def purge_user_suite_data(
     conn: asyncpg.Connection, user_id: str
 ) -> dict[str, int]:
     """Erase ALL of a user's suite-side rows on a permanent user purge — the
     router hard-deletes its own store + scrubs PII, but doesn't reach
-    `bp_suite`. Deletes (FK-free tables, so order is only about resolving
-    `session_history` by the user's sessions before `session_info` goes):
-    `session_history`, `cron_executions`, `cron_jobs`,
-    `suite_platform_mappings`, `session_info`, `user_config`. Run inside a
-    transaction. Returns per-table delete counts. Caller MUST have confirmed
-    (via the router) that the user is purged."""
+    `bp_suite`. Deletes `cron_executions`, `cron_jobs`,
+    `suite_platform_mappings`, `user_config`. Run inside a transaction.
+    Returns per-table delete counts. Caller MUST have confirmed (via the
+    router) that the user is purged."""
     counts: dict[str, int] = {}
-    # session_history has no user_id — resolve via the user's sessions first.
-    status = await conn.execute(
-        "DELETE FROM session_history WHERE session_id IN "
-        "(SELECT session_id FROM session_info WHERE user_id = $1)",
-        user_id,
-    )
-    counts["session_history"] = int(status.rsplit(" ", 1)[-1]) if status else 0
     for table in (
         "cron_executions", "cron_jobs", "suite_platform_mappings",
-        "session_info", "user_config",
+        "user_config",
     ):
         status = await conn.execute(
             f"DELETE FROM {table} WHERE user_id = $1", user_id  # noqa: S608
@@ -125,252 +93,22 @@ async def list_user_config_ids(
 async def list_old_session_ids(
     conn: asyncpg.Connection, *, before: datetime, limit: int
 ) -> list[str]:
-    """Session ids whose `session_info` was created before `before`, oldest
-    first. A cheap pre-filter for the suite session-GC reconcile: a session
-    closed past the retention window must have been created before it, so this
-    bounds the set before the router existence check decides which to reap.
-    Global (all users) — the GC is a deployment-wide maintenance sweep."""
+    """Session ids the suite still holds rows for, created before `before`,
+    oldest first.
+
+    A cheap pre-filter for the suite session-GC reconcile: a session closed
+    past the retention window must have been created before it, so this bounds
+    the set before the router existence check decides which to reap. Now keyed
+    on `cron_jobs` — the only session-scoped suite table left once the
+    conversation moved into the router's session store. Global (all users):
+    the GC is a deployment-wide maintenance sweep."""
     rows = await conn.fetch(
-        "SELECT session_id FROM session_info WHERE created_at < $1 "
-        "ORDER BY created_at ASC LIMIT $2",
+        "SELECT DISTINCT session_id FROM cron_jobs WHERE created_at < $1 "
+        "ORDER BY session_id LIMIT $2",
         before,
         limit,
     )
     return [r["session_id"] for r in rows]
-
-
-async def create_session_info(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    user_id: str,
-    channel: str,
-    chat_id: str | None = None,
-) -> SessionInfoRow:
-    """Insert a session_info row. Idempotent — an existing row for the
-    session is returned unchanged (the channel may re-resolve a session
-    it already tracks)."""
-    row = await conn.fetchrow(
-        """
-        INSERT INTO session_info (session_id, user_id, channel, chat_id)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (session_id) DO NOTHING
-        RETURNING *
-        """,
-        session_id,
-        user_id,
-        channel,
-        chat_id,
-    )
-    if row is None:
-        existing = await get_session_info(conn, session_id)
-        assert existing is not None
-        return existing
-    return SessionInfoRow.model_validate(dict(row))
-
-
-_SESSION_INFO_MUTABLE = frozenset(
-    # `channel=None` releases a Telegram-owned session on chatbot close so the
-    # webapp can reopen/remove it ([webapp.md] §4). `session_name` is the
-    # auto-generated / user-renamed conversation title.
-    {"channel", "chat_id", "delegated_to", "history_summary", "delegate_summary",
-     "session_name"}
-)
-
-
-async def update_session_info(
-    conn: asyncpg.Connection, session_id: str, **fields: Any
-) -> None:
-    """Patch channel-owned session_info columns (also bumps
-    `updated_at`). Only `_SESSION_INFO_MUTABLE` columns are accepted —
-    the column names are a fixed allowlist, never caller input, so the
-    interpolated SET clause carries no injection surface. `None` values
-    write SQL NULL (e.g. `delegated_to=None` clears the delegate on
-    hand-back)."""
-    cols = {k: v for k, v in fields.items() if k in _SESSION_INFO_MUTABLE}
-    unknown = set(fields) - _SESSION_INFO_MUTABLE
-    if unknown:
-        raise ValueError(f"update_session_info: non-mutable columns {sorted(unknown)}")
-    if not cols:
-        return
-    set_clause = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
-    await conn.execute(
-        f"UPDATE session_info SET {set_clause}, updated_at = now() "
-        "WHERE session_id = $1",
-        session_id,
-        *cols.values(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# session_history  (channel writes user rows + summaries; agents write
-# their own assistant/tool rows — all within the per-session queue)
-# ---------------------------------------------------------------------------
-
-
-async def append_history(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    agent_id: str,
-    role: str,
-    message: str,
-    incumbent: bool = True,
-    hidden: bool = False,
-) -> int:
-    """Append one conversation row; returns its `id`."""
-    return await conn.fetchval(
-        """
-        INSERT INTO session_history
-            (session_id, agent_id, role, message, incumbent, hidden)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id
-        """,
-        session_id,
-        agent_id,
-        role,
-        message,
-        incumbent,
-        hidden,
-    )
-
-
-async def reload_incumbent(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    agent_id: str,
-    up_to_id: int | None = None,
-) -> list[SessionHistoryRow]:
-    """The reload query ([sessions.md] §2.1): incumbent `user`/`assistant`
-    rows for one agent's thread, in chronological order. `tool_call` /
-    `tool_result` rows are never reloaded — the live loop holds the tool
-    sequence in memory; persisted tool rows exist for render + audit.
-
-    `up_to_id` bounds the read to rows with `id <= up_to_id` — the
-    summarizer reads the cutoff window the channel asks it to fold."""
-    args: list[Any] = [session_id, agent_id]
-    bound = ""
-    if up_to_id is not None:
-        args.append(up_to_id)
-        bound = "AND id <= $3"
-    rows = await conn.fetch(
-        f"""
-        SELECT * FROM session_history
-        WHERE session_id = $1 AND agent_id = $2
-          AND incumbent = true
-          AND role IN ('user', 'assistant')
-          {bound}
-        ORDER BY created_at ASC, id ASC
-        """,
-        *args,
-    )
-    return [SessionHistoryRow.model_validate(dict(r)) for r in rows]
-
-
-async def recent_tool_exchanges(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    agent_id: str,
-    limit: int,
-    skip: int = 0,
-) -> list[tuple[SessionHistoryRow, SessionHistoryRow]]:
-    """A page of past `tool_call`/`tool_result` exchanges for ONE agent's
-    thread — the recall tool's read side ([agent-tool-history-recall.md]).
-
-    Returns up to `limit` (call, result) pairs, **newest-last**, starting
-    `skip` exchanges back from the most recent. Scoped to
-    `(session_id, agent_id)` — never another agent or session. Tool rows
-    are write-once and never demoted, so `incumbent` is ignored.
-
-    Pairing is done on whole exchanges (a `tool_call` row followed by its
-    `tool_result` row) so `skip`/`limit` count the unit the model reasons
-    about and a page never splits a call from its result. We over-fetch
-    the tail by id (a small margin past `2*(skip+limit)` rows) so the
-    requested page is always fully covered even if a stray row sits on the
-    truncation boundary."""
-    if limit <= 0:
-        return []
-    skip = max(0, skip)
-    fetch_rows = 2 * (skip + limit) + 4
-    rows = await conn.fetch(
-        """
-        SELECT * FROM (
-            SELECT * FROM session_history
-            WHERE session_id = $1 AND agent_id = $2
-              AND role IN ('tool_call', 'tool_result')
-            ORDER BY id DESC
-            LIMIT $3
-        ) s
-        ORDER BY id ASC
-        """,
-        session_id,
-        agent_id,
-        fetch_rows,
-    )
-    parsed = [SessionHistoryRow.model_validate(dict(r)) for r in rows]
-    # Greedy pair: a `tool_call` opens an exchange, the next `tool_result`
-    # closes it. A boundary orphan (an unpaired result at the window's
-    # oldest edge) is dropped — the over-fetch margin keeps the page whole.
-    exchanges: list[tuple[SessionHistoryRow, SessionHistoryRow]] = []
-    pending: SessionHistoryRow | None = None
-    for row in parsed:
-        if row.role == "tool_call":
-            pending = row
-        elif row.role == "tool_result" and pending is not None:
-            exchanges.append((pending, row))
-            pending = None
-    # `exchanges` is ascending (newest last). Drop the `skip` newest, then
-    # take the newest `limit` of what remains.
-    if skip:
-        exchanges = exchanges[: max(0, len(exchanges) - skip)]
-    return exchanges[-limit:]
-
-
-async def demote_incumbent_through(
-    conn: asyncpg.Connection,
-    *,
-    session_id: str,
-    agent_id: str,
-    up_to_id: int,
-) -> int:
-    """Flip `incumbent = false` on a thread's rows with `id <= up_to_id`
-    — the summarization apply step ([sessions.md] §3.1). Returns the
-    number of rows demoted."""
-    status = await conn.execute(
-        """
-        UPDATE session_history SET incumbent = false
-        WHERE session_id = $1 AND agent_id = $2
-          AND id <= $3 AND incumbent = true
-        """,
-        session_id,
-        agent_id,
-        up_to_id,
-    )
-    # asyncpg returns e.g. "UPDATE 5"
-    return int(status.rsplit(" ", 1)[-1]) if status else 0
-
-
-async def demote_thread(
-    conn: asyncpg.Connection, *, session_id: str, agent_id: str
-) -> int:
-    """Flip `incumbent = false` on ALL of a thread's rows — used when a
-    delegation episode ends ([delegation.md] Phase 3): the orchestrator
-    retires the delegate's whole thread (incl. the `delegate_prompt`
-    seed) on hand-back."""
-    status = await conn.execute(
-        "UPDATE session_history SET incumbent = false "
-        "WHERE session_id = $1 AND agent_id = $2 AND incumbent = true",
-        session_id,
-        agent_id,
-    )
-    return int(status.rsplit(" ", 1)[-1]) if status else 0
-
-
-# ---------------------------------------------------------------------------
-# user_config
-# ---------------------------------------------------------------------------
 
 
 async def get_user_config(

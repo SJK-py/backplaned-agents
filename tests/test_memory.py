@@ -186,7 +186,7 @@ def test_memory_gc_sweep(suite_db_url: str, tmp_path) -> None:
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_history, session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY"
                 )
                 # One user has a store; the other never materialised one.

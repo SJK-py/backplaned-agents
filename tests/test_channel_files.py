@@ -16,6 +16,7 @@ from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
+from tests.fake_store import FakeChannelStore, FakeStore
 
 
 class _FakeTelegram:
@@ -77,7 +78,7 @@ class _Dispatcher:
 async def _seed(pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, session_info, user_config, "
+            "TRUNCATE TABLE user_config, "
             "suite_platform_mappings RESTART IDENTITY"
         )
         await queries.upsert_platform_mapping(
@@ -85,10 +86,6 @@ async def _seed(pool) -> None:
         )
         await queries.create_user_config(
             conn, user_id="usr_a", default_session_id="ses_1"
-        )
-        await queries.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="chatbot_telegram",
-            chat_id="tg1",
         )
 
 
@@ -119,8 +116,10 @@ def test_inbound_file_saved_and_recorded(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram(downloads={"fid1": b"PDF BYTES"})
             creds = _FakeCreds()
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=_Dispatcher(), pool=pool, telegram=tg, credentials=creds
+                dispatcher=_Dispatcher(), pool=pool, telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "look at this", [("fid1", "report.pdf")])
 
@@ -129,14 +128,11 @@ def test_inbound_file_saved_and_recorded(suite_db_url: str) -> None:
             # MIME resolved from the .pdf extension (bytes don't carry the
             # %PDF magic here) and forwarded to the store.
             assert creds.mime_types == ["application/pdf"]
-            # History has the (T,T) file row + the user text turn.
-            async with pool.acquire() as conn:
-                rows = await queries.reload_incumbent(
-                    conn, session_id="ses_1", agent_id="orchestrator"
-                )
-            msgs = [r.message for r in rows]
-            assert "user-attached file saved as report.pdf" in msgs
-            assert "look at this" in msgs
+            # The saved NAME reaches the agent in the turn's prompt; the
+            # channel records nothing itself.
+            prompt = gw._core._dispatcher.prompts[-1]
+            assert "report.pdf" in prompt and "look at this" in prompt
+            assert store.messages == []
         finally:
             await pool.close()
 
@@ -151,8 +147,10 @@ def test_outbound_file_relayed(suite_db_url: str) -> None:
             tg = _FakeTelegram()
             creds = _FakeCreds(resolves={"chart.png": "file_9"}, blobs={"file_9": b"PNG"})
             disp = _Dispatcher(files=["chart.png"])
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=disp, pool=pool, telegram=tg, credentials=creds
+                dispatcher=disp, pool=pool, telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "make me a chart")
             # Text reply + the produced file sent as a document.
@@ -172,8 +170,10 @@ def test_file_only_message_dispatches(suite_db_url: str) -> None:
             tg = _FakeTelegram(downloads={"fid1": b"DATA"})
             creds = _FakeCreds()
             disp = _Dispatcher()
+            store = FakeStore()
             gw = ChatbotGateway(
-                dispatcher=disp, pool=pool, telegram=tg, credentials=creds
+                dispatcher=disp, pool=pool, telegram=tg, credentials=creds,
+                store=FakeChannelStore(store),
             )
             await gw.handle_update("tg1", "", [("fid1", "photo.jpg")])
             # Dispatched with a synthetic prompt; the file row is in history.

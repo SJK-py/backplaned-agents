@@ -1,29 +1,33 @@
 """history_summarizer agent — rolling conversation summarization.
 
-Read-only over `session_history`. Builds a transcript of the cutoff
-window, folds in the previous summary, and returns an updated summary.
-The channel applies it.
+Read-only over the router's session store: it reads the target thread (and
+that thread's current rolling summary), folds them into one updated summary,
+and returns the text. **It never applies it.** Only the thread's owner can
+move its own floor, and a summary that isn't applied together with the floor
+is either double-counted or lost — so the caller applies both in one batch:
+
+  * the owner itself, at the start of an oversized turn
+    (`bp_agents.common.thread.maybe_fold`);
+  * the channel, which uses the text as a delegation seed or hand-back recap
+    and applies nothing at all.
+
+Reading another agent's thread is a first-class read (`owner_agent_id` is a
+parameter on `Read` and `GetState`); writing one is unrepresentable. That
+asymmetry is exactly what lets this agent be useful without being trusted.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from bp_agents import slots
 from bp_agents.common import text_output
-from bp_agents.db import queries
-from bp_agents.db.connection import open_pool
-from bp_agents.settings import SuiteSettings, load_suite_settings
+from bp_agents.common.thread import CONTEXT_ROLES, SUMMARY_KEY
+from bp_protocol.frames import SessionMessage
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, Message, TaskContext
-
-if TYPE_CHECKING:
-    import asyncpg
-
-    from bp_agents.db.models import SessionHistoryRow
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +43,12 @@ than repeating it. Output only the summary text.\
 """
 
 
-class SummarizeIncumbent(BaseModel):
+class SummarizeThread(BaseModel):
     agent_id: str
-    up_to: int
-    """Cutoff `session_history.id`; rows with `id <= up_to` are folded."""
-    previous_summary: str | None = None
-
-
-class SummarizeAll(BaseModel):
-    agent_id: str
-    summarize_after: int | None = None
-    """When set, only rows with `id > summarize_after` are summarized."""
+    """Whose thread to summarize — the orchestrator's, or a delegate's."""
+    up_to: int | None = None
+    """Fold only messages with `id <= up_to`. `None` summarizes the whole
+    active window, which is what a delegation switch wants."""
 
 
 class NameSession(BaseModel):
@@ -87,41 +86,36 @@ agent = Agent(
     ),
 )
 
-_settings: SuiteSettings = load_suite_settings()
-_pool: asyncpg.Pool | None = None
+
+def _transcript(rows: list[SessionMessage]) -> str:
+    return "\n".join(f"{r.role}: {r.content}" for r in rows)
 
 
-@agent.on_startup
-async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — startup-wired handle
-    _pool = await open_pool(_settings)
-
-
-@agent.on_shutdown
-async def _shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
-
-
-def _transcript(rows: list[SessionHistoryRow]) -> str:
-    return "\n".join(f"{r.role}: {r.message}" for r in rows)
-
-
-async def _summarize(
-    ctx: TaskContext,
-    *,
-    rows: list[SessionHistoryRow],
-    previous_summary: str | None,
-    pool: asyncpg.Pool,
-    settings: SuiteSettings,
+async def run_summarize_thread(
+    ctx: TaskContext, payload: SummarizeThread
 ) -> AgentOutput:
+    """Read `agent_id`'s thread and its rolling summary, return the fold."""
+    batch = ctx.history.batch()
+    state = batch.get_state(SUMMARY_KEY, owner=payload.agent_id)
+    read = batch.read(
+        owner=payload.agent_id,
+        roles=CONTEXT_ROLES,
+        # `before_id` is exclusive, and `up_to` is the last id to fold.
+        before_id=payload.up_to + 1 if payload.up_to is not None else None,
+    )
+    await batch.send()
+
+    previous_entry = state.state.get(SUMMARY_KEY)
+    previous = previous_entry.value if previous_entry else None
+    rows = read.messages
     if not rows:
-        # Nothing to fold — preserve the existing summary unchanged.
-        return text_output(previous_summary or "")
+        # Nothing to fold — preserve the existing summary unchanged rather
+        # than returning empty, which the caller would store as "no summary".
+        return text_output(previous or "")
 
     user_parts: list[str] = []
-    if previous_summary:
-        user_parts.append(f"## Previous summary\n{previous_summary}")
+    if previous:
+        user_parts.append(f"## Previous summary\n{previous}")
     user_parts.append(f"## Conversation\n{_transcript(rows)}")
     messages = [
         Message(role="system", content=_SYSTEM),
@@ -131,49 +125,7 @@ async def _summarize(
     return text_output(resp.text)
 
 
-async def run_summarize_incumbent(
-    ctx: TaskContext,
-    payload: SummarizeIncumbent,
-    *,
-    pool: asyncpg.Pool,
-    settings: SuiteSettings,
-) -> AgentOutput:
-    async with pool.acquire() as conn:
-        rows = await queries.reload_incumbent(
-            conn, session_id=ctx.session_id, agent_id=payload.agent_id,
-            up_to_id=payload.up_to,
-        )
-    return await _summarize(
-        ctx, rows=rows, previous_summary=payload.previous_summary,
-        pool=pool, settings=settings,
-    )
-
-
-async def run_summarize_all(
-    ctx: TaskContext,
-    payload: SummarizeAll,
-    *,
-    pool: asyncpg.Pool,
-    settings: SuiteSettings,
-) -> AgentOutput:
-    async with pool.acquire() as conn:
-        rows = await queries.reload_incumbent(
-            conn, session_id=ctx.session_id, agent_id=payload.agent_id
-        )
-    if payload.summarize_after is not None:
-        rows = [r for r in rows if r.id > payload.summarize_after]
-    return await _summarize(
-        ctx, rows=rows, previous_summary=None, pool=pool, settings=settings
-    )
-
-
-async def run_name_session(
-    ctx: TaskContext,
-    payload: NameSession,
-    *,
-    pool: asyncpg.Pool,
-    settings: SuiteSettings,
-) -> AgentOutput:
+async def run_name_session(ctx: TaskContext, payload: NameSession) -> AgentOutput:
     messages = [
         Message(role="system", content=_NAME_SYSTEM),
         Message(role="user", content=payload.user_prompt),
@@ -188,32 +140,19 @@ async def run_name_session(
     "message (channel-driven, lite LLM).",
 )
 async def session_name(ctx: TaskContext, payload: NameSession) -> AgentOutput:
-    assert _pool is not None
-    return await run_name_session(ctx, payload, pool=_pool, settings=_settings)
+    return await run_name_session(ctx, payload)
 
 
 @agent.handler(
-    mode="summarize_incumbent", tool=False,
-    description="Fold the oldest part of a thread's incumbent history into "
-    "the rolling summary and demote those turns (channel-driven).",
+    mode="summarize_thread", tool=False,
+    description="Fold a thread (optionally only up to a cutoff id) and its "
+    "rolling summary into one updated summary. Returns the text; the caller "
+    "applies it.",
 )
-async def summarize_incumbent(
-    ctx: TaskContext, payload: SummarizeIncumbent
+async def summarize_thread(
+    ctx: TaskContext, payload: SummarizeThread
 ) -> AgentOutput:
-    assert _pool is not None
-    return await run_summarize_incumbent(
-        ctx, payload, pool=_pool, settings=_settings
-    )
-
-
-@agent.handler(
-    mode="summarize_all", tool=False,
-    description="Produce a fresh full-thread summary from all incumbent "
-    "turns (channel-driven).",
-)
-async def summarize_all(ctx: TaskContext, payload: SummarizeAll) -> AgentOutput:
-    assert _pool is not None
-    return await run_summarize_all(ctx, payload, pool=_pool, settings=_settings)
+    return await run_summarize_thread(ctx, payload)
 
 
 if __name__ == "__main__":

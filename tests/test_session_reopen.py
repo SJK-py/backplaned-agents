@@ -24,6 +24,7 @@ import pytest
 
 from bp_router.api import sessions as sessions_mod
 from bp_router.db import queries
+from tests.fake_store import UpstreamSessionMixin
 
 # ---------------------------------------------------------------------------
 # Router — query + endpoint contract (source-inspection)
@@ -111,20 +112,20 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
+class _Upstream(UpstreamSessionMixin):
     def __init__(self, *, sub: str = "usr_a", sessions: list[dict] | None = None) -> None:
         self._sub = sub
-        self._sessions = sessions or []
         self.reopened: list[str] = []
+        if sessions is not None:
+            self.sessions.clear()
+            for row in sessions:
+                self.sessions[row["session_id"]] = {"metadata": {}, **row}
 
     async def login(self, *, email: str, password: str) -> dict:
         return {
             "access_token": _fake_jwt(self._sub), "refresh_token": "r",
             "expires_at": "2999-01-01T00:00:00+00:00", "level": "tier1",
         }
-
-    async def list_sessions(self, *, access_token):
-        return self._sessions
 
     async def reopen_session(self, *, access_token, session_id):
         self.reopened.append(session_id)
@@ -149,15 +150,10 @@ def _build_app(*, upstream, pool):
 
 
 async def _seed(pool) -> None:
-    from bp_agents.db import queries as suite_q  # noqa: PLC0415
-
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, cron_jobs, session_info, user_config, "
+            "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
-        )
-        await suite_q.create_session_info(
-            conn, session_id="ses_1", user_id="usr_a", channel="webapp",
         )
 
 

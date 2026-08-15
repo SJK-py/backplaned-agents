@@ -38,11 +38,44 @@ from bp_agents.agents.webapp.pages._common import (
 )
 from bp_agents.agents.webapp.pages._common import owned_session as _owned_session
 from bp_agents.agents.webapp.turns import TurnRunner, register_turn
-from bp_agents.channel import ORCHESTRATOR_AGENT_ID, agent_tag
-from bp_agents.db import queries
+from bp_agents.channel import DELEGATED_TO, agent_tag
+from bp_agents.common.thread import CONTEXT_ROLES
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _transcript(request: Request, session_id: str) -> list[dict[str, Any]]:
+    """The whole conversation, across every thread it touched.
+
+    A conversation is not one thread: a hand-off moves it to a specialist and
+    back, and each agent owns its own. Message ids are session-wide and
+    monotonic, so merging the threads by id reconstructs the real order
+    without the suite having to track it. Retired messages are included —
+    the floor governs what an AGENT still carries in context, not what
+    happened — and hidden ones are not, which is what keeps seeds, recaps and
+    hand-off markers out of the user's view."""
+    upstream = request.app.state.upstream
+    access = request.session["access_token"]
+    threads = await upstream.session_threads(
+        access_token=access, session_id=session_id
+    )
+    rows: list[tuple[int, dict[str, Any]]] = []
+    for th in threads:
+        owner = th["owner_agent_id"]
+        tag = agent_tag(owner)
+        messages = await upstream.session_messages(
+            access_token=access, session_id=session_id, owner=owner,
+            roles=CONTEXT_ROLES,
+        )
+        for m in messages:
+            rows.append((m["id"], {
+                "role": m["role"],
+                "content": m["content"],
+                "tag": tag if m["role"] == "assistant" else "",
+            }))
+    rows.sort(key=lambda pair: pair[0])
+    return [row for _id, row in rows]
 
 
 @router.get("/chat/{session_id}", response_class=HTMLResponse)
@@ -50,23 +83,12 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
     info = await _owned_session(request, session_id)
     if info is None:
         raise HTTPException(status_code=404)
-    dest = info.delegated_to or ORCHESTRATOR_AGENT_ID
-
-    history: list[dict[str, Any]] = []
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        rows = await queries.reload_incumbent(
-            conn, session_id=session_id, agent_id=dest
-        )
-    tag = agent_tag(dest)
-    for r in rows:
-        if r.hidden:  # delegate seed / fold-back recap — internal, not shown
-            continue
-        history.append({
-            "role": r.role,
-            "content": r.message,
-            "tag": tag if r.role == "assistant" else "",
-        })
+    state = await request.app.state.upstream.session_state(
+        access_token=request.session["access_token"], session_id=session_id,
+        keys=[DELEGATED_TO],
+    )
+    delegated_to = state.get(DELEGATED_TO) or None
+    history = await _transcript(request, session_id)
 
     core = request.app.state.core
     delegatable = sorted(core.delegatable_agents) if core is not None else []
@@ -83,7 +105,7 @@ async def chat_view(session_id: str, request: Request) -> HTMLResponse:
             "history": history,
             "in_flight": in_flight,
             "in_flight_turn_id": runner.turn_id if in_flight else None,
-            "delegated_to": info.delegated_to,
+            "delegated_to": delegated_to,
             "delegatable": delegatable,
             "chat_channel_label": (
                 "Telegram" if info.channel == TELEGRAM_CHANNEL

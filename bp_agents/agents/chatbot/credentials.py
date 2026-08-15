@@ -89,6 +89,8 @@ class ChannelCredentials(Protocol):
 
     async def cancel_task(self, *, user_id: str, task_id: str) -> None: ...
 
+    async def user_access_token(self, user_id: str) -> str: ...
+
     async def mint_password_reset_token(self, *, user_id: str) -> str: ...
 
     async def link_channel(
@@ -215,6 +217,15 @@ class HttpChannelCredentials:
                 pair["refresh_token"], pair["access_token"], exp
             )
             return pair["access_token"]
+
+    async def user_access_token(self, user_id: str) -> str:
+        """A live access token for `user_id`, minted through this channel's
+        `serviced_by` rights and cached until just before it expires.
+
+        Public because the session store needs it: the steward endpoints run
+        under the USER's authority, never the channel's, so every store call
+        this process makes carries a token for the user it is acting for."""
+        return await self._user_token(user_id)
 
     async def _mint_user_refresh(self, user_id: str) -> str:
         token = await self._service_token()

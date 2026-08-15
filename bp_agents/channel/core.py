@@ -2,35 +2,65 @@
 
 See the package docstring. A frontend orchestrates one turn as:
 
-    async with core.session_lock(session_id):
-        dest, mode = await core.route(session_id)
+    async with core.turn(user_id, session_id):
+        dest, mode = await core.route(user_id, session_id)
         # frontend: persist any inbound files (transport-specific)
-        await core.record_user_turn(session_id, dest, text)
         task_id = await core.spawn(user_id, session_id, dest, mode, prompt)
         result = await core.await_result(task_id, on_progress=<frontend>)
         # frontend: relay result.output.content + files (transport-specific)
-        ctx_tokens = await core.after_result(session_id, dest, result)
-        await core.maybe_summarize(session_id, dest, ctx_tokens)
+        await core.after_result(user_id, session_id, dest, result)
     core.fire_memory_add(user_id, session_id, text, reply)
 
 and uses `core.delegate` / `core.undelegate` for the slash/button switch.
+
+**The channel no longer writes anyone's history.** Conversation lives in the
+router's session store ([../../docs/design/router-managed-session-store.md]),
+where a thread can only be written by the agent that owns it — so the channel
+holds a *steward* view: it may read any thread, drive session state, enqueue
+hand-overs, and take the turn lease, and it may not append. Three things
+follow, and they are the whole shape of this module:
+
+  * **The user's words arrive as the task payload**, and the executing agent
+    appends them to its own thread as its opening act. `[shipped]` §13 spec'd
+    a `HandOver(kind="input")` instead; the payload already carries the same
+    text, so a hand-over would duplicate it and add a synchronous round trip
+    to the user-visible path. The property §13 was protecting — that nobody
+    writes another agent's thread — holds either way.
+  * **Summarization is the thread owner's job**, done at the start of its own
+    turn. `[shipped]` §13 had the steward decide via `StatThread`; but the
+    apply must be owner-written regardless, and the owner already measures its
+    context, so routing the decision through the channel only bought a
+    hand-over hop and a one-turn delay before the fold took effect.
+  * **The hand-over queue carries what has no task to ride on**: the
+    `/delegate` seed and the hand-back recap/retire, both of which happen
+    between turns.
+
+Ordering is the router's FIFO turn lease (§6.4) rather than a suite lock, so
+running a second channel instance no longer needs Valkey.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
+from bp_agents.channel.store import StoreError
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.db import queries
-from bp_agents.session_lock import SessionLockManager
+from bp_protocol.frames import (
+    GetStateOp,
+    HandOverOp,
+    SetStateOp,
+    StatThreadOp,
+)
 from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
-    import asyncpg
+    from collections.abc import AsyncIterator
 
-    from bp_agents.db.models import SessionInfoRow
+    from bp_agents.channel.store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +68,32 @@ ORCHESTRATOR_AGENT_ID = "orchestrator"
 MEMORY_AGENT_ID = "memory"
 HISTORY_SUMMARIZER_AGENT_ID = "history_summarizer"
 
-# Summarization tuning ([sessions.md] §3): fold the oldest ~70% of the
-# incumbent window once a thread crosses the soft limit, but only when
-# there's a meaningful number of turns to compress.
-_SUMMARIZE_FRACTION = 0.7
-_MIN_ROWS_TO_SUMMARIZE = 6
-_DEFAULT_CONTEXT_LIMIT = 120_000
+# Session-scoped state keys the channel owns. Session state is a flat
+# `(session_id, key)` namespace any agent in the session can read, so the keys
+# are prefixed by intent rather than by writer.
+DELEGATED_TO = "delegated_to"
+
+# Hand-over item kinds. Opaque to the router; this is the suite's vocabulary.
+SEED_ITEM = "seed"        # channel → delegate: start here, with this context
+RECAP_ITEM = "recap"      # channel → orchestrator: what the delegate did
+RETIRE_ITEM = "retire"    # channel → delegate: your episode is over
+
+# Turn-lease tuning. The TTL is what a dead holder costs the next waiter, so
+# it wants to be comfortably longer than a slow turn but not so long that a
+# crashed channel wedges the session for minutes.
+_LEASE_TTL_MS = 300_000
+_LEASE_WAIT_TIMEOUT_S = 300.0
 
 
 def pretty_agent(agent_id: str) -> str:
     """`computer_use` → `Computer Use` — a human-readable specialist name."""
     return agent_id.replace("_", " ").title()
+
+
+class SessionBusy(RuntimeError):
+    """The turn lease could not be taken before the wait timeout. The session
+    is genuinely occupied — a frontend should tell the user, not retry
+    silently, because the queue is already FIFO and a retry goes to the back."""
 
 
 class ChannelCore:
@@ -59,20 +104,18 @@ class ChannelCore:
         self,
         *,
         dispatcher: Any,
-        pool: asyncpg.Pool,
+        store: SessionStore,
         delegatable_agents: frozenset[str] = frozenset(),
         result_timeout_s: float = 600.0,
         fire_memory: bool = False,
-        redis: Any | None = None,
+        lease_wait_timeout_s: float = _LEASE_WAIT_TIMEOUT_S,
     ) -> None:
         self._dispatcher = dispatcher
-        self._pool = pool
+        self._store = store
         self._delegatable = delegatable_agents
         self._result_timeout_s = result_timeout_s
         self._fire_memory = fire_memory
-        # Per-`session_id` FIFO serialization ([sessions.md] §4); cross-process
-        # when `redis` is set (the prerequisite for a second channel instance).
-        self._session_locks = SessionLockManager(redis)
+        self._lease_wait_timeout_s = lease_wait_timeout_s
         # Detached fire-and-forget memory.add tasks (tracked for cleanup).
         self._memory_tasks: set[asyncio.Task] = set()
         # Detached fire-and-forget session-name tasks (first-turn titling).
@@ -84,28 +127,81 @@ class ChannelCore:
         Exposed so a frontend can render the delegation picker."""
         return self._delegatable
 
-    # -- session serialization + routing --------------------------------
+    @property
+    def store(self) -> SessionStore:
+        """The steward view of the session store, for frontends that need to
+        render a transcript or read session metadata."""
+        return self._store
 
-    def session_lock(self, session_id: str):  # noqa: ANN202 — async-ctx guard
-        return self._session_locks(session_id)
+    # -- session serialization ------------------------------------------
 
-    async def route(self, session_id: str) -> tuple[str, str]:
+    @contextlib.asynccontextmanager
+    async def turn(
+        self, user_id: str, session_id: str
+    ) -> AsyncIterator[str]:
+        """Hold the session's turn lease for one turn.
+
+        The router queues waiters FIFO by ticket, so polling here does not
+        cost fairness — the ticket, not the retry timing, decides who runs
+        next. A steward has no socket for the router to push a promotion to,
+        which is why this polls at all; each 409 carries the current holder's
+        remaining TTL as `Retry-After`.
+
+        Yields the holder id. A fresh one per turn: two turns in one process
+        must not be able to release each other's lease."""
+        holder = f"channel:{uuid.uuid4().hex[:12]}"
+        deadline = asyncio.get_running_loop().time() + self._lease_wait_timeout_s
+        while True:
+            granted, retry_after = await self._store.acquire_lease(
+                user_id=user_id, session_id=session_id,
+                holder_id=holder, ttl_ms=_LEASE_TTL_MS,
+            )
+            if granted:
+                break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise SessionBusy(session_id)
+            await asyncio.sleep(min(retry_after, remaining))
+        try:
+            yield holder
+        finally:
+            # Release even on failure: holding the lease through a crashed
+            # turn would wedge the session until its TTL, and the next waiter
+            # is already queued behind us.
+            with contextlib.suppress(Exception):
+                await self._store.release_lease(
+                    user_id=user_id, session_id=session_id, holder_id=holder
+                )
+
+    # -- routing ---------------------------------------------------------
+
+    async def route(self, user_id: str, session_id: str) -> tuple[str, str]:
         """`(dest, mode)` for the next turn: the delegate during an active
         delegation, else the orchestrator."""
-        async with self._pool.acquire() as conn:
-            info = await queries.get_session_info(conn, session_id)
-        if info and info.delegated_to:
-            return info.delegated_to, "delegated_message"
+        delegate = await self._session_state(user_id, session_id, DELEGATED_TO)
+        if delegate:
+            return delegate, "delegated_message"
         return ORCHESTRATOR_AGENT_ID, "message"
 
-    async def record_user_turn(self, session_id: str, dest: str, text: str) -> None:
-        """Write the user turn verbatim (the channel is the sole writer of
-        `user` rows, [sessions.md] §2), into the dispatch target's thread."""
-        async with self._pool.acquire() as conn:
-            await queries.append_history(
-                conn, session_id=session_id, agent_id=dest,
-                role="user", message=text,
+    async def _session_state(
+        self, user_id: str, session_id: str, key: str
+    ) -> str | None:
+        try:
+            results = await self._store.ops(
+                user_id=user_id, session_id=session_id,
+                ops=[GetStateOp(session_scoped=True, keys=[key])],
             )
+        except StoreError:
+            logger.warning(
+                "channel_state_read_failed",
+                extra={"event": "channel_state_read_failed",
+                       "bp.session_id": session_id, "key": key},
+            )
+            return None
+        for entry in results[0].state or []:
+            if entry.key == key:
+                return entry.value
+        return None
 
     # -- task injection (thin wrappers over the SDK dispatcher) ----------
 
@@ -137,17 +233,11 @@ class ChannelCore:
             task_id, timeout_s=self._result_timeout_s,
         )
 
-    # -- post-turn: delegated_to maintenance + summarization ------------
+    # -- post-turn: delegated_to maintenance -----------------------------
 
-    async def after_result(self, session_id: str, dest: str, result: Any) -> int | None:
-        """Maintain `delegated_to` from the result source, and return the
-        agent-measured `context_tokens` (the summarization signal)."""
-        await self._update_delegation(session_id, dest, result)
-        return (
-            result.output.metadata.get("context_tokens") if result.output else None
-        )
-
-    async def _update_delegation(self, session_id: str, dest: str, result: Any) -> None:
+    async def after_result(
+        self, user_id: str, session_id: str, dest: str, result: Any
+    ) -> None:
         """Maintain `delegated_to` from the result source ([delegation.md] §2).
 
         - dispatched orchestrator but a delegate produced the result ⇒
@@ -168,73 +258,15 @@ class ChannelCore:
             update = (producer,)  # hand-off
         elif dest != ORCHESTRATOR_AGENT_ID and producer == ORCHESTRATOR_AGENT_ID:
             update = (None,)  # hand-back
-        if update is not None:
-            async with self._pool.acquire() as conn:
-                await queries.update_session_info(
-                    conn, session_id, delegated_to=update[0]
-                )
-
-    async def maybe_summarize(
-        self, session_id: str, agent_id: str, context_tokens: int | None
-    ) -> None:
-        """If the thread's context is over the user's soft limit, fold its
-        oldest ~70% of incumbent turns into the rolling summary and demote
-        them. Best-effort — a summarizer failure never breaks the turn."""
-        if not context_tokens:
+        if update is None:
             return
-        async with self._pool.acquire() as conn:
-            info = await queries.get_session_info(conn, session_id)
-            if info is None:
-                return
-            cfg = await queries.get_user_config(conn, info.user_id)
-            limit = cfg.max_context_token_limit if cfg else _DEFAULT_CONTEXT_LIMIT
-            if context_tokens <= limit:
-                return
-            rows = await queries.reload_incumbent(
-                conn, session_id=session_id, agent_id=agent_id
+        with contextlib.suppress(StoreError):
+            await self._store.ops(
+                user_id=user_id, session_id=session_id,
+                ops=[SetStateOp(
+                    session_scoped=True, key=DELEGATED_TO, value=update[0]
+                )],
             )
-        if len(rows) < _MIN_ROWS_TO_SUMMARIZE:
-            return
-
-        # Fold the oldest ~70% of the incumbent window.
-        cutoff_idx = max(1, int(len(rows) * _SUMMARIZE_FRACTION))
-        up_to = rows[cutoff_idx - 1].id
-        is_main = agent_id == ORCHESTRATOR_AGENT_ID
-        previous = info.history_summary if is_main else info.delegate_summary
-
-        try:
-            from bp_agents.agents.history_summarizer import SummarizeIncumbent  # noqa: PLC0415
-
-            task_id = await self._dispatcher.spawn_root_for_user(
-                HISTORY_SUMMARIZER_AGENT_ID,
-                SummarizeIncumbent(
-                    agent_id=agent_id, up_to=up_to, previous_summary=previous
-                ),
-                user_id=info.user_id, session_id=session_id,
-                mode="summarize_incumbent",
-            )
-            result = await self.await_result(task_id)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "summarize_failed",
-                extra={"event": "summarize_failed", "bp.session_id": session_id},
-            )
-            return
-
-        new_summary = (result.output.content if result.output else "") or ""
-        field = "history_summary" if is_main else "delegate_summary"
-        # Atomic: the summary write and the demotion of the rows it folded in
-        # must commit together. A crash between them would either re-fold the
-        # same rows into the summary next pass (double-count) or demote rows
-        # whose content never made the summary.
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                await queries.update_session_info(
-                    conn, session_id, **{field: new_summary}
-                )
-                await queries.demote_incumbent_through(
-                    conn, session_id=session_id, agent_id=agent_id, up_to_id=up_to
-                )
 
     # -- user-driven delegation switch ([delegation.md] §6 path b) -------
 
@@ -248,19 +280,14 @@ class ChannelCore:
                 f"Can't delegate to {target or '(missing agent)'}. "
                 f"Available: {avail}."
             )
-        async with self.session_lock(session_id):
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-            current = info.delegated_to if info else None
+        async with self.turn(user_id, session_id):
+            current = await self._session_state(user_id, session_id, DELEGATED_TO)
             if current == target:
                 return f"Already delegated to {pretty_agent(target)}."
             if current:  # implicit switch — fold the current one back first
-                await self._fold_back(session_id, user_id, current, info)
-                async with self._pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, session_id)
+                await self._fold_back(user_id, session_id, current)
             summary = await self._summarize_thread(
-                session_id, user_id, ORCHESTRATOR_AGENT_ID,
-                previous=info.history_summary if info else None,
+                user_id, session_id, ORCHESTRATOR_AGENT_ID
             )
             seed = (
                 "## Conversation so far (summarized)\n"
@@ -268,18 +295,21 @@ class ChannelCore:
                 "The user has delegated this conversation to you; continue "
                 "helping them directly."
             )
-            # Atomic: the delegate seed row and the `delegated_to` flag must
-            # commit together, or a crash leaves a seed with no active
-            # delegation (or a delegation flag with no seed thread).
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
-                    await queries.append_history(
-                        conn, session_id=session_id, agent_id=target,
-                        role="user", message=seed, incumbent=True, hidden=True,
-                    )
-                    await queries.update_session_info(
-                        conn, session_id, delegated_to=target
-                    )
+            # One batch: the seed and the routing flag commit together, or a
+            # crash leaves a seed nobody will be routed to (or a delegation
+            # flag with no context behind it).
+            await self._store.ops(
+                user_id=user_id, session_id=session_id,
+                ops=[
+                    HandOverOp(
+                        target_agent_id=target, item_kind=SEED_ITEM,
+                        payload={"text": seed},
+                    ),
+                    SetStateOp(
+                        session_scoped=True, key=DELEGATED_TO, value=target
+                    ),
+                ],
+            )
         return (
             f"Delegated to {pretty_agent(target)} — it'll handle your messages "
             "until /undelegate."
@@ -288,36 +318,28 @@ class ChannelCore:
     async def undelegate(self, user_id: str, session_id: str) -> str:
         """Return the session to the main assistant (summarize the delegate
         thread into a recap, retire the episode). Returns the message."""
-        async with self.session_lock(session_id):
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-            current = info.delegated_to if info else None
+        async with self.turn(user_id, session_id):
+            current = await self._session_state(user_id, session_id, DELEGATED_TO)
             if not current:
                 return "You're already with the main assistant."
-            await self._fold_back(session_id, user_id, current, info)
+            await self._fold_back(user_id, session_id, current)
         return f"Returned to the main assistant (was {pretty_agent(current)})."
 
     async def _summarize_thread(
-        self, session_id: str, user_id: str, agent_id: str, *, previous: str | None
+        self, user_id: str, session_id: str, agent_id: str
     ) -> str:
-        """Best-effort complete summary of one agent's incumbent thread (the
-        prior rolling summary folded in). Returns `previous` (or '') on an
-        empty thread or a summarizer failure — never blocks the switch."""
-        async with self._pool.acquire() as conn:
-            rows = await queries.reload_incumbent(
-                conn, session_id=session_id, agent_id=agent_id
-            )
-        if not rows:
-            return previous or ""
-        from bp_agents.agents.history_summarizer import SummarizeIncumbent  # noqa: PLC0415
+        """Best-effort summary of one agent's active thread, produced by the
+        summarizer agent reading that thread itself.
+
+        Returns '' on an empty thread or a summarizer failure — a switch the
+        user asked for must never be blocked by a background LLM call."""
+        from bp_agents.agents.history_summarizer import SummarizeThread  # noqa: PLC0415
 
         try:
             task_id = await self._dispatcher.spawn_root_for_user(
                 HISTORY_SUMMARIZER_AGENT_ID,
-                SummarizeIncumbent(
-                    agent_id=agent_id, up_to=rows[-1].id, previous_summary=previous
-                ),
-                user_id=user_id, session_id=session_id, mode="summarize_incumbent",
+                SummarizeThread(agent_id=agent_id),
+                user_id=user_id, session_id=session_id, mode="summarize_thread",
             )
             result = await self.await_result(task_id)
         except Exception:  # noqa: BLE001
@@ -326,57 +348,55 @@ class ChannelCore:
                 extra={"event": "delegation_summarize_failed",
                        "bp.session_id": session_id, "agent_id": agent_id},
             )
-            return previous or ""
-        return (result.output.content if result.output else "") or (previous or "")
+            return ""
+        return (result.output.content if result.output else "") or ""
 
     async def _fold_back(
-        self, session_id: str, user_id: str, delegate: str, info: SessionInfoRow | None
+        self, user_id: str, session_id: str, delegate: str
     ) -> None:
-        """End a delegation: summarize the delegate thread into a recap row on
-        the main thread, retire the delegate episode, and clear the flags.
-        Mirrors `orchestrator.end_delegation` ([delegation.md] Phase 3)."""
-        summary = await self._summarize_thread(
-            session_id, user_id, delegate,
-            previous=info.delegate_summary if info else None,
-        )
-        recap = f"[Returned from {pretty_agent(delegate)}] {summary or '(no summary)'}"
-        # Atomic: the two recap rows, the delegate-thread demotion, and the
-        # flag clear must commit together. A crash mid-sequence could leave a
-        # session whose `delegated_to` is set but whose delegate thread is
-        # already demoted (or recap rows with the delegation never cleared).
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                # Mirror `orchestrator.end_delegation`: a hidden `user` recap
-                # (the specialist's results as external input — not the
-                # orchestrator's own work) followed by a hidden `assistant`
-                # ack that closes the turn, so the reloaded thread alternates.
-                # The pre-delegation user turn was already closed by the
-                # hand-off marker.
-                await queries.append_history(
-                    conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                    role="user", message=recap, incumbent=True, hidden=True,
-                )
-                await queries.append_history(
-                    conn, session_id=session_id, agent_id=ORCHESTRATOR_AGENT_ID,
-                    role="assistant", message="Acknowledged.", incumbent=True,
-                    hidden=True,
-                )
-                await queries.demote_thread(
-                    conn, session_id=session_id, agent_id=delegate
-                )
-                await queries.update_session_info(
-                    conn, session_id, delegate_summary=None, delegated_to=None
-                )
+        """End a delegation: recap the delegate's work to the orchestrator,
+        retire the delegate's episode, and clear the routing flag.
 
-    # -- memory ----------------------------------------------------------
+        Both messages are hand-overs, not writes: the channel reaches neither
+        thread. The orchestrator materialises the recap as its own hidden
+        `user` row on its next turn (the specialist's results are external
+        input, not the orchestrator's work); the delegate applies the retire
+        as a floor on its own thread the next time it runs. A delegate that
+        never runs again keeps a stale window it will never read — harmless,
+        and the alternative is letting the channel move another agent's
+        floor."""
+        summary = await self._summarize_thread(user_id, session_id, delegate)
+        # The retire cutoff: everything in the delegate's thread as of now.
+        stat = await self._store.ops(
+            user_id=user_id, session_id=session_id,
+            ops=[StatThreadOp(owner_agent_id=delegate)],
+        )
+        through_id = stat[0].stat.last_message_id if stat[0].stat else 0
+        recap = f"[Returned from {pretty_agent(delegate)}] {summary or '(no summary)'}"
+        await self._store.ops(
+            user_id=user_id, session_id=session_id,
+            ops=[
+                HandOverOp(
+                    target_agent_id=ORCHESTRATOR_AGENT_ID, item_kind=RECAP_ITEM,
+                    payload={"delegate": delegate, "text": recap},
+                ),
+                HandOverOp(
+                    target_agent_id=delegate, item_kind=RETIRE_ITEM,
+                    payload={"through_id": through_id},
+                ),
+                SetStateOp(session_scoped=True, key=DELEGATED_TO, value=None),
+            ],
+        )
+
+    # -- session titling + memory ----------------------------------------
 
     def fire_name_session(
         self, user_id: str, session_id: str, user_prompt: str
     ) -> None:
         """Title the conversation from its first message, fire-and-forget,
-        OUTSIDE the session lock. A no-op once the session already has a name,
+        OUTSIDE the turn lease. A no-op once the session already has a title,
         so it effectively runs only on the first turn. Best-effort: a failure
-        leaves the name unset and a later turn retries."""
+        leaves the title unset and a later turn retries."""
         if not user_prompt.strip():
             return
         task = asyncio.create_task(
@@ -388,15 +408,17 @@ class ChannelCore:
     async def _name_session(
         self, user_id: str, session_id: str, user_prompt: str
     ) -> None:
-        from bp_agents.agents.history_summarizer import (  # noqa: PLC0415
-            NameSession,
-        )
+        from bp_agents.agents.history_summarizer import NameSession  # noqa: PLC0415
 
         try:
-            async with self._pool.acquire() as conn:
-                info = await queries.get_session_info(conn, session_id)
-            if info is None or info.session_name:
-                return  # session gone, or already named — nothing to do
+            # `patch_metadata` with an empty patch reads the session back
+            # without changing it — cheaper than a list call and it 404s on a
+            # session that is gone, which is the other thing we care about.
+            metadata = await self._store.patch_metadata(
+                user_id=user_id, session_id=session_id, patch={}
+            )
+            if metadata.get("title"):
+                return  # already named — nothing to do
             task_id = await self._dispatcher.spawn_root_for_user(
                 HISTORY_SUMMARIZER_AGENT_ID,
                 NameSession(user_prompt=user_prompt),
@@ -411,10 +433,9 @@ class ChannelCore:
             )
             if not title:
                 return
-            async with self._pool.acquire() as conn:
-                await queries.update_session_info(
-                    conn, session_id, session_name=title
-                )
+            await self._store.patch_metadata(
+                user_id=user_id, session_id=session_id, patch={"title": title}
+            )
         except Exception:  # noqa: BLE001
             logger.exception(
                 "session_name_failed", extra={"event": "session_name_failed"}
@@ -424,7 +445,7 @@ class ChannelCore:
         self, user_id: str, session_id: str, user_prompt: str, reply: str
     ) -> None:
         """Spawn `memory.add` for the turn, fire-and-forget, OUTSIDE the
-        session lock ([overview.md] §2.2). No-op unless `fire_memory` and a
+        turn lease ([overview.md] §2.2). No-op unless `fire_memory` and a
         non-empty reply. Detached so the next turn isn't blocked."""
         if not (self._fire_memory and reply):
             return

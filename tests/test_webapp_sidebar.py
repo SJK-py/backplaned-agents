@@ -17,9 +17,9 @@ import re
 import httpx
 import pytest
 
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
+from tests.fake_store import UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -27,10 +27,9 @@ def _fake_jwt(sub: str) -> str:
     return f"hdr.{payload.decode()}.sig"
 
 
-class _Upstream:
-    def __init__(self, *, sub: str = "usr_a", sessions: list[dict] | None = None) -> None:
+class _Upstream(UpstreamSessionMixin):
+    def __init__(self, *, sub: str = "usr_a") -> None:
         self._sub = sub
-        self._sessions = sessions or []
         self.deleted: list[tuple[str, bool]] = []
 
     async def login(self, *, email: str, password: str) -> dict:
@@ -38,9 +37,6 @@ class _Upstream:
             "access_token": _fake_jwt(self._sub), "refresh_token": "r",
             "expires_at": "2999-01-01T00:00:00+00:00", "level": "tier1",
         }
-
-    async def list_sessions(self, *, access_token):
-        return self._sessions
 
     async def delete_session(self, *, access_token, session_id, purge=False):
         self.deleted.append((session_id, purge))
@@ -62,17 +58,24 @@ def _build_app(*, upstream, pool):
     return create_app(cfg, upstream=upstream, pool=pool, core=None)
 
 
-async def _seed(pool, rows: list[tuple[str, str | None]]) -> None:
-    """rows = [(session_id, channel|None)] for usr_a."""
+async def _seed(pool, upstream, rows) -> None:
+    """rows = [(session_id, channel|None)] for usr_a — now the ROUTER's
+    session metadata rather than a suite table shadowing it."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "TRUNCATE TABLE session_history, cron_jobs, session_info, user_config, "
+            "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
         )
-        for sid, channel in rows:
-            await queries.create_session_info(
-                conn, session_id=sid, user_id="usr_a", channel=channel,
-            )
+    upstream.sessions.clear()
+    for row in rows:
+        sid, channel = row[0], row[1]
+        closed_at = row[2] if len(row) > 2 else None
+        upstream.sessions[sid] = {
+            "session_id": sid,
+            "opened_at": _TS,
+            "closed_at": closed_at,
+            "metadata": {"kind": channel} if channel else {},
+        }
 
 
 async def _login(client) -> None:
@@ -93,18 +96,12 @@ def test_sidebar_groups_and_button_rules(suite_db_url: str) -> None:
     async def _drive() -> str:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, [
+            up = _Upstream()
+            await _seed(pool, up, [
                 ("ses_web", "webapp"),
                 ("ses_tg", "chatbot_telegram"),
                 ("ses_kt", "chatbot_kakao"),
-                ("ses_closed", None),
-            ])
-            up = _Upstream(sessions=[
-                {"session_id": "ses_web", "opened_at": _TS, "closed_at": None},
-                {"session_id": "ses_tg", "opened_at": _TS, "closed_at": None},
-                {"session_id": "ses_kt", "opened_at": _TS, "closed_at": None},
-                {"session_id": "ses_closed", "opened_at": _TS,
-                 "closed_at": "2026-05-02T00:00:00Z"},
+                ("ses_closed", None, "2026-05-02T00:00:00Z"),
             ])
             app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
@@ -139,8 +136,8 @@ def test_close_telegram_session_is_blocked(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, list, int, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, [("ses_tg", "chatbot_telegram"), ("ses_web", "webapp")])
             up = _Upstream()
+            await _seed(pool, up, [("ses_tg", "chatbot_telegram"), ("ses_web", "webapp")])
             app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -176,8 +173,8 @@ def test_close_kakao_session_is_blocked(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, list]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, [("ses_kt", "chatbot_kakao")])
             up = _Upstream()
+            await _seed(pool, up, [("ses_kt", "chatbot_kakao")])
             app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -202,8 +199,9 @@ def test_rename_sets_name_via_hx_prompt(suite_db_url: str) -> None:
     async def _drive() -> tuple[int, str | None, str | None, int, int]:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, [("ses_web", "webapp")])
-            app = _build_app(upstream=_Upstream(), pool=pool)
+            up = _Upstream()
+            await _seed(pool, up, [("ses_web", "webapp")])
+            app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -221,10 +219,9 @@ def test_rename_sets_name_via_hx_prompt(suite_db_url: str) -> None:
                     "/sessions/ses_nope/rename",
                     headers={"X-CSRF-Token": token, "HX-Prompt": "x"},
                 )
-                async with pool.acquire() as conn:
-                    info = await queries.get_session_info(conn, "ses_web")
+            title = up.sessions["ses_web"]["metadata"].get("title")
             return (ok.status_code, ok.headers.get("HX-Trigger"),
-                    info.session_name, empty.status_code, missing.status_code)
+                    title, empty.status_code, missing.status_code)
         finally:
             await pool.close()
 
@@ -241,14 +238,9 @@ def test_sidebar_shows_session_name_over_id(suite_db_url: str) -> None:
     async def _drive() -> str:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
-            await _seed(pool, [("ses_web", "webapp")])
-            async with pool.acquire() as conn:
-                await queries.update_session_info(
-                    conn, "ses_web", session_name="Weekend trip plan"
-                )
-            up = _Upstream(sessions=[
-                {"session_id": "ses_web", "opened_at": _TS, "closed_at": None},
-            ])
+            up = _Upstream()
+            await _seed(pool, up, [("ses_web", "webapp")])
+            up.sessions["ses_web"]["metadata"]["title"] = "Weekend trip plan"
             app = _build_app(upstream=up, pool=pool)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"

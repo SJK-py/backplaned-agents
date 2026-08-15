@@ -27,6 +27,7 @@ from bp_router.llm.service import LlmResponse, TokenUsage
 from bp_sdk import Agent
 from bp_sdk.settings import AgentConfig
 from bp_sdk.testing import TestRouter
+from tests.fake_store import FakeChannelStore, FakeStore
 
 _REPLY = "Hello from the orchestrator!"
 
@@ -122,7 +123,7 @@ def test_phase1_message_round_trip(
                 session_id = await router.open_session(user_id=user.user_id)
                 async with suite_pool.acquire() as conn:
                     await conn.execute(
-                        "TRUNCATE TABLE session_history, session_info, "
+                        "TRUNCATE TABLE "
                         "user_config, suite_platform_mappings RESTART IDENTITY"
                     )
                     await queries.upsert_platform_mapping(
@@ -132,15 +133,13 @@ def test_phase1_message_round_trip(
                     await queries.create_user_config(
                         conn, user_id=user.user_id, default_session_id=session_id
                     )
-                    await queries.create_session_info(
-                        conn, session_id=session_id, user_id=user.user_id,
-                        channel="chatbot_telegram", chat_id="tg-e2e",
-                    )
 
                 tg = _FakeTelegram()
+                store = FakeStore()
                 gateway = ChatbotGateway(
                     dispatcher=channel, pool=suite_pool, telegram=tg,
                     result_timeout_s=20.0,
+                    store=FakeChannelStore(store),
                 )
 
                 await gateway.handle_update("tg-e2e", "hello there")
@@ -148,14 +147,13 @@ def test_phase1_message_round_trip(
                 # The orchestrator's stubbed reply was relayed.
                 assert tg.sent == [("tg-e2e", _REPLY)]
 
-                # History holds the user turn (channel) + assistant turn
-                # (orchestrator), both on the orchestrator thread.
-                async with suite_pool.acquire() as conn:
-                    rows = await queries.reload_incumbent(
-                        conn, session_id=session_id,
-                        agent_id=ORCHESTRATOR_AGENT_ID,
-                    )
-                assert [(r.role, r.message) for r in rows] == [
+                # Both turns are on the orchestrator's own thread in the
+                # ROUTER's session store — the channel wrote neither.
+                rows = await router.session_messages(
+                    user_id=user.user_id, session_id=session_id,
+                    owner=ORCHESTRATOR_AGENT_ID,
+                )
+                assert [(r["role"], r["content"]) for r in rows] == [
                     ("user", "hello there"),
                     ("assistant", _REPLY),
                 ]

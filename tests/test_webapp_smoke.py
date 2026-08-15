@@ -22,7 +22,6 @@ from pydantic import SecretStr
 
 from bp_agents.agents.webapp.config import WebappConfig
 from bp_agents.agents.webapp.upstream import UpstreamError
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 
@@ -221,15 +220,8 @@ def test_webapp_session_list_flags_telegram_channel(suite_db_url: str) -> None:
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
-                    "TRUNCATE TABLE session_info, user_config, "
+                    "TRUNCATE TABLE user_config, "
                     "suite_platform_mappings RESTART IDENTITY CASCADE"
-                )
-                await queries.create_session_info(
-                    conn, session_id="ses_tg", user_id="usr_a",
-                    channel="chatbot_telegram", chat_id="tg1",
-                )
-                await queries.create_session_info(
-                    conn, session_id="ses_web", user_id="usr_a", channel="webapp",
                 )
             upstream = _FakeUpstream(
                 sub="usr_a",
