@@ -1,21 +1,44 @@
-"""suite initial schema (consolidated v1 — pre-release)
+"""suite initial schema (consolidated — pre-release baseline)
 
-Creates the suite's Postgres tables ([data-model.md] §1):
-session_info, session_history, user_config, suite_platform_mappings,
-cron_jobs, cron_executions.
+The agent suite's ENTIRE Postgres schema, as one migration. Four tables:
+`user_config`, `suite_platform_mappings`, `cron_jobs`, `cron_executions`.
 
-This is a CONSOLIDATED v1 baseline. The codebase is pre-release; no
-deployment carries an intermediate schema, so the historical
-incremental migrations have been folded into this single file — a
-fresh deployment runs ONE migration and lands on the final schema.
-Post-release schema changes get fresh sequence numbers (0002+).
+**This baseline is not upgradable-to.** It was consolidated a second time,
+absorbing what had been migrations 0002–0006, so a database created by the
+previous chain has an `alembic_version` naming a revision that no longer
+exists and `alembic upgrade head` fails against it rather than doing
+something subtle. That is deliberate: the codebase is pre-release, no
+deployment carries data worth a rewrite path, and a fabricated "upgrade"
+from an unknown intermediate is a worse promise than a clear stop.
+**Existing installations must be recreated from empty.** Post-release
+schema changes get fresh sequence numbers (0002+) chaining off this file.
 
-Folded in (previously standalone migrations 0002–0004):
-  * 0002 — cron_jobs / cron_executions tables.
-  * 0003 — session_info.channel made nullable (the chatbot clears it
-    on `/new` so the session is no longer Telegram-owned; declared
-    nullable inline here, no DROP NOT NULL dance on a fresh schema).
-  * 0004 — session_info.session_name (webapp display title).
+Two whole tables the old chain created and then dropped are simply ABSENT
+here, and the reasons are worth keeping because they explain why the suite's
+schema is this small:
+
+  * `session_history` / `session_info` — the conversation and its
+    descriptors are the ROUTER's now, in the store
+    `docs/design/router-managed-session-store.md` specifies. Turns became
+    `session_messages`, written only by the agent that owns the thread;
+    the rolling summaries became that thread's own state; `delegated_to`
+    became session-scoped state; and `channel` / `chat_id` /
+    `session_name` became the router session's `metadata`, which its
+    serviced-session discovery already read — so the suite copy was always
+    a shadow.
+  * Six `user_config` settings — `full_name`, `timezone`, `language`,
+    `verbose_default`, `custom_note`, `max_context_token_limit` — became
+    keys in the router's user-scoped state (§3.1 of the same design).
+    Reading them no longer needs a database credential, which is what let
+    the l1 specialists drop their suite pools entirely. The four
+    `preset_*` columns went further and are gone with no replacement here:
+    model choice is a router-resolved preset slot
+    (`docs/design/router-resolved-preset-slots.md`), so the *choice* and
+    the *tier entitlement* finally live in the same place.
+
+What remains in `user_config` remains for one reason: it is read OUTSIDE
+any task, by a caller with neither a `ctx.history` nor a session to ride.
+See the table's own comment.
 
 Revision ID: 0001_suite_initial
 Revises:
@@ -34,79 +57,25 @@ depends_on = None
 
 def upgrade() -> None:
     # ------------------------------------------------------------------
-    # session_info — one row per session (channel-owned writes).
-    # `channel` is nullable (folded from 0003): the chatbot clears it
-    # on `/new` to 'release' the session so the webapp can reopen/remove
-    # it ([webapp.md] §4). NULL satisfies the CHECK (NULL → not
-    # violated). `session_name` (folded from 0004) is the webapp's
-    # human-friendly conversation title.
+    # user_config — one row per user.
     # ------------------------------------------------------------------
-    op.execute("""
-        CREATE TABLE session_info (
-            session_id        text PRIMARY KEY,
-            user_id           text NOT NULL,
-            channel           text
-                              CHECK (channel IN ('chatbot_telegram', 'webapp')),
-            chat_id           text,
-            delegated_to      text,
-            history_summary   text,
-            delegate_summary  text,
-            created_at        timestamptz NOT NULL DEFAULT now(),
-            updated_at        timestamptz NOT NULL DEFAULT now(),
-            session_name      text
-        )
-    """)
-    op.execute(
-        "CREATE INDEX session_info_user_idx "
-        "ON session_info(user_id, created_at DESC)"
-    )
-
-    # ------------------------------------------------------------------
-    # session_history — the conversation log. `agent_id` is the thread
-    # key (set on `user` rows too). The composite index serves the
-    # incumbent-reload query ([sessions.md] §2.1).
-    # ------------------------------------------------------------------
-    op.execute("""
-        CREATE TABLE session_history (
-            id          bigserial PRIMARY KEY,
-            session_id  text NOT NULL,
-            agent_id    text NOT NULL,
-            role        text NOT NULL
-                        CHECK (role IN ('user', 'assistant', 'tool_call', 'tool_result')),
-            message     text NOT NULL,
-            created_at  timestamptz NOT NULL DEFAULT now(),
-            incumbent   boolean NOT NULL DEFAULT true,
-            hidden      boolean NOT NULL DEFAULT false
-        )
-    """)
-    op.execute(
-        "CREATE INDEX session_history_reload_idx "
-        "ON session_history (session_id, agent_id, incumbent, created_at)"
-    )
-
-    # ------------------------------------------------------------------
-    # user_config — one row per user. Presets reference router LLM-preset
-    # names; `default_session_id` is the cron-fallback pointer.
-    # ------------------------------------------------------------------
+    # Deliberately two settings wide. Everything a turn reads moved to the
+    # router's user scope; what is left is what a NON-task reader needs:
+    #
+    #   * `sandbox_uid` — read by the sandbox host, which is network-isolated
+    #     from this database, and which needs cross-user UNIQUENESS that a
+    #     per-key namespace does not give. Currently DEAD in this table: the
+    #     sandbox owns per-user uids in its own local JSON store. Kept as the
+    #     column of record for the identifier.
+    #   * `default_session_id` — the cron fallback pointer ([cron.md] §2),
+    #     read by the scheduler, which fires outside any session. Inbound
+    #     chat routing does NOT use it; that reads
+    #     `suite_platform_mappings.session_id` below.
     op.execute("""
         CREATE TABLE user_config (
             user_id                  text PRIMARY KEY,
-            full_name                text NOT NULL DEFAULT '',
-            timezone                 text NOT NULL DEFAULT 'UTC',
-            preset_pro               text NOT NULL DEFAULT 'default',
-            preset_balanced          text NOT NULL DEFAULT 'default',
-            preset_lite              text NOT NULL DEFAULT 'default',
-            preset_embedding         text NOT NULL DEFAULT 'default_embedding',
-            max_context_token_limit  integer NOT NULL DEFAULT 120000,
-            verbose_default          boolean NOT NULL DEFAULT false,
-            language                 text NOT NULL DEFAULT 'en',
-            sandbox_uid              integer,  -- DEAD: the sandbox now owns
-                                              -- per-user uids in a local JSON
-                                              -- store (it's network-isolated
-                                              -- from this DB). Never written;
-                                              -- kept to avoid a migration.
+            sandbox_uid              integer,
             default_session_id       text,
-            custom_note              text NOT NULL DEFAULT '',
             created_at               timestamptz NOT NULL DEFAULT now(),
             updated_at               timestamptz NOT NULL DEFAULT now()
         )
@@ -114,13 +83,19 @@ def upgrade() -> None:
 
     # ------------------------------------------------------------------
     # suite_platform_mappings — inbound identity (chat_id → user_id).
-    # PK (platform, chat_id); reverse index on user_id.
     # ------------------------------------------------------------------
+    # `session_id` is the chat's OWN live session, so a user who links two
+    # channels (Telegram + KakaoTalk via `/link`) keeps a separate
+    # conversation on each instead of both interleaving into one. Nullable:
+    # a chat that has not started one yet falls back to
+    # `user_config.default_session_id`.
     op.execute("""
         CREATE TABLE suite_platform_mappings (
-            platform    text NOT NULL CHECK (platform IN ('telegram', 'web')),
+            platform    text NOT NULL
+                        CHECK (platform IN ('telegram', 'web', 'kakao')),
             chat_id     text NOT NULL,
             user_id     text NOT NULL,
+            session_id  text,
             created_at  timestamptz NOT NULL DEFAULT now(),
             PRIMARY KEY (platform, chat_id)
         )
@@ -131,8 +106,7 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------
-    # cron_jobs (folded from 0002) — scheduled per-session prompts
-    # ([data-model.md] §1.4).
+    # cron_jobs — scheduled per-session prompts ([data-model.md] §1.4).
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE cron_jobs (
@@ -159,8 +133,7 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------
-    # cron_executions (folded from 0002) — one row per firing
-    # ([data-model.md] §1.5).
+    # cron_executions — one row per firing ([data-model.md] §1.5).
     # ------------------------------------------------------------------
     op.execute("""
         CREATE TABLE cron_executions (
@@ -183,5 +156,3 @@ def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS cron_jobs")
     op.execute("DROP TABLE IF EXISTS suite_platform_mappings")
     op.execute("DROP TABLE IF EXISTS user_config")
-    op.execute("DROP TABLE IF EXISTS session_history")
-    op.execute("DROP TABLE IF EXISTS session_info")

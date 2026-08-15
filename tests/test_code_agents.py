@@ -32,17 +32,21 @@ import pytest
 
 
 def _migration_body() -> str:
+    """The consolidated baseline. `code_agents` shipped as its own migration
+    and was later folded in; the table's SHAPE is what these tests pin, so
+    they follow it to wherever it is declared rather than asserting a
+    filename that consolidation is allowed to change."""
     return (
         Path(__file__).parent.parent
         / "bp_router" / "db" / "migrations" / "versions"
-        / "0013_code_agents.py"
+        / "0001_initial_schema.py"
     ).read_text()
 
 
 def test_migration_creates_code_agents() -> None:
     body = _migration_body()
     assert "CREATE TABLE code_agents" in body
-    assert 'down_revision = "0012_invitation_roster"' in body
+    assert "down_revision = None" in body
 
 
 def test_migration_pins_id_and_entrypoint_grammar() -> None:

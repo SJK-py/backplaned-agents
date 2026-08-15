@@ -2,7 +2,8 @@
 
 > **Status: implemented.** Shipped as `bp_agents/host.py` (supervised
 > multi-agent runner), `bp_agents/init.py` (the merged one-shot),
-> `invitations.agent_ids` (migration `0012_invitation_roster`) with roster
+> `invitations.agent_ids` (in the consolidated `0001_initial_schema`,
+> shipped as `0012_invitation_roster`) with roster
 > support in `bp_agents/bootstrap.py` and `scripts/register-invitations.sh`,
 > `scripts/gen_env_reference.py` → `docs/env-reference.md`, and a rewritten
 > `docker-compose.prod.yml`: **22 services → 11**, **12 credential vars → 2**,

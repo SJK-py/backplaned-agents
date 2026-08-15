@@ -1,8 +1,9 @@
 # Router-managed session store
 
 > **Status: implemented.** Shipped as `bp_protocol` frames (`SessionOp` /
-> `SessionResult` / `SessionLease`), `bp_router/session_store.py` +
-> migration `0010_session_store`, the `SessionOp` dispatch handler, the
+> `SessionResult` / `SessionLease`), `bp_router/session_store.py` + the
+> five session-store tables (in the consolidated `0001_initial_schema`,
+> shipped as `0010_session_store`), the `SessionOp` dispatch handler, the
 > steward HTTP endpoints on `/v1/sessions/{id}`, and `ctx.history`
 > (`bp_sdk/history.py`). Covered by `tests/test_session_store.py`.
 > Deviations from this text where the implementation knew better are

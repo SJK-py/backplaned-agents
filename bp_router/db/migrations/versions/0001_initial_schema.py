@@ -1,48 +1,54 @@
-"""initial schema (consolidated v1 — pre-release)
+"""initial schema (consolidated — pre-release baseline)
 
-Creates the full set of tables defined in
-docs/backplaned/router/storage.md §1.1: users, sessions, agents, tasks,
-task_events, files, acl_rules, audit_log, invitations,
-auth_refresh_tokens, llm_presets, plus pending_user_registrations,
-registration_attempts, password_reset_tokens and mcp_servers.
+The router's ENTIRE schema, as one migration. A fresh deployment runs
+this file and nothing else and lands on the final shape.
 
-This is a CONSOLIDATED v1 baseline. The codebase is pre-release;
-no production (or derivative) deployment carries an intermediate
-schema, so the historical incremental migrations have been folded
-into this single file — a fresh deployment runs ONE migration and
-lands directly on the final schema. Post-release schema changes
-will get fresh sequence numbers (0002+).
+Tables: users, sessions, agents, tasks, task_events, files, file_names,
+acl_rules, audit_log, invitations, auth_refresh_tokens,
+password_reset_tokens, llm_presets, pending_user_registrations,
+registration_attempts, user_oidc_identities, mcp_servers, custom_agents,
+code_agents, the five session-store tables (session_messages,
+session_threads, session_state, session_handovers, session_turn_queue)
+and user_llm_preferences.
 
-Folded in (previously standalone migrations 0002–0008):
-  * 0002 — tasks.caller_agent_id / active_agent_id (NOT NULL, FK
-    agents, indexed). Declared inline here (fresh schema → no
-    nullable-then-backfill dance, no FK on a transient state).
-  * 0003 — users.serviced_by; pending_user_registrations;
-    registration_attempts.
-  * 0004 — password_reset_tokens.
-  * 0005 — users.deleted_at + active-rows partial index.
-  * 0006 — mcp_servers.
-  * 0007 — audit_log(actor_id, ts DESC) partial index. Created
-    here as a plain CREATE INDEX: the standalone migration used
-    CREATE INDEX CONCURRENTLY (+ autocommit_block) only to avoid
-    AccessExclusiveLock on a populated audit_log during an online
-    migration. On the initial empty schema that concern does not
-    apply and a plain index keeps the whole migration in one
-    transaction (the correct shape for a baseline).
-  * 0008 — acl_rules caller/callee pattern CHECKs use the relaxed
-    Phase-10 prefix-glob regex, with explicit constraint names so
-    a future relaxation has a stable handle. The pre-0008 (strict)
-    regex is not reproduced — a consolidated baseline has no
-    history to be faithful to, only the final shape.
-  * fk-cascade — every FK to agents(agent_id) / users(user_id) is
-    declared `ON UPDATE CASCADE` inline (15 constraints) so an
-    agent/service-principal PK rename on eviction propagates to
-    dependent rows. Delete behaviour is unchanged — only
-    password_reset_tokens.user_id keeps ON DELETE CASCADE and
-    pending_user_registrations.submitted_by_service_user_id keeps
-    ON DELETE SET NULL. The standalone migration recreated the FKs
-    with ALTER; on a fresh schema they're declared cascading from
-    the start.
+**This baseline is not upgradable-to.** It was consolidated a second
+time, absorbing what had been migrations 0002–0013, so a database
+created by the previous chain has an `alembic_version` naming a
+revision that no longer exists — `alembic upgrade head` against it
+fails rather than doing anything subtle. That is deliberate: the
+codebase is pre-release, no deployment carries data worth a rewrite
+path, and a fabricated "upgrade" from an unknown intermediate is a
+worse promise than a clear stop. **Existing installations must be
+recreated from empty.** Post-release schema changes get fresh sequence
+numbers (0002+) chaining linearly off this file.
+
+What the fold changed, versus replaying the old chain (the schema is
+identical; only the route to it differs):
+
+  * Columns added by a later ALTER are declared inline in their
+    table's CREATE — `users.purged_at`, `mcp_servers`'
+    invitation/capability/stdio columns,
+    `pending_user_registrations.requested_password_hash`,
+    `invitations.agent_ids`/`consumed`, and the four
+    `custom_agents` agent-loop columns.
+  * `mcp_servers.url` is nullable from the start and the transport
+    CHECK carries `stdio` from the start, rather than being widened
+    later. The `mcp_servers_transport_fields` CHECK that keeps the
+    URL and stdio shapes disjoint is declared with the table.
+  * `tasks.caller_agent_id` / `active_agent_id` are NOT NULL + FK
+    inline. The historical migration added them nullable, backfilled,
+    then enforced — a dance only a populated table needs.
+  * The `audit_log(actor_id, ts DESC)` partial index is a plain
+    CREATE INDEX. The historical migration used CONCURRENTLY (and an
+    autocommit block) purely to avoid an AccessExclusiveLock on a
+    populated table; on an empty schema that buys nothing and costs
+    the single-transaction property a baseline should have.
+  * Only final constraint shapes appear. The pre-Phase-10 strict
+    `acl_rules` pattern regex, for instance, is not reproduced — a
+    consolidated baseline has no history to be faithful to.
+  * Every FK to `users(user_id)` / `agents(agent_id)` is declared
+    `ON UPDATE CASCADE` inline, so a service-principal rename on
+    eviction propagates. Delete behaviour is per-table and unchanged.
 
 Revision ID: 0001_initial_schema
 Revises:
@@ -83,13 +89,19 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # users
     # ------------------------------------------------------------------
-    # `serviced_by` (folded from 0003): list of service-principal
-    # user_ids authorised to mint credentials for this user.
-    # Default-deny — an empty array means no principal can mint.
-    # `deleted_at` (folded from 0005): terminal admin soft-delete
-    # (distinct from the reversible `suspended_at`); the row stays
-    # so the nine `REFERENCES users(user_id)` FKs — audit_log
-    # attribution in particular — survive the delete.
+    # `serviced_by`: list of service-principal user_ids authorised to
+    # mint credentials for this user. Default-deny — an empty array
+    # means no principal can mint.
+    # `deleted_at` is the terminal admin soft-delete (distinct from the
+    # reversible `suspended_at`); the row stays so the many
+    # `REFERENCES users(user_id)` FKs — audit_log attribution in
+    # particular — survive the delete.
+    # `purged_at` goes further: a permanent `purge_user` hard-deletes
+    # the user's content (sessions/tasks/files), scrubs PII (`email` /
+    # `auth_secret_hash` → NULL) and stamps this column. The row is kept
+    # as a tombstone (the FKs above, plus an append-only audit chain that
+    # must stay intact), so `purged_at` is the durable signal the suite's
+    # reconcile loop keys off to erase its own per-user rows and LanceDB.
     op.execute("""
         CREATE TABLE users (
             user_id            text PRIMARY KEY,
@@ -100,7 +112,8 @@ def upgrade() -> None:
             created_at         timestamptz NOT NULL DEFAULT now(),
             suspended_at       timestamptz,
             serviced_by        text[] NOT NULL DEFAULT '{}',
-            deleted_at         timestamptz
+            deleted_at         timestamptz,
+            purged_at          timestamptz
         )
     """)
     op.execute("CREATE INDEX users_level_idx ON users(level)")
@@ -409,7 +422,18 @@ def upgrade() -> None:
             created_by       text NOT NULL REFERENCES users(user_id) ON UPDATE CASCADE,
             created_at       timestamptz NOT NULL DEFAULT now(),
             idempotency_key  text,
-            provisions_service_user boolean NOT NULL DEFAULT false
+            provisions_service_user boolean NOT NULL DEFAULT false,
+            -- Optional agent-name ROSTER on a single token (see
+            -- docs/design/deployment-agent-host.md §3). Without it every
+            -- invitation is an unbound bearer credential: `POST /v1/onboard`
+            -- takes the name from the agent's own `agent_info`, so any token
+            -- can onboard as any name. `agent_ids` fixes the names one token
+            -- may produce and `consumed` records which have been taken, so a
+            -- host process can onboard the whole group it runs and a
+            -- partially-provisioned group heals on restart. NULL `agent_ids`
+            -- keeps the unbound single-use behaviour exactly.
+            agent_ids        text[],
+            consumed         text[] NOT NULL DEFAULT '{}'
         )
     """)
     op.execute("""
@@ -516,13 +540,22 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------
-    # pending_user_registrations (folded from 0003)
+    # pending_user_registrations
     # ------------------------------------------------------------------
     # Queue for channel-side registration requests. Channel agents
     # submit on behalf of an unauthenticated chat; admin approves to
     # convert into a real user row. `submitted_by_service_user_id`
     # is the F8 hook — approve auto-grants that principal servicing
     # rights on the new user.
+    #
+    # `requested_password_hash` serves the self-service WEB signup path
+    # only. A chat-channel registration is submitted by a service
+    # principal that controls the chat, so the password is set later
+    # out-of-band (the bot mints a reset token via `serviced_by`); those
+    # rows leave this NULL and keep the random-initial-password approval
+    # behaviour. The webapp has no such principal and no delivery
+    # channel, so the user chooses a password on the public form and its
+    # argon2 hash rides here until an admin approves.
     op.execute("""
         CREATE TABLE pending_user_registrations (
             registration_id              uuid           PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -530,6 +563,7 @@ def upgrade() -> None:
             external_id                  text           NOT NULL,
             display_name                 text,
             requested_email              text,
+            requested_password_hash      text,
             metadata                     jsonb          NOT NULL DEFAULT '{}'::jsonb,
             requested_at                 timestamptz    NOT NULL DEFAULT now(),
             attempts                     integer        NOT NULL DEFAULT 1,
@@ -576,32 +610,92 @@ def upgrade() -> None:
     )
 
     # ------------------------------------------------------------------
-    # mcp_servers (folded from 0006)
+    # user_oidc_identities — external OIDC subjects linked to a user
+    # ------------------------------------------------------------------
+    # SSO login resolves a validated `(issuer, sub)` to a local
+    # `user_id`. A child table rather than columns on `users`, so one
+    # account can carry a password AND any number of linked OPs — and so
+    # the OIDC subject (PII) is scrubbed on purge by deleting rows.
+    #
+    # `PRIMARY KEY (issuer, sub)` enforces "one OP identity ↔ exactly one
+    # account" (`sub` is only unique per issuer); the `user_id` index
+    # powers the reverse "list / unlink my logins" lookup. Structurally
+    # the same as the suite's `(platform, external_id) → user_id` map.
+    op.execute("""
+        CREATE TABLE user_oidc_identities (
+            issuer        text NOT NULL,
+            sub           text NOT NULL,
+            user_id       text NOT NULL
+                          REFERENCES users(user_id)
+                          ON UPDATE CASCADE ON DELETE CASCADE,
+            email_at_link text,
+            created_at    timestamptz NOT NULL DEFAULT now(),
+            last_login_at timestamptz,
+            PRIMARY KEY (issuer, sub)
+        )
+    """)
+    op.execute(
+        "CREATE INDEX user_oidc_identities_user_id_idx "
+        "ON user_oidc_identities (user_id)"
+    )
+
+    # ------------------------------------------------------------------
+    # mcp_servers
     # ------------------------------------------------------------------
     # Admin-managed MCP bridge configurations. PK is `server_id`
     # (one row → N runtime agents, one per MCP tool). `auth_value_ref`
-    # indirects through env/secret store — raw secrets never live
-    # here. Inert until the bridge package reads from it.
+    # indirects through env/secret store — raw secrets never live here.
+    #
+    # Three transports in two disjoint shapes, kept apart by
+    # `mcp_servers_transport_fields`: `stdio` spawns a local subprocess
+    # (`command` + `args`, no URL) and speaks MCP over its pipes;
+    # `sse` / `streamable_http` connect to a `url` and have no command.
+    # `url` is therefore nullable. `env_refs` is a JSON map
+    # `{ENV_NAME: "env://VAR" | "secret://..."}` the bridge resolves from
+    # its own environment — never raw secrets in the table. The launcher
+    # allowlist (uvx/…) is enforced app-side, not here.
+    #
+    # `pending_invitation_token` is how a bridge onboards without admin
+    # rights: an admin action (create / reconnect) mints a short-TTL
+    # service invitation onto the row, the bridge consumes it on its next
+    # poll to onboard the `mcp_<server>` agent, and it is cleared once
+    # that agent connects. `capabilities` merges into the agent's
+    # auto-derived `mcp.bridge` / `mcp.tool.<tool>` set for ACL
+    # targeting; `disabled_tools` names tools the bridge must not expose
+    # as modes, while the full list is still reported for the UI.
     op.execute("""
         CREATE TABLE mcp_servers (
             server_id            text         PRIMARY KEY,
             description          text         NOT NULL DEFAULT '',
-            url                  text         NOT NULL,
-            transport            text         NOT NULL
-                                              CHECK (transport IN ('sse', 'streamable_http')),
+            url                  text,
+            transport            text         NOT NULL,
             auth_kind            text         NOT NULL DEFAULT 'none'
                                               CHECK (auth_kind IN ('none', 'bearer', 'header')),
             auth_value_ref       text,
             auth_header_name     text,
+            command              text,
+            args                 text[]       NOT NULL DEFAULT '{}',
+            env_refs             jsonb        NOT NULL DEFAULT '{}',
             groups               text[]       NOT NULL DEFAULT '{}',
+            capabilities         text[]       NOT NULL DEFAULT '{}',
+            disabled_tools       text[]       NOT NULL DEFAULT '{}',
             expose_to_llm        boolean      NOT NULL DEFAULT true,
             tools_cache          jsonb,
             refresh_requested_at timestamptz,
             created_at           timestamptz  NOT NULL DEFAULT now(),
             last_connected_at    timestamptz,
             created_by           text         REFERENCES users(user_id) ON UPDATE CASCADE,
+            pending_invitation_token      text,
+            pending_invitation_expires_at timestamptz,
             CONSTRAINT mcp_servers_server_id_check
                 CHECK (server_id ~ '^[a-z][a-z0-9_]+$'),
+            CONSTRAINT mcp_servers_transport_check
+                CHECK (transport IN ('sse', 'streamable_http', 'stdio')),
+            CONSTRAINT mcp_servers_transport_fields CHECK (
+                (transport = 'stdio' AND command IS NOT NULL AND url IS NULL)
+                OR (transport IN ('sse', 'streamable_http')
+                    AND url IS NOT NULL AND command IS NULL)
+            ),
             CONSTRAINT mcp_servers_auth_consistent CHECK (
                 -- auth_value_ref required when auth_kind != 'none'
                 (auth_kind = 'none' AND auth_value_ref IS NULL
@@ -615,10 +709,359 @@ def upgrade() -> None:
     """)
     op.execute("CREATE INDEX mcp_servers_groups_idx ON mcp_servers USING gin (groups)")
 
+    # ------------------------------------------------------------------
+    # custom_agents — operator-defined LLM-backed agents
+    # ------------------------------------------------------------------
+    # The second bridge-provisioned kind. An operator authors a system
+    # prompt, a user-prompt template, a list of parameters and a model
+    # preset in the admin UI; the bridge stands up one single-mode
+    # backplane `Agent` (`custom_<slug>`) whose handler runs an LLM
+    # completion instead of forwarding to an MCP `tools/call`.
+    #
+    #   * `preset_name` FKs `llm_presets.name` — a referenced preset
+    #     cannot be dropped.
+    #   * `parameters` is a JSON list of `{name, description, required}`.
+    #     Every param is type "string": the names are both the mode's
+    #     `accepts_schema` keys and the `$name` substitution keys in the
+    #     prompts, and non-string values have no safe `$`-templating.
+    #   * The agent-loop columns turn one completion into a bounded
+    #     tool-use loop. All default off, so a row that never touches
+    #     them behaves as a single completion.
+    #   * Provisioning mirrors `mcp_servers` exactly.
+    #
+    # See `docs/design/mcp-bridge-custom-llm-agents.md`.
+    op.execute("""
+        CREATE TABLE custom_agents (
+            agent_id      text PRIMARY KEY
+                          CHECK (agent_id ~ '^custom_[a-z][a-z0-9_]*$'),
+            description   text NOT NULL DEFAULT '',
+            preset_name   text NOT NULL REFERENCES llm_presets(name),
+            system_prompt text NOT NULL DEFAULT '',
+            user_prompt   text NOT NULL DEFAULT '',
+            parameters    jsonb NOT NULL DEFAULT '[]'::jsonb,
+            groups        jsonb NOT NULL DEFAULT '[]'::jsonb,
+            capabilities  jsonb NOT NULL DEFAULT '[]'::jsonb,
+            expose_to_llm boolean NOT NULL DEFAULT true,
+            output_as_file boolean NOT NULL DEFAULT false,
+            enabled       boolean NOT NULL DEFAULT true,
+            agent_loop_enabled boolean NOT NULL DEFAULT false,
+            max_rounds    integer NOT NULL DEFAULT 4
+                          CHECK (max_rounds BETWEEN 1 AND 16),
+            file_access   text NOT NULL DEFAULT 'none'
+                          CHECK (file_access IN ('none', 'read_only', 'full')),
+            peer_tools_enabled boolean NOT NULL DEFAULT false,
+            created_at    timestamptz NOT NULL DEFAULT now(),
+            updated_at    timestamptz NOT NULL DEFAULT now(),
+            created_by    text REFERENCES users(user_id),
+            pending_invitation_token      text,
+            pending_invitation_expires_at timestamptz
+        )
+    """)
+
+    # ------------------------------------------------------------------
+    # code_agents — operator-authored Python functions
+    # ------------------------------------------------------------------
+    # The third bridge-provisioned kind. An operator authors a Python
+    # function in the admin UI; the bridge stands up one single-mode
+    # `Agent` (`code_<slug>`) whose handler runs it in a uid-dropped
+    # subprocess.
+    #
+    # A separate table rather than a `kind` column on `custom_agents`:
+    # `custom_agents.preset_name` is `NOT NULL REFERENCES
+    # llm_presets(name)`, and a discriminator would force it nullable —
+    # dropping a real constraint on every existing LLM row for a kind
+    # that will never pick a preset. What the two kinds share is CODE
+    # (`bp_mcp_bridge/agent_common.py`), not schema.
+    #
+    #   * `parameters` entries carry a real JSON-Schema `type`. This
+    #     handler receives a dict, so the string-only rule above — which
+    #     exists for `$`-templating safety — does not transfer.
+    #   * `secret_refs` holds `env://VAR` REFERENCES, never literals, the
+    #     same posture as `mcp_servers.auth_value_ref`.
+    #   * `timeout_s` / `memory_mb` bound one call inside the bridge; the
+    #     router's task deadline is the outer bound.
+    #   * There is deliberately NO `network` column. Per-agent egress
+    #     control needs CAP_NET_ADMIN, which the bridge does not have and
+    #     should not get, so the column would read as a guarantee it
+    #     cannot make. See `docs/design/bridge-python-code-agents.md`
+    #     §3.4.
+    op.execute("""
+        CREATE TABLE code_agents (
+            agent_id      text PRIMARY KEY
+                          CHECK (agent_id ~ '^code_[a-z][a-z0-9_]*$'),
+            description   text NOT NULL DEFAULT '',
+            code          text NOT NULL DEFAULT '',
+            entrypoint    text NOT NULL DEFAULT 'run'
+                          CHECK (entrypoint ~ '^[a-z_][a-z0-9_]*$'),
+            parameters    jsonb NOT NULL DEFAULT '[]'::jsonb,
+            returns       jsonb,
+            secret_refs   jsonb NOT NULL DEFAULT '{}'::jsonb,
+            timeout_s     integer NOT NULL DEFAULT 30
+                          CHECK (timeout_s BETWEEN 1 AND 300),
+            memory_mb     integer NOT NULL DEFAULT 512
+                          CHECK (memory_mb BETWEEN 64 AND 4096),
+            groups        jsonb NOT NULL DEFAULT '[]'::jsonb,
+            capabilities  jsonb NOT NULL DEFAULT '[]'::jsonb,
+            expose_to_llm boolean NOT NULL DEFAULT true,
+            output_as_file boolean NOT NULL DEFAULT false,
+            enabled       boolean NOT NULL DEFAULT true,
+            created_at    timestamptz NOT NULL DEFAULT now(),
+            updated_at    timestamptz NOT NULL DEFAULT now(),
+            created_by    text REFERENCES users(user_id),
+            pending_invitation_token      text,
+            pending_invitation_expires_at timestamptz
+        )
+    """)
+
+    _create_session_store()
+
+    # ------------------------------------------------------------------
+    # user_llm_preferences — the user's per-slot model choice
+    # ------------------------------------------------------------------
+    # A **slot** is an opaque key ("balanced", "pro", …) naming a
+    # preference the router resolves to a preset. This table holds the
+    # user's half of that decision; the operator's half is
+    # `Settings.llm_default_presets`, and the ceiling is each preset's
+    # `min_user_level`. See `docs/design/router-resolved-preset-slots.md`
+    # §4.
+    #
+    # Why its own table rather than the session store's user-scoped state
+    # below, which already provides an opaque `(user_id, key)` namespace:
+    # that namespace is writable by any agent acting in the user's
+    # session, and the router *acts* on this value — it selects a model,
+    # at a cost, under a tier gate. A value the router enforces policy on
+    # must not be one any agent can overwrite. Writes come only from the
+    # session-JWT endpoints (`/v1/llm/preferences`).
+    #
+    # `preset_embedding` is deliberately NOT a slot: changing an
+    # embedding model invalidates every vector already written, silently,
+    # with no migration path (design §12).
+    op.execute("""
+        CREATE TABLE user_llm_preferences (
+            user_id     text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            slot        text NOT NULL,
+            preset_name text NOT NULL,
+            updated_at  timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (user_id, slot)
+        )
+    """)
+
+
+def _create_session_store() -> None:
+    """The five router-managed session-store tables.
+
+    Adds the conversation log + session state service specified in
+    `docs/design/router-managed-session-store.md`. All scoped by
+    `(user_id, session_id)` with `ON DELETE CASCADE` on the session, so purge
+    and the closed-session retention sweep reap conversation data with no
+    cross-database reconcile (§10.1).
+
+    Shape notes that are load-bearing, not incidental:
+
+      * `session_messages.owner_agent_id` is the THREAD key and is stamped by
+        the router from the task's active executor — never from the wire.
+        There is deliberately no `author_agent_id`: with the owner derived,
+        the author IS the owner (§4).
+      * `role` carries NO check constraint. The router never interprets a
+        role; every read names the roles it wants (§3.3).
+      * There is no `incumbent` flag. Retirement is
+        `session_threads.floor_id`, a monotonic cursor covering both prefix
+        folding and whole-thread retirement (§3.4).
+      * `session_id` is nullable: NULL rows are the `user` scope —
+        cross-session agent context, the conversational analogue of the file
+        store's `persist/` (§3.1). They survive session purge and are reaped
+        by `purge_user`.
+      * `session_turn_queue` holds at most one `active` row per session,
+        enforced by a partial unique index rather than by application logic
+        (§6.4).
+    """
+    op.execute("""
+        CREATE TABLE session_messages (
+            id              bigserial PRIMARY KEY,
+            user_id         text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            session_id      text
+                REFERENCES sessions (session_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            owner_agent_id  text NOT NULL,
+            thread_key      text NOT NULL DEFAULT '',
+            role            text NOT NULL,
+            content         text NOT NULL,
+            hidden          boolean NOT NULL DEFAULT false,
+            metadata        jsonb NOT NULL DEFAULT '{}'::jsonb,
+            task_id         text,
+            idempotency_key text,
+            redacted_at     timestamptz,
+            created_at      timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    # Read path: a range scan over one thread's partition. `roles` /
+    # `redacted_at` / `hidden` are filters applied to the scanned rows.
+    op.execute("""
+        CREATE INDEX ix_session_messages_thread
+            ON session_messages (session_id, owner_agent_id, thread_key, id)
+    """)
+    # `user`-scope read path (session_id IS NULL).
+    op.execute("""
+        CREATE INDEX ix_session_messages_user_thread
+            ON session_messages (user_id, owner_agent_id, thread_key, id)
+            WHERE session_id IS NULL
+    """)
+    # Idempotent append. Keyed on the CALLER'S key, not on (task_id, role):
+    # one task legitimately appends several rows of the same role (a
+    # tool_call and its tool_result), which a role-keyed constraint would
+    # reject.
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_messages_idempotency
+            ON session_messages (task_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+    """)
+
+    op.execute("""
+        CREATE TABLE session_threads (
+            user_id          text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            session_id       text
+                REFERENCES sessions (session_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            owner_agent_id   text NOT NULL,
+            thread_key       text NOT NULL DEFAULT '',
+            floor_id         bigint NOT NULL DEFAULT 0,
+            message_count    bigint NOT NULL DEFAULT 0,
+            content_bytes    bigint NOT NULL DEFAULT 0,
+            last_message_id  bigint NOT NULL DEFAULT 0,
+            created_at       timestamptz NOT NULL DEFAULT now(),
+            updated_at       timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    # Session and user scopes need separate uniqueness: NULL session_id
+    # never equals itself, so one index cannot cover both.
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_threads_session
+            ON session_threads (session_id, owner_agent_id, thread_key)
+            WHERE session_id IS NOT NULL
+    """)
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_threads_user
+            ON session_threads (user_id, owner_agent_id, thread_key)
+            WHERE session_id IS NULL
+    """)
+    # Per-user quota: SUM(content_bytes) over a user's threads.
+    op.execute(
+        "CREATE INDEX ix_session_threads_user ON session_threads (user_id)"
+    )
+
+    op.execute("""
+        CREATE TABLE session_state (
+            user_id         text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            session_id      text
+                REFERENCES sessions (session_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            owner_agent_id  text,
+            thread_key      text NOT NULL DEFAULT '',
+            key             text NOT NULL,
+            value           text,
+            version         bigint NOT NULL DEFAULT 1,
+            metadata        jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at      timestamptz NOT NULL DEFAULT now(),
+            updated_at      timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    # Thread state (owner set) and session state (owner NULL) are distinct
+    # namespaces; NULL-safe uniqueness needs the partial-index pair again.
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_state_thread
+            ON session_state (session_id, owner_agent_id, thread_key, key)
+            WHERE owner_agent_id IS NOT NULL AND session_id IS NOT NULL
+    """)
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_state_session
+            ON session_state (session_id, key)
+            WHERE owner_agent_id IS NULL AND session_id IS NOT NULL
+    """)
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_state_user_thread
+            ON session_state (user_id, owner_agent_id, thread_key, key)
+            WHERE owner_agent_id IS NOT NULL AND session_id IS NULL
+    """)
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_state_user
+            ON session_state (user_id, key)
+            WHERE owner_agent_id IS NULL AND session_id IS NULL
+    """)
+
+    op.execute("""
+        CREATE TABLE session_handovers (
+            id                  bigserial PRIMARY KEY,
+            user_id             text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            session_id          text
+                REFERENCES sessions (session_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            target_agent_id     text NOT NULL,
+            thread_key          text NOT NULL DEFAULT '',
+            from_agent_id       text,
+            item_kind           text NOT NULL,
+            payload             jsonb NOT NULL DEFAULT '{}'::jsonb,
+            created_at          timestamptz NOT NULL DEFAULT now(),
+            consumed_at         timestamptz,
+            consumed_by_task_id text
+        )
+    """)
+    # Partial, so a drain never scans consumed rows.
+    op.execute("""
+        CREATE INDEX ix_session_handovers_pending
+            ON session_handovers (session_id, target_agent_id, thread_key, id)
+            WHERE consumed_at IS NULL
+    """)
+    op.execute("""
+        CREATE INDEX ix_session_handovers_pending_user
+            ON session_handovers (user_id, target_agent_id, thread_key, id)
+            WHERE consumed_at IS NULL AND session_id IS NULL
+    """)
+
+    op.execute("""
+        CREATE TABLE session_turn_queue (
+            ticket      bigserial PRIMARY KEY,
+            session_id  text NOT NULL
+                REFERENCES sessions (session_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            user_id     text NOT NULL
+                REFERENCES users (user_id) ON UPDATE CASCADE ON DELETE CASCADE,
+            holder_id   text NOT NULL,
+            agent_id    text NOT NULL,
+            state       text NOT NULL CHECK (state IN ('waiting', 'active')),
+            expires_at  timestamptz NOT NULL,
+            created_at  timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    # At most one holder per session — a database guarantee, not a code path.
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_turn_queue_active
+            ON session_turn_queue (session_id)
+            WHERE state = 'active'
+    """)
+    # One row per (session, holder): re-acquiring is idempotent.
+    op.execute("""
+        CREATE UNIQUE INDEX uq_session_turn_queue_holder
+            ON session_turn_queue (session_id, holder_id)
+    """)
+    op.execute("""
+        CREATE INDEX ix_session_turn_queue_waiting
+            ON session_turn_queue (session_id, ticket)
+            WHERE state = 'waiting'
+    """)
+
 
 def downgrade() -> None:
     for table in (
+        "user_llm_preferences",
+        "session_turn_queue",
+        "session_handovers",
+        "session_state",
+        "session_threads",
+        "session_messages",
+        "code_agents",
+        "custom_agents",
         "mcp_servers",
+        "user_oidc_identities",
         "registration_attempts",
         "pending_user_registrations",
         "password_reset_tokens",

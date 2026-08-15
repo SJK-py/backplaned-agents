@@ -312,8 +312,9 @@ signature is an implementation detail to confirm against
 
 ## 9. v2 — the agent loop (implemented)
 
-Additive (migration `0009_custom_agent_loop`, all default-off so v1 rows
-are unchanged):
+Additive (shipped as migration `0009_custom_agent_loop`, since folded into
+the consolidated `0001_initial_schema`; all default-off so v1 rows are
+unchanged):
 
 ```sql
 ALTER TABLE custom_agents

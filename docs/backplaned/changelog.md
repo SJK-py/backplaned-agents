@@ -18,6 +18,48 @@
 
 ---
 
+## 2026-08-18
+
+> **Breaking — existing installations must be recreated from empty.**
+> Both Alembic chains were consolidated back down to a single `0001`
+> baseline. This entry is the record of what that removed, since the
+> per-migration entries below now name files that no longer exist.
+
+### Changed — one migration per database, and no upgrade path to it
+
+- **What:** `bp_router/db/migrations/versions/` went from thirteen files to
+  `0001_initial_schema` alone, and `bp_agents/migrations/versions/` from six
+  to `0001_suite_initial` alone. Everything 0002+ was folded into its
+  baseline: columns added by a later `ALTER` are now declared inline in
+  their table's `CREATE`, and tables added later are created in dependency
+  order alongside the originals.
+- **Verified by schema diff, not by reading.** Both chains were applied to
+  fresh databases before and after the fold and the `pg_dump -s` output
+  compared. The only differences are **column ordinal positions** — a
+  column appended by `ALTER` lands last, whereas the consolidated file
+  places it where it belongs — with every type, default, constraint, index
+  and foreign key identical. Nothing in the codebase reads a row
+  positionally (no `INSERT` without a column list, no `row[0]`), so the
+  ordinals are unobservable.
+- **Why this breaks upgrades, deliberately:** a database created by the old
+  chain carries an `alembic_version` naming a revision that no longer
+  exists, so `alembic upgrade head` **fails** rather than doing something
+  subtle. That is the intended behaviour. The codebase is pre-release and
+  no deployment carries data worth a rewrite path; a fabricated "upgrade"
+  from an unknown intermediate is a worse promise than a clear stop.
+- **Two whole tables are absent rather than created-then-dropped:** the
+  suite's `session_history` / `session_info`, whose contents are the
+  router's session store now. The reasons they left are preserved in the
+  baseline's docstring, because a schema this small otherwise invites
+  someone to re-add them.
+- **`tests/test_migrations_consolidated.py`** now covers **both** chains
+  (it was router-only) and pins the single-file shape. The tests that
+  asserted a specific migration filename — `custom_agents`, `code_agents` —
+  follow the table's shape into the baseline instead; a filename that
+  consolidation is allowed to change was never the thing worth pinning.
+
+---
+
 ## 2026-08-17
 
 > A THIRD bridge-provisioned agent kind: operator-authored Python functions

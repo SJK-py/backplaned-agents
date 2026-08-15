@@ -5,8 +5,9 @@
 > and custom LLM agents ([`mcp-bridge-custom-llm-agents.md`](./mcp-bridge-custom-llm-agents.md)).
 > An operator authors a Python function in the admin UI; the bridge stands
 > up one backplane `Agent` whose handler runs that function in a
-> uid-dropped subprocess. v1 is deliberately narrow — see §2. Migration
-> `0013_code_agents`; runtime in `bp_mcp_bridge/code_runner.py` +
+> uid-dropped subprocess. v1 is deliberately narrow — see §2. The
+> `code_agents` table (in the consolidated `0001_initial_schema`, shipped
+> as `0013_code_agents`); runtime in `bp_mcp_bridge/code_runner.py` +
 > `code_agent.py` + `code_agent_bridge.py`; UI at `/admin/code-agents`.
 > Nine `[shipped]` deviations in §15.
 

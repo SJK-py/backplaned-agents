@@ -22,17 +22,18 @@ import pytest
 
 
 def _migration_body() -> str:
+    """The consolidated baseline — see the note in `test_code_agents.py`."""
     return (
         Path(__file__).parent.parent
         / "bp_router" / "db" / "migrations" / "versions"
-        / "0008_custom_agents.py"
+        / "0001_initial_schema.py"
     ).read_text()
 
 
 def test_migration_creates_custom_agents() -> None:
     body = _migration_body()
     assert "CREATE TABLE custom_agents" in body
-    assert 'down_revision = "0007_user_oidc_identities"' in body
+    assert "down_revision = None" in body
 
 
 def test_migration_pk_grammar_and_preset_fk() -> None:
@@ -699,15 +700,14 @@ def test_parameters_tojson_is_attribute_safe() -> None:
 # ===========================================================================
 
 
-def test_migration_0009_adds_loop_columns() -> None:
-    body = (
-        Path(__file__).parent.parent
-        / "bp_router" / "db" / "migrations" / "versions"
-        / "0009_custom_agent_loop.py"
-    ).read_text()
-    assert 'down_revision = "0008_custom_agents"' in body
+def test_migration_declares_the_loop_columns() -> None:
+    body = _migration_body()
+    # Column runs are whitespace-aligned in the consolidated baseline, so
+    # collapse runs before matching — the DEFAULT is the claim, not the
+    # indentation.
+    flat = " ".join(body.split())
     assert "agent_loop_enabled" in body
-    assert "max_rounds integer NOT NULL DEFAULT 4" in body
+    assert "max_rounds integer NOT NULL DEFAULT 4" in flat
     assert "max_rounds BETWEEN 1 AND 16" in body
     assert "file_access IN ('none', 'read_only', 'full')" in body
     assert "peer_tools_enabled" in body

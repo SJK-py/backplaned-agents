@@ -2,11 +2,13 @@
 
 > **Status: implemented**, both halves. Router: `LlmRequestFrame.preset_slot`
 > + `LlmResultFrame.resolved_preset` / `preset_downgraded`,
-> `LlmService.resolve_slot`, migration `0011_user_llm_preferences`,
+> `LlmService.resolve_slot`, `user_llm_preferences` (in the consolidated
+> `0001_initial_schema`, shipped as `0011_user_llm_preferences`),
 > `Settings.llm_default_presets`, the `/v1/llm/presets` +
 > `/v1/llm/preferences` endpoints, `ctx.llm.generate(slot=…)`. Suite (step 7):
 > `bp_agents/slots.py`, `run_llm_loop(slot=…)`, every agent call site,
-> the webapp Models pane, and migration `0004_drop_user_config_presets`.
+> the webapp Models pane, and the suite's `user_config.preset_*` drop
+> (shipped as `0004_drop_user_config_presets`).
 > Covered by `tests/test_preset_slots.py` + `tests/test_webapp_phase5.py`.
 > Carries three `[shipped]` deviations: §5.1 (where selection lives), §8.1
 > (the vision sidecar's engagement decision), §8.2 (a delegation race the
