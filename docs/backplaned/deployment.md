@@ -120,7 +120,8 @@ Web-search backend for `research`. Internal-only; the one agent-side box with we
 
 ## 4. Networks
 
-- `edge` — proxy ↔ router (+ webapp in v2).
+- `edge` — proxy ↔ router ↔ `channels` (the browser channel; Caddy reaches
+  it by the `webapp` network alias on that service).
 - `backend` — router ↔ PG / Valkey / SeaweedFS. **Private**; agents never join it.
 - `agents` — router ↔ every agent (the agent WS).
 - `suite` — chatbot + suite agents ↔ `bp_suite` Postgres / Valkey.

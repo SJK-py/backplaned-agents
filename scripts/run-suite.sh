@@ -76,7 +76,11 @@ MCP_BRIDGE_SECRET="${ROUTER_MCP_BRIDGE_SECRET:-$(grep '^ROUTER_MCP_BRIDGE_SECRET
 if [[ "${SKIP_SUITE_MIGRATE:-0}" != "1" ]]; then
     log "applying suite schema (alembic -c alembic_suite.ini upgrade head)"
     "${ALEMBIC:-alembic}" -c alembic_suite.ini upgrade head | sed 's/^/  /' || \
-        fail "suite migration failed (is bp_suite created + reachable at SUITE_DATABASE_URL?)"
+        fail "suite migration failed. is bp_suite created + reachable at
+  SUITE_DATABASE_URL? if the error was \"Can't locate revision identified by
+  '00NN_...'\", this database predates the migration consolidation and cannot
+  be upgraded — recreate it (DESTROYS dev data):
+      docker compose -f docker-compose.dev.yml down -v"
 fi
 
 curl -sf "$ROUTER_URL/healthz" >/dev/null || fail "router not reachable at $ROUTER_URL"

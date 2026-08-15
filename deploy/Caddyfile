@@ -59,6 +59,11 @@
 # (login at /, /chat/*, /files/*, …), which would collide with the
 # router's /admin on the main domain. `flush_interval -1` disables
 # response buffering so the chat SSE progress stream flushes immediately.
+#
+# `webapp` is a NETWORK ALIAS on the `channels` service (docker-compose.prod.yml),
+# not a service name — the browser channel shares a container with the chatbot.
+# Keep the alias and this target in step: Docker DNS resolves service names and
+# aliases only, so dropping the alias makes this a 502.
 {$EDGE_SCHEME:https}://{$WEBAPP_DOMAIN:app.localhost} {
 	{$EDGE_TLS:}
 	reverse_proxy webapp:8002 {

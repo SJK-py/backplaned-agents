@@ -82,11 +82,16 @@ router_body() {
 EOF
 }
 
+# `webapp` is a NETWORK ALIAS on the `channels` service, not a service name —
+# the browser channel shares a container with the chatbot. Docker DNS resolves
+# service names and aliases only, so if that alias is dropped this becomes a
+# 502 on every edge mode. Keep the two in step.
 webapp_body() {
     cat <<'EOF'
 	# Browser channel — its own host because it serves from / (login, /chat/*,
 	# /files/*), which would collide with the router's /admin. flush_interval -1
 	# disables buffering so the chat SSE progress stream flushes immediately.
+	# `webapp` = network alias on the `channels` service (compose).
 	reverse_proxy webapp:8002 {
 		flush_interval -1
 	}

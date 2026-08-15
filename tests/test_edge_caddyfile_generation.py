@@ -272,3 +272,105 @@ def test_prod_sh_layers_ip_ports_override_only_for_ip_mode() -> None:
     assert 'IP_PORTS_OVERRIDE="deploy/compose.ip-ports.yml"' in _PROD
     assert '[[ "$(env_val EDGE_MODE)" == "ip" ]]' in _PROD
     assert 'CARGS+=(-f "$IP_PORTS_OVERRIDE")' in _PROD
+
+
+# --- the proxy targets must actually RESOLVE -------------------------------
+#
+# The tests above pin the target as a STRING, which is exactly how the
+# regression they were meant to catch got in: the `webapp` compose service was
+# folded into `channels` (22 services → 11) and neither Caddyfile was updated,
+# so `reverse_proxy webapp:8002` pointed at a name Docker DNS could no longer
+# resolve — a 502 on the browser channel in EVERY edge mode, with every string
+# assertion still green. These check the other half: that each name is
+# something on the `edge` network answers to.
+
+
+def _edge_names() -> set[str]:
+    """Every name resolvable on the `edge` network: service names plus the
+    network aliases declared on services attached to it. This is what Docker's
+    embedded DNS will answer for — nothing else."""
+    import yaml
+
+    compose = yaml.safe_load(_COMPOSE)
+    names: set[str] = set()
+    for svc, spec in compose["services"].items():
+        nets = spec.get("networks")
+        if nets is None:
+            continue
+        if isinstance(nets, list):
+            attached, aliases = "edge" in nets, []
+        else:
+            attached = "edge" in nets
+            aliases = ((nets.get("edge") or {}) or {}).get("aliases") or []
+        if attached:
+            names.add(svc)
+            names.update(aliases)
+    return names
+
+
+def _proxy_targets(caddyfile: str) -> set[str]:
+    """Upstream HOSTNAMES in every `reverse_proxy` line (matchers stripped)."""
+    targets: set[str] = set()
+    for raw in caddyfile.splitlines():
+        line = raw.strip()
+        if not line.startswith("reverse_proxy "):
+            continue
+        for word in line.split()[1:]:
+            if word.startswith("@") or word == "{":
+                continue  # a matcher token, or the opening brace of a block
+            targets.add(word.split(":")[0])
+            break
+    return targets
+
+
+@pytest.mark.parametrize("mode", ["domain", "ip", "both"])
+def test_generated_caddyfile_targets_resolve_on_the_edge_network(mode: str) -> None:
+    pytest.importorskip("yaml")
+    out = _render(
+        EDGE_MODE=mode,
+        PUBLIC_DOMAIN="ex.com",
+        WEBAPP_DOMAIN="app.ex.com",
+        PUBLIC_IP="203.0.113.5",
+    )
+    unresolvable = _proxy_targets(out) - _edge_names()
+    assert not unresolvable, (
+        f"EDGE_MODE={mode}: reverse_proxy target(s) {sorted(unresolvable)} are "
+        f"neither a service on the `edge` network nor an alias on one "
+        f"({sorted(_edge_names())}) — Docker DNS will not resolve them, so the "
+        f"edge returns 502"
+    )
+
+
+def test_committed_fallback_caddyfile_targets_resolve_too() -> None:
+    """The committed deploy/Caddyfile serves a bare `docker compose up` made
+    WITHOUT prod.sh, so it needs the same guarantee as the generated one."""
+    pytest.importorskip("yaml")
+    committed = (_REPO / "deploy" / "Caddyfile").read_text()
+    unresolvable = _proxy_targets(committed) - _edge_names()
+    assert not unresolvable, (
+        f"deploy/Caddyfile target(s) {sorted(unresolvable)} do not resolve on "
+        f"the `edge` network ({sorted(_edge_names())})"
+    )
+
+
+def test_the_browser_channel_is_reachable_by_the_name_the_edge_uses() -> None:
+    """Pin the specific coupling rather than only the general rule, so a
+    future regrouping gets a message naming the alias to move."""
+    pytest.importorskip("yaml")
+    import yaml
+
+    compose = yaml.safe_load(_COMPOSE)
+    holder = []
+    for svc, spec in compose["services"].items():
+        nets = spec.get("networks")
+        if isinstance(nets, dict):
+            aliases = ((nets.get("edge") or {}) or {}).get("aliases") or []
+        else:
+            aliases = []
+        if svc == "webapp" or "webapp" in aliases:
+            holder.append(svc)
+    assert holder == ["channels"], (
+        "the edge proxies the browser channel as `webapp:8002`; exactly one "
+        "service must answer to that name on `edge` (today: an alias on "
+        f"`channels`), got {holder}"
+    )

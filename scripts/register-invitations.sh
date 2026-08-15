@@ -106,16 +106,55 @@ TOKEN=$(curl -sf -X POST "$ROUTER_URL/v1/auth/login" \
 [[ -n "$TOKEN" ]] || fail "login returned empty token"
 
 registered=0
+
+# NO per-name Idempotency-Key anywhere below. The token itself is the natural
+# dedup key — re-registering the SAME token collides on the token-hash PK and
+# returns 409, which is exactly right. A per-name key (`register-<name>`) was
+# actively WRONG with fresh-token-per-launch (prod.sh regenerates them): the
+# router's idempotency contract returns the EXISTING row for a repeated key
+# and IGNORES the new token, so the relaunch's token was never registered and
+# the agent then presented an unregistered one → 403. This mirrors
+# `bp_agents/bootstrap.py`, which is what the compose `init` one-shot runs;
+# keep the two in step.
+
+# ROSTER PATH. One token bound to every agent that does NOT provision a
+# service user. `--gen` emits exactly this plus the chatbot's, so this is the
+# normal case — without it, the eleven per-agent vars below are all unset and
+# nothing would be registered at all.
+if [[ -n "${SUITE_ROSTER_TOKEN:-}" ]]; then
+    names=$(for entry in "${ROSTER[@]}"; do
+        [[ "$(cut -d: -f3 <<<"$entry")" == "false" ]] || continue
+        printf '"%s",' "$(cut -d: -f1 <<<"$entry")"
+    done)
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ROUTER_URL/v1/admin/invitations" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d "{\"level\":\"tier1\",\"token\":\"$SUITE_ROSTER_TOKEN\",\"agent_ids\":[${names%,}],\"provisions_service_user\":false}")
+    case "$code" in
+        201) log "roster: registered"; registered=$((registered+1));;
+        409) log "roster: already registered (idempotent)";;
+        *)   fail "roster: register failed (HTTP $code)";;
+    esac
+fi
+
+# PER-AGENT PATH. Still the ONLY way to register a `provisions_service_user`
+# invitation (the chatbot's), and still the whole story for a deployment that
+# used `--gen-per-agent`. An unset var is skipped rather than fatal: with a
+# roster token set, every name but the chatbot is covered by it, and failing
+# here told the operator to run `--gen` — the very command that had just
+# deliberately not emitted these.
 for entry in "${ROSTER[@]}"; do
     name="$(cut -d: -f1 <<<"$entry")"
     var="$(cut -d: -f2 <<<"$entry")"
     prov="$(cut -d: -f3 <<<"$entry")"
     val="${!var:-}"
-    [[ -n "$val" ]] || fail "$var is empty — generate tokens with '--gen' first"
+    if [[ -z "$val" ]]; then
+        [[ -n "${SUITE_ROSTER_TOKEN:-}" ]] || log "skip $name: $var unset and no SUITE_ROSTER_TOKEN"
+        continue
+    fi
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ROUTER_URL/v1/admin/invitations" \
         -H "Authorization: Bearer $TOKEN" \
         -H 'Content-Type: application/json' \
-        -H "Idempotency-Key: register-$name" \
         -d "{\"level\":\"tier1\",\"token\":\"$val\",\"provisions_service_user\":$prov}")
     case "$code" in
         201) log "$name: registered (provisions_service_user=$prov)"; registered=$((registered+1));;
@@ -124,4 +163,6 @@ for entry in "${ROSTER[@]}"; do
     esac
 done
 
-log "done — $registered newly registered. Agents can now onboard with their \$<AGENT>_INVITATION."
+[[ "$registered" -gt 0 || -n "${SUITE_ROSTER_TOKEN:-}" ]] \
+    || fail "nothing registered — set SUITE_ROSTER_TOKEN + CHATBOT_INVITATION ('--gen')"
+log "done — $registered newly registered. Agents can now onboard."

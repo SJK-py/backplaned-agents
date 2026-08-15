@@ -87,28 +87,47 @@ the whole job; the compose `migrate` / `init` one-shots run them for you.
 > A **fresh** install is unaffected — this is only about databases that
 > already carry an older `alembic_version`.
 
-## Invitations (one per agent)
+## Invitations — two tokens, not twelve
 
-Each agent onboards with its own admin-issued invitation. There's **no
-mint → paste round-trip**: `POST /v1/admin/invitations` accepts a
-caller-supplied `token`, so you set one token per agent in the env file and
-register those same values. `scripts/register-invitations.sh` does both —
-`--gen` prints one `<AGENT>_INVITATION=<token>` line per agent (append to
-`deploy/.env.prod`), and a normal run logs in as admin and registers each
-(the **chatbot's** with `provisions_service_user: true` automatically — it
-bootstraps the `usr_service_chatbot` principal used for registration +
-per-user minting). It's idempotent (re-runs are safe). The same env vars
-feed the agent containers:
+Agents onboard with admin-issued invitations, and there's **no mint → paste
+round-trip**: `POST /v1/admin/invitations` accepts a caller-supplied `token`,
+so you set the values and register those same values.
 
-| env var | agent | notes |
+**Two env vars, both required** (compose refuses to start without them):
+
+| env var | covers | notes |
 | --- | --- | --- |
-| `CHATBOT_INVITATION` | chatbot | `provisions_service_user=true` |
-| `WEBAPP_INVITATION` | webapp | browser channel (no service principal) |
-| `ORCHESTRATOR_INVITATION` | orchestrator | |
-| `DEEP_REASONING_INVITATION` · `RESEARCH_INVITATION` · `COMPUTER_USE_INVITATION` | l1 | |
-| `KNOWLEDGE_BASE_INVITATION` · `MEMORY_INVITATION` | l3 stores | share `lancedb_data` |
-| `HISTORY_SUMMARIZER_INVITATION` · `MD_CONVERTER_INVITATION` · `CONFIG_INVITATION` | l3/l4/l2 | |
-| `SANDBOX_INVITATION` | sandbox | hardened container |
+| `SUITE_ROSTER_TOKEN` | the eleven agents that do **not** provision a service user — `webapp`, `orchestrator`, `history_summarizer`, `memory`, `knowledge_base`, `md_converter`, `config`, `deep_reasoning`, `research`, `computer_use`, `sandbox` | one token with an **agent-name roster**; each name consumable once |
+| `CHATBOT_INVITATION` | `chatbot` only | registered `provisions_service_user=true` — it bootstraps the `usr_service_chatbot` principal used for registration + per-user minting |
+
+The chatbot's stays separate deliberately: its invitation yields a
+minting-capable principal, and the other eleven agents must not inherit that
+flag. And the roster is **tighter** than the per-agent tokens it replaced,
+not merely fewer — an invitation with no roster is an *unbound bearer
+credential*, because `POST /v1/onboard` takes the agent name from the agent's
+own `agent_info`, so any such token can onboard as any name. A roster token
+is bound to its list, stays live until the list is exhausted, and therefore
+lets a partially-provisioned group heal on restart.
+
+```bash
+# 1. generate both tokens
+scripts/register-invitations.sh --gen >> deploy/.env.prod
+
+# 2. register them (compose's `init` one-shot already does this;
+#    run it by hand only for a non-compose deploy, once the router is up)
+ROUTER_URL=https://your.domain scripts/register-invitations.sh deploy/.env.prod
+```
+
+Both steps are idempotent — re-running registers nothing new and exits 0.
+Step 2 is `bp_agents/bootstrap.py`'s shell equivalent and registers the same
+two things it does; the compose path runs the Python one via `init`.
+
+**Per-agent tokens are still supported** for a deployment that registers
+agents individually: `--gen-per-agent` emits one `<AGENT>_INVITATION` line
+each, and the register step picks up whichever are set. Leave
+`SUITE_ROSTER_TOKEN` empty if you go that route — and note that the agent
+*containers* only receive the vars `docker-compose.prod.yml` passes them, so
+per-agent tokens beyond the chatbot's need a compose edit as well.
 
 The dev launcher `scripts/run-suite.sh` mints + starts the whole roster
 automatically for a local router.

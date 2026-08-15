@@ -42,7 +42,7 @@ volumes:
 
 # Common config shared by every suite agent. Each service sets
 # SUITE_AGENT + its own AGENT_INVITATION_TOKEN. NOTE: no `build:` here on
-# purpose — the image is built once by `suite-migrate`; every agent that
+# purpose — the image is built once by `init`; every agent that
 # inherits this anchor (`<<: *suite-agent`) references the tag image-only.
 # Adding `build:` back would make `up --build` build backplaned-suite:latest
 # from many services at once → `image ... already exists`.
@@ -376,12 +376,12 @@ services:
 
   # ======================================================================
   # AGENT SUITE. One image (Dockerfile.suite); each service selects its
-  # agent via $SUITE_AGENT and onboards with its OWN admin-issued
-  # invitation (the chatbot's flagged `provisions_service_user`). NONE
+  # agent via $SUITE_AGENT and onboards from the ROSTER token, except the
+  # chatbot, whose own invitation is flagged `provisions_service_user`. NONE
   # hold provider / S3 / JWT secrets — they call ctx.llm and the router's
-  # file endpoints. The suite schema is applied once by `suite-migrate`,
-  # and the suite ACL rule set is applied by the `bootstrap` one-shot
-  # (no separate `suite-acl` service). See docs/agent-suite/deployment.md.
+  # file endpoints. Both schemas AND the suite ACL rule set are applied by
+  # the single `init` one-shot above (it replaced the former `migrate` +
+  # `suite-migrate` + `bootstrap` trio). See docs/agent-suite/deployment.md.
   # ======================================================================
 
   # --- Agent groups ------------------------------------------------------
@@ -481,7 +481,21 @@ services:
       WEBAPP_PUBLIC_BASE_URL: "${WEBAPP_PUBLIC_BASE_URL:-https://${WEBAPP_DOMAIN:-app.${PUBLIC_DOMAIN:-localhost}}}"
       WEBAPP_PASSWORD_LOGIN_ENABLED: "${WEBAPP_PASSWORD_LOGIN_ENABLED:-true}"
     command: ["python", "-m", "bp_agents.host", "--group", "channels"]
-    networks: [edge, agents, suite]
+    networks:
+      agents: {}
+      suite: {}
+      edge:
+        # `webapp` is the name the EDGE uses for the browser channel, and it
+        # must keep resolving however the agents are packed into containers.
+        # This group used to be a service literally named `webapp`; folding it
+        # into `channels` (22 services → 11) silently broke
+        # `reverse_proxy webapp:8002` in BOTH deploy/Caddyfile and
+        # scripts/render-caddyfile.sh, because Docker DNS resolves service
+        # names and aliases — and `webapp` had become neither. The alias
+        # decouples the edge config from the packing decision, so the next
+        # regrouping cannot break it again. Do not remove without changing
+        # both Caddyfiles.
+        aliases: [webapp]
     volumes: [channels_state:/state]
 
   sandbox:                         # UNTRUSTED code execution — hardened
