@@ -902,7 +902,33 @@ step's tests:
   6. **`user_config`.** Still outstanding — deliberately last: until step 5
      the suite needed its pool anyway, so moving these fields earlier bought
      nothing and cost a network round trip per turn on the hot path. Now it
-     would close the pool, which is the point.
+     is the only thing left keeping a Postgres password in the ten worker
+     agents, which is the point. §13.4 is what surveying it settled.
+
+### 13.4 What the `user_config` survey settled
+
+Two things worth writing down before the move, both found by looking rather
+than assuming:
+
+  * **It splits by READER, not by kind.** The fields the ten worker agents
+    read at turn start — `full_name`, `timezone`, `language`,
+    `verbose_default`, `custom_note`, `max_context_token_limit` — are read
+    inside a task, so `ctx.history.user_scope` reaches them and moving them
+    closes those pools. `sandbox_uid` and `default_session_id` are read
+    *outside* one, by the sandbox and the cron scheduler, and `sandbox_uid`
+    additionally needs cross-user uniqueness that per-key CAS does not give.
+    They stay in `user_config`, which the chatbot keeps a pool for anyway
+    (cron, platform mappings). Moving only the first group is what the
+    "closes those ten pools" claim above actually rests on.
+  * **User-scoped state is addressable only through a session** — §8's ops
+    endpoint takes `scope` in the body but a `session_id` in the path, and
+    ownership is checked against it. So a steward reading a user's
+    preferences needs a carrier session, and "survives session purge" is
+    true of the *data* but not of the *route to it*. Closed sessions work as
+    carriers (`_owned_session` doesn't check `closed_at`), so in practice the
+    webapp settings page is fine for anyone who has ever held a conversation
+    — but a `GET|PATCH /v1/users/me/state` would remove the wart and is the
+    cleaner fix if this is done properly.
 
 ### 13.3 `[shipped]` Where the cutover departed from the table
 
