@@ -20,7 +20,7 @@ from bp_agents.settings import SuiteSettings
 def _stub_request(pool, user_id, settings):
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(
-            pool=pool, suite_settings=settings,
+            pool=pool,
         )),
         session={"user_id": user_id},
     )
@@ -89,7 +89,7 @@ def test_ensure_user_config_noops_without_pool_or_user() -> None:
         # no user_id
         req = SimpleNamespace(
             app=SimpleNamespace(state=SimpleNamespace(
-                pool=object(), suite_settings=SimpleNamespace())),
+                pool=object())),
             session={},
         )
         await ensure_user_config(req)

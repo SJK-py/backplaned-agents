@@ -344,7 +344,7 @@ def test_config_empty_reply_shows_settings(suite_db_url: str) -> None:
             llm = _ScriptLlm([LlmResponse(text="")])  # model says nothing
             out = await run_config(
                 _Ctx(llm), MessagePayload(prompt="show settings"),
-                pool=pool, settings=_settings(suite_db_url),
+                pool=pool,
             )
             assert "timezone: Asia/Seoul" in out.content
             assert out.content != "Done."
@@ -369,7 +369,7 @@ def test_config_set_persists(suite_db_url: str) -> None:
                 LlmResponse(text="Updated your timezone."),
             ])
             ctx = _Ctx(llm)
-            await run_config(ctx, MessagePayload(prompt="set tz tokyo"), pool=pool, settings=_settings(suite_db_url))
+            await run_config(ctx, MessagePayload(prompt="set tz tokyo"), pool=pool)
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, "usr_a")
             assert cfg.timezone == "Asia/Tokyo"
@@ -406,7 +406,7 @@ def test_config_set_returns_grounded_snapshot(suite_db_url: str) -> None:
             ])
             await run_config(
                 _Ctx(llm), MessagePayload(prompt="set tz tokyo"),
-                pool=pool, settings=_settings(suite_db_url),
+                pool=pool,
             )
             # The set_config tool result (fed back on the 2nd turn) must carry
             # the full read-back: the changed field AND an untouched one.
@@ -450,7 +450,7 @@ def test_config_reply_uses_user_language(suite_db_url: str) -> None:
             llm = _CapturingLlm([LlmResponse(text="설정을 보여드릴게요.")])
             await run_config(
                 _Ctx(llm), MessagePayload(prompt="show settings"),
-                pool=pool, settings=_settings(suite_db_url),
+                pool=pool,
             )
             assert "ko" in captured["system"]
             assert "preferred language" in captured["system"]

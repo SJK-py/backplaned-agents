@@ -65,7 +65,7 @@ class _Upstream:
         pass
 
 
-def _build_app(*, pool, suite_settings=None, upstream=None):
+def _build_app(*, pool, upstream=None):
     pytest.importorskip("fastapi")
     pytest.importorskip("itsdangerous")
     pytest.importorskip("jinja2")
@@ -77,7 +77,6 @@ def _build_app(*, pool, suite_settings=None, upstream=None):
     cfg = WebappConfig(session_secret=SecretStr("x" * 32), session_cookie_secure=False)
     return create_app(
         cfg, upstream=upstream or _Upstream(), pool=pool, core=None,
-        suite_settings=suite_settings,
     )
 
 

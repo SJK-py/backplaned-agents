@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     import asyncpg
 
     from bp_agents.channel import ChannelCore
-    from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +75,14 @@ def create_app(
     upstream: UpstreamClient,
     pool: asyncpg.Pool | None = None,
     core: ChannelCore | None = None,
-    suite_settings: SuiteSettings | None = None,
 ) -> FastAPI:
     """Build the webapp. `upstream` (router HTTP, user-token) is required;
     `pool` (suite DB) and `core` (the channel engine; required for the chat
     pane to inject turns) are optional so tests can build a read-only app.
-    `suite_settings` supplies the per-tier preset allow-lists for the config
-    form; when omitted, the LLM-tier fields stay system-managed (hidden)."""
+    The webapp holds no suite-wide settings of its own: the one thing it
+    used them for — the per-tier preset allow-lists — is gone, because model
+    entitlement is the router's and the Models pane asks it directly
+    ([../../../docs/design/router-resolved-preset-slots.md] §5.1)."""
     app = FastAPI(
         title="bp_webapp",
         version="0.1.0",
@@ -93,7 +93,6 @@ def create_app(
     app.state.upstream = upstream
     app.state.pool = pool
     app.state.core = core
-    app.state.suite_settings = suite_settings
     # session_id → in-flight TurnRunner (webapp.turns). Set while a turn runs
     # DETACHED from the SSE connection, so closing the stream (navigating away)
     # doesn't kill it: the SSE subscribes/replays, the chat view rebuilds the

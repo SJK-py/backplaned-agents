@@ -102,7 +102,7 @@ async def _startup() -> None:
         redis=_redis,
     )
     app = create_app(
-        cfg, upstream=_upstream, pool=_pool, core=core, suite_settings=_settings
+        cfg, upstream=_upstream, pool=_pool, core=core
     )
 
     server = uvicorn.Server(

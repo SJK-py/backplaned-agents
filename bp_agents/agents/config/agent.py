@@ -151,11 +151,7 @@ async def _shutdown() -> None:
 
 
 async def run_config(
-    ctx: TaskContext,
-    payload: MessagePayload,
-    *,
-    pool: asyncpg.Pool,
-    settings: SuiteSettings,
+    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool
 ) -> AgentOutput:
     async with pool.acquire() as conn:
         cfg = await queries.get_user_config(conn, ctx.user_id)
@@ -187,7 +183,7 @@ async def run_config(
 )
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     assert _pool is not None
-    return await run_config(ctx, payload, pool=_pool, settings=_settings)
+    return await run_config(ctx, payload, pool=_pool)
 
 
 @agent.handler(
