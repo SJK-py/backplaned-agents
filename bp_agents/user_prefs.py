@@ -201,9 +201,10 @@ async def load_prefs(ctx: TaskContext, settings: SuiteSettings) -> UserPrefs:
     """This user's settings, read through the executing agent's own socket.
 
     One round trip, independent of everything else `open_turn` does, so a
-    caller that cares about latency can `asyncio.gather` it with the turn
-    open. A store failure degrades to the operator defaults rather than
-    failing the turn — preferences are context, not correctness."""
+    caller can `asyncio.gather` it with the turn open — which overlaps the
+    client side, though the router's per-socket reader still applies the two
+    frames in sequence. A store failure degrades to the operator defaults
+    rather than failing the turn: preferences are context, not correctness."""
     defaults = defaults_from(settings)
     try:
         state = await ctx.history.user_scope.state(

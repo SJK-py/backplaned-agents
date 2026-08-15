@@ -229,8 +229,12 @@ async def run_delegated_turn(
     to the orchestrator is cycle-free."""
     # Two independent round trips into the router's store — the user's
     # settings (user scope) and this thread's window (session scope). A batch
-    # carries one scope, so they cannot be merged; running them concurrently
-    # keeps the preference read off the turn's critical path.
+    # carries ONE scope, so they cannot be merged into one op list.
+    #
+    # `gather` overlaps the client side only: the router's per-socket reader
+    # awaits each frame inline, so it still applies them one after the other.
+    # What it saves is the send/await gap, not a round trip — worth having,
+    # but don't read this as "the preference read is free".
     prefs, turn = await asyncio.gather(
         load_prefs(ctx, settings),
         open_turn(
