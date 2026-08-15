@@ -135,7 +135,22 @@ log "running alembic upgrade head"
 set -a
 . ./.env
 set +a
-alembic upgrade head | sed 's/^/  /'
+# The schema is ONE migration (0001_initial_schema). A database created
+# before the 2026-08-18 consolidation carries an alembic_version naming a
+# revision that no longer exists; alembic then fails with "Can't locate
+# revision identified by ...". There is deliberately no upgrade path, so
+# say what to do rather than leaving a bare traceback.
+if ! alembic upgrade head | sed 's/^/  /'; then
+    log ""
+    log "migration failed."
+    log "if the error says \"Can't locate revision identified by '00NN_...'\","
+    log "this database predates the migration consolidation and cannot be"
+    log "upgraded. recreate it (DESTROYS dev data):"
+    log ""
+    log "    docker compose -f docker-compose.dev.yml down -v && $0"
+    log ""
+    exit 1
+fi
 
 # 5. Hand off
 log ""

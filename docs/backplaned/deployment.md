@@ -130,7 +130,12 @@ The sandbox joins `agents` **only** (router WS), nothing else.
 ## 5. First-boot order
 
 1. `docker compose -f docker-compose.prod.yml up -d postgres valkey seaweedfs` — data services.
-2. `migrate` one-shot runs `alembic upgrade head` against `bp_router`.
+2. `migrate` one-shot runs `alembic upgrade head` against `bp_router`. The
+   router's schema is a **single** migration, `0001_initial_schema`.
+   ⚠️ On a database created before 2026-08-18 this step **fails** by design —
+   the Alembic chain was consolidated and there is no upgrade path. See
+   [`../agent-suite/deployment.md`](../agent-suite/deployment.md#databases)
+   for what to do (short version: recreate the databases empty).
 3. `router` starts; the bootstrap-admin env seeds the first admin.
 4. Admin logs into `/admin`, configures LLM presets, and **issues agent invitations** — the chatbot's flagged `provisions_service_user`.
 5. The suite repo runs its **own** migrations against `bp_suite`, then its agents start: each onboards with its invitation (persisting creds to its `state_dir`) and connects.

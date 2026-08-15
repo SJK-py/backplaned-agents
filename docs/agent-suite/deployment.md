@@ -35,6 +35,58 @@ alembic upgrade head                          # router  (migrate service)
 alembic -c alembic_suite.ini upgrade head     # suite   (the `init` service)
 ```
 
+Each database is **one migration**: `0001_initial_schema` for the router,
+`0001_suite_initial` for the suite. On an empty database those commands do
+the whole job; the compose `migrate` / `init` one-shots run them for you.
+
+> ### ⚠️ Upgrading from a build before 2026-08-18 requires a data wipe
+>
+> Both Alembic chains were consolidated back down to a single baseline, so
+> every revision after `0001` was deleted. A database created by the older
+> chain has an `alembic_version` naming a revision that no longer exists,
+> and `alembic upgrade head` against it **fails**:
+>
+> ```
+> ERROR [alembic.util.messaging] Can't locate revision identified by
+> '0013_code_agents'
+> ```
+>
+> That failure is the intended behaviour, not a bug to work around — the
+> tooling is telling you the truth, that there is no upgrade path. **The
+> deployment stops there and nothing starts against a stale schema**:
+> alembic exits 255, `bp_agents.init` stops at the first failing step
+> rather than continuing to the ACL bootstrap, and every agent group
+> declares `init: {condition: service_completed_successfully}`. You get a
+> failed one-shot, not a half-migrated system.
+>
+> Do **not** try to `alembic stamp` your way past it: stamping asserts the
+> schema already matches the baseline, and on a pre-existing database that
+> is a claim nobody has checked. The supported move is to start the
+> databases empty:
+>
+> ```bash
+> scripts/prod.sh          # choose the "reset" action — down -v
+> ```
+>
+> (`reset` asks you to type `reset` to confirm before it removes anything.)
+>
+> **`reset` deletes every data volume**, not just Postgres: Valkey,
+> SeaweedFS (the file store), LanceDB (memory + knowledge base), and the
+> agents' `credentials.json`. Users, sessions, conversations, files, and
+> memories do not survive it. If any of that matters to you, take a
+> `pg_dump` and copy the volumes **before** resetting — this repo ships no
+> migration path back in, so a dump is a record, not a restore route.
+>
+> After the reset the normal first-boot flow applies with **no env-file
+> changes**: `init` re-registers the same `SUITE_ROSTER_TOKEN` /
+> `CHATBOT_INVITATION` values already in `deploy/.env.prod` (registration is
+> idempotent and the tokens are caller-supplied, not minted), the agents
+> re-onboard against a wiped `state_dir`, and the router re-seeds the first
+> admin from `BOOTSTRAP_ADMIN_*`. Registered end users must register again.
+>
+> A **fresh** install is unaffected — this is only about databases that
+> already carry an older `alembic_version`.
+
 ## Invitations (one per agent)
 
 Each agent onboards with its own admin-issued invitation. There's **no

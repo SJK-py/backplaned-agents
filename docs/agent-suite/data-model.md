@@ -10,8 +10,9 @@
 
 ### 1.1 The conversation is NOT here
 
-`session_info` and `session_history` are gone (migration
-`0005_drop_session_tables`). Conversation, its rolling summaries,
+`session_info` and `session_history` are gone — dropped by migration
+`0005_drop_session_tables`, and since the chain was consolidated they are
+simply absent from `0001_suite_initial`. Conversation, its rolling summaries,
 `delegated_to`, and a session's channel/title all live in the router's
 session store — see [sessions.md §1](./sessions.md) for the mapping and
 [`../design/router-managed-session-store.md`](../design/router-managed-session-store.md)
@@ -20,8 +21,9 @@ for why. What follows is what the suite still keeps.
 ### 1.2 The user's settings are NOT here either
 
 `full_name`, `timezone`, `language`, `verbose_default`, `custom_note` and
-`max_context_token_limit` are gone from `user_config` (migration
-`0006_user_config_to_user_scope`). They are keys in the router's
+`max_context_token_limit` are gone from `user_config` (dropped by migration
+`0006_user_config_to_user_scope`, now simply absent from the consolidated
+`0001_suite_initial`). They are keys in the router's
 **user-scoped state** — the `(user_id, key)` namespace the session store
 exposes under `scope="user"` — reached through `bp_agents/user_prefs.py`.
 Reading them no longer needs a database credential, which is what let the l1
@@ -46,7 +48,8 @@ Two fields wide, and that is the point: what is left is exactly what cannot
 be read through `ctx.history` or a carrier session.
 
 **No model choice lives here.** Four `preset_*` columns did until migration
-`0004_drop_user_config_presets`; which model a user runs on is now a router
+`0004_drop_user_config_presets` (likewise absent from the consolidated
+baseline); which model a user runs on is now a router
 preset **slot** ([`../design/router-resolved-preset-slots.md`]) — the agent
 names an opaque slot (`pro` / `balanced` / `lite`, `bp_agents/slots.py`) and
 the router resolves it from the user's own preference intersected with their

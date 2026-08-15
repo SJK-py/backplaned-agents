@@ -13,16 +13,29 @@ single-node path; that's been dropped — the codebase relies on
 Postgres-only features like `jsonb`, GIN indexes, recursive CTEs,
 and `SELECT ... FOR UPDATE`.)
 
+**The authoritative schema is one file:**
+`bp_router/db/migrations/versions/0001_initial_schema.py`. The chain was
+consolidated back to a single baseline, so there is no sequence of
+migrations to read to work out the current shape — and no upgrade path
+onto it from a database built by the older chain (see
+[`../deployment.md`](../deployment.md) §5). What follows is a **summary**;
+where the two disagree, the migration is right and this file is stale.
+
 ### 1.1 Core tables
 
 ```
 users(user_id PK, level, auth_kind, auth_secret_hash,
       email UNIQUE, created_at, suspended_at, deleted_at,
-      serviced_by text[])
+      purged_at, serviced_by text[])
   -- `suspended_at` reversible (admin lock).
   -- `deleted_at` terminal soft-delete (row stays; audit / FK refs
   --   survive). Partial idx users_active_idx on
   --   (created_at DESC) WHERE deleted_at IS NULL.
+  -- `purged_at` goes further: content hard-deleted and PII scrubbed
+  --   (GDPR erasure). The row is KEPT as a tombstone — the FKs above
+  --   and the append-only audit chain need it — so this column is the
+  --   durable signal the suite's reconcile loop keys off to erase its
+  --   own per-user rows and LanceDB.
   -- `serviced_by` lists service-principal user_ids authorised to
   --   mint refresh / password-reset tokens for this user (F8).
 
@@ -74,7 +87,8 @@ audit_log(event_id PK, ts, actor_kind, actor_id, event,
 invitations(token_hash PK, level, expires_at, used_at,
             used_by, created_by FK,
             created_at, idempotency_key,
-            provisions_service_user)
+            provisions_service_user,
+            agent_ids text[], consumed text[])
   -- `used_by` is plain text, NOT a FK: invitations are consumed
   --   by AGENTS (agents.agent_id), not users — a users FK
   --   rejected every legitimate agent onboard. Audit-only.
@@ -87,6 +101,14 @@ invitations(token_hash PK, level, expires_at, used_at,
   --   onboard that consumes this invitation also creates a co-located
   --   `usr_service_{agent_id}` (level=service) + returns its refresh
   --   token (see security.md §3.2).
+  -- `agent_ids` is an optional ROSTER: the agent names this one token
+  --   may produce, with `consumed` recording which have been taken.
+  --   Without it an invitation is an UNBOUND bearer credential —
+  --   `/v1/onboard` takes the name from the agent's own agent_info, so
+  --   any token can onboard as any name. The token stays live until the
+  --   roster is exhausted, so one host process onboards the group it
+  --   runs and a partially-provisioned group heals on restart. NULL
+  --   keeps the unbound single-use behaviour exactly.
 
 auth_refresh_tokens(token_hash PK, user_id FK,
                     issued_at, expires_at, used_at, replaced_by)
@@ -121,13 +143,33 @@ registration_attempts(id bigserial PK, channel, external_id,
   --   should prune `WHERE attempted_at < now() - interval '30d'`.
 
 mcp_servers(server_id PK, description, url, transport, auth_kind,
-            auth_value_ref, auth_header_name, groups text[],
-            expose_to_llm, tools_cache JSONB, refresh_requested_at,
-            created_at, last_connected_at, created_by FK)
+            auth_value_ref, auth_header_name, command, args text[],
+            env_refs JSONB, groups text[], capabilities text[],
+            disabled_tools text[], expose_to_llm, tools_cache JSONB,
+            refresh_requested_at, created_at, last_connected_at,
+            created_by FK, pending_invitation_token,
+            pending_invitation_expires_at)
   -- Admin-managed MCP bridge configs. One row → N runtime agents
   --   (one per MCP tool). `auth_value_ref` indirects via
   --   env://VAR or secret://path — raw secrets never stored here.
+  -- Three transports in two disjoint shapes, kept apart by the
+  --   `mcp_servers_transport_fields` CHECK: `stdio` spawns a local
+  --   subprocess (command set, url NULL); `sse` /
+  --   `streamable_http` connect to a url (command NULL).
 ```
+
+The remaining tables are documented where they were designed, because
+each is one feature's whole story and repeating the columns here would
+just be a second copy to let drift:
+
+| table(s) | what it is | reference |
+| --- | --- | --- |
+| `file_names` | named directory over the content-addressed `files` blob registry — `(user_id, scope, filename) → file_id` | [`../../design/router-managed-file-store.md`](../../design/router-managed-file-store.md) |
+| `user_oidc_identities` | `(issuer, sub) → user_id` for SSO login; a child table so one account can hold a password *and* any number of linked OPs | [`../../design/oidc-webapp.md`](../../design/oidc-webapp.md) |
+| `custom_agents` | operator-defined LLM-backed agents (`custom_<slug>`): prompts, typed params, a preset, and the optional bounded agent loop | [`../../design/mcp-bridge-custom-llm-agents.md`](../../design/mcp-bridge-custom-llm-agents.md) |
+| `code_agents` | operator-authored Python functions (`code_<slug>`) run in a uid-dropped subprocess. Deliberately **no** `network` column — per-agent egress needs `CAP_NET_ADMIN`, which the bridge does not have | [`../../design/bridge-python-code-agents.md`](../../design/bridge-python-code-agents.md) |
+| `session_messages`, `session_threads`, `session_state`, `session_handovers`, `session_turn_queue` | the router-managed session store: conversation log, per-thread cursors, key/value state, hand-over queue, FIFO turn lease. `session_id IS NULL` is the cross-session **user** scope | [`../../design/router-managed-session-store.md`](../../design/router-managed-session-store.md) |
+| `user_llm_preferences` | the user's per-slot model choice. Its own table rather than user-scoped state precisely because the router *acts* on it — a value under policy must not be one any agent can overwrite | [`../../design/router-resolved-preset-slots.md`](../../design/router-resolved-preset-slots.md) |
 
 ### 1.2 Indexes
 

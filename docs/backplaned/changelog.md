@@ -11,7 +11,16 @@
 > Scope: changes to **platform/infra code only** (`bp_protocol`, `bp_sdk`,
 > `bp_router`, `bp_admin`, and the platform tests under `tests/`). Pure
 > suite code (`bp_agents/`) and suite docs (`agent-suite/`) are **not**
-> tracked here — they are new, not modifications.
+> tracked here — they are new, not modifications. Neither is
+> `bp_mcp_bridge/`, for the same reason: it is a new package this repo
+> added, not a change to something vendored. Its design decisions and
+> post-ship fixes live in [`../design/`](../design/) — see
+> [`mcp-bridge-per-server-mode-per-tool.md`](../design/mcp-bridge-per-server-mode-per-tool.md),
+> [`mcp-bridge-custom-llm-agents.md`](../design/mcp-bridge-custom-llm-agents.md)
+> and [`bridge-python-code-agents.md`](../design/bridge-python-code-agents.md)
+> (§15.1 there carries the retry/give-up and HTTPS work). A bridge change
+> appears here only when it forced a `bp_router` / `bp_admin` change, and
+> then it is that change which is logged.
 >
 > Change types: **Added** (new, backward-compatible surface) ·
 > **Fixed** (bug fix) · **Changed** (behavior change) · **Removed**.
@@ -47,6 +56,25 @@
   subtle. That is the intended behaviour. The codebase is pre-release and
   no deployment carries data worth a rewrite path; a fabricated "upgrade"
   from an unknown intermediate is a worse promise than a clear stop.
+- **The failure is safe, and was checked rather than assumed.** Against a
+  database stamped `0013_code_agents`, alembic prints `Can't locate
+  revision identified by '0013_code_agents'` and exits **255**;
+  `bp_agents.init` stops at the first failing step instead of continuing to
+  the ACL bootstrap, and every agent group declares
+  `init: {condition: service_completed_successfully}`. The operator gets a
+  failed one-shot, never a router serving traffic against a stale schema.
+- **What an operator must do:** recreate both databases empty — `scripts/
+  prod.sh` → **reset** (`down -v`) in production, `docker compose -f
+  docker-compose.dev.yml down -v` in development. `reset` deletes **every**
+  data volume, not just Postgres: Valkey, SeaweedFS, LanceDB and the
+  agents' credentials go with it, so users, sessions, conversations, files
+  and memories do not survive. **Do not `alembic stamp` past the error** —
+  stamping asserts the schema already matches the baseline, which on a
+  pre-existing database is a claim nobody has verified. Documented at the
+  three places an operator actually reads: `README.md`,
+  `docs/agent-suite/deployment.md`, and `DEVELOPMENT.md`; `scripts/
+  dev-up.sh` now prints the recovery command on a failed migration instead
+  of a bare traceback.
 - **Two whole tables are absent rather than created-then-dropped:** the
   suite's `session_history` / `session_info`, whose contents are the
   router's session store now. The reasons they left are preserved in the

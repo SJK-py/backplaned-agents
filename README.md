@@ -40,7 +40,10 @@ A roster of cooperating agents and the conversation machinery around them:
 - **Knowledge base** — per-user documents with hybrid retrieval, semantic chunking, any-file ingest (via `md_converter`), and LLM-generated metadata.
 - **Conversational sessions** — full history per `(session, agent)` thread with **rolling summarization** so context stays bounded without losing the thread.
 - **Scheduled tasks** — DST-aware **cron** reminders and jobs that run on your behalf and ping you when they matter.
-- **MCP servers** — connect external **[Model Context Protocol](https://modelcontextprotocol.io)** servers from the admin UI, and their tools become first-class, **ACL-gated** tools the orchestrator and specialists can call — extending the assistant with third-party capabilities (GitHub, databases, SaaS APIs, …) without writing or redeploying agent code. A supervisor projects each server to one backplane agent (one mode per tool) and reconciles live as the server's tool list changes. See [`docs/design/mcp-bridge-per-server-mode-per-tool.md`](./docs/design/mcp-bridge-per-server-mode-per-tool.md).
+- **Operator-defined agents, three kinds, no redeploy** — a supervisor stands up one backplane agent per row in the admin UI, provisions its credentials, and reconciles live as you edit. All three are ordinary **ACL-gated** agents the orchestrator and specialists can call:
+  - **MCP servers** — connect external **[Model Context Protocol](https://modelcontextprotocol.io)** servers (GitHub, databases, SaaS APIs, …) over HTTP/SSE or a local `stdio` subprocess; each becomes one agent with one mode per tool, re-listed as the server's tool set changes. ([design](./docs/design/mcp-bridge-per-server-mode-per-tool.md))
+  - **Custom LLM agents** — a system prompt, a user-prompt template, typed parameters and a model preset become a callable agent; optionally a bounded tool-use loop with file access and peer tools. ([design](./docs/design/mcp-bridge-custom-llm-agents.md))
+  - **Python code agents** — for the half of the problem that isn't a model: a weather API, an internal REST call, a CSV transform. You author a function in the admin UI and it runs in a **uid-dropped, rlimited, scoped-env subprocess** with a per-call working directory, killed on timeout — not in the bridge process, so a typo can't reach another agent's credentials. ([design](./docs/design/bridge-python-code-agents.md))
 - **Channels** — **Telegram** (slash commands: `/new`, `/stop`, `/config`, `/cron`, `/password`, `/v` for verbose), **KakaoTalk** (the same commands, via an egress-only pull consumer behind a tiny Cloudflare Worker relay — see [`docs/design/kakao-channel.md`](./docs/design/kakao-channel.md)), and a **web app** (browser channel: login, session management, live-progress chat, settings/cron, file stash).
 - **Helpers** — `config` (change settings in natural language), `history_summarizer`, `md_converter`.
 
@@ -77,7 +80,15 @@ Re-run later and answer "no" to reuse the existing file — volume-baked secrets
 | **stop** | `down` — keeps data volumes |
 | **reset** | `down -v` — **deletes** the DB + all data volumes (Postgres, Valkey, SeaweedFS, LanceDB, agent creds) for a clean slate |
 
-Compose brings everything up in dependency order: **router** → a one-shot **`init`** (both schemas, then the agent invitations + suite ACL once the router is healthy) → the agent groups. Onboarding uses **one roster token** (`SUITE_ROSTER_TOKEN`) plus the chatbot's own higher-privilege invitation, rather than one token per agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **MCP bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add and configure MCP servers in the admin UI (unset the secret to leave it off).
+> **⚠️ Upgrading from a build before 2026-08-18?** Both Alembic chains were
+> consolidated to a single baseline migration, so there is **no upgrade path**
+> from an older database — `init` fails with `Can't locate revision identified
+> by '00NN_…'` and nothing starts against a stale schema. Use the **reset**
+> action above and start fresh; back anything you care about up first, because
+> `reset` deletes every data volume. A **fresh** install is unaffected. Details
+> and the safe-failure guarantee: [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md#databases).
+
+Compose brings everything up in dependency order: **router** → a one-shot **`init`** (both schemas, then the agent invitations + suite ACL once the router is healthy) → the agent groups. Onboarding uses **one roster token** (`SUITE_ROSTER_TOKEN`) plus the chatbot's own higher-privilege invitation, rather than one token per agent. The `search` profile (bundled SearXNG) is auto-added when the env file points at it — no flag to remember. The **agent bridge** runs under an optional `mcp` profile that `prod.sh` auto-adds when `MCP_BRIDGE_SECRET` is set — which it generates by default, so the bridge runs out of the box; you then add MCP servers, custom LLM agents, or Python code agents in the admin UI (unset the secret to leave it off).
 
 Then message the bot on Telegram, send `/register`, and approve it as admin. The **browser channel** is served by the `webapp` service behind Caddy on its own host — `app.<your-domain>` by default (override with `WEBAPP_DOMAIN`); users log in with their email + a web password (`/password` to the bot). Invitations, networks, the SearXNG profile, and the sandbox-isolation caveat are detailed in [`docs/agent-suite/deployment.md`](./docs/agent-suite/deployment.md).
 

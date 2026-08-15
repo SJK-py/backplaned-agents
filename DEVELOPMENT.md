@@ -75,7 +75,12 @@ docker compose -f docker-compose.dev.yml up -d
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[router,admin,dev]"
 
-# Schema.
+# Schema. One migration per database: 0001_initial_schema (router),
+# 0001_suite_initial (suite). If this FAILS with "Can't locate revision
+# identified by '00NN_...'", your database predates the 2026-08-18
+# migration consolidation and there is no upgrade path — drop and recreate
+# it (`dropdb bp_router && createdb bp_router`, or
+# `docker compose -f docker-compose.dev.yml down -v`) and re-run.
 export ROUTER_DB_URL=postgresql://postgres:bp@127.0.0.1:5432/bp_router
 alembic upgrade head
 
