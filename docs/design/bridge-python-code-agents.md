@@ -1,11 +1,14 @@
 # Agent bridge — operator-authored Python code agents
 
-> **Status: proposed.** A third bridge-provisioned agent kind, alongside
-> MCP servers ([`mcp-bridge-per-server-mode-per-tool.md`](./mcp-bridge-per-server-mode-per-tool.md))
+> **Status: implemented (v1).** A third bridge-provisioned agent kind,
+> alongside MCP servers ([`mcp-bridge-per-server-mode-per-tool.md`](./mcp-bridge-per-server-mode-per-tool.md))
 > and custom LLM agents ([`mcp-bridge-custom-llm-agents.md`](./mcp-bridge-custom-llm-agents.md)).
 > An operator authors a Python function in the admin UI; the bridge stands
 > up one backplane `Agent` whose handler runs that function in a
-> uid-dropped subprocess. v1 is deliberately narrow — see §2.
+> uid-dropped subprocess. v1 is deliberately narrow — see §2. Migration
+> `0013_code_agents`; runtime in `bp_mcp_bridge/code_runner.py` +
+> `code_agent.py` + `code_agent_bridge.py`; UI at `/admin/code-agents`.
+> Nine `[shipped]` deviations in §15.
 
 ## 1. Why
 
@@ -538,7 +541,68 @@ and because two of them are shapes this design must not copy.
    No network is `internal: true`; the bridge has outbound internet
    today. §3.4 depends on this being stated accurately.
 
-## 15. What not to do
+## 15. `[shipped]` What the build changed
+
+Nine places the implementation departed from the text above. The first
+seven are small. The last two are not: both are cases where the design's
+one-line summary of a mechanism ("wait, then read") hid a real bug that only
+running the thing surfaced — which is the argument for §13's step 4 in a
+nutshell.
+
+  * **`python -I` implies `-P`, so the harness must put its own directory on
+    `sys.path`.** §7 said "spawn `python -I -S harness.py`" and stopped
+    there. `-I` is what we want against the interpreter's own environment
+    (no `PYTHON*` vars, no user site-packages) but it also refuses to
+    prepend the script's directory — so `import agent_main` failed outright
+    on the first run. The harness now inserts the workdir, and only the
+    workdir, explicitly.
+  * **`RLIMIT_FSIZE` was added to the shared `StdioSpawnConfig`.** §4 listed
+    `memory_mb` but nothing bounded disk. A runaway `open(...).write` fills
+    the volume every other bridged agent shares. The stdio path keeps it
+    disabled (an MCP server may legitimately cache large artifacts); the
+    code path sets 64 MB.
+  * **The drains are standalone tasks, not gathered with the wait.** The
+    first shape — `wait_for(gather(feed, drain, drain, wait))` — deadlocks
+    its own cleanup: on timeout the gather is already cancelled, so
+    re-awaiting it to collect partial output raises `CancelledError` out of
+    the timeout handler. The drains now run for the call's whole life and
+    are collected after the kill, which is also how a killed function's
+    partial stderr still reaches the log.
+  * **The supervisor generalisation landed as `_Kind`.** §11 asked for it;
+    it is a dataclass of (name, active map, lister, row factory, bridge
+    factory) plus one `_reconcile_kind`. `_reconcile_custom_once` /
+    `_start_custom` / `_stop_custom` survive as thin named wrappers, because
+    they are the names the codebase refers to.
+  * **`returns: {}` is the PATCH clear sentinel.** Not in the design, and
+    needed: PATCH's "None means leave alone" rule otherwise leaves no way to
+    remove a declared output schema once set.
+  * **An unresolvable secret is skipped and logged, not fatal.** §9 did not
+    say. Failing the bridge means one typo in one of five refs takes the
+    agent offline entirely; skipping means the function sees the variable
+    missing and can say so. The ref NAME is logged; the value never is.
+  * **Code agents write `output.txt`, not `output.md`.** The LLM kind's
+    output is prose and markdown is right for it. A function returns JSON as
+    often as text, and naming it `.md` mislabels the majority case.
+  * **The runner waits on the RESULT LINE, not on process exit.** §3.2's
+    diagram says `wait(timeout_s)`, and that is wrong in a way only a test
+    finds: `asyncio`'s `Process.wait()` does not return until the pipes close
+    too, so a function that returns fine after a bare
+    `subprocess.Popen(...)` — a background job it never reaps — was reported
+    as a **timeout with its result discarded**. The harness writes exactly one
+    line, so the runner reads exactly one line and takes the result the
+    moment it exists. The process group is then killed unconditionally, on
+    success as well as timeout, so the straggler does not outlive the call
+    either.
+  * **Cleanup runs on every exit path, and lets its tasks finish.** Two
+    bugs in one: an oversize result raised out of the read and skipped
+    teardown entirely, and cancelling the drains mid-read left `stdin`
+    unclosed and the pipes open. Both leak the subprocess transport to the
+    garbage collector, which surfaces much later — in an unrelated call — as
+    `Event loop is closed` from `BaseSubprocessTransport.__del__`. The fix
+    is a single `_cleanup` on every path that kills the group, then lets the
+    feed and drain tasks *complete* rather than cancelling them.
+
+## 16. What not to do
 
 - **Don't run operator code in the bridge process.** §3.1. Not "for
   simple agents", not "behind a flag". The credential blast radius is the
@@ -562,7 +626,7 @@ and because two of them are shapes this design must not copy.
   a larger capability than the one it would contain.
 - **Don't put the code body in the audit chain** (§10).
 
-## 16. Open questions
+## 17. Open questions
 
 - **Timeout vs. the router's task deadline.** `timeout_s` is the bridge's
   inner bound; `ctx.deadline` is the outer one, and neither the LLM
@@ -592,21 +656,31 @@ and because two of them are shapes this design must not copy.
   call the process "the agent bridge" in docs, and leave the rename as a
   cosmetic change for a quieter week.
 
-## 17. Sizing estimate
+## 18. Sizing — estimate vs. shipped
 
-| piece | estimate |
-| --- | --- |
-| preflight: custom-agent metrics + PATCH validator | ~80 |
-| shared-surface extraction (§11) | ~150 (mostly moves) |
-| migration + models + queries | ~200 |
-| router admin API + validators | ~350 |
-| `code_agent.py` (runner + harness + handler) | ~400 |
-| `code_agent_bridge.py` | ~150 (mirrors `custom_agent_bridge.py`) |
-| admin UI (page + 3 templates) | ~450 |
-| tests | ~600 |
+| piece | estimated | shipped |
+| --- | --- | --- |
+| preflight: custom-agent metrics + PATCH validator | ~80 | 84 |
+| shared surface (§11): `agent_common.py` + `agent_bridge.py` | ~150 | 276 |
+| migration + models + queries | ~200 | ~280 |
+| router admin API + validators | ~350 | ~450 |
+| `code_runner.py` (subprocess + harness) | ~400 | 446 |
+| `code_agent.py` (agent + handler) | — | 185 |
+| `code_agent_bridge.py` | ~150 | 185 |
+| admin UI (page + 2 templates) | ~450 | 913 |
+| tests (`tests/test_code_agents.py`) | ~600 | 963 |
 
-~1 800 lines plus 600 of tests, no `bp_agents` dependency, no router
-protocol change, and no new container. The largest single risk is step 4
-(§13) — if the uid drop or the scoped env does not behave as the stdio
-path suggests, the design changes shape, which is why it is pinned
-before anything else is built.
+~2 700 lines plus 963 of tests — about 45% over, mostly in the two
+places a spec can afford to be vaguer than code: the admin UI (a code
+textarea, a typed-param editor and a secret-ref editor are three Alpine
+components, not one) and the shared extraction, which turned out to be
+two modules rather than one because the schema helper and the bridge
+lifecycle have nothing to do with each other.
+
+No `bp_agents` dependency, no router protocol change, no new container,
+and one additive field on a shared struct (`rlimit_fsize_bytes`, §15).
+
+The largest risk was step 4 — and it paid for itself immediately: the
+first run failed on `-I` implying `-P`, which no amount of reading the
+design would have surfaced. Pinning the runner before the UI existed
+meant that was a 5-minute fix rather than a mystery three layers down.

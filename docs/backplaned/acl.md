@@ -490,6 +490,36 @@ other admin-group agents, plus the admin-driven endpoints that use
 that tighten the ord-2 rule should preserve the ord-0 / ord-1 pair
 so the admin test endpoint keeps working.
 
+### 13.2 Bridge-provisioned agents (`mcp_*`, `custom_*`, `code_*`)
+
+The bridge stands up one agent per row in three admin-managed tables, and
+each kind carries a fixed capability marker on top of whatever the operator
+sets:
+
+| id prefix | table | marker capability |
+| --- | --- | --- |
+| `mcp_<server>` | `mcp_servers` | `mcp.bridge` |
+| `custom_<slug>` | `custom_agents` | `custom.agent` |
+| `code_<slug>` | `code_agents` | `code.agent` |
+
+These are ordinary agents to the ACL — nothing about them is special-cased.
+The markers exist so a deployment can write one coarse rule per kind
+(`allow tierN -> @code.agent`) instead of enumerating agent ids, and the
+operator's own `groups` / `capabilities` narrow it from there.
+
+Two things worth knowing before writing those rules:
+
+  * **A newly created row is not reachable until a rule admits it.** The
+    bridge onboards the agent and it appears in the catalog, but the default
+    policy does not grant callers access to a prefix it has never seen. This
+    is the intended failure mode — a code agent that runs operator-authored
+    Python should not become callable by every tier the moment it is saved.
+  * **`enabled: false` is not an authorization control.** It removes the row
+    from the bridge's desired set, so the agent disconnects — but the router
+    keeps it registered and ACL-reachable, and a call fails as
+    `destination not active` rather than as a refusal. To deny access, write
+    a deny rule or delete the row.
+
 ## 14. Schema
 
 ```sql

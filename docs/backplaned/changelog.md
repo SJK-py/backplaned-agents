@@ -18,6 +18,91 @@
 
 ---
 
+## 2026-08-17
+
+> A THIRD bridge-provisioned agent kind: operator-authored Python functions
+> (`code_<slug>`), run in a uid-dropped subprocess. The runtime ships in
+> `bp_mcp_bridge` and is not tracked here; these are the **platform**
+> (`bp_router` / `bp_admin`) changes it required, plus two fixes to the
+> custom-LLM-agent surface it sits beside. Design:
+> [`../design/bridge-python-code-agents.md`](../design/bridge-python-code-agents.md).
+
+### Added — `code_agents` table + admin CRUD
+
+- **What:** **migration `0013_code_agents`** — one row per operator-authored
+  function: `code`, `entrypoint`, TYPED `parameters`, an optional `returns`
+  JSON Schema (published as the agent's `produces_schema`), `secret_refs`,
+  `timeout_s` / `memory_mb`, and the same groups/capabilities/expose/enabled
+  surface `custom_agents` has. `CodeAgentRow` + the `insert/get/list/update/
+  delete` query set; `POST/GET/PATCH/DELETE /v1/admin/code-agents` plus
+  `/reconnect` and `/connected`, gated exactly as the MCP + custom endpoints
+  are (reads admin-or-bridge, writes admin).
+- **Why a separate table, not a `kind` column on `custom_agents`:**
+  `custom_agents.preset_name` is `NOT NULL REFERENCES llm_presets(name)`. A
+  discriminator would force it nullable — dropping a real constraint on every
+  existing LLM row for a kind that will never pick a preset.
+- **Two validator rules worth naming:** `secret_refs` values must be
+  `env://` / `secret://` REFERENCES — a literal is refused, the same posture
+  as `mcp_servers.auth_value_ref` — and `returns` is checked as a real JSON
+  Schema at write time rather than discovered invalid when a caller reads the
+  catalog. The audit payload carries `sha256(code)` and its length, **never
+  the body**: an append-only hash chain containing operator code is an
+  erasure problem, and the code is already in the row.
+
+### Added — `/admin/code-agents` UI
+
+- **What:** list + form pages mirroring `custom_agents`, with a code
+  textarea, a typed-parameter editor, secret-reference rows, and
+  timeout/memory inputs. Registered in the nav between MCP servers and the
+  audit log.
+- **Why the warning banner:** the form states plainly that the code runs on
+  the bridge host with that container's unrestricted network access. Per-agent
+  egress control needs `CAP_NET_ADMIN`, which the bridge deliberately does not
+  have; saying so is the honest alternative to a setting that cannot enforce
+  what it implies.
+
+### Fixed — custom-agent PATCH accepted duplicate parameter names
+
+- **What:** `_check_param_names_unique` ran only in `CustomAgentCreate`'s
+  model validator. `PATCH /v1/admin/custom-agents/{id}` re-validated prompt
+  placeholders against the merged record but never uniqueness, so a duplicate
+  name was written, `_accepts_schema` silently collapsed it to one property,
+  and the admin UI rendered a row that did nothing. The rule is now applied to
+  the merged parameter list on both paths.
+
+### Fixed — bridge-hosted non-MCP agents had no metrics at all
+
+- **What:** every metric in `bp_mcp_bridge.metrics` was incremented only on
+  the MCP path, and `active_bridges` was set from the MCP map alone — so a
+  deployment running custom or code agents and no MCP servers reported
+  `active_bridges 0`, with no call volume, latency or failure signal. Added
+  `agent_calls_total`, `agent_call_duration_seconds`,
+  `agent_bridge_starts_total`, `agent_bridge_exits_total` and
+  `active_agent_bridges`, all labelled by `kind` (`custom` | `code`).
+- **Why not a metric per kind:** the label set stays small and bounded, and a
+  dashboard can sum across kinds or split by one. `active_bridges` keeps its
+  MCP-only meaning so existing dashboards don't silently change.
+
+### Fixed — a flaky rate-limit test the new e2e coverage made likelier
+
+- **What:** `test_bucket_consumes_until_empty` drained a burst at 10 tokens/s,
+  so a token refilled every 100 ms — and a loaded machine taking longer than
+  that over four Redis round trips saw the fourth call *allowed* and the test
+  fail for a reason it is not about. Now 0.5/s, a 2 s refill window, which no
+  load this suite produces can outrun.
+- **Why now:** the code-agent e2e tests add two router startups and lengthen
+  the full run by roughly a third, which raises the odds of exactly this
+  race. Leaving a known flake more likely than it was is not a neutral act.
+
+### Changed — `StdioSpawnConfig` gained `rlimit_fsize_bytes`
+
+- **What:** an additive field on the shared spawn struct, applied in
+  `_stdio_preexec` alongside NPROC / AS / CPU. Default 0 (disabled), so the
+  stdio MCP path is unchanged — an MCP server may legitimately cache large
+  artifacts. Code agents set 64 MB.
+- **Why:** nothing bounded disk. A runaway write from operator code fills the
+  volume every other bridged agent shares.
+
 ## 2026-08-16
 
 > The suite's conversation moved into the router's session store. The suite

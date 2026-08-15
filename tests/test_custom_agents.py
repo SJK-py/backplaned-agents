@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -616,13 +617,34 @@ def test_config_signature_sensitive_to_prompt_and_preset() -> None:
 # ===========================================================================
 
 
-def test_supervisor_has_custom_reconcile() -> None:
+def test_supervisor_reconciles_the_custom_kind() -> None:
+    """The custom kind is one of the supervisor's non-MCP reconcile sources,
+    and its named entry points still exist.
+
+    Pinned on the WIRING, not on a call name in `run()`: the per-kind blocks
+    were generalised into `_reconcile_agents_once` when the code kind landed,
+    and asserting `run()` mentions one kind by name would have to be rewritten
+    for every kind added — which is exactly the coupling the generalisation
+    removed."""
+    from bp_mcp_bridge.agent_common import KIND_CUSTOM
     from bp_mcp_bridge.supervisor import Supervisor
 
     for name in ("_reconcile_custom_once", "_start_custom", "_stop_custom"):
         assert hasattr(Supervisor, name), name
-    src = inspect.getsource(Supervisor.run)
-    assert "_reconcile_custom_once" in src
+    assert "_reconcile_agents_once" in inspect.getsource(Supervisor.run)
+
+    sup = Supervisor(
+        admin_client=SimpleNamespace(  # type: ignore[arg-type]
+            list_custom_agents=None, list_code_agents=None,
+        ),
+        router_url="ws://r/v1/agent",
+        state_dir=Path("/tmp/state"),  # noqa: S108
+    )
+    kinds = {k.name for k in sup._kinds()}
+    assert KIND_CUSTOM in kinds
+    # And the custom named wrappers address the custom kind, not whichever
+    # one happens to be first in the tuple.
+    assert sup._kinds()[0].name == KIND_CUSTOM
 
 
 # ===========================================================================

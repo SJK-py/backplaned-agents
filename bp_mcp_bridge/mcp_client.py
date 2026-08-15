@@ -810,6 +810,11 @@ class StdioSpawnConfig:
     # against a fork bomb.
     rlimit_as_bytes: int = 0
     rlimit_cpu_s: int = 0  # 0 = no CPU cap (MCP servers are long-lived daemons)
+    # RLIMIT_FSIZE caps the largest file the child may create. 0 (disabled) for
+    # stdio servers, which may legitimately cache large artifacts; the code
+    # agent sets it, because a runaway `open(...).write` there fills the
+    # bridge's disk for every other agent on the volume.
+    rlimit_fsize_bytes: int = 0
 
 
 def _stdio_preexec(cfg: StdioSpawnConfig):  # noqa: ANN202
@@ -824,6 +829,7 @@ def _stdio_preexec(cfg: StdioSpawnConfig):  # noqa: ANN202
             (resource.RLIMIT_NPROC, cfg.rlimit_nproc),
             (resource.RLIMIT_AS, cfg.rlimit_as_bytes),
             (resource.RLIMIT_CPU, cfg.rlimit_cpu_s),
+            (resource.RLIMIT_FSIZE, cfg.rlimit_fsize_bytes),
         ):
             if not limit or limit <= 0:
                 continue

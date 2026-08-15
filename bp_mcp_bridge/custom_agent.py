@@ -32,6 +32,7 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from bp_mcp_bridge.agent_common import KIND_CUSTOM, object_schema, observed_call
 from bp_protocol.types import AgentInfo, AgentOutput, TaskStatus
 from bp_sdk import (
     Agent,
@@ -120,32 +121,26 @@ def _render(template: str, values: dict[str, Any]) -> str:
 
 def _accepts_schema(parameters: list[dict[str, Any]]) -> dict[str, Any]:
     """The single mode's parameter schema: every operator param is one
-    `string` property; `required` params land in the schema's required
-    list. A `file_ref` param stays a `string` (the caller passes a file
-    name) but gains a description hint so the model passes a reference,
-    not the content. Object schema with `additionalProperties: False` so
-    the router rejects anything the operator didn't declare."""
-    props: dict[str, Any] = {}
-    required: list[str] = []
+    `string` property (this kind substitutes values into a prompt as inert
+    text, so a type would buy nothing). A `file_ref` param stays a `string`
+    — the caller passes a file NAME — but gains a description hint so the
+    model passes a reference, not the content.
+
+    The object shape itself comes from `agent_common.object_schema`, shared
+    with the code kind so the two cannot drift on `required` handling or on
+    rejecting undeclared properties."""
+    pinned: list[dict[str, Any]] = []
     for p in parameters:
-        name = p["name"]
         desc = p.get("description") or ""
         if p.get("file_ref"):
             desc = f"{desc} {_FILE_REF_HINT}".strip() if desc else _FILE_REF_HINT
-        prop: dict[str, Any] = {"type": "string"}
-        if desc:
-            prop["description"] = desc
-        props[name] = prop
-        if p.get("required", True):
-            required.append(name)
-    schema: dict[str, Any] = {
-        "type": "object",
-        "properties": props,
-        "additionalProperties": False,
-    }
-    if required:
-        schema["required"] = required
-    return {MODE: schema}
+        pinned.append({
+            "name": p["name"],
+            "type": "string",
+            "description": desc,
+            "required": p.get("required", True),
+        })
+    return {MODE: object_schema(pinned)}
 
 
 async def _read_text_ref(ctx: TaskContext, name: str, param_name: str) -> str:
@@ -335,25 +330,26 @@ def make_custom_handler(spec: CustomAgentSpec):  # type: ignore[no-untyped-def]
                 "preset": spec.preset_name,
             },
         )
-        values = await _resolve_values(ctx, spec.parameters, payload)
-        sys_text = _render(spec.system_prompt, values)
-        user_text = _render(spec.user_prompt, values)
-        messages: list[Message] = []
-        if sys_text.strip():
-            messages.append(Message(role="system", content=sys_text))
-        messages.append(Message(role="user", content=user_text))
-        if spec.agent_loop_enabled:
-            resp = await _run_loop(ctx, spec, messages)
-        else:
-            resp = await ctx.llm.generate(messages, preset=spec.preset_name)
-        text = resp.text or ""
-        if spec.output_as_file:
-            saved = await ctx.files.write(_OUTPUT_FILENAME, text)
-            return AgentOutput(
-                content=f"Output written to file: {saved}",
-                files=[saved],
-            )
-        return AgentOutput(content=text)
+        async with observed_call(KIND_CUSTOM, spec.agent_id):
+            values = await _resolve_values(ctx, spec.parameters, payload)
+            sys_text = _render(spec.system_prompt, values)
+            user_text = _render(spec.user_prompt, values)
+            messages: list[Message] = []
+            if sys_text.strip():
+                messages.append(Message(role="system", content=sys_text))
+            messages.append(Message(role="user", content=user_text))
+            if spec.agent_loop_enabled:
+                resp = await _run_loop(ctx, spec, messages)
+            else:
+                resp = await ctx.llm.generate(messages, preset=spec.preset_name)
+            text = resp.text or ""
+            if spec.output_as_file:
+                saved = await ctx.files.write(_OUTPUT_FILENAME, text)
+                return AgentOutput(
+                    content=f"Output written to file: {saved}",
+                    files=[saved],
+                )
+            return AgentOutput(content=text)
 
     return handler
 

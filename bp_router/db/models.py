@@ -422,3 +422,44 @@ class CustomAgentRow(_Row):
     # bridge consumes to onboard `custom_<slug>`, cleared once it connects.
     pending_invitation_token: str | None = None
     pending_invitation_expires_at: datetime | None = None
+
+
+class CodeAgentRow(_Row):
+    """Admin-managed config for one operator-authored Python code agent
+    bridged onto the backplane. PK `agent_id` is the full backplane id
+    (`code_<slug>`); the `bp_mcp_bridge` supervisor turns each row into one
+    single-mode agent whose handler runs `code`'s `entrypoint` function in a
+    uid-dropped subprocess.
+
+    `parameters` is a JSON list of `{name, type, description, required}`.
+    Unlike `CustomAgentRow`, `type` is a real JSON-Schema type — the handler
+    passes the payload to the function as a dict, so the string-only rule
+    (which exists for `$`-prompt-templating safety) does not apply.
+
+    `secret_refs` maps an env var name the function will see to an `env://VAR`
+    reference resolved in the BRIDGE process; literals are refused at the API
+    boundary, the same posture as `mcp_servers.auth_value_ref`.
+
+    See `docs/design/bridge-python-code-agents.md`."""
+
+    agent_id: str
+    description: str
+    code: str
+    entrypoint: str = "run"
+    parameters: list[dict[str, Any]] = []
+    returns: dict[str, Any] | None = None
+    secret_refs: dict[str, str] = {}
+    timeout_s: int = 30
+    memory_mb: int = 512
+    groups: list[str] = []
+    capabilities: list[str] = []
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+    created_by: str | None = None
+    # Transient onboarding handoff: an admin-minted short-TTL invitation the
+    # bridge consumes to onboard `code_<slug>`, cleared once it connects.
+    pending_invitation_token: str | None = None
+    pending_invitation_expires_at: datetime | None = None

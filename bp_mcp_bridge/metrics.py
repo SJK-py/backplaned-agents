@@ -181,6 +181,51 @@ invitations_issued_total = _counter(
 
 
 # ---------------------------------------------------------------------------
+# Non-MCP agent kinds (custom LLM agents, code agents)
+#
+# The bridge hosts three kinds now; only the MCP one was ever instrumented, so
+# a deployment running custom/code agents and no MCP servers reported
+# `active_bridges 0` and no call volume at all. These carry a `kind` label
+# ("custom" | "code") rather than a metric per kind: the label set stays small
+# and bounded, and a dashboard can sum across kinds or split by it.
+# `agent_id` is operator-defined and finite, so it is safe as a label — the
+# same argument that admits `server_id` above.
+# ---------------------------------------------------------------------------
+
+# `outcome`: success | failed
+agent_calls_total = _counter(
+    "bp_mcp_bridge_agent_calls_total",
+    "Handler invocations on a bridge-hosted non-MCP agent, by outcome.",
+    ("kind", "agent_id", "outcome"),
+)
+agent_call_duration_seconds = _histogram(
+    "bp_mcp_bridge_agent_call_duration_seconds",
+    "Wall-clock latency of one non-MCP agent handler invocation.",
+    ("kind", "agent_id"),
+    (0.05, 0.25, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
+agent_bridge_starts_total = _counter(
+    "bp_mcp_bridge_agent_bridge_starts_total",
+    "Non-MCP agent bridge run() invocations (one per (re)start).",
+    ("kind", "agent_id"),
+)
+# `reason`: cancelled | error | returned
+agent_bridge_exits_total = _counter(
+    "bp_mcp_bridge_agent_bridge_exits_total",
+    "Non-MCP agent bridge run() exits, by reason.",
+    ("kind", "agent_id", "reason"),
+)
+# Unlabelled by kind on purpose: `active_bridges` above counts ONLY MCP
+# bridges, and changing it would break existing dashboards. This is the
+# all-kinds total the supervisor publishes every reconcile pass.
+active_agent_bridges = _gauge(
+    "bp_mcp_bridge_active_agent_bridges",
+    "Non-MCP agent bridges the supervisor currently has running, by kind.",
+    ("kind",),
+)
+
+
+# ---------------------------------------------------------------------------
 # HTTP exposition
 # ---------------------------------------------------------------------------
 

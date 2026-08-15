@@ -4281,10 +4281,19 @@ class CustomAgentParam(BaseModel):
         return v
 
 
-def _check_param_names_unique(params: list[CustomAgentParam]) -> None:
-    names = [p.name for p in params]
+def _check_param_names_unique_raw(names: list[str]) -> None:
+    """The uniqueness rule, over bare names — so the PATCH path (which
+    merges a partial list against the stored one) can apply the same check
+    the create model does."""
     if len(names) != len(set(names)):
-        raise ValueError("parameter names must be unique")
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(
+            "parameter names must be unique; duplicated: " + ", ".join(dupes)
+        )
+
+
+def _check_param_names_unique(params: list[CustomAgentParam]) -> None:
+    _check_param_names_unique_raw([p.name for p in params])
 
 
 class CustomAgentCreate(BaseModel):
@@ -4583,6 +4592,12 @@ async def update_custom_agent(
             else list(existing.parameters)
         )
         try:
+            # Uniqueness is re-checked HERE, not on the model: `CustomAgentUpdate`
+            # carries a partial parameter list, and a PATCH that sets it must be
+            # held to the same rule `CustomAgentCreate` enforces. Without this a
+            # duplicate name is written, `_accepts_schema` silently collapses it
+            # to one property, and the admin UI shows a row that does nothing.
+            _check_param_names_unique_raw([p["name"] for p in eff_params])
             _check_prompt_placeholders(
                 eff_system, eff_user, [p["name"] for p in eff_params]
             )
@@ -4689,4 +4704,551 @@ async def record_custom_agent_connected(
         ok = await queries.record_custom_agent_connected(conn, agent_id)
     if not ok:
         raise HTTPException(404, "custom agent not found")
+    return {"status": "recorded"}
+
+
+# ---------------------------------------------------------------------------
+# code agents — operator-authored Python functions
+# (`docs/design/bridge-python-code-agents.md`)
+# ---------------------------------------------------------------------------
+
+_CODE_AGENT_ID_RE = re.compile(r"^code_[a-z][a-z0-9_]*$")
+_ENTRYPOINT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+# JSON-Schema types a code-agent parameter may declare. Unlike the custom LLM
+# kind (which pins every param to `string` because its values are substituted
+# into a prompt as inert text), this handler passes the payload to the
+# operator's function as a dict — so a type is both meaningful and free, the
+# router already validating the payload against the generated schema.
+_CODE_PARAM_TYPES = (
+    "string", "integer", "number", "boolean", "array", "object",
+)
+
+# Env var names the operator may bind a secret to. Kept to the conventional
+# shell grammar so the value can be handed to a subprocess environment without
+# quoting games.
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+# Inner bounds the BRIDGE enforces on one call. The router's task deadline is
+# the outer one; these keep a runaway function from holding a bridge worker
+# for the whole of it. Mirrored by the table's CHECK constraints.
+_CODE_TIMEOUT_LO, _CODE_TIMEOUT_HI = 1, 300
+_CODE_MEMORY_LO, _CODE_MEMORY_HI = 64, 4096
+
+
+def _check_timeout_s(v: int) -> int:
+    if not _CODE_TIMEOUT_LO <= v <= _CODE_TIMEOUT_HI:
+        raise ValueError(
+            f"timeout_s must be between {_CODE_TIMEOUT_LO} and {_CODE_TIMEOUT_HI}"
+        )
+    return v
+
+
+def _check_memory_mb(v: int) -> int:
+    if not _CODE_MEMORY_LO <= v <= _CODE_MEMORY_HI:
+        raise ValueError(
+            f"memory_mb must be between {_CODE_MEMORY_LO} and {_CODE_MEMORY_HI}"
+        )
+    return v
+
+
+def _check_secret_refs(refs: dict[str, str]) -> dict[str, str]:
+    """Validate the `{ENV_NAME: "env://VAR"}` map.
+
+    Literals are REFUSED, the same posture as `mcp_servers.auth_value_ref`:
+    a secret in a DB column is a secret in every backup, every replica and
+    every admin-UI response. The bridge resolves the ref from its own
+    environment at spawn time (`bp_mcp_bridge/auth_resolver.py`)."""
+    for name, ref in refs.items():
+        if not _ENV_NAME_RE.match(name):
+            raise ValueError(
+                f"secret env name {name!r} must match ^[A-Z][A-Z0-9_]*$"
+            )
+        if not isinstance(ref, str) or not ref.startswith(("env://", "secret://")):
+            raise ValueError(
+                f"secret_refs[{name!r}] must be an env:// or secret:// "
+                "reference — storing a literal secret is refused"
+            )
+        if ref in ("env://", "secret://"):
+            raise ValueError(f"secret_refs[{name!r}] has an empty reference")
+    return refs
+
+
+def _check_returns_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`returns` becomes the agent's `produces_schema`, which the router
+    hands to callers verbatim. Validate it IS a JSON Schema here rather than
+    discovering it isn't when a caller reads the catalog."""
+    if schema is None or schema == {}:
+        return None
+    try:
+        import jsonschema  # noqa: PLC0415
+
+        jsonschema.Draft202012Validator.check_schema(schema)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"returns is not a valid JSON Schema: {exc}") from exc
+    return schema
+
+
+def _check_code_params(params: list[CodeAgentParam]) -> None:
+    _check_param_names_unique_raw([p.name for p in params])
+
+
+class CodeAgentParam(BaseModel):
+    """One operator-declared parameter. `name` is the `accepts_schema`
+    property and the key the function sees in its `params` dict."""
+
+    name: str
+    type: str = "string"
+    description: str = ""
+    required: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _name_grammar(cls, v: str) -> str:
+        if not _CUSTOM_PARAM_NAME_RE.match(v):
+            raise ValueError(
+                "parameter name must match ^[a-z][a-z0-9_]*$"
+            )
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def _type_known(cls, v: str) -> str:
+        if v not in _CODE_PARAM_TYPES:
+            raise ValueError(
+                f"parameter type must be one of {list(_CODE_PARAM_TYPES)}; got {v!r}"
+            )
+        return v
+
+
+class CodeAgentCreate(BaseModel):
+    """Create-time payload for `POST /v1/admin/code-agents`.
+
+    `agent_id` is the FULL backplane id and must already carry the `code_`
+    namespace prefix (the admin UI prepends it)."""
+
+    agent_id: str
+    description: str = ""
+    code: str = ""
+    entrypoint: str = "run"
+    parameters: list[CodeAgentParam] = Field(default_factory=list)
+    returns: dict[str, Any] | None = None
+    secret_refs: dict[str, str] = Field(default_factory=dict)
+    timeout_s: int = 30
+    memory_mb: int = 512
+    groups: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+
+    @field_validator("agent_id")
+    @classmethod
+    def _agent_id_shape(cls, v: str) -> str:
+        if not _CODE_AGENT_ID_RE.match(v):
+            raise ValueError(
+                "agent_id must match ^code_[a-z][a-z0-9_]*$ "
+                "(the 'code_' namespace prefix is required)"
+            )
+        return v
+
+    @field_validator("entrypoint")
+    @classmethod
+    def _entrypoint_grammar(cls, v: str) -> str:
+        if not _ENTRYPOINT_RE.match(v):
+            raise ValueError("entrypoint must match ^[a-z_][a-z0-9_]*$")
+        return v
+
+    @field_validator("groups")
+    @classmethod
+    def _groups_grammar(cls, v: list[str]) -> list[str]:
+        _check_groups_grammar(v)
+        return v
+
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities_grammar(cls, v: list[str]) -> list[str]:
+        _check_caps_grammar(v)
+        return v
+
+    @field_validator("secret_refs")
+    @classmethod
+    def _secret_refs_are_refs(cls, v: dict[str, str]) -> dict[str, str]:
+        return _check_secret_refs(v)
+
+    @field_validator("returns")
+    @classmethod
+    def _returns_is_schema(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _check_returns_schema(v)
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _timeout_range(cls, v: int) -> int:
+        return _check_timeout_s(v)
+
+    @field_validator("memory_mb")
+    @classmethod
+    def _memory_range(cls, v: int) -> int:
+        return _check_memory_mb(v)
+
+    @model_validator(mode="after")
+    def _cross_field(self) -> CodeAgentCreate:
+        _check_code_params(self.parameters)
+        return self
+
+
+class CodeAgentUpdate(BaseModel):
+    """PATCH payload — every field optional. Parameter uniqueness is
+    re-checked in the endpoint against the MERGED record."""
+
+    description: str | None = None
+    code: str | None = None
+    entrypoint: str | None = None
+    parameters: list[CodeAgentParam] | None = None
+    returns: dict[str, Any] | None = None
+    secret_refs: dict[str, str] | None = None
+    timeout_s: int | None = None
+    memory_mb: int | None = None
+    groups: list[str] | None = None
+    capabilities: list[str] | None = None
+    expose_to_llm: bool | None = None
+    output_as_file: bool | None = None
+    enabled: bool | None = None
+
+    @field_validator("entrypoint")
+    @classmethod
+    def _entrypoint_grammar(cls, v: str | None) -> str | None:
+        if v is not None and not _ENTRYPOINT_RE.match(v):
+            raise ValueError("entrypoint must match ^[a-z_][a-z0-9_]*$")
+        return v
+
+    @field_validator("groups")
+    @classmethod
+    def _groups_grammar(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_groups_grammar(v)
+        return v
+
+    @field_validator("capabilities")
+    @classmethod
+    def _capabilities_grammar(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_caps_grammar(v)
+        return v
+
+    @field_validator("secret_refs")
+    @classmethod
+    def _secret_refs_are_refs(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        return _check_secret_refs(v) if v is not None else v
+
+    @field_validator("returns")
+    @classmethod
+    def _returns_is_schema(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        # `{}` is the CLEAR sentinel (see the endpoint) — let it through the
+        # schema check, which would otherwise reject an empty object here.
+        return v if v == {} else _check_returns_schema(v)
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _timeout_range(cls, v: int | None) -> int | None:
+        return _check_timeout_s(v) if v is not None else v
+
+    @field_validator("memory_mb")
+    @classmethod
+    def _memory_range(cls, v: int | None) -> int | None:
+        return _check_memory_mb(v) if v is not None else v
+
+
+class CodeAgentView(BaseModel):
+    """Response model. The code body IS returned — it is operator config,
+    not a secret, and the bridge reads this endpoint to get it. Secrets are
+    references (`env://VAR`), never values, so there is nothing to mask."""
+
+    agent_id: str
+    description: str
+    code: str
+    entrypoint: str
+    parameters: list[dict[str, Any]] = []
+    returns: dict[str, Any] | None = None
+    secret_refs: dict[str, str] = {}
+    timeout_s: int = 30
+    memory_mb: int = 512
+    groups: list[str] = []
+    capabilities: list[str] = []
+    expose_to_llm: bool = True
+    output_as_file: bool = False
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+    created_by: str | None = None
+    pending_invitation_token: str | None = None
+
+
+def _code_agent_row_to_view(row) -> CodeAgentView:  # type: ignore[no-untyped-def]
+    return CodeAgentView(
+        agent_id=row.agent_id,
+        description=row.description,
+        code=row.code,
+        entrypoint=row.entrypoint,
+        parameters=list(row.parameters or []),
+        returns=row.returns,
+        secret_refs=dict(row.secret_refs or {}),
+        timeout_s=row.timeout_s,
+        memory_mb=row.memory_mb,
+        groups=list(row.groups or []),
+        capabilities=list(row.capabilities or []),
+        expose_to_llm=row.expose_to_llm,
+        output_as_file=row.output_as_file,
+        enabled=row.enabled,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        created_by=row.created_by,
+        pending_invitation_token=row.pending_invitation_token,
+    )
+
+
+def _code_hash(code: str) -> str:
+    """The audit handle for a code body. The BODY never enters the audit
+    chain — an append-only hash chain containing operator code is an erasure
+    problem, and the code is already in the row where it can be read, edited
+    and deleted normally (design §10)."""
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+async def _mint_code_agent_pending_invitation(
+    conn: Any, agent_id: str, *, created_by: str
+) -> None:
+    """Mint a short-TTL `service` invitation for `code_<id>` and stash it on
+    the row for the bridge to consume on its next poll. Admin-gated callers
+    only. Must run inside the caller's transaction (after the row exists)."""
+    token = _secrets.token_urlsafe(32)
+    expires_at = _now() + timedelta(seconds=_MCP_INVITATION_TTL_S)
+    await queries.insert_invitation(
+        conn,
+        token_hash=_hash(token),
+        level="service",
+        expires_at=expires_at,
+        created_by=created_by,
+        idempotency_key=None,
+        provisions_service_user=False,
+    )
+    await queries.set_code_agent_pending_invitation(
+        conn, agent_id, token=token, expires_at=expires_at
+    )
+
+
+@router.get("/code-agents", response_model=list[CodeAgentView])
+async def list_code_agents(
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> list[CodeAgentView]:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        rows = await queries.list_code_agents(conn)
+    return [_code_agent_row_to_view(r) for r in rows]
+
+
+@router.get("/code-agents/{agent_id}", response_model=CodeAgentView)
+async def get_code_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> CodeAgentView:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        row = await queries.get_code_agent(conn, agent_id)
+    if row is None:
+        raise HTTPException(404, "code agent not found")
+    return _code_agent_row_to_view(row)
+
+
+@router.post("/code-agents", response_model=CodeAgentView, status_code=201)
+async def create_code_agent(
+    req: CodeAgentCreate,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> CodeAgentView:
+    import asyncpg  # noqa: PLC0415
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row = await queries.insert_code_agent(
+                    conn,
+                    agent_id=req.agent_id,
+                    description=req.description,
+                    code=req.code,
+                    entrypoint=req.entrypoint,
+                    parameters=[p.model_dump() for p in req.parameters],
+                    returns=req.returns,
+                    secret_refs=dict(req.secret_refs),
+                    timeout_s=req.timeout_s,
+                    memory_mb=req.memory_mb,
+                    groups=req.groups,
+                    capabilities=req.capabilities,
+                    expose_to_llm=req.expose_to_llm,
+                    output_as_file=req.output_as_file,
+                    enabled=req.enabled,
+                    created_by=principal.user_id,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(
+                    409, f"code agent {req.agent_id!r} already exists"
+                ) from exc
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="code_agent.created",
+                target_kind="code_agent", target_id=req.agent_id,
+                payload={
+                    "entrypoint": req.entrypoint,
+                    "code_sha256": _code_hash(req.code),
+                    "code_bytes": len(req.code.encode("utf-8")),
+                    "timeout_s": req.timeout_s,
+                    "secret_names": sorted(req.secret_refs),
+                },
+            )
+            await _mint_code_agent_pending_invitation(
+                conn, req.agent_id, created_by=principal.user_id
+            )
+    return _code_agent_row_to_view(row)
+
+
+@router.patch("/code-agents/{agent_id}", response_model=CodeAgentView)
+async def update_code_agent(
+    agent_id: str,
+    req: CodeAgentUpdate,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> CodeAgentView:
+    """PATCH — only the fields the admin set are written. Parameter
+    uniqueness is re-validated against the merged record, so a partial
+    parameter list is held to the same rule create enforces.
+
+    `returns: {}` is the CLEAR sentinel: PATCH's "None means leave alone"
+    rule otherwise leaves no way to remove a declared output schema."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        existing = await queries.get_code_agent(conn, agent_id)
+        if existing is None:
+            raise HTTPException(404, "code agent not found")
+
+        eff_params = (
+            [p.model_dump() for p in req.parameters]
+            if req.parameters is not None
+            else list(existing.parameters)
+        )
+        try:
+            _check_param_names_unique_raw([p["name"] for p in eff_params])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        # `{}` clears; a real schema sets; None leaves alone. The queries
+        # layer only understands "None = leave alone", so a clear is written
+        # as an explicit SQL NULL here.
+        clear_returns = req.returns == {}
+
+        async with conn.transaction():
+            row = await queries.update_code_agent(
+                conn, agent_id,
+                description=req.description,
+                code=req.code,
+                entrypoint=req.entrypoint,
+                parameters=eff_params if req.parameters is not None else None,
+                returns=None if clear_returns else req.returns,
+                secret_refs=req.secret_refs,
+                timeout_s=req.timeout_s,
+                memory_mb=req.memory_mb,
+                groups=req.groups,
+                capabilities=req.capabilities,
+                expose_to_llm=req.expose_to_llm,
+                output_as_file=req.output_as_file,
+                enabled=req.enabled,
+            )
+            if clear_returns:
+                await conn.execute(
+                    "UPDATE code_agents SET returns = NULL WHERE agent_id = $1",
+                    agent_id,
+                )
+                row = await queries.get_code_agent(conn, agent_id)
+            payload: dict[str, Any] = {
+                k: getattr(req, k)
+                for k in (
+                    "description", "entrypoint", "timeout_s", "memory_mb",
+                    "expose_to_llm", "output_as_file", "enabled",
+                )
+                if getattr(req, k) is not None
+            }
+            if req.code is not None:
+                payload["code_sha256"] = _code_hash(req.code)
+                payload["code_bytes"] = len(req.code.encode("utf-8"))
+            if req.secret_refs is not None:
+                payload["secret_names"] = sorted(req.secret_refs)
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="code_agent.updated",
+                target_kind="code_agent", target_id=agent_id,
+                payload=payload,
+            )
+    assert row is not None
+    return _code_agent_row_to_view(row)
+
+
+@router.delete("/code-agents/{agent_id}", status_code=204)
+async def delete_code_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> None:
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await queries.get_code_agent(conn, agent_id)
+            if existing is None:
+                raise HTTPException(404, "code agent not found")
+            await queries.delete_code_agent(conn, agent_id)
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="code_agent.deleted",
+                target_kind="code_agent", target_id=agent_id,
+                payload={"code_sha256": _code_hash(existing.code)},
+            )
+
+
+@router.post("/code-agents/{agent_id}/reconnect", status_code=202)
+async def reconnect_code_agent(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Re-mint the onboarding invitation so a bridge that lost the agent's
+    persisted credentials can re-onboard `code_<id>` on its next poll."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        async with conn.transaction():
+            existing = await queries.get_code_agent(conn, agent_id)
+            if existing is None:
+                raise HTTPException(404, "code agent not found")
+            await _mint_code_agent_pending_invitation(
+                conn, agent_id, created_by=principal.user_id
+            )
+            await queries.append_audit_event(
+                conn, actor_kind="admin", actor_id=principal.user_id,
+                event="code_agent.reconnect_requested",
+                target_kind="code_agent", target_id=agent_id,
+            )
+    return {"status": "reconnect_requested"}
+
+
+@router.post("/code-agents/{agent_id}/connected", status_code=200)
+async def record_code_agent_connected(
+    agent_id: str,
+    request: Request,
+    principal: SessionPrincipal = Depends(require_admin_or_mcp_bridge),
+) -> dict[str, Any]:
+    """Bridge callback once `code_<id>` has onboarded to the router."""
+    state = request.app.state.bp
+    async with state.db_pool.acquire() as conn:
+        ok = await queries.record_code_agent_connected(conn, agent_id)
+    if not ok:
+        raise HTTPException(404, "code agent not found")
     return {"status": "recorded"}

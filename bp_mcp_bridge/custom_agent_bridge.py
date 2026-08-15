@@ -1,25 +1,25 @@
 """One custom-agent row's runtime: ONE backplane `Agent` whose single
 mode runs an LLM completion.
 
-Far simpler than `ServerBridge` — there is no upstream MCP client, no
-`tools/list`, no `tools/list_changed` reconcile. The bridge builds the
-agent, onboards it, and stays connected until cancelled. The supervisor
-restarts it only when the row's `config_signature` changes (an admin
-edit); on restart it resumes from persisted credentials, so no fresh
-invitation is needed for edits.
+The lifecycle — onboard, stay connected, record the connect, tear down —
+is `AgentBridgeBase`, shared with the code-agent kind. What is here is the
+row shape, the config signature the supervisor diffs on, and the two hooks
+that say which agent to build and which admin endpoint to call.
 
-See `docs/design/mcp-bridge-custom-llm-agents.md`.
+See `docs/design/mcp-bridge-custom-llm-agents.md` and
+`docs/design/bridge-python-code-agents.md` §11.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from bp_mcp_bridge.admin_client import AdminClient
+from bp_mcp_bridge.agent_bridge import AgentBridgeBase
+from bp_mcp_bridge.agent_common import KIND_CUSTOM
 from bp_mcp_bridge.custom_agent import CustomAgentSpec, build_custom_agent
 from bp_sdk import Agent
 
@@ -101,10 +101,11 @@ class CustomAgentBridgeRow:
         )
 
 
-class CustomAgentBridge:
-    """One custom agent's runtime: build + onboard ONE backplane agent and
-    keep it connected. The supervisor spawns `run()` as a task and cancels
-    it to tear down."""
+class CustomAgentBridge(AgentBridgeBase):
+    """One custom LLM agent's runtime. Everything but the three per-kind
+    hooks lives in `AgentBridgeBase`, shared with the code-agent kind."""
+
+    KIND = KIND_CUSTOM
 
     def __init__(
         self,
@@ -114,92 +115,22 @@ class CustomAgentBridge:
         router_url: str,
         state_dir: Path,
     ) -> None:
+        super().__init__(
+            agent_id=row.agent_id,
+            admin_client=admin_client,
+            router_url=router_url,
+            state_dir=state_dir,
+            pending_invitation_token=row.pending_invitation_token,
+        )
         self._row = row
-        self._admin_client = admin_client
-        self._router_url = router_url
-        self._state_dir = state_dir
-        self._agent: Agent | None = None
-        self._agent_task: asyncio.Task[None] | None = None
-        self._connected_task: asyncio.Task[None] | None = None
 
-    async def run(self) -> None:
-        """Onboard the agent and run until cancelled. Returns early (without
-        connecting) when there's neither persisted creds nor a pending
-        invitation — the supervisor respawns next poll, by which point an
-        admin reconnect may have stashed a token."""
-        if not self._can_onboard():
-            logger.info(
-                "custom_agent_bridge_awaiting_invitation",
-                extra={
-                    "event": "custom_agent_bridge_awaiting_invitation",
-                    "bp.custom_agent_id": self._row.agent_id,
-                },
-            )
-            return
-        self._spawn_agent()
-        assert self._agent_task is not None
-        try:
-            await self._agent_task
-        finally:
-            await self._tear_down_agent()
+    def build_agent(self, invitation: str) -> Agent:
+        return build_custom_agent(self._to_spec(), invitation)
 
-    def _spawn_agent(self) -> None:
-        invitation = self._onboarding_invitation()
-        self._agent = build_custom_agent(self._to_spec(), invitation)
-        # Fire the connected-writeback once the WS handshake is up (creds
-        # persisted). Background task so the on_startup hook returns
-        # immediately and the dispatch loop starts reading the socket.
-        self._agent.on_startup(self._on_connect)
-        self._agent_task = asyncio.create_task(
-            self._agent.run_async(),
-            name=f"custom_agent:{self._row.agent_id}",
+    async def record_connected(self) -> None:
+        await self._admin_client.record_custom_agent_connected(
+            self._row.agent_id
         )
-
-    async def _on_connect(self) -> None:
-        self._connected_task = asyncio.create_task(
-            self._record_connected(),
-            name=f"custom_agent_connected:{self._row.agent_id}",
-        )
-
-    async def _record_connected(self) -> None:
-        try:
-            await self._admin_client.record_custom_agent_connected(
-                self._row.agent_id
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            # Non-fatal — the agent is connected regardless. The admin UI may
-            # show a stale "pending" until the next reconnect/connect.
-            logger.warning(
-                "custom_agent_connected_write_failed",
-                extra={
-                    "event": "custom_agent_connected_write_failed",
-                    "bp.custom_agent_id": self._row.agent_id,
-                    "error": repr(exc),
-                },
-            )
-
-    async def _tear_down_agent(self) -> None:
-        for task in (self._connected_task, self._agent_task):
-            if task is None:
-                continue
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "custom_agent_teardown_error",
-                    extra={
-                        "event": "custom_agent_teardown_error",
-                        "bp.custom_agent_id": self._row.agent_id,
-                    },
-                )
-        self._connected_task = None
-        self._agent_task = None
-        self._agent = None
 
     def _to_spec(self) -> CustomAgentSpec:
         return CustomAgentSpec(
@@ -220,21 +151,3 @@ class CustomAgentBridge:
             router_url=self._router_url,
             state_dir=self._state_dir,
         )
-
-    def _creds_path(self) -> Path:
-        return self._state_dir / self._row.agent_id / "credentials.json"
-
-    def _can_onboard(self) -> bool:
-        """True if the agent can connect: persisted creds to resume, or an
-        admin-minted invitation to onboard with. When neither holds, the
-        bridge waits for an admin (re)connect rather than spinning."""
-        return self._creds_path().exists() or bool(
-            self._row.pending_invitation_token
-        )
-
-    def _onboarding_invitation(self) -> str:
-        """The invitation used to onboard. Empty once persisted creds exist
-        (the SDK resumes from them and ignores the invitation)."""
-        if self._creds_path().exists():
-            return ""
-        return self._row.pending_invitation_token or ""

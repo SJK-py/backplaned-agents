@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from bp_protocol.types import TaskPriority, TaskState
 from bp_router.db.models import (
     AgentRow,
+    CodeAgentRow,
     CustomAgentRow,
     FileEntryRow,
     FileNameRow,
@@ -3732,6 +3733,176 @@ async def set_custom_agent_pending_invitation(
     result = await conn.execute(
         """
         UPDATE custom_agents
+        SET pending_invitation_token = $2,
+            pending_invitation_expires_at = $3
+        WHERE agent_id = $1
+        """,
+        agent_id,
+        token,
+        expires_at,
+    )
+    return result.endswith(" 1")
+
+
+# ---------------------------------------------------------------------------
+# code_agents — operator-authored Python functions bridged onto the backplane
+# (`docs/design/bridge-python-code-agents.md`)
+# ---------------------------------------------------------------------------
+
+_CODE_AGENT_SELECT_COLS = (
+    "agent_id, description, code, entrypoint, parameters, returns, "
+    "secret_refs, timeout_s, memory_mb, groups, capabilities, expose_to_llm, "
+    "output_as_file, enabled, created_at, updated_at, created_by, "
+    "pending_invitation_token, pending_invitation_expires_at"
+)
+
+
+async def list_code_agents(conn: asyncpg.Connection) -> list[CodeAgentRow]:
+    rows = await conn.fetch(
+        f"SELECT {_CODE_AGENT_SELECT_COLS} FROM code_agents ORDER BY agent_id"
+    )
+    return [CodeAgentRow.model_validate(dict(r)) for r in rows]
+
+
+async def get_code_agent(
+    conn: asyncpg.Connection, agent_id: str
+) -> CodeAgentRow | None:
+    row = await conn.fetchrow(
+        f"SELECT {_CODE_AGENT_SELECT_COLS} FROM code_agents WHERE agent_id = $1",
+        agent_id,
+    )
+    return CodeAgentRow.model_validate(dict(row)) if row else None
+
+
+async def insert_code_agent(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: str,
+    description: str,
+    code: str,
+    entrypoint: str,
+    parameters: list[dict[str, Any]],
+    returns: dict[str, Any] | None,
+    secret_refs: dict[str, str],
+    timeout_s: int,
+    memory_mb: int,
+    groups: list[str],
+    capabilities: list[str],
+    expose_to_llm: bool,
+    output_as_file: bool,
+    enabled: bool,
+    created_by: str | None,
+) -> CodeAgentRow:
+    row = await conn.fetchrow(
+        f"""
+        INSERT INTO code_agents
+            (agent_id, description, code, entrypoint, parameters, returns,
+             secret_refs, timeout_s, memory_mb, groups, capabilities,
+             expose_to_llm, output_as_file, enabled, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        RETURNING {_CODE_AGENT_SELECT_COLS}
+        """,
+        agent_id, description, code, entrypoint, parameters, returns,
+        secret_refs, timeout_s, memory_mb, groups, capabilities,
+        expose_to_llm, output_as_file, enabled, created_by,
+    )
+    assert row is not None
+    return CodeAgentRow.model_validate(dict(row))
+
+
+async def update_code_agent(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    *,
+    description: str | None = None,
+    code: str | None = None,
+    entrypoint: str | None = None,
+    parameters: list[dict[str, Any]] | None = None,
+    returns: dict[str, Any] | None = None,
+    secret_refs: dict[str, str] | None = None,
+    timeout_s: int | None = None,
+    memory_mb: int | None = None,
+    groups: list[str] | None = None,
+    capabilities: list[str] | None = None,
+    expose_to_llm: bool | None = None,
+    output_as_file: bool | None = None,
+    enabled: bool | None = None,
+) -> CodeAgentRow | None:
+    """PATCH semantics — only non-None fields are written. `updated_at`
+    is always stamped so the bridge's config_signature picks up edits.
+
+    `returns` is therefore not clearable through this path: None means
+    "leave it alone", matching every other column. The admin API models a
+    clear as `{}` and normalises it to NULL before calling here."""
+    sets: list[str] = ["updated_at = now()"]
+    params: list[Any] = [agent_id]
+    for col, val in (
+        ("description", description),
+        ("code", code),
+        ("entrypoint", entrypoint),
+        ("parameters", parameters),
+        ("returns", returns),
+        ("secret_refs", secret_refs),
+        ("timeout_s", timeout_s),
+        ("memory_mb", memory_mb),
+        ("groups", groups),
+        ("capabilities", capabilities),
+        ("expose_to_llm", expose_to_llm),
+        ("output_as_file", output_as_file),
+        ("enabled", enabled),
+    ):
+        if val is not None:
+            params.append(val)
+            sets.append(f"{col} = ${len(params)}")
+    row = await conn.fetchrow(
+        f"""
+        UPDATE code_agents
+        SET {', '.join(sets)}
+        WHERE agent_id = $1
+        RETURNING {_CODE_AGENT_SELECT_COLS}
+        """,
+        *params,
+    )
+    return CodeAgentRow.model_validate(dict(row)) if row else None
+
+
+async def delete_code_agent(conn: asyncpg.Connection, agent_id: str) -> bool:
+    result = await conn.execute(
+        "DELETE FROM code_agents WHERE agent_id = $1", agent_id,
+    )
+    return result.endswith(" 1")
+
+
+async def record_code_agent_connected(
+    conn: asyncpg.Connection, agent_id: str
+) -> bool:
+    """Clear the pending onboarding invitation now that the bridge has
+    connected the agent. Returns False when `agent_id` is unknown."""
+    result = await conn.execute(
+        """
+        UPDATE code_agents
+        SET pending_invitation_token = NULL,
+            pending_invitation_expires_at = NULL
+        WHERE agent_id = $1
+        """,
+        agent_id,
+    )
+    return result.endswith(" 1")
+
+
+async def set_code_agent_pending_invitation(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    *,
+    token: str,
+    expires_at: datetime,
+) -> bool:
+    """Stash a short-TTL onboarding invitation on the agent's row for the
+    bridge to consume on its next poll. Returns False when `agent_id` is
+    unknown."""
+    result = await conn.execute(
+        """
+        UPDATE code_agents
         SET pending_invitation_token = $2,
             pending_invitation_expires_at = $3
         WHERE agent_id = $1

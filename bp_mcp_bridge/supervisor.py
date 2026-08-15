@@ -27,11 +27,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from bp_mcp_bridge import metrics
 from bp_mcp_bridge.admin_client import AdminApiError, AdminClient
+from bp_mcp_bridge.agent_bridge import AgentBridgeBase
+from bp_mcp_bridge.agent_common import KIND_CODE, KIND_CUSTOM
+from bp_mcp_bridge.code_agent_bridge import CodeAgentBridge, CodeAgentBridgeRow
 from bp_mcp_bridge.config import StdioPolicy
 from bp_mcp_bridge.custom_agent_bridge import (
     CustomAgentBridge,
@@ -59,13 +64,29 @@ class _ActiveEntry:
 
 
 @dataclass(frozen=True)
-class _ActiveCustomEntry:
-    """One running CustomAgentBridge — task + bridge handle + the row
-    config that spawned it. Keyed by agent_id in `_active_custom`."""
+class _ActiveAgentEntry:
+    """One running non-MCP agent bridge — task + bridge handle + the row
+    config that spawned it. Keyed by agent_id in the kind's active map."""
 
     task: asyncio.Task
-    bridge: CustomAgentBridge
-    row: CustomAgentBridgeRow
+    bridge: AgentBridgeBase
+    row: Any
+
+
+@dataclass(frozen=True)
+class _Kind:
+    """One non-MCP agent kind's reconcile wiring.
+
+    The custom-LLM and code kinds diff identically — list rows, drop what
+    disappeared, start what is new, restart what changed signature — so the
+    loop is written once and parameterised here rather than copied. A third
+    near-identical 60-line block is exactly the drift this avoids."""
+
+    name: str                       # metric label + log field
+    active: dict[str, _ActiveAgentEntry]
+    list_rows: Callable[[], Awaitable[list[dict]]]
+    row_from_dict: Callable[[dict], Any]
+    make_bridge: Callable[[Any], AgentBridgeBase]
 
 
 class Supervisor:
@@ -87,7 +108,9 @@ class Supervisor:
         self._poll_interval_s = poll_interval_s
         self._stdio_policy = stdio_policy or StdioPolicy()
         self._active: dict[str, _ActiveEntry] = {}
-        self._active_custom: dict[str, _ActiveCustomEntry] = {}
+        # One map per non-MCP kind; `_kinds()` wires each to its reconcile.
+        self._active_custom: dict[str, _ActiveAgentEntry] = {}
+        self._active_code: dict[str, _ActiveAgentEntry] = {}
 
     async def run(self) -> None:
         """Run forever — reconcile loop + ServerBridge tasks share
@@ -108,17 +131,10 @@ class Supervisor:
                         "mcp_supervisor_reconcile_failed",
                         extra={"event": "mcp_supervisor_reconcile_failed"},
                     )
-                # Custom-agent reconcile is independent — isolate its failures
-                # so an error in one source never starves the other.
-                try:
-                    await self._reconcile_custom_once()
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "custom_agent_supervisor_reconcile_failed",
-                        extra={
-                            "event": "custom_agent_supervisor_reconcile_failed",
-                        },
-                    )
+                # The non-MCP kinds reconcile independently — each isolates
+                # its own failures, so an error in one source never starves
+                # another (`_reconcile_agents_once`).
+                await self._reconcile_agents_once()
                 await asyncio.sleep(self._poll_interval_s)
         finally:
             await self._tear_down_all()
@@ -298,23 +314,75 @@ class Supervisor:
             )
 
     async def _tear_down_all(self) -> None:
-        """Cancel every running ServerBridge + CustomAgentBridge. Called
-        from the supervisor's finally block on shutdown."""
+        """Cancel every running bridge, of every kind. Called from the
+        supervisor's finally block on shutdown."""
         for sid in list(self._active.keys()):
             await self._stop(sid)
-        for aid in list(self._active_custom.keys()):
-            await self._stop_custom(aid)
+        for kind in self._kinds():
+            for aid in list(kind.active.keys()):
+                await self._stop_kind(kind, aid)
 
-    # -- custom agents ------------------------------------------------------
+    # -- non-MCP agent kinds (custom LLM agents, code agents) ---------------
 
-    async def _reconcile_custom_once(self) -> None:
+    def _kinds(self) -> tuple[_Kind, ...]:
+        return (
+            _Kind(
+                name=KIND_CUSTOM,
+                active=self._active_custom,
+                list_rows=self._admin_client.list_custom_agents,
+                row_from_dict=CustomAgentBridgeRow.from_admin_dict,
+                make_bridge=lambda row: CustomAgentBridge(
+                    row,
+                    admin_client=self._admin_client,
+                    router_url=self._router_url,
+                    state_dir=self._state_dir,
+                ),
+            ),
+            _Kind(
+                name=KIND_CODE,
+                active=self._active_code,
+                list_rows=self._admin_client.list_code_agents,
+                row_from_dict=CodeAgentBridgeRow.from_admin_dict,
+                make_bridge=lambda row: CodeAgentBridge(
+                    row,
+                    admin_client=self._admin_client,
+                    router_url=self._router_url,
+                    state_dir=self._state_dir,
+                    # Code agents reuse the stdio hardening policy: the same
+                    # uid range and work root, because they run the same kind
+                    # of dropped subprocess.
+                    policy=self._stdio_policy,
+                ),
+            ),
+        )
+
+    async def _reconcile_agents_once(self) -> None:
+        """Reconcile every non-MCP kind. Each kind's failure is isolated so a
+        broken endpoint for one never starves the other."""
+        for kind in self._kinds():
+            try:
+                await self._reconcile_kind(kind)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "agent_supervisor_reconcile_failed",
+                    extra={
+                        "event": "agent_supervisor_reconcile_failed",
+                        "kind": kind.name,
+                    },
+                )
+            metrics.active_agent_bridges.labels(kind=kind.name).set(
+                len(kind.active)
+            )
+
+    async def _reconcile_kind(self, kind: _Kind) -> None:
         try:
-            rows_raw = await self._admin_client.list_custom_agents()
+            rows_raw = await kind.list_rows()
         except AdminApiError as exc:
             logger.warning(
-                "custom_agent_supervisor_list_failed",
+                "agent_supervisor_list_failed",
                 extra={
-                    "event": "custom_agent_supervisor_list_failed",
+                    "event": "agent_supervisor_list_failed",
+                    "kind": kind.name,
                     "status_code": exc.status_code,
                     "detail": exc.message,
                 },
@@ -323,93 +391,96 @@ class Supervisor:
         # Desired = enabled rows only. A disabled row is treated like an absent
         # one, so flipping `enabled` off tears the bridge down.
         desired = {
-            r["agent_id"]: CustomAgentBridgeRow.from_admin_dict(r)
+            r["agent_id"]: kind.row_from_dict(r)
             for r in rows_raw
             if r.get("enabled", True)
         }
 
-        for aid in list(self._active_custom.keys()):
+        for aid in list(kind.active.keys()):
             if aid not in desired:
                 logger.info(
-                    "custom_agent_bridge_removed",
+                    "agent_bridge_removed",
                     extra={
-                        "event": "custom_agent_bridge_removed",
-                        "bp.custom_agent_id": aid,
+                        "event": "agent_bridge_removed",
+                        "kind": kind.name,
+                        "bp.bridged_agent_id": aid,
                     },
                 )
-                await self._stop_custom(aid)
+                await self._stop_kind(kind, aid)
 
         for aid, row in desired.items():
-            existing = self._active_custom.get(aid)
+            existing = kind.active.get(aid)
             if existing is None:
-                self._start_custom(row)
+                self._start_kind(kind, row)
                 continue
             if existing.row.config_signature() != row.config_signature():
                 logger.info(
-                    "custom_agent_bridge_config_changed",
+                    "agent_bridge_config_changed",
                     extra={
-                        "event": "custom_agent_bridge_config_changed",
-                        "bp.custom_agent_id": aid,
+                        "event": "agent_bridge_config_changed",
+                        "kind": kind.name,
+                        "bp.bridged_agent_id": aid,
                     },
                 )
-                await self._stop_custom(aid)
-                self._start_custom(row)
+                await self._stop_kind(kind, aid)
+                self._start_kind(kind, row)
                 continue
             # Same config signature — only rebuild the entry if the full row
             # actually differs (e.g. a freshly minted invitation), so the
             # steady-state pass is alloc-free.
             if existing.row != row:
-                self._active_custom[aid] = _ActiveCustomEntry(
+                kind.active[aid] = _ActiveAgentEntry(
                     task=existing.task, bridge=existing.bridge, row=row,
                 )
 
-    def _start_custom(self, row: CustomAgentBridgeRow) -> None:
-        bridge = CustomAgentBridge(
-            row,
-            admin_client=self._admin_client,
-            router_url=self._router_url,
-            state_dir=self._state_dir,
-        )
+    def _start_kind(self, kind: _Kind, row: Any) -> None:
+        bridge = kind.make_bridge(row)
         task = asyncio.create_task(
             bridge.run(),
-            name=f"custom_agent_bridge:{row.agent_id}",
+            name=f"agent_bridge:{kind.name}:{row.agent_id}",
         )
-        task.add_done_callback(self._on_custom_bridge_done)
-        self._active_custom[row.agent_id] = _ActiveCustomEntry(
+        task.add_done_callback(self._on_agent_bridge_done)
+        kind.active[row.agent_id] = _ActiveAgentEntry(
             task=task, bridge=bridge, row=row,
         )
         logger.info(
-            "custom_agent_bridge_started",
+            "agent_bridge_started",
             extra={
-                "event": "custom_agent_bridge_started",
-                "bp.custom_agent_id": row.agent_id,
-                "preset": row.preset_name,
+                "event": "agent_bridge_started",
+                "kind": kind.name,
+                "bp.bridged_agent_id": row.agent_id,
             },
         )
 
-    def _on_custom_bridge_done(self, task: asyncio.Task) -> None:
+    def _on_agent_bridge_done(self, task: asyncio.Task) -> None:
+        """Evict the dead entry so the next reconcile pass respawns. The task
+        name carries `kind:agent_id`; a slot already replaced by a restart is
+        left alone (the new entry is the correct one)."""
         name = task.get_name()
-        prefix = "custom_agent_bridge:"
+        prefix = "agent_bridge:"
         if name.startswith(prefix):
-            agent_id = name[len(prefix):]
-            current = self._active_custom.get(agent_id)
-            if current is not None and current.task is task:
-                self._active_custom.pop(agent_id, None)
+            kind_name, _, agent_id = name[len(prefix):].partition(":")
+            for kind in self._kinds():
+                if kind.name != kind_name:
+                    continue
+                current = kind.active.get(agent_id)
+                if current is not None and current.task is task:
+                    kind.active.pop(agent_id, None)
         if task.cancelled():
             return
         exc = task.exception()
         if exc is not None:
             logger.exception(
-                "custom_agent_bridge_exited",
+                "agent_bridge_exited",
                 extra={
-                    "event": "custom_agent_bridge_exited",
+                    "event": "agent_bridge_exited",
                     "task_name": task.get_name(),
                 },
                 exc_info=exc,
             )
 
-    async def _stop_custom(self, agent_id: str) -> None:
-        entry = self._active_custom.pop(agent_id, None)
+    async def _stop_kind(self, kind: _Kind, agent_id: str) -> None:
+        entry = kind.active.pop(agent_id, None)
         if entry is None:
             return
         entry.task.cancel()
@@ -419,9 +490,24 @@ class Supervisor:
             pass
         except Exception:  # noqa: BLE001
             logger.exception(
-                "custom_agent_bridge_stop_error",
+                "agent_bridge_stop_error",
                 extra={
-                    "event": "custom_agent_bridge_stop_error",
-                    "bp.custom_agent_id": agent_id,
+                    "event": "agent_bridge_stop_error",
+                    "kind": kind.name,
+                    "bp.bridged_agent_id": agent_id,
                 },
             )
+
+    # Named entry points for the custom kind. Thin wrappers over the generic
+    # reconcile — kept because they are the names the rest of the codebase
+    # and its tests refer to, and because "reconcile the custom agents" is a
+    # thing a reader looks for.
+
+    async def _reconcile_custom_once(self) -> None:
+        await self._reconcile_kind(self._kinds()[0])
+
+    def _start_custom(self, row: CustomAgentBridgeRow) -> None:
+        self._start_kind(self._kinds()[0], row)
+
+    async def _stop_custom(self, agent_id: str) -> None:
+        await self._stop_kind(self._kinds()[0], agent_id)

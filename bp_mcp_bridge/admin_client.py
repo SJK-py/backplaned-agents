@@ -197,6 +197,21 @@ class AdminClient:
             )
         )
 
+    async def list_code_agents(self) -> list[dict[str, Any]]:
+        """`GET /v1/admin/code-agents` — the full row set to reconcile."""
+        return self._raise_or_json(
+            await self._request("GET", "/v1/admin/code-agents")
+        )
+
+    async def record_code_agent_connected(self, agent_id: str) -> None:
+        """`POST /v1/admin/code-agents/{id}/connected` — clears the consumed
+        pending onboarding invitation once the agent has connected."""
+        self._raise_or_json(
+            await self._request(
+                "POST", f"/v1/admin/code-agents/{agent_id}/connected",
+            )
+        )
+
     async def aclose(self) -> None:
         await self._client.aclose()
 

@@ -21,15 +21,10 @@ a doc's status changes, update it in both places.
 | [`oidc-webapp.md`](./oidc-webapp.md) | SSO against an external OpenID Provider; router as relying party, webapp as BFF. |
 | [`mcp-bridge-per-server-mode-per-tool.md`](./mcp-bridge-per-server-mode-per-tool.md) | One backplane agent per MCP server, one mode per tool. |
 | [`mcp-bridge-custom-llm-agents.md`](./mcp-bridge-custom-llm-agents.md) | Operator-authored LLM agents stood up by the bridge. |
+| [`bridge-python-code-agents.md`](./bridge-python-code-agents.md) | Operator-authored Python functions stood up by the bridge, run in a uid-dropped subprocess. v1: pure function + network egress, no backplane handles. Seven `[shipped]` deviations in §15; also records seven issues found in the custom-LLM-agent implementation (§14), two of which it fixed. |
 | [`multimodal-vision-sidecar.md`](./multimodal-vision-sidecar.md) | Phase 1 landed — a text-only chat preset reading images/PDFs via a separate vision preset. |
 | [`quota-enforcement.md`](./quota-enforcement.md) | Phases 1–2 landed; phase 3 (concurrent-task caps) outstanding. |
 | [`kakao-channel.md`](./kakao-channel.md) | KakaoTalk as an egress-only pull channel behind a relay + queue. |
-
-## Platform — proposed
-
-| doc | what it covers |
-| --- | --- |
-| [`bridge-python-code-agents.md`](./bridge-python-code-agents.md) | A third bridge-provisioned agent kind: an operator-authored Python function run in a uid-dropped subprocess. v1 is pure-function + network egress, no backplane handles. Also records seven issues found in the custom-LLM-agent implementation (§14). |
 
 ## Deferred / superseded
 

@@ -1,0 +1,298 @@
+{% extends "base.html" %}
+{% block title %}
+  {% if mode == "new" %}New code agent{% else %}Edit code agent — {{ agent.agent_id }}{% endif %} — bp_admin
+{% endblock %}
+
+{% block head_extra %}
+<style>[x-cloak] { display: none !important; }</style>
+{% endblock %}
+
+{% block content %}
+<nav class="text-xs text-brand-500 mb-4">
+  <a href="/admin/code-agents" class="hover:text-brand-900 underline underline-offset-2">Code agents</a>
+  <span class="mx-1">/</span>
+  <span>{% if mode == "new" %}New{% else %}code_{{ form.agent_id }}{% endif %}</span>
+</nav>
+
+<header class="mb-6">
+  <h1 class="text-2xl font-semibold text-brand-900">
+    {% if mode == "new" %}Add code agent{% else %}Edit code_{{ form.agent_id }}{% endif %}
+  </h1>
+  <p class="text-sm text-brand-500 mt-1">
+    Configuration only — the <code class="text-brand-700">bp_mcp_bridge</code>
+    process reads this row and onboards one agent
+    (<code class="text-brand-700">code_{{ form.agent_id or '&lt;id&gt;' }}</code>)
+    whose single mode runs your function, exposed to the LLM as
+    <code class="text-brand-700">call_code_{{ form.agent_id or '&lt;id&gt;' }}</code>.
+  </p>
+</header>
+
+<div class="mb-4 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 max-w-2xl">
+  <strong>This code runs on your bridge host.</strong> It executes in a
+  uid-dropped subprocess with a timeout, a memory cap and only the secrets you
+  declare — but it has the bridge's <em>network access</em>, which is
+  unrestricted. Only authors you trust should have admin here.
+</div>
+
+{% if error %}
+  <div class="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    {{ error }}
+  </div>
+{% endif %}
+
+<form method="post"
+      action="{% if mode == 'new' %}/admin/code-agents/new{% else %}/admin/code-agents/code_{{ form.agent_id }}/edit{% endif %}"
+      class="bg-white border border-brand-500/10 rounded-md p-6 shadow-sm space-y-4 max-w-2xl">
+  {% include "_partials/csrf.html" %}
+
+  <div>
+    <label for="agent_id" class="block text-xs font-medium text-brand-700 mb-1">
+      Agent ID <span class="text-red-700">*</span>
+    </label>
+    <div class="flex items-stretch">
+      <span class="inline-flex items-center rounded-l border border-r-0 border-brand-500/20
+                   bg-brand-50 px-2 text-sm font-mono text-brand-500">code_</span>
+      <input id="agent_id" name="agent_id" type="text" required
+             pattern="[a-z][a-z0-9_]*"
+             value="{{ form.agent_id }}"
+             {% if mode == "edit" %}readonly{% endif %}
+             class="w-full rounded-r border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    {% if mode == 'edit' %}bg-brand-50 text-brand-500{% endif %}
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <p class="text-xs text-brand-500 mt-1">
+      Lowercase + digits + underscores. The <code>code_</code> namespace prefix
+      is added automatically.
+      {% if mode == "edit" %}Immutable after creation.{% endif %}
+    </p>
+  </div>
+
+  <div>
+    <label for="description" class="block text-xs font-medium text-brand-700 mb-1">
+      Description
+    </label>
+    <input id="description" name="description" type="text"
+           value="{{ form.description }}"
+           placeholder="Shown to a calling LLM as the tool description."
+           class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                  focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+  </div>
+
+  <div>
+    <label for="code" class="block text-xs font-medium text-brand-700 mb-1">
+      Python code <span class="text-red-700">*</span>
+    </label>
+    <textarea id="code" name="code" rows="18" spellcheck="false"
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-xs font-mono
+                     leading-relaxed
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+              >{{ form.code }}</textarea>
+    <p class="text-xs text-brand-500 mt-1">
+      Define <code>{{ form.entrypoint or 'run' }}(params, context)</code>.
+      Return a string (used as-is) or any JSON-serialisable value. Only the
+      standard library and the bridge image's packages are importable — there
+      is no per-agent dependency install.
+    </p>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+    <div>
+      <label for="entrypoint" class="block text-xs font-medium text-brand-700 mb-1">
+        Entrypoint
+      </label>
+      <input id="entrypoint" name="entrypoint" type="text"
+             pattern="[a-z_][a-z0-9_]*"
+             value="{{ form.entrypoint }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <div>
+      <label for="timeout_s" class="block text-xs font-medium text-brand-700 mb-1">
+        Timeout (s)
+      </label>
+      <input id="timeout_s" name="timeout_s" type="number" min="1" max="300"
+             value="{{ form.timeout_s }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <div>
+      <label for="memory_mb" class="block text-xs font-medium text-brand-700 mb-1">
+        Memory (MB)
+      </label>
+      <input id="memory_mb" name="memory_mb" type="number" min="64" max="4096"
+             value="{{ form.memory_mb }}"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+  </div>
+  <p class="text-xs text-brand-500 -mt-2">
+    Past the timeout the process group is killed; past the memory cap the
+    function fails with a MemoryError.
+  </p>
+
+  <div x-data="{
+         params: {{ form.parameters | tojson | forceescape }},
+         add() { this.params.push({name: '', type: 'string', description: '', required: true}); },
+         remove(i) { this.params.splice(i, 1); }
+       }">
+    <label class="block text-xs font-medium text-brand-700 mb-1">Parameters</label>
+    <p class="text-xs text-brand-500 mb-2">
+      Each becomes a tool input field and a key in the <code>params</code> dict.
+      The router validates the caller's payload against these before your
+      function runs, so the types are real.
+    </p>
+
+    <div class="space-y-2">
+      <template x-for="(p, i) in params" :key="i">
+        <div class="flex flex-wrap items-center gap-2 rounded border border-brand-500/15 bg-brand-50/40 p-2">
+          <input type="text" x-model="p.name" placeholder="name"
+                 pattern="[a-z][a-z0-9_]*"
+                 class="w-28 rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <select x-model="p.type"
+                  class="w-28 rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                         focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700">
+            {% for t in param_types %}
+              <option value="{{ t }}">{{ t }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" x-model="p.description" placeholder="description"
+                 class="flex-1 min-w-[8rem] rounded border border-brand-500/20 px-2 py-1 text-sm
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <label class="flex items-center gap-1 text-xs text-brand-700">
+            <input type="checkbox" x-model="p.required"
+                   class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+            required
+          </label>
+          <button type="button" @click="remove(i)"
+                  title="Remove parameter"
+                  class="ml-auto text-red-700 hover:text-red-900 text-sm px-1">&times;</button>
+        </div>
+      </template>
+    </div>
+
+    <button type="button" @click="add()"
+            class="mt-2 inline-flex items-center rounded border border-brand-500/30 bg-white
+                   px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50">
+      + Add parameter
+    </button>
+
+    {# Alpine serialises the rows into this hidden field the form actually posts. #}
+    <input type="hidden" name="parameters_json" :value="JSON.stringify(params)"/>
+  </div>
+
+  <div x-data="{
+         secrets: {{ form.secret_refs | tojson | forceescape }},
+         add() { this.secrets.push({name: '', ref: ''}); },
+         remove(i) { this.secrets.splice(i, 1); }
+       }">
+    <label class="block text-xs font-medium text-brand-700 mb-1">Secrets</label>
+    <p class="text-xs text-brand-500 mb-2">
+      Each row binds an environment variable your function will see to a
+      <strong>reference</strong> resolved from the bridge process's own
+      environment. Never paste the secret itself — a literal is refused.
+    </p>
+
+    <div class="space-y-2">
+      <template x-for="(s, i) in secrets" :key="i">
+        <div class="flex flex-wrap items-center gap-2 rounded border border-brand-500/15 bg-brand-50/40 p-2">
+          <input type="text" x-model="s.name" placeholder="MY_API_KEY"
+                 pattern="[A-Z][A-Z0-9_]*"
+                 class="w-44 rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <span class="text-brand-500 text-sm">&larr;</span>
+          <input type="text" x-model="s.ref" placeholder="env://BRIDGE_ENV_VAR"
+                 class="flex-1 min-w-[10rem] rounded border border-brand-500/20 px-2 py-1 text-sm font-mono
+                        focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+          <button type="button" @click="remove(i)"
+                  title="Remove secret"
+                  class="ml-auto text-red-700 hover:text-red-900 text-sm px-1">&times;</button>
+        </div>
+      </template>
+    </div>
+
+    <button type="button" @click="add()"
+            class="mt-2 inline-flex items-center rounded border border-brand-500/30 bg-white
+                   px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50">
+      + Add secret
+    </button>
+
+    <input type="hidden" name="secret_refs_json" :value="JSON.stringify(secrets)"/>
+  </div>
+
+  <div>
+    <label for="returns_json" class="block text-xs font-medium text-brand-700 mb-1">
+      Output schema (optional)
+    </label>
+    <textarea id="returns_json" name="returns_json" rows="4" spellcheck="false"
+              placeholder='{"type": "object", "properties": {"total": {"type": "number"}}}'
+              class="w-full rounded border border-brand-500/20 px-3 py-2 text-xs font-mono
+                     focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"
+              >{{ form.returns }}</textarea>
+    <p class="text-xs text-brand-500 mt-1">
+      A JSON Schema describing what your function returns. Published to callers
+      so a calling model knows the shape. Leave blank for none.
+    </p>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <div>
+      <label for="groups" class="block text-xs font-medium text-brand-700 mb-1">
+        Groups
+      </label>
+      <input id="groups" name="groups" type="text"
+             value="{{ form.groups }}"
+             placeholder="comma, separated"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+    <div>
+      <label for="capabilities" class="block text-xs font-medium text-brand-700 mb-1">
+        Capabilities
+      </label>
+      <input id="capabilities" name="capabilities" type="text"
+             value="{{ form.capabilities }}"
+             placeholder="code.weather, code.pricing"
+             class="w-full rounded border border-brand-500/20 px-3 py-2 text-sm font-mono
+                    focus:border-brand-700 focus:outline-none focus:ring-1 focus:ring-brand-700"/>
+    </div>
+  </div>
+  <p class="text-xs text-brand-500 -mt-2">
+    Used for ACL targeting (who may call this agent). Every code agent also
+    carries the fixed <code>code.agent</code> capability.
+  </p>
+
+  <div class="space-y-2 pt-2">
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="expose_to_llm" value="on"
+             {% if form.expose_to_llm %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Expose to LLM (callable as a tool by other agents)
+    </label>
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="output_as_file" value="on"
+             {% if form.output_as_file %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Output as file (return a file reference instead of inline text)
+    </label>
+    <label class="flex items-center gap-2 text-sm text-brand-700">
+      <input type="checkbox" name="enabled" value="on"
+             {% if form.enabled %}checked{% endif %}
+             class="rounded border-brand-500/30 text-brand-700 focus:ring-brand-700"/>
+      Enabled (the bridge runs this agent)
+    </label>
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="inline-flex items-center rounded-md bg-brand-900 hover:bg-brand-700
+                   text-white text-sm font-medium px-4 py-2 transition-colors">
+      {% if mode == "new" %}Create agent{% else %}Save changes{% endif %}
+    </button>
+    <a href="/admin/code-agents"
+       class="text-sm text-brand-500 hover:text-brand-900 underline underline-offset-2">
+      Cancel
+    </a>
+  </div>
+</form>
+{% endblock %}

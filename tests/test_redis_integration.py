@@ -117,19 +117,24 @@ async def test_bucket_consumes_until_empty(redis) -> None:
     from bp_router.security.rate_limit import TokenBucket
 
     bucket = TokenBucket(redis=redis, prefix="t1")
-    # rate=10/s, burst=3 → first 3 calls allowed, 4th denied.
+    # rate=0.5/s, burst=3 → first 3 calls allowed, 4th denied.
+    #
+    # The rate is deliberately SLOW. What this test asserts is "burst drains
+    # in exactly `burst` calls", and at a fast rate that claim is a race
+    # against the refill: at 10/s a token returns every 100 ms, so a loaded
+    # machine that takes longer than that over four round trips sees the
+    # fourth call allowed and the test fails for a reason it is not about.
+    # At 0.5/s the refill window is 2 s — far longer than four Redis calls
+    # take under any load this suite produces.
     for _ in range(3):
-        d = await bucket.try_consume("u1:tier1", rate_per_s=10.0, burst=3)
+        d = await bucket.try_consume("u1:tier1", rate_per_s=0.5, burst=3)
         assert d.allowed
-    d = await bucket.try_consume("u1:tier1", rate_per_s=10.0, burst=3)
+    d = await bucket.try_consume("u1:tier1", rate_per_s=0.5, burst=3)
     assert not d.allowed
-    # One token at 10/s refills in 0.1 s, so that is the CEILING on the wait.
-    # Only the ceiling is deterministic: real time elapses between the calls
-    # above, partially refilling the bucket, so the wait is anywhere in
-    # (0, 0.1]. A lower bound here (the old `0.05 <`) asserts that the four
-    # calls ran in under ~50 ms — true on an idle machine, intermittently
-    # false under a loaded full-suite run, which made this test flaky.
-    assert 0 < d.retry_after_s <= 1.0 / 10.0
+    # One token at 0.5/s refills in 2 s, the CEILING on the wait. Only the
+    # ceiling is deterministic: real time elapses between the calls above,
+    # partially refilling the bucket, so the wait is anywhere in (0, 2].
+    assert 0 < d.retry_after_s <= 1.0 / 0.5
 
 
 async def test_bucket_refills_after_sleep(redis) -> None:
