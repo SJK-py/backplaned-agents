@@ -25,6 +25,12 @@ a doc's status changes, update it in both places.
 | [`quota-enforcement.md`](./quota-enforcement.md) | Phases 1–2 landed; phase 3 (concurrent-task caps) outstanding. |
 | [`kakao-channel.md`](./kakao-channel.md) | KakaoTalk as an egress-only pull channel behind a relay + queue. |
 
+## Platform — proposed
+
+| doc | what it covers |
+| --- | --- |
+| [`bridge-python-code-agents.md`](./bridge-python-code-agents.md) | A third bridge-provisioned agent kind: an operator-authored Python function run in a uid-dropped subprocess. v1 is pure-function + network egress, no backplane handles. Also records seven issues found in the custom-LLM-agent implementation (§14). |
+
 ## Deferred / superseded
 
 | doc | why |

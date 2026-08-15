@@ -417,7 +417,20 @@ guardrails; `max_rounds` bounds cost. No new mechanism needed.
   v1 is a pure completion, which is also what makes its blast radius
   small enough to ship first.
 
-## 12. Open questions
+## 12. A third kind followed
+
+`[shipped]` context for readers arriving here from the code: the bridge
+now hosts (or is designed to host) three agent kinds, and the
+provisioning substrate §1 argues for is the reason. Operator-authored
+**Python code agents** —
+[`bridge-python-code-agents.md`](./bridge-python-code-agents.md) — reuse
+the invitation / reconcile / credential path unchanged and differ only in
+where the handler body runs. That doc's §14 also records seven issues
+found in *this* implementation while it was being written; §11's "don't
+import `bp_agents`" boundary held for a third consumer, which is the best
+evidence available that it was the right line.
+
+## 13. Open questions
 
 - **`ctx.llm` in the bridge process.** MCP bridge agents have never
   called the LLM service; confirm the dispatcher wires a working
