@@ -1238,10 +1238,11 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                 user_id="usr_k2", session_id="ses_k2", external_id="kchat2",
                 channel="chatbot_kakao", opened_at=datetime.now(UTC),
             )
+            store = FakeStore()
             n = await kapproval.reconcile_serviced_sessions(
                 pool, [rec],
                 platform="kakao", channel="chatbot_kakao",
-                default_language="ko",
+                default_language="ko", store=FakeChannelStore(store),
             )
             assert n == 1
             async with pool.acquire() as conn:
@@ -1250,8 +1251,19 @@ def test_kakao_registration_reconcile_maps_kakao_platform(suite_db_url: str) -> 
                 )
                 cfg = await queries.get_user_config(conn, "usr_k2")
             assert uid == "usr_k2"
-            # KakaoTalk seeds Korean as the user's default language.
-            assert cfg.language == "ko"
+            assert cfg is not None and cfg.default_session_id == "ses_k2"
+            # KakaoTalk seeds Korean — into the ROUTER's user scope now, since
+            # `language` is no longer a `user_config` column.
+            assert store.pref("language") == "ko"
+
+            # A re-poll must NOT re-seed: the user may have changed it since.
+            store.set_pref("language", "en")
+            assert await kapproval.reconcile_serviced_sessions(
+                pool, [rec],
+                platform="kakao", channel="chatbot_kakao",
+                default_language="ko", store=FakeChannelStore(store),
+            ) == 0
+            assert store.pref("language") == "en"
         finally:
             await pool.close()
 

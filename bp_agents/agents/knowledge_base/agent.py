@@ -14,7 +14,6 @@ import hashlib
 import json
 import logging
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -22,15 +21,11 @@ from bp_agents import slots
 from bp_agents.agents.knowledge_base.chunking import chunk_markdown
 from bp_agents.common import text_output
 from bp_agents.common.payloads import MAX_PAGE, KbBrowse, KbDelete
-from bp_agents.db.connection import open_pool
 from bp_agents.lance import connect
 from bp_agents.lance.knowledge import KnowledgeStore
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, Message, TaskContext
-
-if TYPE_CHECKING:
-    import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -109,19 +104,6 @@ agent = Agent(
 )
 
 _settings: SuiteSettings = load_suite_settings()
-_pool: asyncpg.Pool | None = None
-
-
-@agent.on_startup
-async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — startup-wired handle
-    _pool = await open_pool(_settings)
-
-
-@agent.on_shutdown
-async def _shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
 
 
 async def _store_for(ctx: TaskContext, settings: SuiteSettings) -> KnowledgeStore:

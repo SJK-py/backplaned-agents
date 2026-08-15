@@ -28,7 +28,8 @@
 > §13 (and §13.3, where the implementation departed from the table).
 >
 > Almost all of this is suite work. One platform addition, one platform
-> nicety.
+> nicety — and, when the user's settings followed the conversation across
+> (§13.5), one platform test for the path they took.
 
 ### Added — `TestRouter.session_messages`
 
@@ -49,6 +50,20 @@
   channel, for its parked-turn registry. `.env.example`, the prod compose and
   the settings docstring all said "needed to run more than one channel
   instance"; they no longer do.
+
+### Added — `tests/test_session_store.py::test_steward_drives_user_scoped_state`
+
+- **What:** pins the steward + user-scope + `session_scoped` state
+  combination end-to-end against the real store: a caller with no agent
+  identity writes it, it lands with `session_id IS NULL` and
+  `owner_agent_id IS NULL`, a session-scoped read cannot see it, an agent in
+  any session can, and it survives deletion of the session it was written
+  through.
+- **Why:** the suite's per-user settings moved onto exactly that path
+  ([`../design/router-managed-session-store.md`](../design/router-managed-session-store.md)
+  §13.5), and it was the one combination the store's own tests did not
+  cover — user scope was proven for messages, not for state, and never from
+  a steward. No `bp_router` code changed; the behaviour was already there.
 
 ### Note — no `bp_router` change was needed for the cutover
 

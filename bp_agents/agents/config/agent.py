@@ -1,4 +1,11 @@
-"""config agent — conversational user-config management (l2)."""
+"""config agent — conversational user-settings management (l2).
+
+The settings themselves live in the router's **user-scoped state**
+(`bp_agents.user_prefs`), so `get_config` / `set_config` ride
+`ctx.history.user_scope` — this agent's own authenticated socket — not a
+suite database. The pool it still holds is for cron management, whose jobs
+are a suite table.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +15,17 @@ from typing import TYPE_CHECKING, Any
 from bp_agents import slots
 from bp_agents.common import LocalTool, LocalToolset, run_llm_loop, text_output
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.config_edit import (
-    ConfigError,
-    coerce_config_value,
-    displayable_fields,
-    editable_fields,
-)
 from bp_agents.cron_manage import run_cron_management
-from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
+from bp_agents.user_prefs import (
+    ConfigError,
+    as_display,
+    coerce_config_value,
+    editable_fields,
+    load_prefs,
+    save_pref,
+)
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, Message, TaskContext, ToolSpec
 
@@ -29,7 +37,7 @@ logger = logging.getLogger(__name__)
 CONFIG_AGENT_ID = "config"
 
 # Editable fields + value coercion are shared with the webapp config form
-# (bp_agents.config_edit) so the NL path and the structured form agree.
+# (bp_agents.user_prefs) so the NL path and the structured form agree.
 #
 # Model selection is NOT here: it is a router-side preference the user sets
 # under their own authority on the web Settings page
@@ -69,19 +77,11 @@ def _system_prompt(language: str | None = None) -> str:
     return "".join(lines)
 
 
-def _format_config(cfg: Any) -> str:
-    if cfg is None:
-        return "No settings found."
-    return "\n".join(f"{f}: {getattr(cfg, f)}" for f in displayable_fields())
-
-
-async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
+def _build_tools() -> LocalToolset:
     fields = editable_fields()
 
     async def _get(ctx: TaskContext, args: dict[str, Any]) -> str:
-        async with pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, ctx.user_id)
-        return _format_config(cfg)
+        return as_display(await load_prefs(ctx, _settings))
 
     async def _set(ctx: TaskContext, args: dict[str, Any]) -> str:
         field = args.get("field")
@@ -89,15 +89,13 @@ async def _build_tools(pool: asyncpg.Pool) -> LocalToolset:
             value = coerce_config_value(field, args.get("value"))
         except ConfigError as exc:
             return str(exc)
-        async with pool.acquire() as conn:
-            await queries.update_user_config(conn, ctx.user_id, **{field: value})
-            # Read the row back (same conn) and return the full, current config.
-            # Without this the model only sees the one changed field and, when
-            # asked to summarize, fabricates the values of the others.
-            cfg = await queries.get_user_config(conn, ctx.user_id)
+        await save_pref(ctx, field, value)
+        # Read back and return the FULL current settings. Without this the
+        # model only sees the one changed field and, when asked to summarize,
+        # fabricates the values of the others.
         return (
             f"Set {field} = {value}.\n\nCurrent settings:\n"
-            f"{_format_config(cfg)}"
+            f"{as_display(await load_prefs(ctx, _settings))}"
         )
 
     return LocalToolset([
@@ -150,30 +148,21 @@ async def _shutdown() -> None:
         await _pool.close()
 
 
-async def run_config(
-    ctx: TaskContext, payload: MessagePayload, *, pool: asyncpg.Pool
-) -> AgentOutput:
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    tools = await _build_tools(pool)
+async def run_config(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
+    prefs = await load_prefs(ctx, _settings)
     messages = [
-        Message(
-            role="system",
-            content=_system_prompt(language=cfg.language if cfg else None),
-        ),
+        Message(role="system", content=_system_prompt(language=prefs.language)),
         Message(role="user", content=payload.prompt),
     ]
     resp = await run_llm_loop(
-        ctx, messages=messages, slot=slots.LITE, local_tools=tools,
+        ctx, messages=messages, slot=slots.LITE, local_tools=_build_tools(),
         use_peer_tools=False,
     )
     if resp.text and resp.text.strip():
         return text_output(resp.text)
     # The model produced no prose (e.g. it called a tool and stopped) — show
     # the current settings rather than a bare "Done." that hides the result.
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    return text_output(_format_config(cfg))
+    return text_output(as_display(await load_prefs(ctx, _settings)))
 
 
 @agent.handler(
@@ -182,8 +171,7 @@ async def run_config(
     "language, verbose mode, context-token limit, custom note.",
 )
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
-    assert _pool is not None
-    return await run_config(ctx, payload, pool=_pool)
+    return await run_config(ctx, payload)
 
 
 @agent.handler(
@@ -199,10 +187,9 @@ async def cron(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
     ([acl.py] `<self_call>`); config is reachable only by the orchestrator
     and the channel."""
     assert _pool is not None
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
+    prefs = await load_prefs(ctx, _settings)
     return await run_cron_management(
-        ctx, payload, pool=_pool, language=cfg.language if cfg else None,
+        ctx, payload, pool=_pool, language=prefs.language,
     )
 
 

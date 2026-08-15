@@ -19,17 +19,17 @@ class _Row(BaseModel):
 
 
 class UserConfigRow(_Row):
-    """One row per user ([data-model.md] §1.3)."""
+    """One row per user ([data-model.md] §1.3).
+
+    Two fields wide, because the user's SETTINGS moved to the router's
+    user-scoped state (`bp_agents.user_prefs`). What is left is what cannot
+    live there: both are read OUTSIDE any task — by the cron scheduler and
+    the sandbox host — where neither an agent's `ctx.history` nor a steward's
+    carrier session exists."""
 
     user_id: str
-    full_name: str
-    timezone: str
-    max_context_token_limit: int
-    verbose_default: bool
-    language: str
     sandbox_uid: int | None = None
     default_session_id: str | None = None
-    custom_note: str
     created_at: datetime
     updated_at: datetime
 

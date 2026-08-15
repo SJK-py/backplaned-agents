@@ -14,6 +14,7 @@ own `assistant` turn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -44,16 +45,13 @@ from bp_agents.common import (
 )
 from bp_agents.common.payloads import CronMessage, MessagePayload
 from bp_agents.common.thread import RETIRE_ITEM
-from bp_agents.db import queries
-from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
+from bp_agents.user_prefs import load_prefs
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
 from bp_sdk import Agent, Message, TaskContext, ToolCall, ToolSpec
 from bp_sdk.peers import PeerCallError
 
 if TYPE_CHECKING:
-    import asyncpg
-
     from bp_sdk import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -119,29 +117,16 @@ agent = Agent(
     ),
 )
 
-# Suite resources, wired on startup. Module-level so the handler can
-# reach them; the testable core takes them as explicit args instead.
+# Operator configuration, loaded once. The orchestrator holds NO suite
+# database handle any more: the conversation is the router's session store
+# and the user's settings are its user scope.
 _settings: SuiteSettings = load_suite_settings()
-_pool: asyncpg.Pool | None = None
-
-
-@agent.on_startup
-async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — module-level handle wired once at startup
-    _pool = await open_pool(_settings)
-
-
-@agent.on_shutdown
-async def _shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
 
 
 async def run_orchestrator_message(
     ctx: TaskContext,
     payload: MessagePayload,
     *,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
     record_user_turn: bool = True,
 ) -> AgentOutput:
@@ -155,25 +140,25 @@ async def run_orchestrator_message(
     `record_user_turn=False` is for the `end_delegation` follow-up, which has
     already appended the forwarded prompt alongside its recap rows.
     """
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-
-    turn = await open_turn(
-        ctx, ORCHESTRATOR_AGENT_ID,
-        user_text=payload.prompt if record_user_turn else None,
+    # Two independent round trips into the router's store — the user's
+    # settings (user scope) and this thread's window (session scope). A batch
+    # carries one scope, so they cannot be merged; running them concurrently
+    # keeps the preference read off the turn's critical path.
+    prefs, turn = await asyncio.gather(
+        load_prefs(ctx, settings),
+        open_turn(
+            ctx, ORCHESTRATOR_AGENT_ID,
+            user_text=payload.prompt if record_user_turn else None,
+        ),
     )
-    timezone = cfg.timezone if cfg else settings.default_timezone
-    config_note = user_config_note(cfg) if cfg else ""
-    limit = (
-        cfg.max_context_token_limit if cfg
-        else settings.default_max_context_token_limit
-    )
+    timezone = prefs.timezone
+    config_note = user_config_note(prefs)
     turn = await maybe_fold(
         ctx, turn,
         system=compose_system_prompt(
             GENERAL_INSTRUCTION, config_note=config_note, summary=turn.summary
         ),
-        limit_tokens=limit,
+        limit_tokens=prefs.max_context_token_limit,
     )
 
     system_prompt = compose_system_prompt(
@@ -311,14 +296,11 @@ async def run_orchestrator_subagent(
     ctx: TaskContext,
     payload: LLMData,
     *,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
     """Generic subagent execution (e.g. deep_reasoning's execute_step).
     Stateless — no session history; full toolset."""
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    timezone = cfg.timezone if cfg else settings.default_timezone
+    timezone = (await load_prefs(ctx, settings)).timezone
     messages = [
         Message(
             role="system",
@@ -340,7 +322,6 @@ async def run_orchestrator_end_delegation(
     ctx: TaskContext,
     payload: dict,
     *,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
     """Phase 3 of delegation: the hand-back target. Append a recap to the
@@ -374,7 +355,7 @@ async def run_orchestrator_end_delegation(
         await _retire_delegate_thread(ctx, ctx.delegating_agent_id)
     if user_prompt:
         out = await run_orchestrator_message(
-            ctx, MessagePayload(prompt=user_prompt), pool=pool,
+            ctx, MessagePayload(prompt=user_prompt),
             settings=settings, record_user_turn=False,
         )
         # Merge the handed-back files with whatever the orchestrator produced
@@ -416,9 +397,8 @@ async def _retire_delegate_thread(ctx: TaskContext, delegate: str) -> None:
     "loop (may hand off to a specialist).",
 )
 async def message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
-    assert _pool is not None, "orchestrator pool not initialised (on_startup)"
     return await run_orchestrator_message(
-        ctx, payload, pool=_pool, settings=_settings
+        ctx, payload, settings=_settings
     )
 
 
@@ -442,7 +422,6 @@ async def run_orchestrator_cron_message(
     ctx: TaskContext,
     payload: CronMessage,
     *,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
     """Scheduled run ([cron.md] §2): a FRESH context (cron instruction +
@@ -454,11 +433,10 @@ async def run_orchestrator_cron_message(
     active executor, it has the job's `report` policy in the payload, so it
     decides and records in one place. Returns `{report, reason}` in metadata
     so the scheduler still knows whether to deliver a live notification."""
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    timezone = cfg.timezone if cfg else settings.default_timezone
+    prefs = await load_prefs(ctx, settings)
+    timezone = prefs.timezone
     system = compose_system_prompt(
-        CRON_INSTRUCTION, config_note=user_config_note(cfg) if cfg else "",
+        CRON_INSTRUCTION, config_note=user_config_note(prefs),
     )
     messages = [
         Message(role="system", content=system),
@@ -508,9 +486,8 @@ async def run_orchestrator_cron_message(
     "session history (e.g. a deep_reasoning plan step).",
 )
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
-    assert _pool is not None
     return await run_orchestrator_subagent(
-        ctx, payload, pool=_pool, settings=_settings
+        ctx, payload, settings=_settings
     )
 
 
@@ -520,9 +497,8 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     "the orchestrator (delegation lifecycle).",
 )
 async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
-    assert _pool is not None
     return await run_orchestrator_end_delegation(
-        ctx, payload, pool=_pool, settings=_settings
+        ctx, payload, settings=_settings
     )
 
 
@@ -532,9 +508,8 @@ async def end_delegation(ctx: TaskContext, payload: dict) -> AgentOutput:
     "delegates; returns the message plus a {report, reason} decision.",
 )
 async def cron_message(ctx: TaskContext, payload: CronMessage) -> AgentOutput:
-    assert _pool is not None
     return await run_orchestrator_cron_message(
-        ctx, payload, pool=_pool, settings=_settings
+        ctx, payload, settings=_settings
     )
 
 

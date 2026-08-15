@@ -67,8 +67,12 @@ x-suite-agent: &suite-agent
   environment: &suite-env
     AGENT_ROUTER_URL: ws://router:8000/v1/agent
     AGENT_STATE_DIR: /state
-    SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
     SUITE_LANCE_ROOT: /lancedb
+    # SUITE_DATABASE_URL is deliberately NOT here. Only `config` (cron),
+    # `memory` (its GC sweep), `chatbot` and `webapp` still open a suite
+    # pool — the conversation and the user's settings are the router's now
+    # — so the credential is set per service instead of handed to every
+    # agent. `sandbox`, which runs untrusted code, no longer carries one.
     # Suite Valkey (db 1; the router uses db 0). Consumed only by the
     # KakaoTalk channel, which backs its deadline/next-touch registry on it.
     # Turn ordering is NOT here — that is the router's per-session lease, so
@@ -403,12 +407,13 @@ services:
       SUITE_AGENT_GROUP: suite-core
       # Resolved per agent by the host; every agent here draws from the roster.
       SUITE_ROSTER_TOKEN: ${SUITE_ROSTER_TOKEN:?}
-      # Pool size is PER AGENT and this process runs nine of them, so the
-      # suite defaults (min 1 / max 10) would mean up to 90 connections from
-      # one container — against a stock `max_connections` of 100, with the
-      # router and channels still to come. 0/3 keeps the group under ~27 with
-      # no idle connections held. (Most of these agents stop needing the suite
-      # DB at all once the session-store rework lands.)
+      # Two of this group's nine agents open a suite pool: `config` (cron) and
+      # `memory` (its GC sweep). The other seven read the user's settings from
+      # the router's user scope and the conversation from its session store, so
+      # they hold no database handle at all. Pool size is PER AGENT, so the cap
+      # here bounds 2 × max, not 9 × max — it was the difference between ~90
+      # and ~27 connections before those seven stopped opening one.
+      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
       SUITE_DB_POOL_MIN_SIZE: ${SUITE_DB_POOL_MIN_SIZE:-0}
       SUITE_DB_POOL_MAX_SIZE: ${SUITE_DB_POOL_MAX_SIZE:-3}
       # research
@@ -447,6 +452,8 @@ services:
     <<: *suite-agent
     environment:
       <<: *suite-env
+      # Cron jobs, chat-platform mappings, and the two per-user pointers.
+      SUITE_DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/bp_suite
       SUITE_AGENT_GROUP: channels
       # The host resolves a token PER AGENT (`bp_agents.host.agent_invitation`):
       # `<NAME>_INVITATION` wins, else the roster. AGENT_INVITATION_TOKEN is a

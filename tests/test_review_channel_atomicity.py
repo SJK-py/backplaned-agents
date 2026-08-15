@@ -87,10 +87,10 @@ def test_delegate_rolls_back_the_whole_batch_on_a_refusal() -> None:
         store = FakeStore()
         real_execute = store.execute
 
-        def _refuse_state(ops, *, owner):  # type: ignore[no-untyped-def]
+        def _refuse_state(ops, *, owner, scope="session"):  # type: ignore[no-untyped-def]
             if any(isinstance(op, SetStateOp) for op in ops):
                 raise SessionStoreError("version_conflict")
-            return real_execute(ops, owner=owner)
+            return real_execute(ops, owner=owner, scope=scope)
 
         core = ChannelCore(
             dispatcher=_SummDispatcher(), store=FakeChannelStore(store),

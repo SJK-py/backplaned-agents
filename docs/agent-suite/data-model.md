@@ -1,10 +1,10 @@
 # Agent Suite — Data Model
 
 > Consolidated schema reference. The suite keeps its own **Postgres**
-> (per-user config / cron / chat mappings) and **per-user LanceDB**
+> (cron, chat mappings, and two per-user pointers) and **per-user LanceDB**
 > (knowledge + memory), joined to the platform only by `user_id` /
-> `session_id`. The conversation itself is the ROUTER's (§1.1). Types are
-> indicative; tune for your DB.
+> `session_id`. The conversation itself is the ROUTER's (§1.1), and so are
+> the user's settings (§1.2). Types are indicative; tune for your DB.
 
 ## 1. Postgres
 
@@ -17,19 +17,33 @@ session store — see [sessions.md §1](./sessions.md) for the mapping and
 [`../design/router-managed-session-store.md`](../design/router-managed-session-store.md)
 for why. What follows is what the suite still keeps.
 
+### 1.2 The user's settings are NOT here either
+
+`full_name`, `timezone`, `language`, `verbose_default`, `custom_note` and
+`max_context_token_limit` are gone from `user_config` (migration
+`0006_user_config_to_user_scope`). They are keys in the router's
+**user-scoped state** — the `(user_id, key)` namespace the session store
+exposes under `scope="user"` — reached through `bp_agents/user_prefs.py`.
+Reading them no longer needs a database credential, which is what let the l1
+specialists and the orchestrator drop their suite pools entirely.
+
+The split was by **reader**, not by kind:
+
+| where it is read | destination |
+| --- | --- |
+| inside a task (turn start, to build a system prompt), or by a steward holding a carrier session | **router user scope** |
+| outside any task — the sandbox host, the cron scheduler | stays in `user_config` |
+
 ### 1.3 `user_config` — one row per user
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `user_id` | text PK | |
-| `full_name` | text | |
-| `timezone` | text | IANA tz |
-| `max_context_token_limit` | int | soft summarization trigger |
-| `verbose_default` | bool | default verbose mode ([channel.md](./channel.md) §5); `verbose` is a reserved word in Postgres |
-| `language` | text | preference |
-| `sandbox_uid` | int | maps to the container uid / `/home/{user_id}` |
+| `sandbox_uid` | int | maps to the container uid / `/home/{user_id}`; also needs cross-user uniqueness, which a per-key namespace does not give |
 | `default_session_id` | text null | cron fallback target ([cron.md](./cron.md)) |
-| `custom_note` | text | injected into system prompts |
+
+Two fields wide, and that is the point: what is left is exactly what cannot
+be read through `ctx.history` or a carrier session.
 
 **No model choice lives here.** Four `preset_*` columns did until migration
 `0004_drop_user_config_presets`; which model a user runs on is now a router
@@ -37,11 +51,12 @@ preset **slot** ([`../design/router-resolved-preset-slots.md`]) — the agent
 names an opaque slot (`pro` / `balanced` / `lite`, `bp_agents/slots.py`) and
 the router resolves it from the user's own preference intersected with their
 tier gate. The preference is stored router-side in `user_llm_preferences` and
-written only under the user's session JWT, because the router *acts* on it;
-`user_config` is agent-writable and therefore the wrong home for a value that
-gates spend. The embedding preset is operator configuration
-(`SUITE_DEFAULT_PRESET_EMBEDDING`) and deliberately not a slot — changing it
-invalidates every vector already written.
+written only under the user's session JWT, because the router *acts* on it.
+That is the same test the settings above pass and the presets fail: user
+scope is writable by any agent in the session, so it holds values the router
+merely *stores*, never one it *obeys*. The embedding preset is operator
+configuration (`SUITE_DEFAULT_PRESET_EMBEDDING`) and deliberately not a slot
+— changing it invalidates every vector already written.
 
 ### 1.4 `cron_jobs`
 
@@ -123,7 +138,8 @@ No mode defines a bespoke `produces_schema`; all outputs validate as `AgentOutpu
 | --- | --- |
 | router session store — threads | each agent, its OWN thread only; the router stamps the owner from the task's active executor, so another agent's thread is unwritable rather than merely forbidden |
 | router session store — session state / metadata | the channel, as a steward under the user's token |
-| `user_config` | `config` agent (+ channel for `default_session_id`) |
+| router session store — USER state (settings) | the `config` agent in-task; the webapp settings form and the chatbot `/config` as stewards. Shared, not per-agent — see §1.2 |
+| `user_config` | the channel (`default_session_id`); the sandbox host (`sandbox_uid`) |
 | `cron_jobs` / `cron_executions` | chatbot (`cron` mode + scheduler) |
 | KB LanceDB | `knowledge_base` |
 | memory LanceDB | `memory` (per-user lock) |

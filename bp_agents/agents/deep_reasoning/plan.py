@@ -29,14 +29,12 @@ from bp_agents.common import (
     run_llm_loop,
     text_output,
 )
-from bp_agents.db import queries
+from bp_agents.user_prefs import load_prefs
 from bp_protocol.types import AgentOutput, LLMData, TaskStatus
 from bp_sdk import Message, ToolSpec
 from bp_sdk.peers import PeerCallError
 
 if TYPE_CHECKING:
-    import asyncpg
-
     from bp_agents.settings import SuiteSettings
     from bp_sdk import TaskContext
 
@@ -223,14 +221,11 @@ async def run_plan(
     *,
     objective: str,
     initial_steps: list[str],
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
     """Drive the plan to a final `AgentOutput`. Bounded by
     `plan_max_steps` / `plan_max_iters` so it always terminates."""
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    timezone = cfg.timezone if cfg else settings.default_timezone
+    timezone = (await load_prefs(ctx, settings)).timezone
 
     steps: list[str] = [s for s in initial_steps if s][: settings.plan_max_steps]
     results: list[dict[str, Any]] = []

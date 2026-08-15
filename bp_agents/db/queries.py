@@ -130,37 +130,25 @@ async def create_user_config(
     conn: asyncpg.Connection,
     *,
     user_id: str,
-    full_name: str = "",
-    timezone: str = "UTC",
-    max_context_token_limit: int = 120_000,
-    verbose_default: bool = False,
-    language: str = "en",
     sandbox_uid: int | None = None,
     default_session_id: str | None = None,
-    custom_note: str = "",
 ) -> UserConfigRow:
-    """Create a user_config row (defaults seeded from `SuiteSettings` at
-    the call site). Idempotent — an existing row is returned unchanged."""
+    """Create a user_config row. Idempotent — an existing row is returned
+    unchanged.
+
+    The user's settings are NOT here any more; they are keys in the router's
+    user scope, where an absent key is simply the operator default and there
+    is nothing to pre-create (`bp_agents.user_prefs`)."""
     row = await conn.fetchrow(
         """
-        INSERT INTO user_config (
-            user_id, full_name, timezone,
-            max_context_token_limit, verbose_default, language,
-            sandbox_uid, default_session_id, custom_note
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        INSERT INTO user_config (user_id, sandbox_uid, default_session_id)
+        VALUES ($1,$2,$3)
         ON CONFLICT (user_id) DO NOTHING
         RETURNING *
         """,
         user_id,
-        full_name,
-        timezone,
-        max_context_token_limit,
-        verbose_default,
-        language,
         sandbox_uid,
         default_session_id,
-        custom_note,
     )
     if row is None:
         existing = await get_user_config(conn, user_id)
@@ -178,40 +166,6 @@ async def set_default_session_id(
         "WHERE user_id = $1",
         user_id,
         session_id,
-    )
-
-
-_USER_CONFIG_MUTABLE = frozenset(
-    {
-        "full_name",
-        "timezone",
-        "max_context_token_limit",
-        "verbose_default",
-        "language",
-        "sandbox_uid",
-        "default_session_id",
-        "custom_note",
-    }
-)
-
-
-async def update_user_config(
-    conn: asyncpg.Connection, user_id: str, **fields: Any
-) -> None:
-    """Patch user_config columns (config agent / channel). Column names
-    are a fixed allowlist — no injection surface in the SET clause."""
-    cols = {k: v for k, v in fields.items() if k in _USER_CONFIG_MUTABLE}
-    unknown = set(fields) - _USER_CONFIG_MUTABLE
-    if unknown:
-        raise ValueError(f"update_user_config: non-mutable columns {sorted(unknown)}")
-    if not cols:
-        return
-    set_clause = ", ".join(f"{c} = ${i + 2}" for i, c in enumerate(cols))
-    await conn.execute(
-        f"UPDATE user_config SET {set_clause}, updated_at = now() "
-        "WHERE user_id = $1",
-        user_id,
-        *cols.values(),
     )
 
 

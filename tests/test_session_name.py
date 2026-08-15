@@ -19,6 +19,10 @@ from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from tests.fake_store import FakeChannelStore, FakeStore
 
+# Operator defaults for a preference the user has not set; the
+# gateway never dials `database_url` through it.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 # ---------------------------------------------------------------------------
 # _clean_title — single line, de-quoted, length-capped
 # ---------------------------------------------------------------------------
@@ -97,6 +101,7 @@ def test_first_message_titles_the_session(suite_db_url: str) -> None:
             disp = _Dispatcher(title="Cat preferences")
             store = FakeStore()  # no title yet
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
                 store=FakeChannelStore(store),
             )
@@ -128,6 +133,7 @@ def test_already_named_session_is_not_retitled(suite_db_url: str) -> None:
             store = FakeStore()
             store.metadata_by_session["ses_1"] = {"title": "My existing title"}
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
                 store=FakeChannelStore(store),
             )

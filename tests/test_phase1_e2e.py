@@ -29,6 +29,10 @@ from bp_sdk.settings import AgentConfig
 from bp_sdk.testing import TestRouter
 from tests.fake_store import FakeChannelStore, FakeStore
 
+# Operator defaults for a preference the user has not set; the
+# gateway never dials `database_url` through it.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 _REPLY = "Hello from the orchestrator!"
 
 
@@ -137,6 +141,7 @@ def test_phase1_message_round_trip(
                 tg = _FakeTelegram()
                 store = FakeStore()
                 gateway = ChatbotGateway(
+                    settings=_SETTINGS,
                     dispatcher=channel, pool=suite_pool, telegram=tg,
                     result_timeout_s=20.0,
                     store=FakeChannelStore(store),

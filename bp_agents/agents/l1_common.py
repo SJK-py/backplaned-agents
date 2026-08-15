@@ -32,6 +32,7 @@ call), not a delegation.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -51,13 +52,11 @@ from bp_agents.common import (
     text_output,
     user_config_note,
 )
-from bp_agents.db import queries
+from bp_agents.user_prefs import load_prefs
 from bp_protocol.types import AgentOutput, LLMData
 from bp_sdk import Message, TaskContext, ToolCall, ToolSpec
 
 if TYPE_CHECKING:
-    import asyncpg
-
     from bp_agents.settings import SuiteSettings
 
 ORCHESTRATOR_AGENT_ID = "orchestrator"
@@ -118,7 +117,7 @@ LocalToolsFactory = Callable[
 # Handler for an agent-specific terminal tool (e.g. deep_reasoning's
 # `plan_mode`): given the firing tool call, produce the turn's result.
 ExtraTerminalHandler = Callable[
-    [TaskContext, ToolCall, "asyncpg.Pool", "SuiteSettings"],
+    [TaskContext, ToolCall, "SuiteSettings"],
     Awaitable[AgentOutput],
 ]
 
@@ -181,18 +180,18 @@ async def run_subagent(
     payload: LLMData,
     *,
     config: L1Config,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
 ) -> AgentOutput:
-    """Stateless tool-face execution — no history read/write."""
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
+    """Stateless tool-face execution — no history read/write.
+
+    "Stateless" means no THREAD: the user-scoped preference read below is
+    not conversation, and it is what tells this call the user's timezone."""
+    prefs = await load_prefs(ctx, settings)
     messages = [
         Message(role="system", content=compose_subagent_system(config.subagent_system, payload)),
         Message(role="user", content=payload.prompt),
     ]
-    timezone = cfg.timezone if cfg else settings.default_timezone
-    local = await _local_tools(ctx, settings, config, timezone)
+    local = await _local_tools(ctx, settings, config, prefs.timezone)
     resp = await run_llm_loop(
         ctx, messages=messages,
         slot=config.slot, local_tools=local,
@@ -207,7 +206,6 @@ async def run_delegated_turn(
     ctx: TaskContext,
     *,
     config: L1Config,
-    pool: asyncpg.Pool,
     settings: SuiteSettings,
     first_turn: bool,
     seed: LLMData | None = None,
@@ -229,12 +227,16 @@ async def run_delegated_turn(
     (`T`'s originator) and the router rejects that as a cycle. Subsequent
     turns run on fresh tasks spawned straight to this agent, so handing back
     to the orchestrator is cycle-free."""
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-
-    turn = await open_turn(
-        ctx, config.agent_id,
-        user_text=_seed_text(seed) if seed is not None else user_text,
+    # Two independent round trips into the router's store — the user's
+    # settings (user scope) and this thread's window (session scope). A batch
+    # carries one scope, so they cannot be merged; running them concurrently
+    # keeps the preference read off the turn's critical path.
+    prefs, turn = await asyncio.gather(
+        load_prefs(ctx, settings),
+        open_turn(
+            ctx, config.agent_id,
+            user_text=_seed_text(seed) if seed is not None else user_text,
+        ),
     )
 
     # System prompt = shared harness framing + the agent's own instruction +
@@ -251,18 +253,14 @@ async def run_delegated_turn(
     if not first_turn and config.file_tools:
         parts.append(INCOMING_FILE_NOTE)
     base_system = "\n\n".join(parts)
-    config_note = user_config_note(cfg) if cfg else ""
+    config_note = user_config_note(prefs)
 
-    limit = (
-        cfg.max_context_token_limit if cfg
-        else settings.default_max_context_token_limit
-    )
     turn = await maybe_fold(
         ctx, turn,
         system=compose_system_prompt(
             base_system, config_note=config_note, summary=turn.summary
         ),
-        limit_tokens=limit,
+        limit_tokens=prefs.max_context_token_limit,
     )
     system = compose_system_prompt(
         base_system, config_note=config_note, summary=turn.summary
@@ -271,11 +269,10 @@ async def run_delegated_turn(
     messages.extend(turn.context())
     context_tokens = await context_tokens_of(system, turn)
 
-    timezone = cfg.timezone if cfg else settings.default_timezone
     # A delegate talks to the user directly, so it can deliver files via
     # `send_file` (recorded into `outbound` → AgentOutput.files).
     outbound: list[str] = []
-    local = await _local_tools(ctx, settings, config, timezone) or LocalToolset()
+    local = await _local_tools(ctx, settings, config, prefs.timezone) or LocalToolset()
     local.add(make_send_file_tool(outbound))
     local.add(make_recall_tool_history_tool(agent_id=config.agent_id))
 
@@ -338,7 +335,7 @@ async def run_delegated_turn(
             (tc for tc in resp.tool_calls if tc.name in extra_names), None
         )
         if extra_call is not None:
-            return await config.on_extra_terminal(ctx, extra_call, pool, settings)
+            return await config.on_extra_terminal(ctx, extra_call, settings)
 
     await close_turn(
         ctx, turn, messages=messages, assistant_text=resp.text

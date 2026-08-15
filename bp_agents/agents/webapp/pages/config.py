@@ -1,10 +1,17 @@
 """bp_agents.agents.webapp.pages.config — the structured config form.
 
-A per-user settings form over `user_config` ([webapp.md] §5, Decision 2).
-Reads the row directly; writes via `queries.update_user_config` with the
-SAME validation the config agent's `set_config` uses
-(`bp_agents.config_edit`), so the form and the NL path can't disagree. The
-chat pane still handles "change my timezone" conversationally.
+A per-user settings form over the router's **user-scoped state**
+([webapp.md] §5, Decision 2). Reads and writes go through the steward store
+surface (`POST /v1/sessions/{id}/ops` with `scope="user"`) under the
+logged-in user's own token, with the SAME validation the config agent's
+`set_config` uses (`bp_agents.user_prefs`), so the form and the NL path
+can't disagree. The chat pane still handles "change my timezone"
+conversationally.
+
+The session in that path is a CARRIER, not a scope: the rows have no
+session, and the endpoint only checks that the session is the caller's — so
+a closed one serves and the page works for anyone who has ever held a
+conversation.
 
 **Model selection is the exception** and lives only here
 ([../../../../docs/design/router-resolved-preset-slots.md]). The router
@@ -23,11 +30,16 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.pages._common import ensure_user_config
+from bp_agents.agents.webapp.pages._common import carrier_session, user_prefs
 from bp_agents.agents.webapp.upstream import UpstreamError
-from bp_agents.config_edit import ConfigError, coerce_config_value, editable_fields
 from bp_agents.db import queries
 from bp_agents.slots import SLOT_HELP, SLOT_LABELS, SLOTS
+from bp_agents.user_prefs import (
+    ConfigError,
+    coerce_config_value,
+    editable_fields,
+    save_prefs_via_store,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -161,11 +173,7 @@ async def config_view(
     user_id = session_user_id(request)
     if pool is None or not user_id:
         raise HTTPException(status_code=404)
-    # Self-heal a missing user_config (web/OIDC accounts not seeded by the
-    # chatbot reconcile) so reads/saves below actually work.
-    await ensure_user_config(request)
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, user_id)
+    cfg = await user_prefs(request)
     linked = await _linked_platforms(pool, user_id)
     return request.app.state.templates.TemplateResponse(
         request,
@@ -228,8 +236,7 @@ async def mint_link_token(request: Request) -> HTMLResponse:
             extra={"event": "webapp_mint_link_token_failed",
                    "status_code": exc.status_code},
         )
-    async with pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, user_id)
+    cfg = await user_prefs(request)
     linked = await _linked_platforms(pool, user_id)
     return request.app.state.templates.TemplateResponse(
         request,
@@ -244,15 +251,32 @@ async def mint_link_token(request: Request) -> HTMLResponse:
     )
 
 
+async def _render_save_error(
+    request: Request, pool: object, user_id: str, error: str
+) -> HTMLResponse:
+    """Re-render Settings with an error banner and a 400. Every failed save
+    lands here — a validation refusal and a store refusal look the same to
+    the user, and both must show what is CURRENTLY stored rather than the
+    values that failed to save."""
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "config/form.html",
+        {"cfg": await user_prefs(request), "saved": False, "error": error,
+         "active_section": "config", "pw_error": None,
+         "model_slots": await _model_slots(request), "model_error": None,
+         "linkable_platforms": _LINKABLE_PLATFORMS,
+         "linked_platforms": await _linked_platforms(pool, user_id),
+         "link_token": None},
+        status_code=400,
+    )
+
+
 @router.post("/config", response_class=HTMLResponse)
 async def config_save(request: Request) -> HTMLResponse:
     pool = request.app.state.pool
     user_id = session_user_id(request)
     if pool is None or not user_id:
         raise HTTPException(status_code=404)
-    # Ensure the row exists first, else the UPDATE below patches zero rows and
-    # the save silently does nothing (web/OIDC accounts start without it).
-    await ensure_user_config(request)
     form = await request.form()
 
     updates: dict[str, object] = {}
@@ -270,24 +294,35 @@ async def config_save(request: Request) -> HTMLResponse:
             errors.append(str(exc))
 
     if errors:
-        async with pool.acquire() as conn:
-            cfg = await queries.get_user_config(conn, user_id)
-        linked = await _linked_platforms(pool, user_id)
-        return request.app.state.templates.TemplateResponse(
-            request,
-            "config/form.html",
-            {"cfg": cfg, "saved": False, "error": "; ".join(errors),
-             "active_section": "config", "pw_error": None,
-             "model_slots": await _model_slots(request), "model_error": None,
-             "linkable_platforms": _LINKABLE_PLATFORMS,
-             "linked_platforms": linked,
-             "link_token": None},
-            status_code=400,
-        )
+        return await _render_save_error(request, pool, user_id, "; ".join(errors))
 
     if updates:
-        async with pool.acquire() as conn:
-            await queries.update_user_config(conn, user_id, **updates)
+        # ONE batch, so a refusal mid-list can't leave the user looking at a
+        # page that reports some of what they typed. No carrier session means
+        # no route to the user scope at all — report it rather than redirect
+        # to a "saved" page that saved nothing.
+        core = request.app.state.core
+        session_id = await carrier_session(request, open_only=False)
+        if core is None or session_id is None:
+            return await _render_save_error(
+                request, pool, user_id,
+                "Couldn't save — no session to write through. "
+                "Start a conversation first.",
+            )
+        try:
+            await save_prefs_via_store(
+                core.store, user_id=user_id, session_id=session_id,
+                updates=updates,
+            )
+        except Exception:  # noqa: BLE001 — surfaced on the form, not a 500
+            logger.warning(
+                "webapp_config_save_failed",
+                extra={"event": "webapp_config_save_failed"},
+            )
+            return await _render_save_error(
+                request, pool, user_id, "Couldn't save your settings. "
+                "Please try again.",
+            )
     return RedirectResponse(url="/config?saved=1", status_code=303)
 
 

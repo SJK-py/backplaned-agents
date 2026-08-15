@@ -320,55 +320,44 @@ def test_cron_management_empty_reply_lists_jobs(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
-def test_config_empty_reply_shows_settings(suite_db_url: str) -> None:
+def test_config_empty_reply_shows_settings() -> None:
     """An empty model turn falls back to the current settings, not 'Done.'."""
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.create_user_config(
-                    conn, user_id="usr_a", timezone="Asia/Seoul"
-                )
-            llm = _ScriptLlm([LlmResponse(text="")])  # model says nothing
-            out = await run_config(
-                _Ctx(llm), MessagePayload(prompt="show settings"),
-                pool=pool,
-            )
-            assert "timezone: Asia/Seoul" in out.content
-            assert out.content != "Done."
-        finally:
-            await pool.close()
+        store = FakeStore()
+        store.set_pref("timezone", "Asia/Seoul")
+        llm = _ScriptLlm([LlmResponse(text="")])  # model says nothing
+        out = await run_config(
+            _Ctx(llm, store=store), MessagePayload(prompt="show settings"),
+        )
+        assert "timezone: Asia/Seoul" in out.content
+        assert out.content != "Done."
 
     asyncio.run(_drive())
 
 
-def test_config_set_persists(suite_db_url: str) -> None:
+def test_config_set_persists() -> None:
+    """`set_config` writes the ROUTER's user scope — the agent's own socket,
+    under its own authority — not a suite table."""
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.create_user_config(conn, user_id="usr_a")
-            llm = _ScriptLlm([
-                LlmResponse(text="", tool_calls=[ToolCall(
-                    id="c", name="set_config",
-                    args={"field": "timezone", "value": "Asia/Tokyo"},
-                )]),
-                LlmResponse(text="Updated your timezone."),
-            ])
-            ctx = _Ctx(llm)
-            await run_config(ctx, MessagePayload(prompt="set tz tokyo"), pool=pool)
-            async with pool.acquire() as conn:
-                cfg = await queries.get_user_config(conn, "usr_a")
-            assert cfg.timezone == "Asia/Tokyo"
-        finally:
-            await pool.close()
+        store = FakeStore()
+        llm = _ScriptLlm([
+            LlmResponse(text="", tool_calls=[ToolCall(
+                id="c", name="set_config",
+                args={"field": "timezone", "value": "Asia/Tokyo"},
+            )]),
+            LlmResponse(text="Updated your timezone."),
+        ])
+        await run_config(
+            _Ctx(llm, store=store), MessagePayload(prompt="set tz tokyo")
+        )
+        assert store.pref("timezone") == "Asia/Tokyo"
+        # User scope, not session scope: it must outlive this conversation.
+        assert "timezone" not in store.session_state
 
     asyncio.run(_drive())
 
 
-def test_config_set_returns_grounded_snapshot(suite_db_url: str) -> None:
+def test_config_set_returns_grounded_snapshot() -> None:
     """After a change, set_config returns the full freshly-read config so the
     model can't fabricate the other (untouched) fields when it summarizes."""
     seen: dict = {}
@@ -379,31 +368,24 @@ def test_config_set_returns_grounded_snapshot(suite_db_url: str) -> None:
             return await super().generate(messages, **kw)
 
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.create_user_config(
-                    conn, user_id="usr_a", full_name="Sam", timezone="Asia/Seoul"
-                )
-            llm = _CapturingLlm([
-                LlmResponse(text="", tool_calls=[ToolCall(
-                    id="c", name="set_config",
-                    args={"field": "timezone", "value": "Asia/Tokyo"},
-                )]),
-                LlmResponse(text="Your timezone is now Asia/Tokyo."),
-            ])
-            await run_config(
-                _Ctx(llm), MessagePayload(prompt="set tz tokyo"),
-                pool=pool,
-            )
-            # The set_config tool result (fed back on the 2nd turn) must carry
-            # the full read-back: the changed field AND an untouched one.
-            blob = "\n".join(str(m.content) for m in seen["messages"])
-            assert "timezone: Asia/Tokyo" in blob
-            assert "full_name: Sam" in blob
-        finally:
-            await pool.close()
+        store = FakeStore()
+        store.set_pref("full_name", "Sam")
+        store.set_pref("timezone", "Asia/Seoul")
+        llm = _CapturingLlm([
+            LlmResponse(text="", tool_calls=[ToolCall(
+                id="c", name="set_config",
+                args={"field": "timezone", "value": "Asia/Tokyo"},
+            )]),
+            LlmResponse(text="Your timezone is now Asia/Tokyo."),
+        ])
+        await run_config(
+            _Ctx(llm, store=store), MessagePayload(prompt="set tz tokyo"),
+        )
+        # The set_config tool result (fed back on the 2nd turn) must carry
+        # the full read-back: the changed field AND an untouched one.
+        blob = "\n".join(str(m.content) for m in seen["messages"])
+        assert "timezone: Asia/Tokyo" in blob
+        assert "full_name: Sam" in blob
 
     asyncio.run(_drive())
 
@@ -418,7 +400,7 @@ def test_config_system_prompt_has_language_directive() -> None:
     assert "ko" in p
 
 
-def test_config_reply_uses_user_language(suite_db_url: str) -> None:
+def test_config_reply_uses_user_language() -> None:
     """run_config threads the user's `language` into the system prompt, so
     /config (which bypasses the orchestrator) still replies in their language."""
     captured: dict = {}
@@ -429,22 +411,14 @@ def test_config_reply_uses_user_language(suite_db_url: str) -> None:
             return await super().generate(messages, **kw)
 
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            await _reset(pool)
-            async with pool.acquire() as conn:
-                await queries.create_user_config(
-                    conn, user_id="usr_a", language="ko"
-                )
-            llm = _CapturingLlm([LlmResponse(text="설정을 보여드릴게요.")])
-            await run_config(
-                _Ctx(llm), MessagePayload(prompt="show settings"),
-                pool=pool,
-            )
-            assert "ko" in captured["system"]
-            assert "preferred language" in captured["system"]
-        finally:
-            await pool.close()
+        store = FakeStore()
+        store.set_pref("language", "ko")
+        llm = _CapturingLlm([LlmResponse(text="설정을 보여드릴게요.")])
+        await run_config(
+            _Ctx(llm, store=store), MessagePayload(prompt="show settings"),
+        )
+        assert "ko" in captured["system"]
+        assert "preferred language" in captured["system"]
 
     asyncio.run(_drive())
 
@@ -488,7 +462,7 @@ def test_orchestrator_cron_message_structured(suite_db_url: str) -> None:
             ctx = _Ctx(llm)
             out = await run_orchestrator_cron_message(
                 ctx, CronMessage(prompt="daily digest"),
-                pool=pool, settings=_settings(suite_db_url),
+                settings=_settings(suite_db_url),
             )
             assert out.content == "here is the digest"
             assert out.metadata["report"] is True

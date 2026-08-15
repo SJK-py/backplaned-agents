@@ -18,6 +18,10 @@ from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from tests.fake_store import FakeChannelStore, FakeStore
 
+# The gateway takes SuiteSettings for the operator defaults behind an
+# unset user preference; `database_url` is never read through it here.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 
 class _FakeTelegram:
     def __init__(self, *, downloads: dict[str, bytes] | None = None) -> None:
@@ -118,6 +122,7 @@ def test_inbound_file_saved_and_recorded(suite_db_url: str) -> None:
             creds = _FakeCreds()
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_Dispatcher(), pool=pool, telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
             )
@@ -149,6 +154,7 @@ def test_outbound_file_relayed(suite_db_url: str) -> None:
             disp = _Dispatcher(files=["chart.png"])
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
             )
@@ -172,6 +178,7 @@ def test_file_only_message_dispatches(suite_db_url: str) -> None:
             disp = _Dispatcher()
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
             )

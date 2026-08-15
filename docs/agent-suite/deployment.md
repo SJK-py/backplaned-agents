@@ -66,18 +66,22 @@ automatically for a local router.
 - `AGENT_ROUTER_URL` — `ws://router:8000/v1/agent`
 - `AGENT_STATE_DIR` — persists `credentials.json` (+ chatbot's Telegram
   offset); give the chatbot a volume.
-- `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`
+- `SUITE_DATABASE_URL` — `postgresql://…@postgres:5432/bp_suite`. Needed by
+  **four** agents only: `chatbot` and `webapp` (cron + chat mappings),
+  `config` (cron), and `memory` (its GC sweep). The rest read the
+  conversation from the router's session store and the user's settings from
+  its user scope, so the reference compose sets this per service rather than
+  on the shared env anchor — `sandbox`, which runs untrusted code, carries no
+  database credential at all.
 - `SUITE_LANCE_ROOT` — per-user LanceDB root (`/lancedb`; shared volume
   for `knowledge_base` + `memory`).
-- chatbot / webapp Valkey: `SUITE_VALKEY_URL` makes the per-session turn lock
-  **distributed** so the two channels serialize turns on a shared session
-  (the lock key is `session_id`-only, so a Telegram turn and a webapp turn
-  for the same session contend on the same key). The reference
-  `docker-compose.prod.yml` **defaults it on** (in-cluster `valkey` on db 1;
-  db 0 is the router's) — because v1 runs both channels — and the lock
-  **fails open** if Valkey is unreachable. Override only to point at a
-  different Valkey; a single-channel deploy can unset it for an in-process
-  lock.
+- chatbot Valkey: `SUITE_VALKEY_URL` (db 1; db 0 is the router's) backs the
+  **KakaoTalk** channel's parked-turn registry, and nothing else. It is no
+  longer what makes two channels serialize — turn ordering is the router's
+  per-session FIFO lease ([sessions.md §5](./sessions.md)), so a webapp and a
+  Telegram bot order their turns through the router with nothing shared
+  between them. The reference `docker-compose.prod.yml` defaults it on;
+  a deployment without KakaoTalk can unset it.
 - chatbot: `SUITE_TELEGRAM_BOT_TOKEN` (Telegram).
 - chatbot (KakaoTalk, optional): an egress-only second channel. The agent
   **pulls** turns from a Cloudflare Queue fed by the

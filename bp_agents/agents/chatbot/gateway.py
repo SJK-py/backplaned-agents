@@ -29,10 +29,13 @@ from bp_agents.channel import (
 from bp_agents.common.payloads import MessagePayload
 from bp_agents.common.progress import LOOP_PROGRESS_KEY
 from bp_agents.db import queries
+from bp_agents.user_prefs import load_prefs_via_store
 from bp_protocol.types import TaskStatus
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +208,7 @@ class ChatbotGateway:
         pool: asyncpg.Pool,
         telegram: TelegramClient,
         store: SessionStore,
+        settings: SuiteSettings,
         credentials: ChannelCredentials | None = None,
         result_timeout_s: float = 180.0,
         fire_memory: bool = False,
@@ -213,6 +217,8 @@ class ChatbotGateway:
         self._dispatcher = dispatcher
         self._pool = pool
         self._telegram = telegram
+        self._store = store
+        self._settings = settings
         self._credentials = credentials
         self._result_timeout_s = result_timeout_s
         # Transport-free channel engine: routing, the per-session lock,
@@ -258,13 +264,21 @@ class ChatbotGateway:
         if resolved is None:
             await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
             return
-        user_id, cfg, session_id = resolved
+        user_id, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
 
-        # Effective verbose: /v one-shot > user_config.verbose_default > false.
-        verbose = one_shot_verbose or bool(cfg and cfg.verbose_default)
+        # Effective verbose: `/v` one-shot > the user's stored default > false.
+        # The stored default now lives in the router's user scope, so it needs
+        # the session as a carrier — which is why this reads AFTER the session
+        # resolves, and only when `/v` did not already settle the question.
+        verbose = one_shot_verbose or (
+            await load_prefs_via_store(
+                self._store, user_id=user_id, session_id=session_id,
+                settings=self._settings,
+            )
+        ).verbose_default
         await self._dispatch_turn(
             chat_id, user_id, session_id, text, attachments or [], verbose=verbose
         )
@@ -312,7 +326,7 @@ class ChatbotGateway:
         if resolved is None:
             await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
             return
-        user_id, _cfg, session_id = resolved
+        user_id, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return
@@ -346,14 +360,16 @@ class ChatbotGateway:
     # ([delegation.md] §6: the deterministic, channel-driven path).
     # ------------------------------------------------------------------
 
-    async def _resolve_chat(
-        self, chat_id: str
-    ) -> tuple[str, Any, str | None] | None:
-        """`(user_id, cfg, session_id)` for a registered chat, or None if the
-        chat is unmapped. `session_id` is the chat's OWN current session
+    async def _resolve_chat(self, chat_id: str) -> tuple[str, str | None] | None:
+        """`(user_id, session_id)` for a registered chat, or None if the chat
+        is unmapped. `session_id` is the chat's OWN current session
         (`mapping.session_id`), falling back to the user's `default_session_id`
         (the cron fallback) only until the chat has one of its own; it may
-        still be None when the user has no session at all."""
+        still be None when the user has no session at all.
+
+        Both values still come from the suite database: they are read before
+        any session is known, which is exactly the position from which the
+        router's user scope is not addressable."""
         async with self._pool.acquire() as conn:
             mapping = await queries.get_platform_mapping(
                 conn, platform=PLATFORM, chat_id=chat_id
@@ -362,7 +378,7 @@ class ChatbotGateway:
                 return None
             cfg = await queries.get_user_config(conn, mapping.user_id)
         session_id = mapping.session_id or (cfg.default_session_id if cfg else None)
-        return mapping.user_id, cfg, session_id
+        return mapping.user_id, session_id
 
     async def _resolve_session(self, chat_id: str) -> tuple[str, str] | None:
         """`(user_id, session_id)` for a registered chat, or None after
@@ -371,7 +387,7 @@ class ChatbotGateway:
         if resolved is None:
             await self._telegram.send_message(chat_id=chat_id, text=REGISTER_PROMPT)
             return None
-        user_id, _cfg, session_id = resolved
+        user_id, session_id = resolved
         if session_id is None:
             await self._telegram.send_message(chat_id=chat_id, text=_NO_SESSION)
             return None

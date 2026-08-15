@@ -1,10 +1,17 @@
-"""Regression: web/OIDC accounts must get a suite-side `user_config`.
+"""Regression: web/OIDC accounts must get a suite-side `user_config` row.
 
-Chat users get `user_config` seeded by the chatbot approval reconcile;
-web-first and OIDC accounts never go through it. Without a row,
-`update_user_config` patches zero rows (the webapp 'saves' but nothing
-changes) and `get_user_config` returns None (the config agent reads
-nothing). The webapp's `ensure_user_config` seeds the row idempotently.
+Chat users get one from the chatbot approval reconcile; web-first and OIDC
+accounts never go through it. `ensure_user_config` seeds it idempotently.
+
+**Half of the original bug is now structurally gone.** It was: with no row,
+`update_user_config` patched zero rows, so the webapp reported 'saved' while
+nothing changed. The user's SETTINGS moved to the router's user scope, where
+a write creates the key and an absent key is simply the operator default —
+there is no row to be missing and no `update_user_config` left to no-op.
+
+What survives is the pointer half: `set_default_session_id` still patches
+zero rows for a user with no `user_config`, which would lose the cron
+fallback. That is what this file now pins.
 """
 
 from __future__ import annotations
@@ -26,9 +33,11 @@ def _stub_request(pool, user_id, settings):
     )
 
 
-def test_update_without_create_is_a_silent_noop(suite_db_url: str) -> None:
-    """Documents the bug: patching a non-existent row changes nothing and
-    raises nothing — exactly the 'saved but unchanged' symptom."""
+def test_setting_the_default_session_without_a_row_is_a_silent_noop(
+    suite_db_url: str,
+) -> None:
+    """Documents the surviving bug: pointing the cron fallback at a session
+    for a user with no row changes nothing and raises nothing."""
 
     async def _drive() -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
@@ -36,7 +45,9 @@ def test_update_without_create_is_a_silent_noop(suite_db_url: str) -> None:
             uid = "usr_noconfig_1"
             async with pool.acquire() as conn:
                 await conn.execute("DELETE FROM user_config WHERE user_id = $1", uid)
-                await queries.update_user_config(conn, uid, full_name="Nope")
+                await queries.set_default_session_id(
+                    conn, user_id=uid, session_id="ses_lost"
+                )
                 assert await queries.get_user_config(conn, uid) is None
         finally:
             await pool.close()
@@ -44,7 +55,7 @@ def test_update_without_create_is_a_silent_noop(suite_db_url: str) -> None:
     asyncio.run(_drive())
 
 
-def test_ensure_user_config_creates_the_row_then_update_persists(
+def test_ensure_user_config_creates_the_row_then_the_pointer_persists(
     suite_db_url: str,
 ) -> None:
     from bp_agents.agents.webapp.pages._common import ensure_user_config
@@ -63,16 +74,18 @@ def test_ensure_user_config_creates_the_row_then_update_persists(
             async with pool.acquire() as conn:
                 cfg = await queries.get_user_config(conn, uid)
             assert cfg is not None
-            assert cfg.timezone == "UTC"
+            assert cfg.default_session_id is None
 
             # Idempotent: a second ensure doesn't duplicate or reset.
             await ensure_user_config(req)
 
-            # And now an update actually persists (the fixed save path).
+            # And now the pointer actually persists.
             async with pool.acquire() as conn:
-                await queries.update_user_config(conn, uid, full_name="Ada")
+                await queries.set_default_session_id(
+                    conn, user_id=uid, session_id="ses_kept"
+                )
                 cfg2 = await queries.get_user_config(conn, uid)
-            assert cfg2 is not None and cfg2.full_name == "Ada"
+            assert cfg2 is not None and cfg2.default_session_id == "ses_kept"
         finally:
             await pool.close()
 

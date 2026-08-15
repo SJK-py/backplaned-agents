@@ -8,7 +8,6 @@ the LoopProgress payload.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 from bp_agents.common import (
     LocalTool,
@@ -28,7 +27,7 @@ from bp_agents.common.progress import (
     PROGRESS_PRODUCER_KEY,
     LoopProgress,
 )
-from bp_agents.db.models import UserConfigRow
+from bp_agents.user_prefs import UserPrefs
 from bp_protocol.frames import ProgressFrame, ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from bp_sdk import (
@@ -174,15 +173,17 @@ def _failed_result_frame(code: str, message: str = "") -> ResultFrame:
     )
 
 
-def _user_config(**overrides) -> UserConfigRow:
+def _user_config(**overrides) -> UserPrefs:
+    """The user's settings as the prompt composer sees them. A `UserPrefs`
+    now, not a `UserConfigRow` — these fields moved to the router's user
+    scope, and the row that is left holds none of them."""
     base = dict(
-        user_id="usr_a", full_name="Ada", timezone="Europe/London",
+        full_name="Ada", timezone="Europe/London",
         max_context_token_limit=120_000,
         verbose_default=False, language="en", custom_note="be terse",
-        created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
     )
     base.update(overrides)
-    return UserConfigRow(**base)
+    return UserPrefs(**base)
 
 
 # ---------------------------------------------------------------------------

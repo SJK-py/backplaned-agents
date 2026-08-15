@@ -263,14 +263,26 @@ Services after: `caddy`, `postgres`, `valkey`, `seaweedfs`, `init`, `router`,
 `suite-core`, `channels`, `sandbox`, plus `searxng` and `mcp-bridge` on their
 existing profiles.
 
-## 7. A free reduction already banked
+## 7. A free reduction — banked, and smaller than it looked
 
-The session-store rework removes `SUITE_DATABASE_URL` and `SUITE_VALKEY_URL`
-from every agent that only needed them for conversation state — eight to ten
-of the twelve. That deletes most of the 60-line `&suite-env` anchor, drops the
-`suite` network from those services, and removes database credentials from
-processes that no longer touch a database. It lands independently of anything
-here, and it makes the host's single env block small enough to read.
+`[shipped]` The session-store rework plus the `user_config` move
+([`router-managed-session-store.md` §13.5`](./router-managed-session-store.md))
+took the suite pool count from **ten agents to four**: `chatbot` and `webapp`
+(cron + chat mappings), `config` (cron), and `memory` (its GC sweep).
+`SUITE_VALKEY_URL` likewise narrowed to the KakaoTalk parked-turn registry.
+
+The container-level saving is smaller than the agent-level one, and that is
+worth being straight about: grouping means `suite-core` co-hosts `config` and
+`memory` with seven agents that need nothing, so the group still needs the
+credential and the `suite` network. What actually landed is that
+`SUITE_DATABASE_URL` moved off the shared `&suite-env` anchor onto the two
+groups that use it — so `sandbox`, the container that runs untrusted code, no
+longer carries a Postgres credential — and that `suite-core`'s connection
+ceiling is now bounded by two agents rather than nine.
+
+The grouping and the credential narrowing pull against each other here. If
+that matters more than the process count, the lever is the group boundary,
+not the env block.
 
 ## 8. The single-node profile
 

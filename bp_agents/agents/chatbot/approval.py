@@ -4,9 +4,9 @@ A service-level channel can't see approval results directly; it discovers
 its provisioned users by polling `GET /v1/admin/serviced-sessions`
 (`credentials.list_serviced_sessions`). For each session carrying a
 channel-native `external_id`, the channel writes the suite-side identity:
-`suite_platform_mappings` (chat_id → user_id), a `user_config` row (seeding
-`default_session_id`). All writes are idempotent,
-so re-polling is safe.
+`suite_platform_mappings` (chat_id → user_id) and a `user_config` row
+(seeding `default_session_id`). All writes are idempotent, so re-polling is
+safe.
 
 Channel-agnostic: `reconcile_serviced_sessions` / `approval_poll_loop` take
 `channel` + `platform` (defaulting to Telegram), so the chatbot runs one
@@ -23,9 +23,12 @@ from typing import TYPE_CHECKING
 
 from bp_agents.agents.chatbot.credentials import ChannelCredentials, ServicedSession
 from bp_agents.db import queries
+from bp_agents.user_prefs import save_prefs_via_store
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from bp_agents.channel.store import SessionStore
 
 
 logger = logging.getLogger(__name__)
@@ -36,13 +39,33 @@ PLATFORM = "telegram"
 CHANNEL = "chatbot_telegram"
 
 
+async def _seed_language(
+    store: SessionStore, *, user_id: str, session_id: str, language: str
+) -> None:
+    """Best-effort language seed for a newly discovered chat. A failure here
+    costs the user a default, not their registration — the mapping is already
+    committed and the reconcile must not retry it just because one preference
+    write went wrong."""
+    try:
+        await save_prefs_via_store(
+            store, user_id=user_id, session_id=session_id,
+            updates={"language": language},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "seed_language_failed",
+            extra={"event": "seed_language_failed", "bp.user_id": user_id},
+        )
+
+
 async def reconcile_serviced_sessions(
     pool: asyncpg.Pool,
     records: list[ServicedSession],
     *,
     platform: str = PLATFORM,
     channel: str = CHANNEL,
-    default_language: str = "en",
+    default_language: str | None = None,
+    store: SessionStore | None = None,
 ) -> int:
     """Write the suite-side identity for each discovered session. Returns
     the count of newly-mapped chats (an already-mapped chat is a no-op).
@@ -50,8 +73,15 @@ async def reconcile_serviced_sessions(
 
     `platform`/`channel` default to Telegram but are parametrized so the
     same reconcile serves the KakaoTalk channel (`kakao`/`chatbot_kakao`).
-    `default_language` seeds a first-time `user_config.language` (e.g. `ko`
-    for the Korea-only KakaoTalk channel); the user can change it later.
+
+    `default_language` seeds a language preference for a chat discovered for
+    the FIRST time (e.g. `ko` for the Korea-only KakaoTalk channel); the user
+    can change it later. It needs `store`, because the preference lives in the
+    router's user scope now rather than in a `user_config` column, and it is
+    written only on first discovery — a re-poll must not overwrite a language
+    the user has since chosen. Omit it (the default) and a user with no stored
+    preference simply resolves to the operator's `default_language`, which is
+    the right behaviour for a single-language deployment.
 
     Model choice is NOT seeded here any more: it is a router-resolved preset
     slot with an operator default, so a user with no preference simply gets
@@ -75,10 +105,14 @@ async def reconcile_serviced_sessions(
             # existing config (so a later /new isn't clobbered).
             await queries.create_user_config(
                 conn, user_id=rec.user_id, default_session_id=rec.session_id,
-                language=default_language,
             )
         if existing is None:
             newly_mapped += 1
+            if default_language and store is not None:
+                await _seed_language(
+                    store, user_id=rec.user_id, session_id=rec.session_id,
+                    language=default_language,
+                )
             logger.info(
                 "registration_reconciled",
                 extra={
@@ -98,15 +132,16 @@ async def approval_poll_loop(
     interval_s: float = 30.0,
     channel: str = CHANNEL,
     platform: str = PLATFORM,
-    default_language: str = "en",
+    default_language: str | None = None,
+    store: SessionStore | None = None,
 ) -> None:
     """Poll `serviced-sessions` for `channel` on an interval and reconcile new
     ones into `platform` mappings. The cursor is in-memory (advances past the
     newest seen `opened_at`); a restart re-lists from scratch, which is safe
     because reconcile is idempotent. Run one loop per channel.
 
-    `default_language` seeds a first-time user's `user_config.language` (e.g.
-    `ko` for KakaoTalk)."""
+    `default_language` (with `store`) seeds a first-time user's language
+    preference (e.g. `ko` for KakaoTalk)."""
     cursor: datetime | None = None
     while not stop.is_set():
         try:
@@ -117,7 +152,7 @@ async def approval_poll_loop(
                 await reconcile_serviced_sessions(
                     pool, records,
                     platform=platform, channel=channel,
-                    default_language=default_language,
+                    default_language=default_language, store=store,
                 )
                 cursor = max(r.opened_at for r in records)
         except Exception:  # noqa: BLE001

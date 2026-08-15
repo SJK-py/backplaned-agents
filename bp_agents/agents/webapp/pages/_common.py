@@ -12,6 +12,7 @@ from fastapi import Request
 from bp_agents.agents.webapp.auth import session_user_id
 from bp_agents.agents.webapp.upstream import UpstreamError
 from bp_agents.db import queries
+from bp_agents.user_prefs import UserPrefs, defaults_from, load_prefs_via_store
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +75,14 @@ async def ensure_user_config(request: Request) -> None:
 
     Chat users get this row when the approval poller reconciles their serviced
     session; web-first and OIDC accounts never go through that path, so without
-    this their `user_config` is missing — `get_user_config` returns None (the
-    config agent reads nothing) and `update_user_config` silently updates zero
-    rows (the webapp reports 'saved' but the value is unchanged). Idempotent
-    (`INSERT ... ON CONFLICT DO NOTHING`), so it's safe to call on every login
-    and on the config pages."""
+    this their `user_config` is missing and `set_default_session_id` silently
+    updates zero rows. Idempotent (`INSERT ... ON CONFLICT DO NOTHING`), so
+    it's safe to call on every login.
+
+    The row is much smaller than it was: the user's SETTINGS moved to the
+    router's user scope (`bp_agents.user_prefs`), where an absent key is
+    simply the default and there is nothing to pre-create. What is left here
+    is `sandbox_uid` and `default_session_id` — both read outside any task."""
     pool = request.app.state.pool
     user_id = session_user_id(request)
     if pool is None or not user_id:
@@ -107,11 +111,21 @@ async def owned_session(request: Request, session_id: str) -> SessionView | None
     return SessionView.from_row(row) if row else None
 
 
-async def carrier_session(request: Request) -> str | None:
-    """An OPEN session_id to ride for a per-user management dispatch (Memory /
-    Knowledge pages). Root-task admit requires a real, open, owned session;
-    the target agent works per-user, so any open session serves. Prefers the
-    user's `default_session_id`, else the newest open one; None if none open."""
+async def carrier_session(request: Request, *, open_only: bool = True) -> str | None:
+    """A session_id to ride for a per-user operation. Prefers the user's
+    `default_session_id`, else the newest.
+
+    Two callers with different needs, hence `open_only`:
+
+      * **A management dispatch** (Memory / Knowledge pages) needs an OPEN
+        session — root-task admit refuses a closed one.
+      * **A user-scoped store batch** (the settings form) does not. The rows
+        it touches have no session at all; the session in the path is only
+        what the endpoint checks ownership against, and `_owned_session`
+        does not look at `closed_at`. So a user who has ever held a
+        conversation can always reach their settings, even with everything
+        closed.
+    """
     upstream = request.app.state.upstream
     pool = request.app.state.pool
     user_id = session_user_id(request)
@@ -123,17 +137,37 @@ async def carrier_session(request: Request) -> str | None:
     except UpstreamError:
         logger.warning("webapp_carrier_list_failed", extra={"event": "webapp_carrier_list_failed"})
         return None
-    open_sessions = [s for s in sessions if not s.get("closed_at")]
-    if not open_sessions:
+    if open_only:
+        sessions = [s for s in sessions if not s.get("closed_at")]
+    if not sessions:
         return None
-    open_ids = {s["session_id"] for s in open_sessions}
+    ids = {s["session_id"] for s in sessions}
     if pool is not None and user_id:
         async with pool.acquire() as conn:
             cfg = await queries.get_user_config(conn, user_id)
-        if cfg and cfg.default_session_id in open_ids:
+        if cfg and cfg.default_session_id in ids:
             return cfg.default_session_id
-    open_sessions.sort(key=lambda s: s.get("opened_at") or "", reverse=True)
-    return open_sessions[0]["session_id"]
+    sessions = sorted(sessions, key=lambda s: s.get("opened_at") or "", reverse=True)
+    return sessions[0]["session_id"]
+
+
+async def user_prefs(request: Request) -> UserPrefs:
+    """The logged-in user's settings, read from the router's user scope.
+
+    Degrades to the operator defaults when there is no store, no carrier
+    session, or the read fails: a settings page that renders defaults is
+    recoverable, one that 500s is not."""
+    settings = request.app.state.suite_settings
+    core = request.app.state.core
+    user_id = session_user_id(request)
+    if core is None or not user_id:
+        return defaults_from(settings)
+    session_id = await carrier_session(request, open_only=False)
+    if session_id is None:
+        return defaults_from(settings)
+    return await load_prefs_via_store(
+        core.store, user_id=user_id, session_id=session_id, settings=settings
+    )
 
 
 async def call_agent_json(

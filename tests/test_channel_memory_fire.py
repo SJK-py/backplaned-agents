@@ -13,6 +13,10 @@ from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from tests.fake_store import FakeChannelStore, FakeStore
 
+# Operator defaults for a preference the user has not set; the
+# gateway never dials `database_url` through it.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 
 class _FakeTelegram:
     def __init__(self) -> None:
@@ -60,6 +64,7 @@ def test_channel_fires_memory_add(suite_db_url: str) -> None:
             disp = _Dispatcher()
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
                 fire_memory=True,
                 store=FakeChannelStore(store),

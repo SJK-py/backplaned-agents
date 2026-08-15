@@ -65,7 +65,7 @@ result = await outbound_await_result(
 
 ## 5. Progress / verbose
 
-Agents emit a structured **`LoopProgress`** in `ProgressFrame.metadata` ([data-model.md](./data-model.md)). In **verbose** mode the channel passes an `on_progress` callback to `outbound_await_result` and renders **one Telegram message per frame**; non-verbose suppresses interim output. Effective verbose = `/v` one-shot prefix > `user_config.verbose_default` > false.
+Agents emit a structured **`LoopProgress`** in `ProgressFrame.metadata` ([data-model.md](./data-model.md)). In **verbose** mode the channel passes an `on_progress` callback to `outbound_await_result` and renders **one Telegram message per frame**; non-verbose suppresses interim output. Effective verbose = `/v` one-shot prefix > the user's stored `verbose_default` > false. That default lives in the router's user scope (`bp_agents.user_prefs`), so the gateway reads it as a steward once the chat's session has resolved — and skips the read entirely when `/v` already settled the question.
 
 Every verbose line leads with a **`💭` marker** so it's visually distinct from the final answer (which has none). When the session is **delegated**, both the specialist's verbose lines and its final reply are prefixed with a **`[<Specialist> Agent]`** tag (per-frame, from the producing `agent_id`, prettified) — the orchestrator's own lines stay untagged, so the user sees exactly when a specialist holds the session. The delegation **transition** tools (`hand_off` / `end_delegation`) render as `Delegating to a specialist…` / `Handing back to the assistant…`.
 

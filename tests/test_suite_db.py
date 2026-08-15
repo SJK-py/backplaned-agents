@@ -29,37 +29,21 @@ def test_suite_db_round_trips(suite_db_url: str) -> None:
         try:
             await _truncate(pool)
             async with pool.acquire() as conn:
-                # --- user_config: create + defaults + allowlist update ---
+                # --- user_config: create + idempotence ---
+                # Two fields wide now: the user's SETTINGS moved to the
+                # router's user scope, so what is left is only what is read
+                # outside a task (`bp_agents.user_prefs`).
                 cfg = await queries.create_user_config(
-                    conn, user_id="usr_a", full_name="Ada",
-                    timezone="Europe/London",
+                    conn, user_id="usr_a", default_session_id="ses_0",
                 )
-                assert cfg.full_name == "Ada"
-                assert cfg.timezone == "Europe/London"
-                assert cfg.verbose_default is False
-                assert cfg.max_context_token_limit == 120_000
+                assert cfg.default_session_id == "ses_0"
+                assert cfg.sandbox_uid is None
 
                 # Idempotent — second create returns the existing row.
                 again = await queries.create_user_config(
-                    conn, user_id="usr_a", full_name="SHOULD-NOT-OVERWRITE",
+                    conn, user_id="usr_a", default_session_id="SHOULD-NOT-OVERWRITE",
                 )
-                assert again.full_name == "Ada"
-
-                await queries.update_user_config(
-                    conn, "usr_a", verbose_default=True, custom_note="be terse",
-                )
-                cfg2 = await queries.get_user_config(conn, "usr_a")
-                assert cfg2 is not None
-                assert cfg2.verbose_default is True
-                assert cfg2.custom_note == "be terse"
-
-                # Non-mutable / unknown column is rejected, not silently dropped.
-                rejected = False
-                try:
-                    await queries.update_user_config(conn, "usr_a", bogus_col=1)
-                except ValueError:
-                    rejected = True
-                assert rejected
+                assert again.default_session_id == "ses_0"
 
                 await queries.set_default_session_id(
                     conn, user_id="usr_a", session_id="ses_1"

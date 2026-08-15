@@ -31,7 +31,7 @@
 
 Two boundaries to keep straight:
 
-- **Two Postgres databases, one server** — `bp_router` (router: users/tasks/agents/files/acl/audit) and `bp_suite` (suite: user_config/cron/suite_platform_mappings — the conversation moved into the router's session store). Different owners, different credentials. ([`agent-suite/data-model.md`](../agent-suite/data-model.md))
+- **Two Postgres databases, one server** — `bp_router` (router: users/tasks/agents/files/acl/audit) and `bp_suite` (suite: cron/suite_platform_mappings, plus two per-user pointers in user_config — the conversation AND the user's settings moved into the router's session store). Different owners, different credentials. ([`agent-suite/data-model.md`](../agent-suite/data-model.md))
 - **The router is the only holder of provider/S3/JWT secrets.** Agents call `ctx.llm` and the router's file endpoints; they never reach providers, S3, or the router DB directly.
 
 ## 2. Boxes

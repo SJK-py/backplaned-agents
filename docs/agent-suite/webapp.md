@@ -20,10 +20,10 @@ The webapp is a **new suite process** (compose service `webapp`, agent_id
    `await_root_result(on_progress=…)`).
 2. **Web server** — FastAPI + Jinja2 + HTMX + Alpine + Tailwind (mirrors
    `bp_admin`), `SessionMiddleware` + CSRF, **SSE** for live progress.
-3. **Direct clients** — the suite Postgres pool (read `user_config` /
-   `cron_jobs` for display; suite-side purge cleanup) **and** a per-user
-   router HTTP client carrying *the logged-in user's own token* (sessions
-   lifecycle, files, and the **session store**: transcript, session state,
+3. **Direct clients** — the suite Postgres pool (read `cron_jobs` for
+   display; suite-side purge cleanup) **and** a per-user router HTTP client
+   carrying *the logged-in user's own token* (sessions lifecycle, files, and
+   the **session store**: transcript, session state, the user's settings,
    metadata, the turn lease).
 
 ```
@@ -211,11 +211,18 @@ also `channel`, gains no KB access ([acl.md](./acl.md) §3, §6). ACL is
 The webapp is a suite process with the `bp_suite` pool, so the **panes are
 structured forms over the DB**, not NL round-trips:
 
-- **Config pane** — read `user_config` directly; write the editable fields
-  via `queries.update_user_config` with the **same validation as the config
-  agent's `set_config`** (factored into the shared `bp_agents.config_edit`
-  helper so the form and the agent agree). The chat pane still handles NL
-  ("change my timezone").
+- **Config pane** — read and write the router's **user-scoped state**
+  through the steward store surface (`POST /v1/sessions/{id}/ops` with
+  `scope="user"`) under the logged-in user's own token, with the **same
+  validation as the config agent's `set_config`** (factored into the shared
+  `bp_agents.user_prefs` helper so the form and the agent agree). The chat
+  pane still handles NL ("change my timezone").
+
+  The session in that path is a **carrier**, not a scope: the rows have no
+  session, and the endpoint only checks the session is the caller's — it does
+  not look at `closed_at`. So the pane works for anyone who has ever held a
+  conversation, and reports plainly rather than redirecting to "saved" when
+  there is no session at all to ride.
 - **Models pane** — the one part of Settings that does NOT touch the suite
   DB. Each preset **slot** (`pro` / `balanced` / `lite`) renders a `<select>`
   filled from `GET /v1/llm/presets`, which the router has already filtered to

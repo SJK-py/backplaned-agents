@@ -634,6 +634,78 @@ def test_user_scope_is_separate_and_survives_session_purge(test_db_url: str) -> 
     _run(go())
 
 
+def test_steward_drives_user_scoped_state(test_db_url: str) -> None:
+    """The exact combination the suite's user settings ride on: a STEWARD
+    (`agent_id=None`, so it cannot append to any thread) writing
+    `session_scoped=True` state in the USER scope (`session_id=None`).
+
+    Three properties, each load-bearing for a settings page:
+
+      * a steward may write it at all — `_require_agent` refuses thread
+        writes but `SetState(session_scoped=True)` deliberately does not go
+        through it, which is what lets the webapp save without an agent;
+      * it lands in its own namespace — invisible to a session-scoped read,
+        so a carrier session cannot accidentally become the storage;
+      * it outlives the carrier — purging the session it was written through
+        leaves it intact, which is the whole reason it is not session state.
+    """
+
+    async def go() -> None:
+        pool = await _pool(test_db_url)
+        async with pool.acquire() as conn:
+            user, session = await _fresh(conn, "uprefs")
+            steward_user = StoreScope(user, None, None)
+            steward_session = StoreScope(user, session, None)
+
+            async with conn.transaction():
+                await execute_batch(
+                    conn, steward_user,
+                    [
+                        SetStateOp(session_scoped=True, key="timezone",
+                                   value="Asia/Seoul"),
+                        SetStateOp(session_scoped=True, key="full_name",
+                                   value="Ada"),
+                    ],
+                )
+                # Same keys, session scope: a different namespace entirely.
+                leak = await execute_batch(
+                    conn, steward_session, [GetStateOp(session_scoped=True)]
+                )
+            assert leak.results[0].state == []
+
+            row = await conn.fetchrow(
+                "SELECT session_id, owner_agent_id FROM session_state "
+                "WHERE user_id = $1 AND key = 'timezone'",
+                user,
+            )
+            assert row["session_id"] is None
+            assert row["owner_agent_id"] is None
+
+            # An AGENT in a session reads the same values — user scope is
+            # shared, which is why the router's own preferences are elsewhere.
+            async with conn.transaction():
+                seen = await execute_batch(
+                    conn, StoreScope(user, None, "orchestrator"),
+                    [GetStateOp(session_scoped=True, keys=["timezone"])],
+                )
+            assert [(s.key, s.value) for s in seen.results[0].state] == [
+                ("timezone", "Asia/Seoul")
+            ]
+
+            # The carrier goes; the settings stay.
+            await conn.execute("DELETE FROM sessions WHERE session_id = $1", session)
+            async with conn.transaction():
+                survived = await execute_batch(
+                    conn, steward_user, [GetStateOp(session_scoped=True)]
+                )
+            assert {s.key: s.value for s in survived.results[0].state} == {
+                "timezone": "Asia/Seoul", "full_name": "Ada",
+            }
+        await pool.close()
+
+    _run(go())
+
+
 def test_lease_is_fifo_and_promotes_on_release(test_db_url: str) -> None:
     async def go() -> None:
         pool = await _pool(test_db_url)

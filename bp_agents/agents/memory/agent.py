@@ -42,6 +42,7 @@ from bp_agents.lance import connect
 from bp_agents.lance.base import user_db_path
 from bp_agents.lance.memory import MemoryStore
 from bp_agents.settings import SuiteSettings, load_suite_settings
+from bp_agents.user_prefs import load_prefs
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, Message, TaskContext
 from bp_sdk.errors import PermissionDeniedError
@@ -238,13 +239,10 @@ async def gc_sweep(pool: asyncpg.Pool, settings: SuiteSettings) -> int:
 
 
 async def _user_timezone(ctx: TaskContext) -> str:
-    """The user's IANA timezone (for resolving relative time in extraction);
-    UTC when there's no pool/config."""
-    if _pool is None:
-        return "UTC"
-    async with _pool.acquire() as conn:
-        cfg = await queries.get_user_config(conn, ctx.user_id)
-    return cfg.timezone if cfg else "UTC"
+    """The user's IANA timezone (for resolving relative time in extraction),
+    from the router's user scope. The pool this used to ride is still here,
+    but only for the GC sweep, which runs outside any task."""
+    return (await load_prefs(ctx, _settings)).timezone
 
 
 async def _store_for(ctx: TaskContext, settings: SuiteSettings) -> MemoryStore:

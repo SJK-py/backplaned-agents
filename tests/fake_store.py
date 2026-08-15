@@ -17,7 +17,10 @@ Two surfaces over ONE `FakeStore`, matching the two the real system has:
 Semantics that matter and are therefore modelled properly: ids are
 session-wide and monotonic (the webapp merges threads by them), a floor
 hides messages from a default read without deleting them, `AssertThread`
-refuses a stale write, and `ConsumeHandovers` drains.
+refuses a stale write, `ConsumeHandovers` drains, and `scope="user"` is a
+SEPARATE namespace — a session-scoped state write lands in `session_state`
+or `user_state` depending on it, exactly as the real store's nullable
+`session_id` decides.
 """
 
 from __future__ import annotations
@@ -110,20 +113,38 @@ class FakeStore:
         entry = self.thread_state.get((owner, thread), {}).get("summary")
         return entry.value if entry else None
 
+    def set_pref(self, key: str, value: str) -> None:
+        """Seed one user-scoped setting (`bp_agents.user_prefs`) — what a
+        test uses to start with a user who has already configured something."""
+        self.user_state[key] = StateValue(key=key, value=value, version=1)
+
+    def pref(self, key: str) -> str | None:
+        entry = self.user_state.get(key)
+        return entry.value if entry else None
+
     # -- op execution ---------------------------------------------------
 
-    def execute(self, ops: list[Any], *, owner: str | None) -> list[SessionOpResult]:
+    def execute(
+        self, ops: list[Any], *, owner: str | None, scope: str = "session"
+    ) -> list[SessionOpResult]:
         """Apply a batch. `owner=None` is the steward (no thread of its own),
         which is what makes every write op refuse — the same way the real
-        store refuses it, rather than by an allowlist here."""
-        return [self._one(op, owner) for op in ops]
+        store refuses it, rather than by an allowlist here.
+
+        `scope` picks the namespace the way the real store's nullable
+        `session_id` does: `"user"` addresses the cross-session `(user_id,
+        key)` space, which is where the user's settings live."""
+        return [self._one(op, owner, scope) for op in ops]
 
     def _require_owner(self, owner: str | None) -> str:
         if owner is None:
             raise SessionStoreError("denied")
         return owner
 
-    def _one(self, op: Any, owner: str | None) -> SessionOpResult:  # noqa: PLR0911, PLR0912, C901
+    def _state_target(self, scope: str) -> dict[str, StateValue]:
+        return self.user_state if scope == "user" else self.session_state
+
+    def _one(self, op: Any, owner: str | None, scope: str = "session") -> SessionOpResult:  # noqa: PLR0911, PLR0912, C901
         if isinstance(op, AppendOp):
             me = self._require_owner(owner)
             msg = self.add(
@@ -141,7 +162,7 @@ class FakeStore:
 
         if isinstance(op, SetStateOp):
             if op.session_scoped:
-                target = self.session_state
+                target = self._state_target(scope)
             else:
                 me = self._require_owner(owner)
                 target = self.thread_state.setdefault((me, op.thread_key), {})
@@ -224,7 +245,7 @@ class FakeStore:
 
         if isinstance(op, GetStateOp):
             if op.session_scoped:
-                source = self.session_state
+                source = self._state_target(scope)
             else:
                 target_owner = op.owner_agent_id or self._require_owner(owner)
                 source = self.thread_state.get((target_owner, op.thread_key), {})
@@ -305,7 +326,7 @@ class FakeHistory(SessionHistory):
         return FakeHistory(self._store, self._owner, scope="user")
 
     async def _round_trip(self, ops: list[Any]) -> list[SessionOpResult]:
-        return self._store.execute(ops, owner=self._owner)
+        return self._store.execute(ops, owner=self._owner, scope=self._scope)
 
 
 class FakeChannelStore:
@@ -315,7 +336,7 @@ class FakeChannelStore:
         self.store = store
 
     async def ops(self, *, user_id, session_id, ops, scope="session"):  # noqa: ANN001, ANN201, ARG002
-        return self.store.execute(ops, owner=None)
+        return self.store.execute(ops, owner=None, scope=scope)
 
     async def messages(  # noqa: ANN201
         self, *, user_id, session_id, owner, thread="", roles=None,  # noqa: ANN001, ARG002

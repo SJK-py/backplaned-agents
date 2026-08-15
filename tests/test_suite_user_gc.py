@@ -33,7 +33,6 @@ async def _seed_user(pool, user_id: str, session_id: str) -> None:
     async with pool.acquire() as conn:
         await queries.create_user_config(
             conn, user_id=user_id, default_session_id=session_id,
-            language="en",
         )
         await queries.upsert_platform_mapping(
             conn, platform="telegram", chat_id=f"chat_{user_id}",

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bp_agents.db.models import UserConfigRow
+    from bp_agents.user_prefs import UserPrefs
 
 
 # Reusable file-delivery instruction for delegated turns. File tools are an
@@ -52,7 +52,7 @@ read every file, since its reference alone is enough to pass it on.\
 """
 
 
-def user_config_note(cfg: UserConfigRow) -> str:
+def user_config_note(cfg: UserPrefs) -> str:
     """Render the per-user context block injected into system prompts:
     name, timezone, language preference, and the user's custom note.
     Empty fields are omitted; returns "" when nothing is set."""

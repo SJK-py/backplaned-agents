@@ -19,7 +19,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from bp_agents.agents.webapp.auth import session_user_id
-from bp_agents.agents.webapp.pages._common import owned_session
+from bp_agents.agents.webapp.pages._common import owned_session, user_prefs
 from bp_agents.cron_manage import (
     REPORT_ALWAYS,
     REPORT_CBC,
@@ -42,14 +42,14 @@ async def _render(request: Request, session_id: str, *, error: str | None = None
     user_id = session_user_id(request)
     async with pool.acquire() as conn:
         jobs = await queries.list_cron_jobs(conn, user_id=user_id)
-        cfg = await queries.get_user_config(conn, user_id)
+    prefs = await user_prefs(request)
     return request.app.state.templates.TemplateResponse(
         request,
         "cron/list.html",
         {
             "session_id": session_id,
             "jobs": jobs,
-            "default_tz": cfg.timezone if cfg else "UTC",
+            "default_tz": prefs.timezone,
             "reports": _REPORTS,
             "error": error,
             "active_section": "sessions",

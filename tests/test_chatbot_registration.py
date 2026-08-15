@@ -25,6 +25,10 @@ from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, TaskStatus
 from tests.fake_store import FakeChannelStore, FakeStore
 
+# Operator defaults for a preference the user has not set; the
+# gateway never dials `database_url` through it.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 
 class _FakeTelegram:
     def __init__(self) -> None:
@@ -105,8 +109,6 @@ def test_reconcile_writes_identity_and_is_idempotent(suite_db_url: str) -> None:
                 ) == "usr_a"
                 cfg = await queries.get_user_config(conn, "usr_a")
                 assert cfg is not None and cfg.default_session_id == "ses_1"
-                # No default_language passed → the en default (Telegram path).
-                assert cfg.language == "en"
 
             # Idempotent: a re-poll maps nothing new.
             assert await reconcile_serviced_sessions(pool, [rec]) == 0
@@ -155,6 +157,7 @@ def test_reconcile_does_not_seed_a_model_choice(suite_db_url: str) -> None:
 
 def _gateway(pool, *, creds=None, tg=None):
     return ChatbotGateway(
+        settings=_SETTINGS,
         dispatcher=_FakeDispatcher(),
         pool=pool,
         telegram=tg or _FakeTelegram(),

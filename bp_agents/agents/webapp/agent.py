@@ -103,7 +103,8 @@ async def _startup() -> None:
         fire_memory=True,
     )
     app = create_app(
-        cfg, upstream=_upstream, pool=_pool, core=core, token_registry=_tokens
+        cfg, upstream=_upstream, pool=_pool, core=core,
+        token_registry=_tokens, suite_settings=_settings,
     )
 
     server = uvicorn.Server(

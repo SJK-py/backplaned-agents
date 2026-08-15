@@ -12,16 +12,13 @@ from bp_agents.agents.deep_reasoning.plan import (
     run_plan,
 )
 from bp_agents.agents.l1_common import L1Config, run_delegated_turn
-from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_protocol.frames import ResultFrame
 from bp_protocol.types import AgentOutput, LLMData, TaskStatus
 from bp_sdk import LlmResponse, ToolCall, ToolSpec
 from tests.fake_store import FakeHistory, FakeStore
 
-
-def _settings(url: str, **kw) -> SuiteSettings:
-    return SuiteSettings(database_url=url, **kw)
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
 
 
 class _ScriptLlm:
@@ -94,122 +91,97 @@ def _exec(**args) -> LlmResponse:
     return LlmResponse(text="", tool_calls=[_tc(_EXECUTE, relevant_context="", **args)])
 
 
-def test_plan_executes_then_reports(suite_db_url: str) -> None:
+def test_plan_executes_then_reports() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            llm = _ScriptLlm([
-                _exec(),  # decision 1 → execute step 1
-                _exec(),  # decision 2 → execute step 2
-                LlmResponse(text="Combined answer."),  # plan-exhausted final loop
-            ])
-            peers = _PlanPeers([_child("result A"), _child("result B")])
-            ctx = _Ctx(llm, peers, files=_Files())
-            out = await run_plan(
-                ctx, objective="do A then B", initial_steps=["step A", "step B"],
-                pool=pool, settings=_settings(suite_db_url),
-            )
-            assert out.content == "Combined answer."
-            # Two steps executed via orchestrator(subagent).
-            assert [s[2] for s in peers.spawns] == ["subagent", "subagent"]
-            assert all(s[0] == "orchestrator" for s in peers.spawns)
-            assert [s[1].prompt for s in peers.spawns] == ["step A", "step B"]
-            assert all(isinstance(s[1], LLMData) for s in peers.spawns)
-        finally:
-            await pool.close()
-
+        llm = _ScriptLlm([
+            _exec(),  # decision 1 → execute step 1
+            _exec(),  # decision 2 → execute step 2
+            LlmResponse(text="Combined answer."),  # plan-exhausted final loop
+        ])
+        peers = _PlanPeers([_child("result A"), _child("result B")])
+        ctx = _Ctx(llm, peers, files=_Files())
+        out = await run_plan(
+            ctx, objective="do A then B", initial_steps=["step A", "step B"],
+            settings=_SETTINGS,
+        )
+        assert out.content == "Combined answer."
+        # Two steps executed via orchestrator(subagent).
+        assert [s[2] for s in peers.spawns] == ["subagent", "subagent"]
+        assert all(s[0] == "orchestrator" for s in peers.spawns)
+        assert [s[1].prompt for s in peers.spawns] == ["step A", "step B"]
+        assert all(isinstance(s[1], LLMData) for s in peers.spawns)
     asyncio.run(_drive())
 
 
-def test_plan_quit_short_circuits(suite_db_url: str) -> None:
+def test_plan_quit_short_circuits() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            llm = _ScriptLlm([
-                LlmResponse(text="", tool_calls=[_tc(_QUIT, result_content="done early")]),
-            ])
-            peers = _PlanPeers()
-            out = await run_plan(
-                ctx=_Ctx(llm, peers, files=_Files()), objective="o",
-                initial_steps=["x"], pool=pool, settings=_settings(suite_db_url),
-            )
-            assert out.content == "done early"
-            assert peers.spawns == []  # never executed a step
-        finally:
-            await pool.close()
-
+        llm = _ScriptLlm([
+            LlmResponse(text="", tool_calls=[_tc(_QUIT, result_content="done early")]),
+        ])
+        peers = _PlanPeers()
+        out = await run_plan(
+            ctx=_Ctx(llm, peers, files=_Files()), objective="o",
+            initial_steps=["x"], settings=_SETTINGS,
+        )
+        assert out.content == "done early"
+        assert peers.spawns == []  # never executed a step
     asyncio.run(_drive())
 
 
-def test_plan_add_step_then_execute(suite_db_url: str) -> None:
+def test_plan_add_step_then_execute() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            llm = _ScriptLlm([
-                LlmResponse(text="", tool_calls=[
-                    _tc(_ADD, add_after_num=0, contents="only step")]),  # build plan
-                _exec(),                                                  # execute it
-                LlmResponse(text="wrapped up"),                           # finalize
-            ])
-            peers = _PlanPeers([_child("step done")])
-            out = await run_plan(
-                ctx=_Ctx(llm, peers, files=_Files()), objective="o",
-                initial_steps=[], pool=pool, settings=_settings(suite_db_url),
-            )
-            assert out.content == "wrapped up"
-            assert len(peers.spawns) == 1
-            assert peers.spawns[0][1].prompt == "only step"
-        finally:
-            await pool.close()
-
+        llm = _ScriptLlm([
+            LlmResponse(text="", tool_calls=[
+                _tc(_ADD, add_after_num=0, contents="only step")]),  # build plan
+            _exec(),                                                  # execute it
+            LlmResponse(text="wrapped up"),                           # finalize
+        ])
+        peers = _PlanPeers([_child("step done")])
+        out = await run_plan(
+            ctx=_Ctx(llm, peers, files=_Files()), objective="o",
+            initial_steps=[], settings=_SETTINGS,
+        )
+        assert out.content == "wrapped up"
+        assert len(peers.spawns) == 1
+        assert peers.spawns[0][1].prompt == "only step"
     asyncio.run(_drive())
 
 
-def test_plan_iter_budget_terminates(suite_db_url: str) -> None:
+def test_plan_iter_budget_terminates() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            # Model keeps trying to add steps; the iter budget must stop it.
-            class _Loop:
-                calls = 0
+        # Model keeps trying to add steps; the iter budget must stop it.
+        class _Loop:
+            calls = 0
 
-                async def generate(self, messages, **kw):
-                    _Loop.calls += 1
-                    return LlmResponse(text="", tool_calls=[
-                        _tc(_ADD, add_after_num=0, contents="another")])
+            async def generate(self, messages, **kw):
+                _Loop.calls += 1
+                return LlmResponse(text="", tool_calls=[
+                    _tc(_ADD, add_after_num=0, contents="another")])
 
-            out = await run_plan(
-                ctx=_Ctx(_Loop(), _PlanPeers(), files=_Files()), objective="o",
-                initial_steps=[], pool=pool,
-                settings=_settings(suite_db_url, plan_max_iters=3),
-            )
-            assert "step budget" in out.content
-        finally:
-            await pool.close()
-
+        out = await run_plan(
+            ctx=_Ctx(_Loop(), _PlanPeers(), files=_Files()), objective="o",
+            initial_steps=[],
+            settings=_SETTINGS,
+        )
+        assert "step budget" in out.content
     asyncio.run(_drive())
 
 
-def test_plan_send_file_delivers(suite_db_url: str) -> None:
+def test_plan_send_file_delivers() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            # Final loop: the model marks a stash file then writes the answer.
-            llm = _ScriptLlm([
-                LlmResponse(text="", tool_calls=[
-                    _tc("send_file", name="report.md")]),  # dispatched (non-terminal)
-                LlmResponse(text="Here is your report."),   # final answer
-            ])
-            out = await run_plan(
-                ctx=_Ctx(llm, _PlanPeers(), files=_Files(names=["report.md"])),
-                objective="o", initial_steps=[], pool=pool,
-                settings=_settings(suite_db_url),
-            )
-            assert out.content == "Here is your report."
-            assert out.files == ["report.md"]
-        finally:
-            await pool.close()
-
+        # Final loop: the model marks a stash file then writes the answer.
+        llm = _ScriptLlm([
+            LlmResponse(text="", tool_calls=[
+                _tc("send_file", name="report.md")]),  # dispatched (non-terminal)
+            LlmResponse(text="Here is your report."),   # final answer
+        ])
+        out = await run_plan(
+            ctx=_Ctx(llm, _PlanPeers(), files=_Files(names=["report.md"])),
+            objective="o", initial_steps=[],
+            settings=_SETTINGS,
+        )
+        assert out.content == "Here is your report."
+        assert out.files == ["report.md"]
     asyncio.run(_drive())
 
 
@@ -219,41 +191,32 @@ def test_plan_send_file_delivers(suite_db_url: str) -> None:
 _SENTINEL = AgentOutput(content="handler ran")
 
 
-def test_delegated_turn_invokes_extra_terminal(suite_db_url: str) -> None:
+def test_delegated_turn_invokes_extra_terminal() -> None:
     async def _drive() -> None:
-        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "TRUNCATE TABLE user_config, "
-                    "suite_platform_mappings RESTART IDENTITY"
-                )
-            store = FakeStore()
-            store.add("deep_reasoning", "user", "plan something complex")
+        store = FakeStore()
+        store.add("deep_reasoning", "user", "plan something complex")
 
-            seen: list[ToolCall] = []
+        seen: list[ToolCall] = []
 
-            async def _handler(ctx, tool_call, pool_, settings_) -> AgentOutput:
-                seen.append(tool_call)
-                return _SENTINEL
+        async def _handler(ctx, tool_call, settings_) -> AgentOutput:
+            seen.append(tool_call)
+            return _SENTINEL
 
-            spec = ToolSpec(name="plan_mode", description="enter planning",
-                            parameters={"type": "object", "properties": {}})
-            cfg = L1Config(
-                agent_id="deep_reasoning", subagent_system="s", delegation_system="d",
-                extra_terminal=[spec], on_extra_terminal=_handler,
-            )
-            llm = _ScriptLlm([
-                LlmResponse(text="", tool_calls=[_tc("plan_mode")]),
-            ])
-            out = await run_delegated_turn(
-                _Ctx(llm, _PlanPeers(), files=_Files(), store=store),
-                config=cfg, pool=pool,
-                settings=_settings(suite_db_url), first_turn=True,
-            )
-            assert out is _SENTINEL
-            assert len(seen) == 1 and seen[0].name == "plan_mode"
-        finally:
-            await pool.close()
+        spec = ToolSpec(name="plan_mode", description="enter planning",
+                        parameters={"type": "object", "properties": {}})
+        cfg = L1Config(
+            agent_id="deep_reasoning", subagent_system="s", delegation_system="d",
+            extra_terminal=[spec], on_extra_terminal=_handler,
+        )
+        llm = _ScriptLlm([
+            LlmResponse(text="", tool_calls=[_tc("plan_mode")]),
+        ])
+        out = await run_delegated_turn(
+            _Ctx(llm, _PlanPeers(), files=_Files(), store=store),
+            config=cfg,
+            settings=_SETTINGS, first_turn=True,
+        )
+        assert out is _SENTINEL
+        assert len(seen) == 1 and seen[0].name == "plan_mode"
 
     asyncio.run(_drive())

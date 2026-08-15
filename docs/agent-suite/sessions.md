@@ -11,7 +11,7 @@
 
 ## 1. Where session state lives
 
-Nothing here is a suite table any more. Four namespaces, all the router's:
+Nothing here is a suite table any more. Five namespaces, all the router's:
 
 | What | Where | Who writes it |
 | --- | --- | --- |
@@ -19,6 +19,13 @@ Nothing here is a suite table any more. Four namespaces, all the router's:
 | a thread's rolling summary | that thread's **state** (`summary`) | that thread's owner |
 | `delegated_to` | **session state** (session-scoped) | the channel |
 | channel, chat id, title | the router session's **`metadata`** (`kind` / `external_id` / `title`) | the channel |
+| the user's settings | **user state** (`scope="user"`, cross-session) | the `config` agent in-task; the webapp form and `/config` as stewards |
+
+The last row is the odd one out: it is not session state at all. It outlives
+every session, is shared by every agent, and is reached through
+`bp_agents/user_prefs.py` rather than `common.thread`. It is listed here
+because it is the fifth thing that used to be a suite table and is not one
+now ([data-model.md §1.2](./data-model.md)).
 
 The single rule the shape follows: **an `Append` carries no owner field.**
 The router stamps the task's active executor, so writing another agent's
@@ -172,5 +179,8 @@ idempotency keys. The lease buys **coherence**; the assertions buy
 
 ## 7. What the suite still keeps
 
-Per-user config (`user_config`), cron, and chat platform mappings. Full
-schema in [`data-model.md`](./data-model.md).
+Cron, chat platform mappings, and two per-user pointers (`sandbox_uid`,
+`default_session_id`). The user's SETTINGS are the router's too now — keys
+in its user scope, read once per turn through `bp_agents/user_prefs.py`
+([data-model.md §1.2](./data-model.md)). Full schema in
+[`data-model.md`](./data-model.md).

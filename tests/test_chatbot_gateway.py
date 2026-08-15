@@ -34,6 +34,10 @@ from bp_protocol.types import AgentOutput, TaskStatus
 from tests.fake_store import FakeChannelStore, FakeStore
 from tests.fake_store import state_value as _state
 
+# The gateway takes SuiteSettings for the operator defaults behind an
+# unset user preference; `database_url` is never read through it here.
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
+
 
 class _FakeTelegram:
     def __init__(self) -> None:
@@ -92,7 +96,7 @@ def test_gateway_dispatches_and_relays(suite_db_url: str) -> None:
             tg = _FakeTelegram()
             disp = _FakeDispatcher(reply="the answer")
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "what's up?")
 
@@ -120,7 +124,7 @@ def test_gateway_unmapped_chat_gets_register_prompt(suite_db_url: str) -> None:
             tg = _FakeTelegram()
             disp = _FakeDispatcher()
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg_unknown", "hello")
             assert tg.sent == [("tg_unknown", REGISTER_PROMPT)]
@@ -139,7 +143,7 @@ def test_gateway_help_command(suite_db_url: str) -> None:
             tg = _FakeTelegram()
             disp = _FakeDispatcher()
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "/help")
             assert tg.sent == [("tg1", HELP_TEXT)]
@@ -158,7 +162,7 @@ def test_gateway_dispatch_failure_is_surfaced(suite_db_url: str) -> None:
             tg = _FakeTelegram()
             disp = _FakeDispatcher(fail=True)
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=tg, store=FakeChannelStore(store))
 
             await gw.handle_update("tg1", "boom please")
             assert len(tg.sent) == 1
@@ -199,7 +203,7 @@ def test_gateway_serializes_per_session(suite_db_url: str) -> None:
             await _seed(pool)
             disp = _OrderingDispatcher()
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
 
             await asyncio.gather(
                 gw.handle_update("tg1", "a"),
@@ -265,7 +269,7 @@ def test_cron_routes_to_config_agent(suite_db_url: str) -> None:
             await _seed(pool)
             disp = _FakeDispatcher(reply="your jobs: none")
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=disp, pool=pool, telegram=_FakeTelegram(), store=FakeChannelStore(store))
             await gw.handle_update("tg1", "/cron")
             assert disp.spawns == [
                 ("config", "List my scheduled jobs.", "usr_a", "ses_1", "cron")
@@ -292,7 +296,7 @@ def test_cmd_agent_surfaces_failed_task(suite_db_url: str) -> None:
             await _seed(pool)
             tg = _FakeTelegram()
             store = FakeStore()
-            gw = ChatbotGateway(dispatcher=_FailingDispatcher(), pool=pool, telegram=tg, store=FakeChannelStore(store))
+            gw = ChatbotGateway(settings=_SETTINGS, dispatcher=_FailingDispatcher(), pool=pool, telegram=tg, store=FakeChannelStore(store))
             await gw.handle_update("tg1", "/config")
             assert len(tg.sent) == 1
             assert "went wrong" in tg.sent[0][1]
@@ -310,6 +314,7 @@ _DELEGATABLE = frozenset({"research", "computer_use", "deep_reasoning"})
 
 def _deleg_gw(pool, tg, disp, store=None):
     return ChatbotGateway(
+        settings=_SETTINGS,
         dispatcher=disp, pool=pool, telegram=tg,
         store=FakeChannelStore(store or FakeStore()),
         delegatable_agents=_DELEGATABLE,
@@ -467,6 +472,7 @@ def test_new_closes_and_releases_previous_session(suite_db_url: str) -> None:
             creds = _FakeCreds(new_session="ses_2")
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=_FakeTelegram(), credentials=creds,
                 store=FakeChannelStore(store),
@@ -540,6 +546,7 @@ def test_link_binds_unmapped_chat_to_existing_account(suite_db_url: str) -> None
             # cron default at the new chat's session.
             store.metadata_by_session["ses_1"] = {"kind": "chatbot_telegram"}
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
@@ -574,6 +581,7 @@ def test_link_invalid_token_reports_and_does_not_map(suite_db_url: str) -> None:
             creds = _LinkCreds(user_id=None)  # router rejected the token
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
@@ -608,6 +616,7 @@ def test_link_privileged_target_reports_refusal_and_does_not_map(
             creds = _LinkCreds(user_id="usr_a", refuse=True)
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
@@ -650,6 +659,7 @@ def test_link_promotes_default_when_current_is_webapp(suite_db_url: str) -> None
             creds = _LinkCreds(user_id="usr_a", new_session="ses_tg")
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
@@ -677,6 +687,7 @@ def test_link_without_token_shows_usage(suite_db_url: str) -> None:
             creds = _LinkCreds(user_id="usr_a")
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=tg, credentials=creds,
                 store=FakeChannelStore(store),
@@ -722,6 +733,7 @@ def test_each_chat_routes_to_its_own_session(suite_db_url: str) -> None:
             disp = _FakeDispatcher(reply="ok")
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=disp, pool=pool, telegram=_FakeTelegram(),
                 store=FakeChannelStore(store),
             )
@@ -750,6 +762,7 @@ def test_setdefault_points_default_at_this_chats_session(suite_db_url: str) -> N
             tg = _FakeTelegram()
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool, telegram=tg,
                 store=FakeChannelStore(store),
             )
@@ -782,6 +795,7 @@ def test_new_repoints_only_this_chats_session(suite_db_url: str) -> None:
             creds = _FakeCreds(new_session="ses_2b")
             store = FakeStore()
             gw = ChatbotGateway(
+                settings=_SETTINGS,
                 dispatcher=_FakeDispatcher(), pool=pool,
                 telegram=_FakeTelegram(), credentials=creds,
                 store=FakeChannelStore(store),

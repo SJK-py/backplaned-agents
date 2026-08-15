@@ -38,11 +38,13 @@ from bp_agents.agents.webapp.pages import (
 )
 from bp_agents.agents.webapp.pages import config as config_pages
 from bp_agents.agents.webapp.upstream import UpstreamClient
+from bp_agents.settings import load_suite_settings
 
 if TYPE_CHECKING:
     import asyncpg
 
     from bp_agents.channel import ChannelCore, TokenRegistry
+    from bp_agents.settings import SuiteSettings
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +78,19 @@ def create_app(
     pool: asyncpg.Pool | None = None,
     core: ChannelCore | None = None,
     token_registry: TokenRegistry | None = None,
+    suite_settings: SuiteSettings | None = None,
 ) -> FastAPI:
     """Build the webapp. `upstream` (router HTTP, user-token) is required;
     `pool` (suite DB) and `core` (the channel engine; required for the chat
-    pane to inject turns) are optional so tests can build a read-only app.
-    The webapp holds no suite-wide settings of its own: the one thing it
-    used them for — the per-tier preset allow-lists — is gone, because model
-    entitlement is the router's and the Models pane asks it directly
+    pane to inject turns, and for the settings form's user-scoped store
+    batches) are optional so tests can build a read-only app.
+
+    `suite_settings` supplies ONE thing: the operator defaults a user with no
+    stored preferences falls back to, which must be the same defaults the
+    agents apply or the form would render a value that is not the one in
+    effect. It is deliberately not a general settings handle — per-tier
+    preset allow-lists are gone from here, because model entitlement is the
+    router's and the Models pane asks it directly
     ([../../../docs/design/router-resolved-preset-slots.md] §5.1)."""
     app = FastAPI(
         title="bp_webapp",
@@ -95,6 +103,7 @@ def create_app(
     app.state.upstream = upstream
     app.state.pool = pool
     app.state.core = core
+    app.state.suite_settings = suite_settings or load_suite_settings()
     # session_id → in-flight TurnRunner (webapp.turns). Set while a turn runs
     # DETACHED from the SSE connection, so closing the stream (navigating away)
     # doesn't kill it: the SSE subscribes/replays, the chat view rebuilds the

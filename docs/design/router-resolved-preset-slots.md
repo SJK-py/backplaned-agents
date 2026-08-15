@@ -57,6 +57,12 @@ path are already right and this design must preserve them:
 
 ### 1.2 The suite's selection — a per-user default
 
+> *State before this design. Both halves are gone now: the presets moved to
+> `user_llm_preferences` (§8), and `config_edit.py` was folded into
+> `bp_agents/user_prefs.py` when the remaining settings moved into the
+> router's user scope
+> ([`router-managed-session-store.md` §13.5](./router-managed-session-store.md)).*
+
 `user_config.preset_{pro,balanced,lite,embedding}` holds preset *names*.
 Whether a user may change one is governed by
 `SuiteSettings.selectable_presets_{pro,balanced,lite}` — a **static,
@@ -283,8 +289,9 @@ and costs a slot call nothing beyond the lookup it already needs.
 ## 8. What this deletes
 
   * `SuiteSettings.selectable_presets_{pro,balanced,lite}` and the
-    `preset_choices` machinery in `bp_agents/config_edit.py` and
-    `webapp/pages/config.py` — replaced by `GET /v1/llm/presets`.
+    `preset_choices` machinery in `bp_agents/config_edit.py` (since folded
+    into `bp_agents/user_prefs.py`) and `webapp/pages/config.py` — replaced
+    by `GET /v1/llm/presets`.
   * `user_config.preset_{pro,balanced,lite}` — replaced by
     `user_llm_preferences`. `preset_embedding` is deleted outright rather
     than migrated: it was never user-selectable, and it must not become so

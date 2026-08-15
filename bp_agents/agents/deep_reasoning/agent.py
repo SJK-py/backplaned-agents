@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from bp_agents import slots
 from bp_agents.agents.deep_reasoning.plan import run_plan
@@ -15,13 +14,9 @@ from bp_agents.common import (
     make_current_time_tool,
 )
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings, load_suite_settings
 from bp_protocol.types import AgentInfo, AgentOutput, LLMData
 from bp_sdk import Agent, TaskContext, ToolCall, ToolSpec
-
-if TYPE_CHECKING:
-    import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +67,13 @@ _PLAN_MODE_SPEC = ToolSpec(
 
 
 async def _enter_plan(
-    ctx: TaskContext, tool_call: ToolCall, pool: asyncpg.Pool, settings: SuiteSettings
+    ctx: TaskContext, tool_call: ToolCall, settings: SuiteSettings
 ) -> AgentOutput:
     args = tool_call.args or {}
     objective = str(args.get("objective") or "").strip()
     steps = [s for s in (args.get("steps") or []) if isinstance(s, str)]
     return await run_plan(
-        ctx, objective=objective, initial_steps=steps, pool=pool, settings=settings
+        ctx, objective=objective, initial_steps=steps, settings=settings
     )
 
 
@@ -114,19 +109,6 @@ agent = Agent(
 )
 
 _settings: SuiteSettings = load_suite_settings()
-_pool: asyncpg.Pool | None = None
-
-
-@agent.on_startup
-async def _startup() -> None:
-    global _pool  # noqa: PLW0603 — startup-wired handle
-    _pool = await open_pool(_settings)
-
-
-@agent.on_shutdown
-async def _shutdown() -> None:
-    if _pool is not None:
-        await _pool.close()
 
 
 @agent.handler(
@@ -135,8 +117,7 @@ async def _shutdown() -> None:
     "and return a structured, worked-through answer.",
 )
 async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
-    assert _pool is not None
-    return await run_subagent(ctx, payload, config=_CONFIG, pool=_pool, settings=_settings)
+    return await run_subagent(ctx, payload, config=_CONFIG, settings=_settings)
 
 
 @agent.handler(
@@ -145,9 +126,8 @@ async def subagent(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     "conversation; may enter plan_mode (delegation lifecycle; not a tool).",
 )
 async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
-    assert _pool is not None
     return await run_delegated_turn(
-        ctx, config=_CONFIG, pool=_pool, settings=_settings,
+        ctx, config=_CONFIG, settings=_settings,
         first_turn=True, seed=payload,
     )
 
@@ -158,9 +138,8 @@ async def on_delegation(ctx: TaskContext, payload: LLMData) -> AgentOutput:
     "conversation (delegation lifecycle; not a tool).",
 )
 async def delegated_message(ctx: TaskContext, payload: MessagePayload) -> AgentOutput:
-    assert _pool is not None
     return await run_delegated_turn(
-        ctx, config=_CONFIG, pool=_pool, settings=_settings,
+        ctx, config=_CONFIG, settings=_settings,
         first_turn=False, user_text=payload.prompt,
     )
 

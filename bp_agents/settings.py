@@ -49,8 +49,11 @@ class SuiteSettings(BaseSettings):
     this is the allow-list it validates `/delegate` targets against."""
 
     # ------------------------------------------------------------------
-    # user_config defaults — seeded into a new `user_config` row at
-    # registration approval; users tune them later via the config agent.
+    # User-setting defaults — what a user with NO stored preference gets
+    # (`bp_agents/user_prefs.py`). They are no longer seeded into a row at
+    # registration: the settings live in the router's user scope, where an
+    # absent key resolves to these, so changing one here takes effect
+    # immediately for every user who has not overridden it.
     # ------------------------------------------------------------------
 
     default_timezone: str = "UTC"

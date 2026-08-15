@@ -1,8 +1,14 @@
 """Webapp Phase 5 — config + cron structured panes ([webapp.md] §5).
 
-Config form writes via the SAME validation the config agent uses
-(bp_agents.config_edit); cron pane add/remove reuse bp_agents.cron_manage.
+The config form reads and writes the ROUTER's user-scoped state through the
+steward store surface, with the SAME validation the config agent uses
+(bp_agents.user_prefs); cron pane add/remove reuse bp_agents.cron_manage.
 Driven on one loop via httpx.ASGITransport (asyncpg is loop-bound).
+
+The app under test therefore needs a channel core, because that is where the
+store handle lives — `_build_app` wires a minimal one over the same
+`FakeStore` the fake upstream serves sessions from, so seeding a preference
+and asserting on a save both go through one object.
 """
 
 from __future__ import annotations
@@ -14,11 +20,11 @@ import json
 import httpx
 import pytest
 
-from bp_agents.config_edit import ConfigError, coerce_config_value
 from bp_agents.db import queries
 from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
-from tests.fake_store import UpstreamSessionMixin
+from bp_agents.user_prefs import ConfigError, coerce_config_value
+from tests.fake_store import FakeChannelStore, UpstreamSessionMixin
 
 
 def _fake_jwt(sub: str) -> str:
@@ -66,6 +72,14 @@ class _Upstream(UpstreamSessionMixin):
         pass
 
 
+class _StoreOnlyCore:
+    """What the config pages need from `app.state.core`: a store. The rest of
+    `ChannelCore` (dispatch, leases, delegation) is not on this path."""
+
+    def __init__(self, store) -> None:
+        self.store = store
+
+
 def _build_app(*, pool, upstream=None):
     pytest.importorskip("fastapi")
     pytest.importorskip("itsdangerous")
@@ -75,21 +89,23 @@ def _build_app(*, pool, upstream=None):
     from bp_agents.agents.webapp.app import create_app  # noqa: PLC0415
     from bp_agents.agents.webapp.config import WebappConfig  # noqa: PLC0415
 
+    upstream = upstream or _Upstream()
     cfg = WebappConfig(session_secret=SecretStr("x" * 32), session_cookie_secure=False)
     return create_app(
-        cfg, upstream=upstream or _Upstream(), pool=pool, core=None,
+        cfg, upstream=upstream, pool=pool,
+        core=_StoreOnlyCore(FakeChannelStore(upstream.store)),
     )
 
 
 async def _seed(pool) -> None:
+    """Suite-side identity in Postgres; the SETTINGS belong to the store the
+    caller built its app with, so a test that asserts on them seeds there."""
     async with pool.acquire() as conn:
         await conn.execute(
             "TRUNCATE TABLE cron_jobs, user_config, "
             "suite_platform_mappings RESTART IDENTITY CASCADE"
         )
-        await queries.create_user_config(
-            conn, user_id="usr_a", full_name="Ada", timezone="UTC",
-        )
+        await queries.create_user_config(conn, user_id="usr_a")
 
 
 async def _login(client) -> None:
@@ -125,11 +141,11 @@ def test_model_choice_is_not_a_user_config_field() -> None:
     """The four `preset_*` columns are gone. Nothing in the suite's editable
     or displayable surface may name a model — the choice lives router-side
     ([docs/design/router-resolved-preset-slots.md] §8)."""
-    from bp_agents.config_edit import (  # noqa: PLC0415
+    from bp_agents.db.models import UserConfigRow  # noqa: PLC0415
+    from bp_agents.user_prefs import (  # noqa: PLC0415
         displayable_fields,
         editable_fields,
     )
-    from bp_agents.db.models import UserConfigRow  # noqa: PLC0415
 
     assert not [f for f in editable_fields() if f.startswith("preset")]
     assert not [f for f in displayable_fields() if f.startswith("preset")]
@@ -184,17 +200,17 @@ def test_model_slots_degrade_when_the_router_is_unreachable() -> None:
 
 def test_config_agent_uses_shared_editable_fields() -> None:
     """The config agent must source its editable set + coercion from
-    config_edit, so the NL path and the form can't drift."""
+    user_prefs, so the NL path and the form can't drift."""
     import importlib  # noqa: PLC0415
     import inspect  # noqa: PLC0415
 
-    from bp_agents.config_edit import EDITABLE_FIELDS  # noqa: PLC0415
+    from bp_agents.user_prefs import PREF_TYPES  # noqa: PLC0415
 
     # importlib returns the real module (the package __init__ rebinds the
     # `agent` attribute to the Agent instance, shadowing the submodule).
     src = inspect.getsource(importlib.import_module("bp_agents.agents.config.agent"))
     assert "coerce_config_value" in src and "editable_fields" in src
-    assert "max_context_token_limit" in EDITABLE_FIELDS
+    assert "max_context_token_limit" in PREF_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +225,9 @@ def test_config_view_prefills_current_values(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(pool=pool)
+            upstream = _Upstream()
+            upstream.store.set_pref("full_name", "Ada")
+            app = _build_app(pool=pool, upstream=upstream)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -232,7 +250,8 @@ def test_config_save_persists_via_shared_validation(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(pool=pool)
+            upstream = _Upstream()
+            app = _build_app(pool=pool, upstream=upstream)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -252,18 +271,19 @@ def test_config_save_persists_via_shared_validation(suite_db_url: str) -> None:
                     follow_redirects=False,
                 )
                 assert r.status_code == 303, r.text[:300]
-                async with pool.acquire() as conn:
-                    cfg = await queries.get_user_config(conn, "usr_a")
-            return cfg
+            return upstream.store
         finally:
             await pool.close()
 
-    cfg = asyncio.run(_drive())
-    assert cfg.full_name == "Grace"
-    assert cfg.timezone == "Europe/London"
-    assert cfg.max_context_token_limit == 9000
-    assert cfg.verbose_default is True
-    assert cfg.custom_note == "be concise"
+    store = asyncio.run(_drive())
+    # Every field landed in the USER scope — cross-session, and not in this
+    # session's state, which is what a carrier session must not become.
+    assert store.pref("full_name") == "Grace"
+    assert store.pref("timezone") == "Europe/London"
+    assert store.pref("max_context_token_limit") == "9000"
+    assert store.pref("verbose_default") == "true"
+    assert store.pref("custom_note") == "be concise"
+    assert store.session_state == {}
 
 
 def test_config_model_pane_renders_and_persists(suite_db_url: str) -> None:
@@ -344,20 +364,21 @@ def test_config_model_pane_renders_and_persists(suite_db_url: str) -> None:
             await pool.close()
 
     cfg = asyncio.run(_drive())
-    # The suite row is untouched by model selection.
+    # The suite row is untouched by model selection — and holds no settings
+    # at all any more.
     assert not [f for f in type(cfg).model_fields if f.startswith("preset")]
 
 
 def test_config_save_unchecked_checkbox_is_false(suite_db_url: str) -> None:
     pytest.importorskip("fastapi")
 
-    async def _drive() -> bool:
+    async def _drive() -> str | None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            async with pool.acquire() as conn:
-                await queries.update_user_config(conn, "usr_a", verbose_default=True)
-            app = _build_app(pool=pool)
+            upstream = _Upstream()
+            upstream.store.set_pref("verbose_default", "true")
+            app = _build_app(pool=pool, upstream=upstream)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -369,13 +390,83 @@ def test_config_save_unchecked_checkbox_is_false(suite_db_url: str) -> None:
                     data={"csrf_token": token, "max_context_token_limit": "120000"},
                     follow_redirects=False,
                 )
-                async with pool.acquire() as conn:
-                    cfg = await queries.get_user_config(conn, "usr_a")
-            return cfg.verbose_default
+            return upstream.store.pref("verbose_default")
         finally:
             await pool.close()
 
-    assert asyncio.run(_drive()) is False
+    assert asyncio.run(_drive()) == "false"
+
+
+def test_config_works_with_only_closed_sessions(suite_db_url: str) -> None:
+    """The carrier session is a CARRIER, not a scope.
+
+    The rows the settings form touches have no session at all; the session in
+    the ops path is only what the endpoint checks ownership against, and that
+    check does not look at `closed_at`. So a user whose every conversation is
+    closed can still read and change their settings — which is the whole
+    reason this shipped without a new router endpoint."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, object]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            upstream = _Upstream()
+            for row in upstream.sessions.values():
+                row["closed_at"] = "2026-01-02T00:00:00+00:00"
+            app = _build_app(pool=pool, upstream=upstream)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client, "/config")
+                r = await client.post(
+                    "/config",
+                    data={"csrf_token": token, "full_name": "Hopper"},
+                    follow_redirects=False,
+                )
+            return r.status_code, upstream.store
+        finally:
+            await pool.close()
+
+    status, store = asyncio.run(_drive())
+    assert status == 303
+    assert store.pref("full_name") == "Hopper"
+
+
+def test_config_save_without_any_session_reports_rather_than_lying(
+    suite_db_url: str,
+) -> None:
+    """No session at all means no route into the user scope. Redirecting to
+    "?saved=1" would tell the user their settings were stored when nothing
+    was written."""
+    pytest.importorskip("fastapi")
+
+    async def _drive() -> tuple[int, str, object]:
+        pool = await open_pool(SuiteSettings(database_url=suite_db_url))
+        try:
+            await _seed(pool)
+            upstream = _Upstream()
+            upstream.sessions.clear()
+            app = _build_app(pool=pool, upstream=upstream)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                await _login(client)
+                token = await _csrf(client, "/config")
+                r = await client.post(
+                    "/config",
+                    data={"csrf_token": token, "full_name": "Hopper"},
+                    follow_redirects=False,
+                )
+            return r.status_code, r.text, upstream.store
+        finally:
+            await pool.close()
+
+    status, text, store = asyncio.run(_drive())
+    assert status == 400
+    assert "no session to write through" in text
+    assert store.pref("full_name") is None
 
 
 def test_config_save_invalid_int_re_renders_error(suite_db_url: str) -> None:
@@ -385,7 +476,9 @@ def test_config_save_invalid_int_re_renders_error(suite_db_url: str) -> None:
         pool = await open_pool(SuiteSettings(database_url=suite_db_url))
         try:
             await _seed(pool)
-            app = _build_app(pool=pool)
+            upstream = _Upstream()
+            upstream.store.set_pref("full_name", "Ada")
+            app = _build_app(pool=pool, upstream=upstream)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
@@ -396,16 +489,14 @@ def test_config_save_invalid_int_re_renders_error(suite_db_url: str) -> None:
                     data={"csrf_token": token, "max_context_token_limit": "abc"},
                     follow_redirects=False,
                 )
-                async with pool.acquire() as conn:
-                    cfg = await queries.get_user_config(conn, "usr_a")
-            return r.status_code, r.text, cfg
+            return r.status_code, r.text, upstream.store
         finally:
             await pool.close()
 
-    status, text, cfg = asyncio.run(_drive())
+    status, text, store = asyncio.run(_drive())
     assert status == 400
     assert "Invalid value" in text
-    assert cfg.full_name == "Ada"  # unchanged — nothing committed
+    assert store.pref("full_name") == "Ada"  # unchanged — nothing committed
 
 
 # ---------------------------------------------------------------------------

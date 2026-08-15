@@ -199,8 +199,9 @@ async def _startup() -> None:
                     credentials=_credentials, pool=_pool,
                     stop=_stop, channel="chatbot_kakao", platform="kakao",
                     # KakaoTalk is a Korea-only product → default new users to
-                    # Korean (they can change it via /config).
-                    default_language="ko",
+                    # Korean (they can change it via /config). Written into
+                    # the router's user scope on first discovery only.
+                    default_language="ko", store=_session_store(),
                 )
             )
     elif _kakao_configured(_settings):
@@ -229,6 +230,7 @@ async def _startup() -> None:
         pool=_pool,
         telegram=_telegram,
         store=_session_store(),
+        settings=_settings,
         credentials=_credentials,
         result_timeout_s=_settings.dispatch_result_timeout_s,
         fire_memory=True,

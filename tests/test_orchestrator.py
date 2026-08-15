@@ -1,8 +1,9 @@
-"""orchestrator `message` turn — core logic against a live suite DB.
+"""orchestrator `message` turn — core logic, DB-free.
 
-Stubs `ctx.llm` (so no router / provider is needed) and uses a real
-`bp_suite` database for the history read/write. Assumes the suite schema
-is applied; truncates between tests.
+Stubs `ctx.llm` (so no router / provider is needed) and runs the whole turn
+against the fake session store. There is no suite database here any more:
+the conversation is the router's store and the user's settings are its user
+scope, so the orchestrator holds no pool at all.
 """
 
 from __future__ import annotations
@@ -11,11 +12,11 @@ import asyncio
 
 from bp_agents.agents.orchestrator import ORCHESTRATOR_AGENT_ID, run_orchestrator_message
 from bp_agents.common.payloads import MessagePayload
-from bp_agents.db import queries
-from bp_agents.db.connection import open_pool
 from bp_agents.settings import SuiteSettings
 from bp_sdk import LlmResponse, Message
 from tests.fake_store import FakeHistory, FakeStore, state_value
+
+_SETTINGS = SuiteSettings(database_url="postgresql://unused/unused")
 
 
 class _StubLlm:
@@ -50,86 +51,70 @@ class _StubCtx:
         self.history = FakeHistory(self.store, "orchestrator")
 
 
-async def _truncate(pool) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE TABLE user_config, "
-            "suite_platform_mappings RESTART IDENTITY"
+def test_orchestrator_message_uses_history_and_persists_reply() -> None:
+    async def _drive() -> None:
+        store = FakeStore()
+        store.set_pref("full_name", "Ada")
+        store.set_pref("timezone", "UTC")
+        store.thread_state[(ORCHESTRATOR_AGENT_ID, "")] = {
+            "summary": state_value("summary", "prior summary text")
+        }
+
+        llm = _StubLlm("hello back")
+        ctx = _StubCtx("usr_a", "ses_1", llm, store)
+        out = await run_orchestrator_message(
+            ctx,  # type: ignore[arg-type]
+            MessagePayload(prompt="hi there"),
+            settings=_SETTINGS,
         )
 
+        assert out.content == "hello back"
+        assert out.metadata["context_tokens"] > 0
 
-def test_orchestrator_message_uses_history_and_persists_reply(
-    suite_db_url: str,
-) -> None:
-    async def _drive() -> None:
-        settings = SuiteSettings(database_url=suite_db_url)
-        pool = await open_pool(settings)
-        try:
-            await _truncate(pool)
-            async with pool.acquire() as conn:
-                await queries.create_user_config(
-                    conn, user_id="usr_a", full_name="Ada", timezone="UTC",
-                )
-            store = FakeStore()
-            store.thread_state[(ORCHESTRATOR_AGENT_ID, "")] = {
-                "summary": state_value("summary", "prior summary text")
-            }
+        # System prompt carried the user-config note + rolling summary.
+        assert llm.captured is not None
+        system = llm.captured[0]
+        assert system.role == "system"
+        assert "Ada" in system.content
+        assert "prior summary text" in system.content
 
-            llm = _StubLlm("hello back")
-            ctx = _StubCtx("usr_a", "ses_1", llm, store)
-            out = await run_orchestrator_message(
-                ctx,  # type: ignore[arg-type]
-                MessagePayload(prompt="hi there"),
-                pool=pool,
-                settings=settings,
-            )
+        # The agent recorded the user's turn itself, from the payload,
+        # and it appears exactly once in the built context.
+        user_msgs = [m for m in llm.captured if m.role == "user"]
+        assert [m.content for m in user_msgs] == ["hi there"]
 
-            assert out.content == "hello back"
-            assert out.metadata["context_tokens"] > 0
-
-            # System prompt carried the user-config note + rolling summary.
-            assert llm.captured is not None
-            system = llm.captured[0]
-            assert system.role == "system"
-            assert "Ada" in system.content
-            assert "prior summary text" in system.content
-
-            # The agent recorded the user's turn itself, from the payload,
-            # and it appears exactly once in the built context.
-            user_msgs = [m for m in llm.captured if m.role == "user"]
-            assert [m.content for m in user_msgs] == ["hi there"]
-
-            # Both turns are on the orchestrator's own thread.
-            assert store.roles(ORCHESTRATOR_AGENT_ID) == ["user", "assistant"]
-            assert store.thread(ORCHESTRATOR_AGENT_ID)[-1].content == "hello back"
-        finally:
-            await pool.close()
+        # Both turns are on the orchestrator's own thread.
+        assert store.roles(ORCHESTRATOR_AGENT_ID) == ["user", "assistant"]
+        assert store.thread(ORCHESTRATOR_AGENT_ID)[-1].content == "hello back"
 
     asyncio.run(_drive())
 
 
-def test_orchestrator_message_falls_back_to_payload_when_no_user_row(
-    suite_db_url: str,
-) -> None:
+def test_orchestrator_message_runs_for_a_user_with_no_stored_settings() -> None:
+    """An empty user scope is the NORMAL case, not an error: a user who has
+    never opened Settings has no keys at all, and the turn runs on the
+    operator defaults.
+
+    The note is still rendered, carrying those defaults — which is what the
+    model actually operates under. Previously a user with no `user_config`
+    row got no note at all while one with a freshly seeded row got exactly
+    these values; the defaults now apply live, so the two agree."""
+
     async def _drive() -> None:
-        settings = SuiteSettings(database_url=suite_db_url)
-        pool = await open_pool(settings)
-        try:
-            await _truncate(pool)
-            # No user_config, no no pre-written user row.
-            llm = _StubLlm("ok")
-            ctx = _StubCtx("usr_x", "ses_x", llm)
-            out = await run_orchestrator_message(
-                ctx,  # type: ignore[arg-type]
-                MessagePayload(prompt="fresh question"),
-                pool=pool,
-                settings=settings,
-            )
-            assert out.content == "ok"
-            assert llm.captured is not None
-            user_msgs = [m for m in llm.captured if m.role == "user"]
-            assert [m.content for m in user_msgs] == ["fresh question"]
-        finally:
-            await pool.close()
+        llm = _StubLlm("ok")
+        ctx = _StubCtx("usr_x", "ses_x", llm)
+        out = await run_orchestrator_message(
+            ctx,  # type: ignore[arg-type]
+            MessagePayload(prompt="fresh question"),
+            settings=_SETTINGS,
+        )
+        assert out.content == "ok"
+        assert llm.captured is not None
+        system = llm.captured[0].content
+        assert "User's timezone: UTC" in system
+        assert "Preferred language: en" in system
+        assert "User's name" not in system  # nothing invented
+        user_msgs = [m for m in llm.captured if m.role == "user"]
+        assert [m.content for m in user_msgs] == ["fresh question"]
 
     asyncio.run(_drive())
