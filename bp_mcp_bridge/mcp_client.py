@@ -107,6 +107,127 @@ class ToolResult:
         }
 
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client construction
+#
+# Hosted MCP providers sit behind load balancers and CDNs, and talking to them
+# with a default `httpx.AsyncClient()` presents as "flaky HTTPS". Two distinct
+# problems, and it is worth being precise about which fix addresses which,
+# because the intuitive one is the weaker one:
+#
+#   1. **A pooled connection the far end already closed.** An LB drops an idle
+#      keep-alive socket without telling us; the next request goes out on it
+#      and comes back `RemoteProtocolError: Server disconnected without
+#      sending a response`. Nothing about the request was wrong — the socket
+#      was.
+#
+#      **Tuning the pool does not fix this**, and it is easy to believe it
+#      does. httpx already expires idle sockets after 5s, which is shorter
+#      than any common LB idle timeout (ALB 60s, nginx 75s); the failures
+#      that get through are connections closed for other reasons — a deploy,
+#      a scale-in, an aggressive proxy — inside whatever window we pick. The
+#      only real fix is to **retry**, which `tool_agent._call_tool_with_retry`
+#      has always done for `tools/call` and `server_bridge._connect_with_retry`
+#      now does for the handshake. That handshake was the actual gap: one
+#      dropped connection during `initialize()` used to kill the bridge.
+#
+#      The pool settings below are therefore hygiene, not a cure: they PIN the
+#      values (so an httpx default change cannot silently loosen reuse) and
+#      cap connections at something sane for one upstream.
+#
+#   2. **One scalar timeout for four different waits.** This one the client
+#      really does fix. `timeout=60` gives a *connect* 60 seconds, so a
+#      black-holed host hangs the bridge for a minute per attempt;
+#      `timeout=None` (the SSE client) never bounded a connect at all, so a
+#      hung TLS handshake could stall the stream task forever. Reads are the
+#      only phase that legitimately wants a long — or infinite — budget.
+# ---------------------------------------------------------------------------
+
+# Pinned at httpx's own default rather than loosened: every second of reuse
+# window is a second in which the far end may close the socket under us.
+_KEEPALIVE_EXPIRY_S = 5.0
+# One MCP server does not need httpx's default 100.
+_MAX_CONNECTIONS = 20
+_CONNECT_TIMEOUT_S = 10.0
+_WRITE_TIMEOUT_S = 30.0
+_POOL_TIMEOUT_S = 10.0
+# Connection-ESTABLISHMENT retries inside httpx. Note the scope: this retries
+# dialling, never a request already sent, so it absorbs the packet-loss class
+# of failure and nothing else. The stale-socket case above is a request that
+# WAS sent, so it never reaches here — that is the retry layers' job.
+_TRANSPORT_CONNECT_RETRIES = 2
+
+
+def build_http_client(
+    *, read_timeout_s: float | None, verify: bool = True
+) -> httpx.AsyncClient:
+    """An `httpx.AsyncClient` tuned for long-lived talk to a third-party MCP
+    server. `read_timeout_s=None` means "never time out a read", which is what
+    an SSE stream needs — the other three phases stay bounded regardless."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=_CONNECT_TIMEOUT_S,
+            read=read_timeout_s,
+            write=_WRITE_TIMEOUT_S,
+            pool=_POOL_TIMEOUT_S,
+        ),
+        limits=httpx.Limits(
+            max_connections=_MAX_CONNECTIONS,
+            max_keepalive_connections=_MAX_CONNECTIONS,
+            keepalive_expiry=_KEEPALIVE_EXPIRY_S,
+        ),
+        transport=httpx.AsyncHTTPTransport(
+            retries=_TRANSPORT_CONNECT_RETRIES, verify=verify
+        ),
+    )
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """Whether `exc` is worth retrying against an MCP server.
+
+    Lives here rather than in `tool_agent` because the classification is
+    about THIS module's error surface (httpx + `McpError`), and because the
+    connect path in `server_bridge` needs the same judgement the tool-call
+    path has always had — a blip during `initialize()` should cost a retry,
+    not the whole bridge.
+
+    `HTTPStatusError` is a SIBLING of `TransportError` under `httpx.HTTPError`,
+    not a subclass, so it needs its own branch — a 502/503/504/429 raised by
+    `raise_for_status()` would otherwise surface as permanent.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _HTTP_TRANSIENT_STATUS
+    if isinstance(exc, httpx.TransportError):
+        # ConnectError, ConnectTimeout, ReadTimeout, ReadError, WriteError,
+        # RemoteProtocolError — anything where the request did not get a
+        # clean HTTP response back.
+        return True
+    if isinstance(exc, McpError):
+        return exc.code in _MCP_TRANSIENT_CODES
+    return False
+
+
+# JSON-RPC codes worth retrying. -32603 is "internal error", which upstreams
+# use for their own transient faults. Every other code (invalid request,
+# method not found, invalid params, application errors) means the same thing
+# on the next attempt.
+_MCP_TRANSIENT_CODES = {-32603}
+# 429 plus the transient 5xx family. Other 4xx are client errors retry cannot fix.
+_HTTP_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+def mcp_transient_codes() -> set[int]:
+    """The retryable JSON-RPC codes, as a copy. Exposed because
+    `tool_agent` re-exports them under the names they were first defined
+    with, and tests assert against those."""
+    return set(_MCP_TRANSIENT_CODES)
+
+
+def http_transient_status() -> set[int]:
+    """The retryable HTTP statuses, as a copy."""
+    return set(_HTTP_TRANSIENT_STATUS)
+
+
 class StreamableHttpMcpClient:
     """JSON-RPC 2.0 over HTTP. One client = one MCP server.
 
@@ -134,7 +255,7 @@ class StreamableHttpMcpClient:
         # responses raise a clear error.
         self._headers["Accept"] = "application/json, text/event-stream"
         self._headers["Content-Type"] = "application/json"
-        self._client = httpx.AsyncClient(timeout=timeout_s)
+        self._client = build_http_client(read_timeout_s=timeout_s)
         self._request_id = 0
         self._initialized = False
 
@@ -324,6 +445,15 @@ class SseMcpClient:
     # overrides per WHATWG SSE spec.
     _RECONNECT_BACKOFF_INITIAL_S = 1.0
     _RECONNECT_BACKOFF_MAX_S = 60.0
+    # Consecutive failed reconnects before the stream task GIVES UP and
+    # returns. It used to loop forever: a server that had gone permanently
+    # away (revoked token, retired endpoint) was re-dialled every 60s for as
+    # long as the process lived, inside a bridge that still reported itself
+    # healthy. Giving up ends the stream task, which ends the bridge, which
+    # hands the decision to the supervisor's backoff — one place that
+    # escalates its waits and eventually stops, instead of two loops that
+    # never do. ~10 attempts spans about 8 minutes with this backoff.
+    _MAX_CONSECUTIVE_RECONNECTS = 10
 
     def __init__(
         self,
@@ -353,7 +483,11 @@ class SseMcpClient:
         # uses application/json for the request body.
         self._sse_headers = {**self._headers, "Accept": "text/event-stream"}
         self._post_headers = {**self._headers, "Content-Type": "application/json"}
-        self._client = httpx.AsyncClient(timeout=None)
+        # `read_timeout_s=None`: an SSE stream is idle for long stretches by
+        # design, so a read deadline would tear down a healthy stream. The
+        # CONNECT is still bounded, which the old `timeout=None` was not — a
+        # hung TLS handshake used to block the stream task forever.
+        self._client = build_http_client(read_timeout_s=None)
         self._post_url: str | None = None
         self._endpoint_event = asyncio.Event()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
@@ -472,6 +606,7 @@ class SseMcpClient:
         """
         last_event_id: str | None = None
         backoff = self._RECONNECT_BACKOFF_INITIAL_S
+        consecutive_failures = 0
         while not self._closed:
             try:
                 headers = dict(self._sse_headers)
@@ -481,9 +616,11 @@ class SseMcpClient:
                     "GET", self._sse_url, headers=headers
                 ) as resp:
                     resp.raise_for_status()
-                    # Successful connect — reset backoff so the next
-                    # failure starts from the floor again.
+                    # Successful connect — reset backoff AND the give-up
+                    # counter, so a stream that works for a while then blips
+                    # gets the full allowance again.
                     backoff = self._RECONNECT_BACKOFF_INITIAL_S
+                    consecutive_failures = 0
                     event_type: str | None = None
                     data_lines: list[str] = []
                     async for raw_line in resp.aiter_lines():
@@ -581,6 +718,24 @@ class SseMcpClient:
                 metrics.sse_pending_stranded_total.labels(
                     server_id=self._server_id,
                 ).inc(stranded_before)
+            consecutive_failures += 1
+            if consecutive_failures >= self._MAX_CONSECUTIVE_RECONNECTS:
+                logger.error(
+                    "mcp_sse_stream_gave_up",
+                    extra={
+                        "event": "mcp_sse_stream_gave_up",
+                        "bp.mcp_server_id": self._server_id,
+                        "consecutive_failures": consecutive_failures,
+                    },
+                )
+                metrics.sse_gave_up_total.labels(
+                    server_id=self._server_id,
+                ).inc()
+                # Fail anything still waiting, then return. The bridge task
+                # notices the dead stream on its next request and exits; the
+                # supervisor decides whether to try again.
+                self._fail_pending_for_reconnect()
+                return
             try:
                 await asyncio.sleep(backoff)
             except asyncio.CancelledError:

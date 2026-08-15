@@ -136,6 +136,12 @@ sse_pending_stranded_total = _counter(
     "In-flight SSE requests failed-fast because their stream reconnected.",
     ("server_id",),
 )
+# The stream task hit its consecutive-reconnect ceiling and stopped trying.
+sse_gave_up_total = _counter(
+    "bp_mcp_bridge_sse_gave_up_total",
+    "SSE stream tasks that gave up after consecutive failed reconnects.",
+    ("server_id",),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +177,29 @@ tool_reconcile_changes_total = _counter(
 aclose_timeouts_total = _counter(
     "bp_mcp_bridge_aclose_timeouts_total",
     "MCP client aclose() calls that hit the bounded timeout.",
+    ("server_id",),
+)
+# One increment per transient failure of the CONNECT handshake
+# (`initialize` + `tools/list`) that was retried rather than fatal.
+# 1 while the supervisor has stopped restarting an agent's bridge, 0
+# otherwise. The one metric to alert on: it means a configured agent is not
+# running and will not come back without an operator touching it.
+bridge_given_up = _gauge(
+    "bp_mcp_bridge_bridge_given_up",
+    "1 when the supervisor has given up restarting a bridged agent.",
+    ("agent_id",),
+)
+connect_retries_total = _counter(
+    "bp_mcp_bridge_connect_retries_total",
+    "Transient-error retries of an MCP server's connect handshake.",
+    ("server_id",),
+)
+# The in-bridge tool-refresh loop hit its consecutive-failure ceiling and
+# parked. Unlike `bridge_given_up` this is not fatal — the bridge keeps
+# serving its current mode set — but the set is stale until a refresh signal.
+reconcile_gave_up_total = _counter(
+    "bp_mcp_bridge_reconcile_gave_up_total",
+    "Tool-refresh loops that stopped retrying after consecutive failures.",
     ("server_id",),
 )
 invitations_issued_total = _counter(

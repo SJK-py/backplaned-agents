@@ -602,6 +602,75 @@ nutshell.
     is a single `_cleanup` on every path that kills the group, then lets the
     feed and drain tasks *complete* rather than cancelling them.
 
+### 15.1 `[shipped]` Retry policy, after the fact
+
+Two operator reports landed after v1: the bridge **retried endlessly without
+giving up**, and **HTTPS was flaky with some providers**. Both are bridge-wide
+rather than code-agent specific, and both are now fixed here because this is
+where the retry story is written down.
+
+**Endless retry** was three loops, none of which escalated or stopped:
+
+  * the supervisor respawned a dead bridge every poll interval, forever —
+    a connect attempt against someone else's server every 30 s, with a stack
+    trace to match, for the life of the process;
+  * the SSE stream task reconnected forever, *inside* a bridge that still
+    reported itself healthy;
+  * the reconcile-refresh loop re-armed its own event on a fixed 5 s.
+
+`bp_mcp_bridge/health.py` is the piece that stops the first. Per bridged
+agent — all three kinds — it counts consecutive failures, defers the next
+start by a doubling backoff (30 s → 15 min), and after eight failures stops
+entirely, logging once and setting `bp_mcp_bridge_bridge_given_up`. Two
+things reopen it, both already in the admin UI and both meaning "an operator
+wants another go": **editing the row** (the config signature changes) and
+**clicking Reconnect** (a fresh invitation is minted). It is deliberately not
+a DB `failed` flag — that would make recovery from a two-hour upstream outage
+need a human, and upstreams recover on their own.
+
+One subtlety worth stating: a *clean but immediate* exit counts as a failure.
+That is how a bridge with neither credentials nor an invitation returns, and
+counting only exceptions would leave it spinning at the poll interval — the
+same bug in a quieter costume.
+
+The other two stop **where they run**, because the health gate cannot see
+either. The SSE stream task and the refresh loop both live *inside* a bridge
+that never exits, so no task ever completes for the supervisor to account
+for — a gate that only watches task exits would have left both spinning
+under a green light. So `SseMcpClient` caps consecutive reconnects, and
+`_refresh_loop` now escalates 5 s → 5 min and, after eight consecutive
+failures, stops re-arming itself and parks on `wait()`.
+
+Parking is deliberately cheaper than giving up on a whole bridge: the
+consequence is a **stale mode set**, not a dead agent — the bridge keeps
+serving the tools it already has. And recovery needs no gate of its own,
+because the loop is still sitting on its event: the next genuine signal, an
+admin "Refresh tools" click or an SSE `tools/list_changed`, starts it over
+from zero. That is why the give-up branch is a `continue` and not a `return`
+— a `return` would make the bridge permanently deaf to refresh for the rest
+of its life, which is a worse bug than the one being fixed.
+
+**Flaky HTTPS** was two things, and the intuitive fix is the weaker one:
+
+  * The real gap was that the CONNECT handshake (`initialize` +
+    `tools/list`) had **no retry**, while `tools/call` had had one all
+    along. A hosted provider dropping a single connection therefore killed
+    the whole bridge and cost a full restart cycle.
+    `ServerBridge._connect_with_retry` closes that with the same
+    bounded-retry-on-transient policy, and the classifier moved to
+    `mcp_client.is_transient_error` so there is one definition of
+    "worth another go".
+  * **Pool tuning does not fix stale sockets**, though it is the first thing
+    one reaches for. httpx already expires idle connections after 5 s —
+    shorter than any common LB idle timeout — so the failures that get
+    through are connections closed for other reasons inside whatever window
+    is chosen. The explicit `Limits` pins the value so it cannot drift
+    looser; the retry is what recovers.
+  * What the client genuinely fixes is **timeouts**: a scalar `timeout=60`
+    gave the *connect* phase 60 s, and the SSE client's `timeout=None`
+    bounded nothing at all, so a hung TLS handshake could stall its stream
+    task forever.
+
 ## 16. What not to do
 
 - **Don't run operator code in the bridge process.** §3.1. Not "for

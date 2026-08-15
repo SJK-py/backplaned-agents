@@ -42,6 +42,7 @@ from bp_mcp_bridge.custom_agent_bridge import (
     CustomAgentBridge,
     CustomAgentBridgeRow,
 )
+from bp_mcp_bridge.health import HealthGate
 from bp_mcp_bridge.server_bridge import ServerBridge, ServerBridgeRow
 
 logger = logging.getLogger(__name__)
@@ -101,12 +102,17 @@ class Supervisor:
         state_dir: Path,
         poll_interval_s: float = 30.0,
         stdio_policy: StdioPolicy | None = None,
+        health: HealthGate | None = None,
     ) -> None:
         self._admin_client = admin_client
         self._router_url = router_url
         self._state_dir = state_dir
         self._poll_interval_s = poll_interval_s
         self._stdio_policy = stdio_policy or StdioPolicy()
+        # Restart backoff + give-up, shared across every bridged kind. Without
+        # it this loop is an unbounded respawner: a permanently broken row is
+        # re-attempted every poll for the life of the process.
+        self._health = health or HealthGate()
         self._active: dict[str, _ActiveEntry] = {}
         # One map per non-MCP kind; `_kinds()` wires each to its reconcile.
         self._active_custom: dict[str, _ActiveAgentEntry] = {}
@@ -170,12 +176,24 @@ class Supervisor:
                     },
                 )
                 await self._stop(sid)
+        # Drop health state for rows that left the table entirely, so a
+        # recreated server_id starts from a clean slate.
+        for key in list(self._health.keys_for("mcp")):
+            if key.split(":", 1)[1] not in desired:
+                self._health.forget(key)
 
         # Spawn new + handle config / refresh changes.
         for sid, row in desired.items():
+            key = f"mcp:{sid}"
+            self._health.observe(
+                key,
+                signature=row.config_signature(),
+                invitation=row.pending_invitation_token,
+            )
             existing = self._active.get(sid)
             if existing is None:
-                self._start(row)
+                if self._health.may_start(key):
+                    self._start(row)
                 continue
             if existing.row.config_signature() != row.config_signature():
                 logger.info(
@@ -186,7 +204,8 @@ class Supervisor:
                     },
                 )
                 await self._stop(sid)
-                self._start(row)
+                if self._health.may_start(key):
+                    self._start(row)
                 continue
             if self._refresh_advanced(existing.row, row):
                 logger.info(
@@ -252,6 +271,7 @@ class Supervisor:
         # `_on_bridge_done` logs the exit and evicts the dead entry
         # from `_active` so the next reconcile pass respawns.
         task.add_done_callback(self._on_bridge_done)
+        self._health.record_start(f"mcp:{row.server_id}")
         self._active[row.server_id] = _ActiveEntry(
             task=task, bridge=bridge, row=row,
         )
@@ -285,6 +305,11 @@ class Supervisor:
         if task.cancelled():
             return
         exc = task.exception()
+        if name.startswith(prefix):
+            self._health.record_exit(
+                f"mcp:{name[len(prefix):]}",
+                error=f"{type(exc).__name__}: {exc}" if exc else None,
+            )
         if exc is not None:
             logger.exception(
                 "mcp_server_bridge_exited",
@@ -407,11 +432,21 @@ class Supervisor:
                     },
                 )
                 await self._stop_kind(kind, aid)
+        for key in list(self._health.keys_for(kind.name)):
+            if key.split(":", 1)[1] not in desired:
+                self._health.forget(key)
 
         for aid, row in desired.items():
+            key = f"{kind.name}:{aid}"
+            self._health.observe(
+                key,
+                signature=row.config_signature(),
+                invitation=row.pending_invitation_token,
+            )
             existing = kind.active.get(aid)
             if existing is None:
-                self._start_kind(kind, row)
+                if self._health.may_start(key):
+                    self._start_kind(kind, row)
                 continue
             if existing.row.config_signature() != row.config_signature():
                 logger.info(
@@ -423,7 +458,8 @@ class Supervisor:
                     },
                 )
                 await self._stop_kind(kind, aid)
-                self._start_kind(kind, row)
+                if self._health.may_start(key):
+                    self._start_kind(kind, row)
                 continue
             # Same config signature — only rebuild the entry if the full row
             # actually differs (e.g. a freshly minted invitation), so the
@@ -440,6 +476,7 @@ class Supervisor:
             name=f"agent_bridge:{kind.name}:{row.agent_id}",
         )
         task.add_done_callback(self._on_agent_bridge_done)
+        self._health.record_start(f"{kind.name}:{row.agent_id}")
         kind.active[row.agent_id] = _ActiveAgentEntry(
             task=task, bridge=bridge, row=row,
         )
@@ -469,6 +506,12 @@ class Supervisor:
         if task.cancelled():
             return
         exc = task.exception()
+        if name.startswith(prefix):
+            kind_name, _, agent_id = name[len(prefix):].partition(":")
+            self._health.record_exit(
+                f"{kind_name}:{agent_id}",
+                error=f"{type(exc).__name__}: {exc}" if exc else None,
+            )
         if exc is not None:
             logger.exception(
                 "agent_bridge_exited",

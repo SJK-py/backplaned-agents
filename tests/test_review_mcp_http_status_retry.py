@@ -153,15 +153,26 @@ def test_http_status_check_runs_before_transport_error_check() -> None:
     `HTTPError` — they're not in a subclass relationship. The
     classifier must check both branches; verify the HTTPStatusError
     check is reachable (lives in the source before the catch-all
-    return False)."""
-    from bp_mcp_bridge import tool_agent
+    return False).
 
-    src = inspect.getsource(tool_agent._is_transient)
+    The classifier moved to `mcp_client.is_transient_error` when the CONNECT
+    path needed the same judgement as the tool-call path; `tool_agent._is_transient`
+    is now a one-line delegation. Inspect the implementation, not the
+    delegation — and assert the delegation still points at it, so this cannot
+    quietly start testing the wrong function."""
+    from bp_mcp_bridge import tool_agent
+    from bp_mcp_bridge.mcp_client import is_transient_error
+
+    assert "is_transient_error" in inspect.getsource(tool_agent._is_transient)
+    src = inspect.getsource(is_transient_error)
     http_idx = src.find("httpx.HTTPStatusError")
     transport_idx = src.find("httpx.TransportError")
     assert http_idx >= 0
     assert transport_idx >= 0
-    # Both branches present.
+    # Both branches present, and the status branch comes FIRST — a
+    # TransportError-first order would swallow HTTPStatusError only if they
+    # were related, but ordering documents the intent either way.
+    assert http_idx < transport_idx
 
 
 def test_transient_status_set_pinned_to_429_plus_5xx() -> None:

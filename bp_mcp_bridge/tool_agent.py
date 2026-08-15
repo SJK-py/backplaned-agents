@@ -27,16 +27,16 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
-
 from bp_mcp_bridge import metrics
 from bp_mcp_bridge.config import BridgeConfig
 from bp_mcp_bridge.mcp_client import (
-    McpError,
     SseMcpClient,
     StreamableHttpMcpClient,
     ToolDefinition,
     ToolResult,
+    http_transient_status,
+    is_transient_error,
+    mcp_transient_codes,
 )
 from bp_protocol.types import AgentInfo, AgentOutput
 from bp_sdk import Agent, TaskContext
@@ -60,35 +60,20 @@ logger = logging.getLogger(__name__)
 _MAX_ATTEMPTS = 3
 _BACKOFF_INITIAL_S = 0.5
 _BACKOFF_MAX_S = 4.0
-_MCP_TRANSIENT_CODES = {-32603}
-# HTTP status codes worth retrying. 429 (too many requests) and the
-# 5xx server-error family are retried; 5xx covers transient upstream
-# failures (502 bad gateway, 503 unavailable, 504 timeout) that
-# typically clear within seconds. Other 4xx codes are client errors
-# that retry won't fix.
-_HTTP_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+# Re-exported from `mcp_client`, which owns them now that the connect path
+# needs the same classification. Kept importable from here: this is where
+# they were first defined and where a reader of the retry loop looks.
+_MCP_TRANSIENT_CODES = mcp_transient_codes()
+_HTTP_TRANSIENT_STATUS = http_transient_status()
 
 
 def _is_transient(exc: Exception) -> bool:
-    # `HTTPStatusError` is a SIBLING of `TransportError` under
-    # `httpx.HTTPError`, NOT a subclass. The R2 PR #136 retry
-    # initially missed it: a 502/503/504/429 from upstream raises
-    # `HTTPStatusError` via `resp.raise_for_status()` inside
-    # `mcp_client._call`, which surfaced immediately without retry
-    # — exactly the case the retry was added for. Check this branch
-    # FIRST so it's reachable even from a future refactor that
-    # narrows the TransportError catch.
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _HTTP_TRANSIENT_STATUS
-    if isinstance(exc, httpx.TransportError):
-        # Covers ConnectError, ReadTimeout, ReadError,
-        # RemoteProtocolError, WriteError, ConnectTimeout, etc.
-        # — anything where the request didn't get a clean HTTP
-        # response from the server.
-        return True
-    if isinstance(exc, McpError):
-        return exc.code in _MCP_TRANSIENT_CODES
-    return False
+    """Retained as this module's name for the shared classifier, which moved
+    to `mcp_client` when the CONNECT path needed the same judgement the
+    tool-call path always had (`is_transient_error`)."""
+    return is_transient_error(exc)
 
 
 async def _call_tool_with_retry(

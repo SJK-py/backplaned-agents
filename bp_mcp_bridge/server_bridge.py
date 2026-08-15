@@ -42,6 +42,7 @@ from bp_mcp_bridge.mcp_client import (
     StreamableHttpMcpClient,
     ToolDefinition,
     build_mcp_client,
+    is_transient_error,
 )
 from bp_mcp_bridge.tool_agent import (
     _build_capabilities,
@@ -70,8 +71,29 @@ _ACLOSE_TIMEOUT_S = 5.0
 # persistently down (a set event makes `_refresh_event.wait()`
 # return immediately, so without the sleep a hard-down server
 # would busy-loop list_tools()). Short enough that a transient
-# blip recovers within one cycle.
+# blip recovers within one cycle, then DOUBLES to a ceiling —
+# a fixed interval is a slow hot spin, not a fix.
 _RECONCILE_RETRY_BACKOFF_S = 5.0
+_RECONCILE_RETRY_BACKOFF_MAX_S = 300.0
+# Consecutive failed reconciles before the loop stops re-arming itself.
+# This one is invisible to `health.HealthGate`: it runs INSIDE a bridge that
+# is otherwise healthy and never exits, so nothing upstream would ever count
+# it. Giving up here is cheap and self-healing — the loop returns to
+# `_refresh_event.wait()`, and the next genuine signal (an admin "Refresh
+# tools" click or an SSE `tools/list_changed`) starts it over from zero. The
+# cost of giving up is a stale mode set, not a dead bridge.
+_RECONCILE_MAX_CONSECUTIVE_FAILURES = 8
+
+# Bounded retry around the CONNECT handshake (`initialize` + `tools/list`).
+# Without it a single transient TLS reset or 503 from a hosted provider kills
+# the whole bridge task, and the operator sees a full restart cycle for what
+# was one dropped packet. This is the same bounded-retry-on-transient policy
+# `tool_agent` has always applied to `tools/call`, moved to the one path that
+# lacked it. It is deliberately SHORT: past this the supervisor's backoff is
+# the better place to wait, because it is visible and it gives up.
+_CONNECT_ATTEMPTS = 3
+_CONNECT_BACKOFF_INITIAL_S = 1.0
+_CONNECT_BACKOFF_MAX_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -331,8 +353,7 @@ class ServerBridge:
         ).inc()
         exit_reason = "returned"
         try:
-            await self._mcp_client.initialize()
-            tools = await self._mcp_client.list_tools()
+            tools = await self._connect_with_retry()
             logger.info(
                 "mcp_server_bridge_tools_listed",
                 extra={
@@ -369,6 +390,43 @@ class ServerBridge:
             await self._tear_down_agent()
             await self._close_mcp_client_bounded()
             self._mcp_client = None
+
+    async def _connect_with_retry(self) -> list[ToolDefinition]:
+        """`initialize()` + `tools/list`, retried on TRANSIENT failures only.
+
+        A permanent error (bad auth, 404, a malformed URL) raises on the
+        first attempt — retrying it just delays the operator's feedback and
+        hammers someone else's server. A transient one (reset connection,
+        503, read timeout) gets a couple of quick goes, because a hosted
+        provider dropping one connection is ordinary and should not cost a
+        bridge restart."""
+        assert self._mcp_client is not None
+        backoff = _CONNECT_BACKOFF_INITIAL_S
+        for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+            try:
+                await self._mcp_client.initialize()
+                return await self._mcp_client.list_tools()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not is_transient_error(exc) or attempt >= _CONNECT_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "mcp_server_bridge_connect_retry",
+                    extra={
+                        "event": "mcp_server_bridge_connect_retry",
+                        "bp.mcp_server_id": self._row.server_id,
+                        "attempt": attempt,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "retry_in_s": backoff,
+                    },
+                )
+                metrics.connect_retries_total.labels(
+                    server_id=self._row.server_id,
+                ).inc()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _CONNECT_BACKOFF_MAX_S)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def _close_mcp_client_bounded(self) -> None:
         """Call `aclose()` on the MCP client with a hard timeout.
@@ -473,17 +531,20 @@ class ServerBridge:
         """Wait for refresh signals, reconcile, repeat. The signal
         comes from the supervisor (admin "Refresh tools" click on
         the UI) OR from an SSE `tools/list_changed` notification."""
+        failures = 0
         while True:
             await self._refresh_event.wait()
             self._refresh_event.clear()
             try:
                 await self._reconcile_tools()
             except Exception:  # noqa: BLE001
+                failures += 1
                 logger.exception(
                     "mcp_server_bridge_reconcile_failed",
                     extra={
                         "event": "mcp_server_bridge_reconcile_failed",
                         "bp.mcp_server_id": self._row.server_id,
+                        "consecutive_failures": failures,
                     },
                 )
                 # The event was cleared BEFORE the reconcile ran. If
@@ -493,12 +554,39 @@ class ServerBridge:
                 # LOST: added/removed tools never reconcile until the
                 # next admin click or SSE push, which for a
                 # streamable_http server may never come. Re-arm the
-                # event so the reconcile retries. The short sleep
-                # before re-arming prevents a hot spin when the
-                # upstream is persistently down (the wait() returns
-                # immediately on a set event).
-                await asyncio.sleep(_RECONCILE_RETRY_BACKOFF_S)
+                # event so the reconcile retries. The sleep before
+                # re-arming prevents a hot spin when the upstream is
+                # persistently down (the wait() returns immediately on
+                # a set event).
+                if failures >= _RECONCILE_MAX_CONSECUTIVE_FAILURES:
+                    # Stop re-arming. Falling through to `wait()` parks
+                    # the loop until something genuinely new arrives,
+                    # rather than re-asking a server that has said no
+                    # eight times in a row for the rest of the process.
+                    logger.error(
+                        "mcp_server_bridge_reconcile_gave_up",
+                        extra={
+                            "event": "mcp_server_bridge_reconcile_gave_up",
+                            "bp.mcp_server_id": self._row.server_id,
+                            "consecutive_failures": failures,
+                            "effect": "tool set is stale until the next "
+                            "refresh signal",
+                        },
+                    )
+                    metrics.reconcile_gave_up_total.labels(
+                        server_id=self._row.server_id,
+                    ).inc()
+                    failures = 0
+                    continue
+                await asyncio.sleep(
+                    min(
+                        _RECONCILE_RETRY_BACKOFF_S * (2 ** (failures - 1)),
+                        _RECONCILE_RETRY_BACKOFF_MAX_S,
+                    )
+                )
                 self._refresh_event.set()
+            else:
+                failures = 0
 
     async def _reconcile_tools(self) -> None:
         """Re-fetch tools/list and replace the agent's mode set in
