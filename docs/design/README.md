@@ -14,7 +14,7 @@ a doc's status changes, update it in both places.
 | doc | what it covers |
 | --- | --- |
 | [`router-managed-file-store.md`](./router-managed-file-store.md) | Named per-user/per-session file stash; `File*` frames, `ctx.files`, LLM `file_ref` resolution. Replaced `ProxyFile`. |
-| [`router-managed-session-store.md`](./router-managed-session-store.md) | Conversation log + session state + hand-over queue + FIFO turn lease. `SessionOp` frames, `ctx.history`. Carries two known warts (§5.2, §9.4) and one shipped-then-fixed bug (§6.4). |
+| [`router-managed-session-store.md`](./router-managed-session-store.md) | Conversation log + session state + hand-over queue + FIFO turn lease. `SessionOp` frames, `ctx.history`. Platform side landed; **the suite still uses its own tables** — §13.2 is the order to cut over. Two known warts (§5.2, §9.4), one shipped-then-fixed bug (§6.4). |
 | [`router-resolved-preset-slots.md`](./router-resolved-preset-slots.md) | The tier gate and the user's model choice resolved as one decision from an opaque slot key. Both halves landed; three `[shipped]` deviations (§5.1, §8.1, §8.2). |
 | [`deployment-agent-host.md`](./deployment-agent-host.md) | One process per agent *group*, a roster token instead of twelve invitations, one `init`. 22 compose services → 11. |
 | [`agent-tool-history-recall.md`](./agent-tool-history-recall.md) | `recall_tool_history` — an agent re-reading its own earlier tool results on demand. |

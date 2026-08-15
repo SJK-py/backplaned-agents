@@ -15,6 +15,12 @@
 > is shaped by today's `bp_agents` code or by migrating its data. §13 maps
 > the suite's known behaviours onto the primitives — as a completeness
 > check on this spec, and as a target for that rebuild.
+>
+> **The suite rebuild (§13) has NOT started.** `bp_agents` still keeps its
+> conversation in `session_history` / `session_info` and serialises turns
+> with `session_lock.py`. §13.1 records what the preset-slot cutover
+> settled about the shape that rebuild has to take, and §13.2 the order to
+> do it in — both written down because they were paid for once already.
 
 The router already owns identity, tasks, files, and sessions. It does not
 own what happens *inside* a session — the conversation. That gap is why
@@ -849,6 +855,50 @@ none of them writes another agent's thread:
 | session title, channel, chat id | `session_info` columns | session `metadata` on the router's session row |
 | webapp transcript | direct SQL | `GET /v1/sessions/{id}/messages` |
 | one turn at a time per session | `session_lock.py` — `asyncio.Lock` plus an optional Valkey lock with a renewal watchdog | `ctx.history.turn()` — the router's FIFO lease (§6.4). Valkey stops being the prerequisite for a second channel instance |
+
+### 13.1 What the preset-slot cutover already settled
+
+Three things came out of shipping `router-resolved-preset-slots.md` §8's
+suite half that this rebuild inherits rather than re-derives:
+
+  * **A delegate is the active executor before it runs.** It was not:
+    `_admit_delegation` flipped `tasks.active_agent_id` only after the
+    delegate acked, so the delegate's opening turn raced the router for its
+    own identity — and every `SessionOp` derives owner from exactly that
+    column. Fixed router-side (see that doc's §8.2). Without it, the very
+    first `HandOver`/`Append` of every hand-off would fail intermittently.
+  * **A gateway needs the user's own token, not an agent's.** The channel
+    writes the user turn *before* any task exists, so it has no task to
+    derive scope from — §8's HTTP surface is the only path, under the
+    caller's session JWT. The chatbot already mints per-user tokens through
+    its `serviced_by` rights (`chatbot/credentials.py`); the webapp holds
+    the user's own. Neither needs new authority, but the two shapes differ,
+    so `ChannelCore` needs a small store-client seam rather than a `pool`.
+  * **The webapp is where user-authority settings live.** Established for
+    model choice and it generalises: anything the router *acts* on is
+    written under the user's token, not by an agent in their session.
+
+### 13.2 Order to do it in
+
+The dependency is real, not stylistic — each step's callers are the next
+step's tests:
+
+  1. **Store client seam.** One protocol the channel engine talks to, two
+     implementations (chatbot `RouterCredentials`, webapp `UpstreamClient`)
+     over §8's endpoints. Nothing behavioural changes yet.
+  2. **`ChannelCore`.** `HandOver(kind="input")` for the user turn, the
+     §6.4 lease for `session_lock`, session state for `delegated_to`,
+     session `metadata` for title/channel/chat_id.
+  3. **Agent side.** Orchestrator + `l1_common` consume hand-overs and
+     append their own rows; `tool_history` reads by role; the summarizer
+     writes `[SetState, SetFloor]` in one batch.
+  4. **Edges.** Gateways, `cron.py`, the webapp transcript
+     (`GET /v1/sessions/{id}/messages`), `session_gc`.
+  5. **Delete.** `session_history`, `session_info`, `session_lock.py`, and
+     the queries module they anchor.
+  6. **`user_config`.** Only now: until step 5 the suite still needs its
+     pool, so moving these fields earlier buys nothing and costs a network
+     round trip per turn on the hot path.
 
 Two failure modes disappear rather than move. The orphan-seed rollback
 (`orchestrator/agent.py:270-277`) exists only because the seed is written
