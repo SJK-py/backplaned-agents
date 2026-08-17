@@ -264,47 +264,88 @@ per-user pooled connection where it does not, chosen per server and
 invisible outside the bridge task. It is a pool-sizing question, not a
 question about what an agent is.
 
-### 4.3 The mode set stays operator-wide; the *offered* tool list is per user
+### 4.3 The offered tool list cannot be filtered per user — and should not be
 
 `tools/list` needs a credential, but the catalogue is a property of the
-server while credentials are per user. Resolution: a `per_user` server keeps
-an operator credential **for the catalogue only** — used for `initialize` +
-`tools/list` and the `tools_cache` write — with per-user credentials used
+server while credentials are per user. Resolution for the **catalogue**: a
+`per_user` server keeps an operator credential used only for `initialize` +
+`tools/list` and the `tools_cache` write, with per-user credentials used
 exclusively for `tools/call`. One bridge per row, one mode set, unchanged.
 
-The obvious objection is that the mode set is then the operator's view: if a
-user's token reaches fewer tools, the agent still advertises the full set and
-the extras fail at call time. An earlier draft accepted that as a declared
-cost. It should not be accepted, because the platform already has the right
-filter point.
+That leaves the question of what the *model* is offered. An earlier draft of
+this section claimed the fix was to filter the offered tool list per user
+through `ctx.peers.visible()`. **That was wrong, structurally, and the reason
+is worth recording because it looks like it should work.**
 
-`bp_sdk/peers.py:505` — `PeerAccess.visible(*, for_user_level=None)` already
-filters the destination catalogue **per task**, defaulting to the active
-task's `user_level` and being default-closed when there is none. The
-orchestrator builds its hand-off tool list from exactly that call
-(`orchestrator/agent.py:67`). So a per-user view of what is callable is not a
-new concept needing a new mechanism — it is an existing hook with one more
-input.
+`bp_router/visibility.py:21` builds the catalogue **per connecting agent**,
+not per task. Each entry carries `callable_user_levels` — "the subset of
+`deployment_levels(max_tier)` for which `(caller → callee)` is allowed" —
+precomputed for *every* level, precisely so "the SDK uses this to filter
+outbound LLM tool schemas without re-evaluating rules." It is delivered in
+`WelcomeFrame.available_destinations` and replaced wholesale by
+`CatalogUpdateFrame`, which "carries the full catalog snapshot." One snapshot
+per connected agent, shared by every task that agent serves.
 
-Which gives the correct layering:
+`visible()` then filters that static snapshot by the active task's
+`user_level`. So the *filter* is per task, but the *data* is per connection
+and user-independent by construction.
 
-  * **Mode set** (router, per agent) — every tool the server exposes, from
-    the operator's catalogue credential. Unchanged.
-  * **Offered tool list** (caller, per task) — filtered by whether *this*
-    user has connected *this* server, so an unconnected server's tools are
-    never put in front of the model.
+Tier can ride in the catalogue because levels are enumerable — the same
+"dozens, not millions" argument that decides metric labels (§4.4). Users are
+not enumerable, and a per-user catalogue would mean one snapshot per
+(agent × user) pushed on every credential change. There is no version of
+`visible()` that answers "has *this user* connected *this server*."
 
-`expose_to_llm` is the existing precedent for the second layer: a per-server
-flag that already decides whether a server's tools reach an LLM at all,
-without touching the mode set. Per-user connection state is the same kind of
-gate with a finer key.
+#### The three real options
 
-What this does **not** fix, and what stays a declared cost: a user who *has*
-connected but whose token is scoped more narrowly than the operator's still
-sees tools their token cannot reach. Fixing that needs per-user `tools/list`,
-which needs per-user mode sets, which the router's agent model does not
-express — an agent has one mode set. §9's typed error is the answer there,
-not a filter.
+  * **A. A per-task query.** The agent asks the router, for this task's user,
+    which `per_user` servers are connected. `SessionOpFrame` is the exact
+    precedent — a per-task router query where "the router derives the
+    authoritative `(user_id, session_id)` from the task row" rather than
+    trusting the agent. Costs a round-trip per turn (cacheable per user), and
+    adds a protocol surface.
+  * **B. The router refuses at admit.** The router *holds the tokens*
+    (§3.2 option B), so it is the one component that already knows. It
+    already admit-validates a spawn against the destination's
+    `accepts_schema`; refusing a spawn to a `per_user` server this user has
+    not connected is the same gate with one more condition — and it fails
+    before the bridge is involved at all.
+  * **C. Don't filter. Make the error excellent.** Offer every tool; an
+    unconnected server returns the typed not-connected result of §9, which
+    the orchestrator relays.
+
+#### Filtering is the wrong goal
+
+The draft treated filtering as obviously desirable and then looked for a
+mechanism. Inverting that assumption is what resolves the section.
+
+If an unconnected server's tools are hidden, the assistant tells the user
+*"I can't do that"* — and the user never learns that they **could**, by
+connecting an account. The capability silently does not exist. If the tools
+are offered and the call returns *"connect your GitHub account in Settings →
+Connections"*, the user learns both that the capability exists and exactly
+how to enable it.
+
+**Silent absence is the worse outcome and the more expensive one to build.**
+So: **B for the mechanism, C for the posture.** No new protocol surface, no
+per-task round-trip, and the failure path is the feature's discovery path.
+This makes §9's typed error load-bearing rather than a nicety — it is now the
+*only* way a user finds out a connectable server exists.
+
+**A stays in reserve, with a named trigger.** The residual cost of C is
+context: N unconnected `per_user` servers still put their tool schemas in
+front of the model on every turn, and invite attempts that fail. With one or
+two servers that is noise; with a dozen it is real token cost and real
+model distraction. If that bites, A is the fix — and it is additive, because
+B's admit check remains correct either way.
+
+#### What stays a declared cost regardless
+
+A user who *has* connected, but whose token is scoped more narrowly than the
+operator's catalogue credential, is still offered tools their token cannot
+reach. No filter fixes this: it needs per-user `tools/list`, which needs
+per-user mode sets, which the router's agent model does not express — an
+agent has one mode set. §9's typed error is the answer there too.
 
 ### 4.4 What "agent health" means once connections are per user
 
@@ -598,6 +639,12 @@ missing), and surfacing it as a bare `401` tool error produces an assistant
 that says "the tool failed" when the correct answer is
 *"connect your GitHub account in Settings → Connections."*
 
+**§4.3 makes this load-bearing rather than a nicety.** Because the offered
+tool list is deliberately *not* filtered per user, this error is the only way
+a user discovers that a connectable server exists at all. It is the feature's
+discovery path, not just its failure path — which also means it must name the
+server and link to the page, not merely report a category.
+
 So it needs a typed result the orchestrator can act on: a distinguishable
 error class with the server id and a deep link, and prompt guidance to relay
 it verbatim rather than retry. This is small and easy to skip, and skipping
@@ -630,8 +677,11 @@ are unchanged; only how the token is *obtained* differs.
 
 ## 11. Non-goals
 
-  * **Per-user tool lists.** §4.3. Needs per-user connections and per-user
-    mode sets; the router's agent model has one mode set per agent.
+  * **Per-user tool lists.** §4.3 — and note this is a non-goal on two
+    independent grounds. The catalogue is per connecting agent and
+    user-independent by construction, so `visible()` cannot express it; and
+    even given the data, hiding an unconnected server's tools is worse UX
+    than offering them and returning a "connect your account" error.
   * **`per_user` for stdio servers.** A local subprocess's credential is its
     environment, which is per-row. Refuse at the admin API.
   * **Dynamic client registration** (RFC 7591). Operators register manually.
@@ -664,11 +714,20 @@ are unchanged; only how the token is *obtained* differs.
     states the rule — labels must be operator-defined and finite. Per-user
     state belongs in the row and on the user's own settings page; the
     operator's dashboard gets aggregates.
-  * **Don't make the mode set per user.** §4.3. Filter what is *offered* to
-    the model, via the existing per-task `ctx.peers.visible()` hook; leave
-    the agent's registered mode set as the operator's full catalogue. An
-    agent has one mode set — that is a property of the router's agent model,
-    not an inconvenience to route around.
+  * **Don't try to filter the offered tool list per user.** §4.3. The
+    catalogue in `WelcomeFrame` / `CatalogUpdateFrame` is built per
+    *connecting agent* and is user-independent by construction —
+    `callable_user_levels` works only because levels are enumerable. There is
+    no version of `ctx.peers.visible()` that answers "has this user connected
+    this server," and adding one would mean a catalogue snapshot per
+    (agent × user).
+  * **Don't hide an unconnected server's tools even if you could.** §4.3.
+    Silent absence tells the user "I can't do that"; an offered tool that
+    returns "connect your account" tells them the capability exists and how
+    to get it. The error is the discovery path.
+  * **Don't make the mode set per user.** §4.3. An agent has one mode set —
+    a property of the router's agent model, not an inconvenience to route
+    around.
   * **Don't let the bridge hold a refresh token or an OAuth client secret.**
     §3.1–3.2. It holds the invitation-minting service secret and every
     agent's credentials, and it runs operator code with unrestricted egress.
