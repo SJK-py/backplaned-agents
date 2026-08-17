@@ -1,9 +1,33 @@
 # Per-user credentials for MCP servers
 
-> **Status: proposed.** No code. This doc settles two questions that must be
-> answered before any is written: **who holds a user's third-party token**
-> (§3), and **how a per-user credential coexists with an MCP server being one
-> backplane agent** (§4). Everything else follows from those.
+> **Status: proposed, and deferred behind
+> [`mcp-agent-oauth.md`](./mcp-agent-oauth.md).** No code.
+>
+> **The reason for the deferral is architectural, and it is the most useful
+> thing in this doc.** The platform's model is that an agent is a stateless
+> workhorse and the *router* enforces access control: an agent does not decide
+> who may call it and carries no per-caller policy — the ACL does, evaluated
+> router-side and precomputed into the catalogue. A per-user credential asks
+> the agent to hold a different credential per caller, which is per-caller
+> policy living inside the agent. That is an **innate mismatch with the
+> architecture**, not an implementation inconvenience, and it is why §4 below
+> keeps needing one more rule to hold the line — a pool that must not become
+> agents (§4.2), a tool list that cannot be filtered (§4.3), a health signal
+> that must be decomposed (§4.4). Four subsections of discipline with nothing
+> structurally enforcing any of it is a signal about the design, not about the
+> writing.
+>
+> `mcp-agent-oauth.md` gets the operator-facing win — OAuth instead of a
+> pasted PAT, refresh instead of silent expiry, and MCP servers that only
+> accept OAuth becoming connectable at all — with **one credential per agent**,
+> which is what the architecture already expects. It is a strict subset of
+> this design (§8 there), so nothing here is wasted if per-user is ever
+> justified.
+>
+> Everything below stands as the record of what per-user would take. It
+> settles two questions: **who holds a user's third-party token** (§3), and
+> **how a per-user credential coexists with an MCP server being one backplane
+> agent** (§4).
 >
 > §4 is the one to read if you only read one. An MCP server is a single
 > agent — one `agent_id`, one ACL position, one mode set, one entry in the
