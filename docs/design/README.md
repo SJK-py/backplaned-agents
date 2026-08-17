@@ -26,6 +26,12 @@ a doc's status changes, update it in both places.
 | [`quota-enforcement.md`](./quota-enforcement.md) | Phases 1–2 landed; phase 3 (concurrent-task caps) outstanding. |
 | [`kakao-channel.md`](./kakao-channel.md) | KakaoTalk as an egress-only pull channel behind a relay + queue. |
 
+## Proposed — not implemented
+
+| doc | what it covers |
+| --- | --- |
+| [`mcp-per-user-oauth.md`](./mcp-per-user-oauth.md) | A user connecting *their own* account to an MCP server from the webapp, instead of every user's call carrying the operator's one credential. Feasible — `ctx.user_id` already reaches the bridge handler and `security/oidc.py` is already an OAuth2 client — but **blocked on there being no encryption at rest** (§3.3), and the custody question (§3) has to be settled before any code. Ships as a pasted bearer token first (§10), OAuth second. |
+
 ## Deferred / superseded
 
 | doc | why |
