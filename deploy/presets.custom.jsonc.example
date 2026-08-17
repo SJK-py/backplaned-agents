@@ -52,8 +52,8 @@
 //                     ctx.llm.generate(preset="..."). Slug grammar
 //                     ^[a-z][a-z0-9_-]{0,63}$ — lowercase, digits, `-`/`_`,
 //                     ≤64 chars, NO dots (enforced by a DB CHECK constraint).
-//                     Versions use `-`: name "gemini-2-5-pro" →
-//                     concrete_model "gemini-2.5-pro".
+//                     Versions use `-`: name "gemini-3-5-flash" →
+//                     concrete_model "gemini-3.5-flash".
 //
 // ✱ provider          Which adapter handles the call. One of:
 //                       gemini | anthropic | openai | openai-embeddings |
@@ -64,8 +64,9 @@
 //                     llama.cpp-server, Ollama OpenAI-mode, TGI).
 //
 // ✱ concrete_model    The REAL upstream model id the provider SDK receives,
-//                     KEEPING its native form incl. dots (e.g. "gemini-2.5-pro",
-//                     "claude-sonnet-4-6", "gpt-5.5"). Unlike `name`, it is not
+//                     KEEPING its native form incl. dots (e.g. "gemini-3.5-flash",
+//                     "gpt-5.5"). Claude 5 ids have no dots, so there
+//                     name and concrete_model coincide. Unlike `name`, it is not
 //                     slug-constrained.
 //
 //   api_key_ref       (default "") INDIRECT credential reference resolved at
@@ -193,7 +194,7 @@
 //   {
 //     "name": "claude-opus",
 //     "provider": "anthropic",
-//     "concrete_model": "claude-opus-4-8",
+//     "concrete_model": "claude-opus-5",
 //     "api_key_ref": "env://ANTHROPIC_API_KEY",
 //     "default_max_tokens": 4096,
 //     "fallback_preset": "claude-sonnet",

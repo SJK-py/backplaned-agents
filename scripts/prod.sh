@@ -79,7 +79,7 @@ ask() {  # ask <var> <prompt> <default>
 yesish() { [[ "${1,,}" =~ ^(y|yes)$ ]]; }
 
 # Read a string field from the bundled catalogue entry named $1 (field $2),
-# e.g. catalog_field claude concrete_model -> "claude-sonnet-4-6". Lets prod.sh
+# e.g. catalog_field claude concrete_model -> "claude-sonnet-5". Lets prod.sh
 # resolve models BY ALIAS from presets_catalog.jsonc instead of hardcoding them
 # (kept in sync automatically as the catalogue's models move). Catalogue entries
 # are flat one-field-per-line objects (no nested braces — provider_options were

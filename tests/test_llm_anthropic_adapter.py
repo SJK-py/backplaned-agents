@@ -535,13 +535,16 @@ def test_default_aliases_include_claude() -> None:
         b = svc._presets[alias]
         return b.provider, b.concrete_model
 
-    assert _resolve("claude") == ("anthropic", "claude-sonnet-4-6")
-    assert _resolve("claude-opus") == ("anthropic", "claude-opus-4-8")
-    assert _resolve("claude-opus-4-8") == ("anthropic", "claude-opus-4-8")
-    assert _resolve("claude-sonnet") == ("anthropic", "claude-sonnet-4-6")
-    assert _resolve("claude-sonnet-4-6") == ("anthropic", "claude-sonnet-4-6")
+    assert _resolve("claude") == ("anthropic", "claude-sonnet-5")
+    assert _resolve("claude-opus") == ("anthropic", "claude-opus-5")
+    assert _resolve("claude-opus-5") == ("anthropic", "claude-opus-5")
+    assert _resolve("claude-sonnet") == ("anthropic", "claude-sonnet-5")
+    assert _resolve("claude-sonnet-5") == ("anthropic", "claude-sonnet-5")
+    # Haiku 4.5 is still the current Haiku — no Haiku 5 exists.
     assert _resolve("claude-haiku") == ("anthropic", "claude-haiku-4-5")
     assert _resolve("claude-haiku-4-5") == ("anthropic", "claude-haiku-4-5")
+    # Opt-in only: reachable by name, deliberately not behind a tier alias.
+    assert _resolve("claude-fable-5") == ("anthropic", "claude-fable-5")
 
 
 # ---------------------------------------------------------------------------

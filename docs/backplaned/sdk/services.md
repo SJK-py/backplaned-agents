@@ -296,26 +296,24 @@ Tier gate on fallback targets:
 {"type":"LlmDelta","finish_reason":"stop"}
 ```
 
-**Built-in aliases:**
+**Built-in aliases.** Generated from `bp_router/llm/presets_catalog.jsonc`, which is the source of truth — this table is a convenience copy and the catalogue wins where they disagree. The catalogue is trimmed to the newest model per tier, so an alias resolves to a different concrete model over time while its name stays put; that indirection is the point.
 
-| Alias | Provider | Concrete model |
+| Alias(es) | Provider | Concrete model |
 | --- | --- | --- |
-| `default` | gemini | `gemini-2.5-flash` |
-| `gemini-2.5` / `gemini-2.5-pro` | gemini | `gemini-2.5-pro` |
-| `gemini-2.5-flash` | gemini | `gemini-2.5-flash` |
-| `gemini-3` / `gemini-3-flash` | gemini | `gemini-3-flash-preview` |
-| `claude-opus` / `claude-opus-4-8` | anthropic | `claude-opus-4-8` |
-| `claude-sonnet` / `claude-sonnet-4-6` | anthropic | `claude-sonnet-4-6` |
+| `default` / `gemini` / `gemini-3-5-flash` | gemini | `gemini-3.5-flash` |
+| `default_embedding` / `gemini-embedding-2` / `gemini-embedding` | gemini | `gemini-embedding-2` |
+| `gemini-3-1-flash-lite` / `gemini-lite` | gemini | `gemini-3.1-flash-lite` |
+| `gemini-3-1-pro` / `gemini-pro` | gemini | `gemini-3.1-pro-preview` |
+| `claude` / `claude-sonnet` / `claude-sonnet-5` | anthropic | `claude-sonnet-5` |
+| `claude-opus` / `claude-opus-5` | anthropic | `claude-opus-5` |
 | `claude-haiku` / `claude-haiku-4-5` | anthropic | `claude-haiku-4-5` |
-| `openai` / `gpt` / `gpt-5.5` | openai | `gpt-5.5` |
-| `gpt-5.5-pro` | openai | `gpt-5.5-pro` |
-| `gpt-5.4` / `gpt-5.4-mini` | openai | `gpt-5.4*` |
-| `gpt-5` / `gpt-5-mini` | openai | `gpt-5*` |
-| `gpt-4.1` / `gpt-4o` | openai | `gpt-4.1` / `gpt-4o` |
-| `o4-mini` | openai | `o4-mini` |
-| `text-embedding-3-small` | openai-embeddings | `text-embedding-3-small` |
+| `claude-fable-5` | anthropic | `claude-fable-5` |
+| `openai` / `gpt` / `gpt-5-5` | openai | `gpt-5.5` |
+| `gpt-5-5-pro` / `gpt-pro` | openai | `gpt-5.5-pro` |
+| `gpt-5-4-mini` | openai | `gpt-5.4-mini` |
+| `gpt-5-4-nano` / `gpt-nano` | openai | `gpt-5.4-nano` |
+| `text-embedding-3-small` / `gpt-embedding` | openai-embeddings | `text-embedding-3-small` |
 | `text-embedding-3-large` | openai-embeddings | `text-embedding-3-large` |
-| `text-embedding-ada-002` | openai-embeddings | `text-embedding-ada-002` |
 
 These presets are seeded into an empty `llm_presets` table on first
 startup. Operators tighten access (e.g., gating

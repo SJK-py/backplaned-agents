@@ -34,8 +34,9 @@
 //
 // NAMING: preset `name` must match ^[a-z][a-z0-9_-]{0,63}$ (the DB CHECK
 // constraint) — so dots are NOT allowed and versions use `-` (e.g.
-// `gemini-2-5-pro`). `concrete_model` is the real upstream identifier the
-// provider SDK sees and KEEPS its dotted form (e.g. `gemini-2.5-pro`).
+// `gemini-3-5-flash`). `concrete_model` is the real upstream identifier the
+// provider SDK sees and KEEPS its dotted form (e.g. `gemini-3.5-flash`).
+// Claude 5 ids contain no dots, so there the two coincide.
 [
   // ===================== Gemini family =====================
   {
@@ -54,12 +55,6 @@
     "name": "gemini",
     "provider": "gemini",
     "concrete_model": "gemini-3.5-flash",
-    "api_key_ref": "env://GEMINI_API_KEY"
-  },
-  {
-    "name": "gemini-2-5-pro",
-    "provider": "gemini",
-    "concrete_model": "gemini-2.5-pro",
     "api_key_ref": "env://GEMINI_API_KEY"
   },
   {
@@ -115,36 +110,56 @@
   },
 
   // ===================== Anthropic / Claude family =====================
+  // Claude 5 model ids carry NO dots and NO date suffix — `claude-opus-5`,
+  // not `claude-opus-5-20260401` and not `claude-opus-5.0`. So unusually,
+  // `name` and `concrete_model` are identical here; the version-uses-`-`
+  // rule in the header only bites providers whose real ids contain dots.
+  //
+  // THINKING IS ON BY DEFAULT on Opus 5 and Sonnet 5, and `max_tokens` is
+  // the TOTAL budget the model splits between hidden thinking and visible
+  // output — the caveat `bp_sdk/llm.py` already documents for Gemini 2.5+.
+  // Nothing here pins `default_max_tokens`, so calls fall through to the
+  // adapter's `_DEFAULT_MAX_TOKENS`; that constant was sized when thinking
+  // was off by default and was raised for these models.
+  //
+  // DO NOT pin `default_temperature` on an Opus 5 / Sonnet 5 preset, and
+  // warn operators off setting one in the admin UI: these models REJECT a
+  // non-default `temperature` / `top_p` / `top_k` with a 400. The adapter
+  // omits the field entirely when it is None, which is why the presets
+  // below work — steer them with prompting instead.
   {
     "name": "claude",
     "provider": "anthropic",
-    "concrete_model": "claude-sonnet-4-6",
+    "concrete_model": "claude-sonnet-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
     "name": "claude-opus",
     "provider": "anthropic",
-    "concrete_model": "claude-opus-4-8",
+    "concrete_model": "claude-opus-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
-    "name": "claude-opus-4-8",
+    "name": "claude-opus-5",
     "provider": "anthropic",
-    "concrete_model": "claude-opus-4-8",
+    "concrete_model": "claude-opus-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
     "name": "claude-sonnet",
     "provider": "anthropic",
-    "concrete_model": "claude-sonnet-4-6",
+    "concrete_model": "claude-sonnet-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
   {
-    "name": "claude-sonnet-4-6",
+    "name": "claude-sonnet-5",
     "provider": "anthropic",
-    "concrete_model": "claude-sonnet-4-6",
+    "concrete_model": "claude-sonnet-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
+  // Haiku 4.5 is still the current Haiku — there is no Haiku 5. Kept as the
+  // cheap/fast tier; note its context window is 200K, not the 1M the Opus
+  // and Sonnet entries above carry.
   {
     "name": "claude-haiku",
     "provider": "anthropic",
@@ -155,6 +170,21 @@
     "name": "claude-haiku-4-5",
     "provider": "anthropic",
     "concrete_model": "claude-haiku-4-5",
+    "api_key_ref": "env://ANTHROPIC_API_KEY"
+  },
+  // Anthropic's most capable widely released model. NOT wired to any alias
+  // or tier slot on purpose — it is opt-in, because three of its properties
+  // will surprise an operator who selects it expecting an Opus:
+  //   * it costs ~2x Opus 5 per token;
+  //   * it REQUIRES 30-day data retention — under zero data retention (or
+  //     any shorter retention) EVERY request 400s, with nothing wrong in
+  //     the payload;
+  //   * thinking is always on and cannot be disabled, so it needs the same
+  //     `max_tokens` headroom as the Claude 5 entries above.
+  {
+    "name": "claude-fable-5",
+    "provider": "anthropic",
+    "concrete_model": "claude-fable-5",
     "api_key_ref": "env://ANTHROPIC_API_KEY"
   },
 
@@ -183,12 +213,10 @@
     "concrete_model": "gpt-5.5-pro",
     "api_key_ref": "env://OPENAI_API_KEY"
   },
-  {
-    "name": "gpt-5-4",
-    "provider": "openai",
-    "concrete_model": "gpt-5.4",
-    "api_key_ref": "env://OPENAI_API_KEY"
-  },
+  // The mini and nano TIERS have no 5.5 release, so their newest entries are
+  // still 5.4 — that mismatch is deliberate, not a stale leftover. The 5.4
+  // standard and the whole gpt-5 / gpt-4.1 generation are dropped: every one
+  // of them is superseded by an entry above at the same tier.
   {
     "name": "gpt-5-4-mini",
     "provider": "openai",
@@ -199,30 +227,6 @@
     "name": "gpt-5-4-nano",
     "provider": "openai",
     "concrete_model": "gpt-5.4-nano",
-    "api_key_ref": "env://OPENAI_API_KEY"
-  },
-  {
-    "name": "gpt-5",
-    "provider": "openai",
-    "concrete_model": "gpt-5",
-    "api_key_ref": "env://OPENAI_API_KEY"
-  },
-  {
-    "name": "gpt-5-mini",
-    "provider": "openai",
-    "concrete_model": "gpt-5-mini",
-    "api_key_ref": "env://OPENAI_API_KEY"
-  },
-  {
-    "name": "gpt-5-nano",
-    "provider": "openai",
-    "concrete_model": "gpt-5-nano",
-    "api_key_ref": "env://OPENAI_API_KEY"
-  },
-  {
-    "name": "gpt-4-1",
-    "provider": "openai",
-    "concrete_model": "gpt-4.1",
     "api_key_ref": "env://OPENAI_API_KEY"
   },
   // Friendly tier aliases (point at the current nano / pro GPT models).

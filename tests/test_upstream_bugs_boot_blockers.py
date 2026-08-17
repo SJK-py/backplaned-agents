@@ -114,13 +114,18 @@ def test_bug2_concrete_models_keep_dotted_form() -> None:
 
     presets = {p.name: p for p in default_presets()}
     # Spot-check the renames: name uses `-`, concrete_model uses `.`.
-    assert presets["gemini-2-5-pro"].concrete_model == "gemini-2.5-pro"
+    # Gemini and GPT ids are the only dotted ones left — Claude 5 model ids
+    # carry no dots at all, so an `assert name == concrete_model` there would
+    # pass without exercising this invariant. Don't "modernise" these to
+    # Claude entries.
     assert presets["gemini-3-5-flash"].concrete_model == "gemini-3.5-flash"
+    assert presets["gemini-3-1-flash-lite"].concrete_model == (
+        "gemini-3.1-flash-lite"
+    )
     assert presets["gpt-5-5"].concrete_model == "gpt-5.5"
     assert presets["gpt-5-5-pro"].concrete_model == "gpt-5.5-pro"
-    assert presets["gpt-5-4"].concrete_model == "gpt-5.4"
     assert presets["gpt-5-4-mini"].concrete_model == "gpt-5.4-mini"
-    assert presets["gpt-4-1"].concrete_model == "gpt-4.1"
+    assert presets["gpt-5-4-nano"].concrete_model == "gpt-5.4-nano"
 
 
 def test_bug2_load_presets_from_db_seeds_in_a_single_transaction() -> None:

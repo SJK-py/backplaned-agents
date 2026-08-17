@@ -844,10 +844,14 @@ def test_default_aliases_include_openai_family() -> None:
     assert _resolve("openai") == ("openai", "gpt-5.5")
     assert _resolve("gpt") == ("openai", "gpt-5.5")
     assert _resolve("gpt-5-5") == ("openai", "gpt-5.5")
-    assert _resolve("gpt-5") == ("openai", "gpt-5")
+    # The catalogue keeps only the newest entry per TIER: 5.5 standard and
+    # pro, 5.4 mini and nano (no 5.5 release at those tiers). The gpt-5 and
+    # gpt-4.1 generations are gone — do not re-add assertions for them
+    # without re-adding the catalogue entries.
     assert _resolve("gpt-5-4-mini") == ("openai", "gpt-5.4-mini")
     assert _resolve("gpt-5-4-nano") == ("openai", "gpt-5.4-nano")
-    assert _resolve("gpt-5-nano") == ("openai", "gpt-5-nano")
+    assert _resolve("gpt-5-4-mini") == ("openai", "gpt-5.4-mini")
+    assert _resolve("gpt-5-4-nano") == ("openai", "gpt-5.4-nano")
 
 
 # ---------------------------------------------------------------------------

@@ -174,7 +174,7 @@ def test_service_seeds_default_presets() -> None:
     assert "default" in names
     # Preset names with `-` replacing `.` per upstream-bug #2.
     assert "gpt-5-5" in names
-    assert "claude-opus-4-8" in names
+    assert "claude-opus-5" in names
     assert "text-embedding-3-small" in names
 
 
@@ -328,22 +328,28 @@ def test_default_presets_cover_known_aliases() -> None:
     names = {p.name for p in default_presets()}
     expected = {
         # Gemini
-        "default", "default_embedding", "gemini", "gemini-2-5-pro",
+        "default", "default_embedding", "gemini",
         "gemini-3-5-flash", "gemini-3-1-flash-lite", "gemini-3-1-pro",
         "gemini-lite", "gemini-pro", "gemini-embedding-2", "gemini-embedding",
-        # Anthropic
-        "claude", "claude-opus", "claude-opus-4-8",
-        "claude-sonnet", "claude-sonnet-4-6",
-        "claude-haiku", "claude-haiku-4-5",
-        # OpenAI
+        # Anthropic — Claude 5 ids carry no dots, so name == concrete_model.
+        # Haiku 4.5 is the current Haiku; `claude-fable-5` is opt-in and has
+        # no tier alias.
+        "claude", "claude-opus", "claude-opus-5",
+        "claude-sonnet", "claude-sonnet-5",
+        "claude-haiku", "claude-haiku-4-5", "claude-fable-5",
+        # OpenAI — newest per TIER: 5.5 standard/pro, 5.4 mini/nano (no 5.5
+        # release at those tiers).
         "openai", "gpt", "gpt-5-5", "gpt-5-5-pro",
-        "gpt-5-4", "gpt-5-4-mini", "gpt-5-4-nano", "gpt-5", "gpt-5-mini",
-        "gpt-5-nano", "gpt-4-1", "gpt-nano", "gpt-pro",
+        "gpt-5-4-mini", "gpt-5-4-nano", "gpt-nano", "gpt-pro",
         # Embeddings
         "text-embedding-3-small", "text-embedding-3-large", "gpt-embedding",
     }
     missing = expected - names
     assert not missing, f"missing default presets: {missing}"
+    # The catalogue is TRIMMED to the newest per tier: a superseded entry
+    # creeping back in is as much a regression as a missing one.
+    extra = names - expected
+    assert not extra, f"unexpected default presets: {extra}"
 
 
 def test_default_presets_min_user_level_is_wildcard() -> None:

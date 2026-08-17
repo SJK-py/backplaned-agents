@@ -201,7 +201,7 @@ def test_default_aliases_include_gemini_3() -> None:
     assert _resolve_concrete(svc, "default") == ("gemini", "gemini-3.5-flash")
     assert _resolve_concrete(svc, "default_embedding") == ("gemini", "gemini-embedding-2")
     assert _resolve_concrete(svc, "gemini") == ("gemini", "gemini-3.5-flash")
-    assert _resolve_concrete(svc, "gemini-2-5-pro") == ("gemini", "gemini-2.5-pro")
+    # gemini-2-5-pro is dropped — superseded by the 3.1 pro entry below.
     assert _resolve_concrete(svc, "gemini-3-5-flash") == ("gemini", "gemini-3.5-flash")
     assert _resolve_concrete(svc, "gemini-3-1-flash-lite") == (
         "gemini", "gemini-3.1-flash-lite"

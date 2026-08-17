@@ -60,9 +60,25 @@ def _anthropic_retry_after(exc: BaseException) -> float | None:
     return parse_http_retry_after(exc)
 
 
-# Anthropic's `messages.create` requires `max_tokens`. Pick a default
-# tall enough for typical responses but not so tall that it eats budget.
-_DEFAULT_MAX_TOKENS = 4096
+# Anthropic's `messages.create` requires `max_tokens`, and nothing upstream
+# supplies one: no suite agent passes it, and no bundled preset pins
+# `default_max_tokens`, so essentially every Anthropic call lands on this
+# constant.
+#
+# It is a CEILING, not a target — a higher value costs nothing unless the
+# model actually generates more — and 4096 became the wrong ceiling when the
+# catalogue moved to Claude 5. On Opus 5 and Sonnet 5 thinking is ON BY
+# DEFAULT, and `max_tokens` is the total budget the model splits between
+# hidden thinking and visible output (the caveat `bp_sdk/llm.py` documents for
+# Gemini 2.5+ now applies to Claude too). Under 4096 a non-trivial turn can
+# spend most of the budget thinking and return a truncated answer with
+# `finish_reason="length"` — a silent quality regression, not an error.
+#
+# 16000 is the documented safe default for NON-STREAMING requests, which is
+# what this adapter issues (`stream=False`); the ceiling for a streaming path
+# is much higher, but a large non-streaming budget risks the SDK's HTTP
+# timeout instead. Revisit this together, not separately.
+_DEFAULT_MAX_TOKENS = 16000
 
 
 # Top-level Anthropic kwargs that pass through `provider_options`
