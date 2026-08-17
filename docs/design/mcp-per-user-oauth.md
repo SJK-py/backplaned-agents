@@ -12,6 +12,12 @@
 > already resolves a per-user decision at call time without per-user agents,
 > every time an agent calls `ctx.llm` (§4.1).
 >
+> **§4.4 answers the question that follows from that:** once the agent owns a
+> connection per active user, what does "agent health" even mean? Short
+> version — `health.py` measures *startability* and must keep measuring only
+> that; per-user credential failures get their own gate with its own reset
+> conditions, and never feed the agent's.
+>
 > The prerequisites are unusually good — `ctx.user_id` already reaches the
 > bridge handler, `bp_router/security/oidc.py` is already a working OAuth2
 > client, and `user_llm_preferences` is already the precedent for the data
@@ -300,7 +306,115 @@ which needs per-user mode sets, which the router's agent model does not
 express — an agent has one mode set. §9's typed error is the answer there,
 not a filter.
 
-### 4.4 The version where the question cannot arise
+### 4.4 What "agent health" means once connections are per user
+
+If the per-server agent owns N per-user connections, "is the agent healthy?"
+stops having one answer. Worth being precise about what the current gate
+measures before deciding what it should measure.
+
+**`health.py` today answers exactly one question, and it is narrower than its
+name suggests.** It is fed from one place: `record_exit` is called only from
+`supervisor.py:309`, in `_on_bridge_done`, when the **bridge task exits**. A
+failed `tools/call` never touches it. So the signal is *startability* — could
+this agent's bridge task come up and stay up for `_HEALTHY_RUN_S` (60s)?
+Eight consecutive failures to do that trips `bridge_given_up`, with a
+30s→15min backoff in between.
+
+That model assumes one agent = one connection = one credential. Per-user
+connections break the assumption, so the question decomposes:
+
+| Question | Granularity | Owner | Feeds `health.py`? |
+| --- | --- | --- | --- |
+| Can the bridge task start and stay up? (invitation, router WS, process) | per **agent** | supervisor | **Yes** — unchanged |
+| Is the MCP server reachable and speaking MCP? | per **server** | the catalogue connection (§4.3) | **Yes, at start** — via the existing `_connect_with_retry`, on the one connection the bridge already makes |
+| Is *this user's* credential good? | per **(server, user)** | the pool | **Never** |
+
+The third row is the load-bearing one, and "never" is a mechanism claim, not
+a preference. `_MAX_FAILURES` is **8 consecutive failures**. If per-user
+connects fed the gate, eight users with stale tokens — or one user retrying
+eight times — would set `bridge_given_up` and stop the server for everyone
+whose credentials are fine. The gate exists to stop hammering *someone
+else's server*; a user's revoked token is not hammering anything.
+
+**The catalogue connection is the canary, and it already exists.** A
+`per_user` server still makes exactly one operator-credential connection at
+startup for `initialize` + `tools/list` (§4.3). If the server is down, that
+fails, the task exits early, and `health.py` counts it — precisely as today.
+"Server unreachable at start" needs no new signal.
+
+#### A second gate, per credential
+
+The §15.1 lesson — every loop that talks to a third party needs an escalating
+wait and a ceiling — applies to per-user connects too. But it is a *different*
+gate, and the differences are the point:
+
+| | agent gate (`health.py`, exists) | credential gate (new) |
+| --- | --- | --- |
+| key | `mcp:<server_id>` | `(server_id, user_id)` |
+| trips on | 8 failed bridge **starts** | N failed connects/calls for that credential |
+| effect | agent is not restarted | that user's calls return not-connected (§9) |
+| resets on | operator edits the row, or clicks Reconnect | **that user** reconnects their own account |
+| observable as | `bridge_given_up{agent_id}` gauge | per-user row state in the DB |
+
+The reset asymmetry is deliberate and easy to get wrong in both directions: a
+user reconnecting their account must **not** clear the operator's gate, and
+an operator clicking Reconnect must **not** silently mark every user's stale
+credential as good.
+
+#### You cannot label metrics by `user_id`
+
+This is a hard constraint the codebase already states. `metrics.py` admits
+`server_id` and `tool` as labels because they are "operator-defined and
+finite (dozens, not millions) … unlike `agent_id` in the router, which is
+caller-supplied and ephemeral." `user_id` is on the wrong side of that line.
+
+So per-user health is **never** a per-user time series. It is:
+
+  * **aggregate counters** for the operator —
+    `mcp_user_connect_failures_total{server_id, reason}` and a pool-size
+    gauge `mcp_user_connections{server_id}`;
+  * **per-user row state** in `user_mcp_credentials` (§5.2), surfaced to
+    *that user* on the webapp Connections page (§8).
+
+Two audiences, two questions: the operator's dashboard answers "is this
+server working," the user's settings page answers "is my account connected."
+Trying to serve the second from Prometheus is how a deployment acquires a
+million-series cardinality incident.
+
+#### The inference to refuse
+
+The tempting extension: *if every per-user connection is failing, the server
+must be broken — give up at the agent level.* Refuse it, for two reasons.
+
+It would stop the agent for users whose credentials are fine (a provider can
+revoke one OAuth app while the server itself is healthy). And more
+fundamentally: **`health.py` gives up on facts about the agent — it did not
+start — never on inferences about upstream state.** An aggregate failure rate
+across users is worth a log line, a metric, and possibly an operator alert.
+It is not worth an automatic stop.
+
+The asymmetry in the cost of being wrong justifies the caution: a false
+"give up" is a silent outage until someone touches the row, while a false
+"keep trying" costs one call's latency.
+
+#### What stays unobservable
+
+"The server went down while the agent is running" is invisible today —
+nothing probes the upstream between calls, and `tools/call` failures are call
+errors that never reach the gate. Per-user connections neither worsen nor fix
+this. If it ever needs fixing, the answer is a periodic catalogue-connection
+probe feeding a **new** server-reachability gauge, not an extension of the
+give-up gate — for the reason immediately above.
+
+#### Pool mechanics worth pinning now
+
+Cap the pool per server, evict on an idle TTL, and accept that the first call
+per `(server, user)` after eviction pays a cold `initialize`. That latency is
+real and belongs in the design rather than being discovered: it lands on a
+user's first call after a quiet period. Eviction must never happen mid-call —
+refcount, or only evict on return.
+
+### 4.5 The version where the question cannot arise
 
 Everything above is discipline: three layers that must be kept apart by
 convention, in a codebase where nothing structurally prevents mixing them.
@@ -536,6 +650,20 @@ are unchanged; only how the token is *obtained* differs.
     ACL, it would break the give-up gate in the worst way: the gate counts
     consecutive failures per agent, so one user's revoked token would trip it
     and stop the server **for everyone**.
+  * **Don't feed per-user connection failures into `health.py`.** §4.4. The
+    gate trips at eight consecutive failures and stops the agent for
+    *everyone*; eight users with stale tokens would take down a server that
+    is working fine. Per-credential failures get their own gate, keyed
+    `(server_id, user_id)`, reset by that user reconnecting.
+  * **Don't give up at the agent level on an aggregate inference.** §4.4.
+    "All per-user connects are failing, so the server must be down" is a
+    guess, and acting on it stops the agent for users whose credentials are
+    good. The gate gives up on facts about the agent (it did not start), not
+    on theories about the upstream.
+  * **Don't label a metric with `user_id`.** §4.4. `metrics.py` already
+    states the rule — labels must be operator-defined and finite. Per-user
+    state belongs in the row and on the user's own settings page; the
+    operator's dashboard gets aggregates.
   * **Don't make the mode set per user.** §4.3. Filter what is *offered* to
     the model, via the existing per-task `ctx.peers.visible()` hook; leave
     the agent's registered mode set as the operator's full catalogue. An
