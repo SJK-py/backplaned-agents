@@ -2,8 +2,15 @@
 
 > **Status: proposed.** No code. This doc settles two questions that must be
 > answered before any is written: **who holds a user's third-party token**
-> (§3) and **whether the credential is per-connection or per-call** (§4).
-> Everything else follows from those.
+> (§3), and **how a per-user credential coexists with an MCP server being one
+> backplane agent** (§4). Everything else follows from those.
+>
+> §4 is the one to read if you only read one. An MCP server is a single
+> agent — one `agent_id`, one ACL position, one mode set, one entry in the
+> health gate — and the failure mode of this feature is letting "per-user
+> credential" become "per-user agent". It does not have to: the platform
+> already resolves a per-user decision at call time without per-user agents,
+> every time an agent calls `ctx.llm` (§4.1).
 >
 > The prerequisites are unusually good — `ctx.user_id` already reaches the
 > bridge handler, `bp_router/security/oidc.py` is already a working OAuth2
@@ -71,8 +78,8 @@ Two gaps, both real work:
 
 ### 2.3 `user_llm_preferences` is the data-model precedent
 
-`router-resolved-preset-slots.md` §4 already argued the exact question this
-feature raises: where does a per-user value live when the router *acts* on
+`router-resolved-preset-slots.md` §4 (that doc's §4, not this one's)
+already argued the exact question this feature raises: where does a per-user value live when the router *acts* on
 it? The answer there was a dedicated table rather than the session store's
 user-scoped state, because that namespace is **writable by any agent acting
 in the user's session**, and a value under policy must not be one any agent
@@ -160,80 +167,159 @@ change with its own doc, not a paragraph inside this feature.
 have connected real accounts, at which point the migration involves
 credentials you cannot re-derive.
 
-## 4. Per-call, not per-connection
+## 4. The per-user dimension must not reach the agent layer
 
-This is where the expected cost was wrong, in the cheap direction.
+An MCP server is **one backplane agent** — one `agent_id`, one ACL position,
+one mode set, one bridge task, one entry in the health gate. That is the
+architecture's central fact about MCP and the feature has to leave it intact.
 
-### 4.1 What the client actually does
+An earlier draft of this section framed the design question as
+"per-call credentials vs per-connection credentials." **That framing was
+wrong** and it is worth recording why, because it is the trap this feature
+sets: it invites you to reason about connections as though they were
+identities, and from there "per-user connection" slides into "per-user agent."
 
-The credential is baked into a client at construction:
-`server_bridge.py:327` resolves `auth_value_ref` once per bridge run and
-passes it to `build_mcp_client` at `:339`; `mcp_client.py:251` turns it into
-`self._headers` in `__init__`, and every request reuses that dict
-(`:345`, `:391`).
+Three things were conflated:
 
-The natural conclusion is that the credential is a property of the
-*connection*, so per-user credentials mean one connection per
-`(server, user)` — which would reshape the supervisor's entire lifecycle
-model (it reconciles rows → tasks; this would make it rows × users →
-connections) and would interact badly with the per-agent give-up gate in
-`health.py` (§15.1 of the code-agents doc), which is keyed by agent, not by
-user.
+| Layer | Granularity | Who decides |
+| --- | --- | --- |
+| **Backplane identity** — who may call this agent, at what tier | per **server** | ACL rules, `agents` row |
+| **Upstream credential** — on whose behalf the call is made | per **user** | this feature |
+| **Transport connection** — an `httpx` client and an MCP handshake | whatever is convenient | private to the bridge task |
 
-**That conclusion is wrong for the current client.** `grep` for
-`Mcp-Session-Id` in `mcp_client.py` returns nothing: the bridge does not
-implement MCP's session header at all. Every `tools/call` is an independent
-`POST` carrying its own headers. So a per-user credential is a **header
-override threaded down one call path**, not a new connection:
+The first is the agent. The third is an implementation detail. Only the
+second is new, and it belongs to neither of the others.
+
+### 4.1 The precedent: this is `ctx.llm`, not a new agent
+
+The platform has already solved exactly this problem once.
+
+An LLM call is per-user in precisely the same way: the model a turn runs on
+depends on *that user's* preference intersected with *that user's* tier gate
+(`router-resolved-preset-slots.md`). Nobody built a per-user LLM agent, or a
+per-user LLM connection, or a `claude-for-alice` agent id. There is **one**
+`LlmService`; an agent sends an opaque slot key; the router resolves the
+per-user decision at call time and attaches the real credential.
+
+MCP credentials should copy that shape exactly:
+
+```
+ctx.llm.generate(slot="balanced")   →  router resolves user's preset  →  provider key
+mcp agent handler, ctx.user_id      →  router resolves user's token   →  MCP server
+```
+
+Read that way, the feature stops being "per-user agents" and becomes "a
+second thing the router resolves per user." The `user_llm_preferences` table
+(§2.3) is not merely a *data-model* precedent — it is the same pattern end to
+end.
+
+### 4.2 Connections are pooled inside the one agent, never promoted to agents
+
+The open question from §2 was whether a credential can ride per request. What
+the client does today: `server_bridge.py:327` resolves `auth_value_ref` once
+per bridge run, `:339` passes it to `build_mcp_client`, `mcp_client.py:251`
+bakes it into `self._headers` in `__init__`, and every request reuses that
+dict (`:345`, `:391`).
+
+`grep` for `Mcp-Session-Id` in `mcp_client.py` returns nothing — the bridge
+does not implement MCP's session header, so every `tools/call` is an
+independent `POST`. Per-request auth is therefore a keyword-only
+`auth_override` threaded down one path:
 
 ```
 handler(ctx, payload)                    tool_agent.py:194  — has ctx.user_id
-  └─ _call_tool_with_retry(...)          tool_agent.py:79   — pass override
+  └─ _call_tool_with_retry(...)          tool_agent.py:79
        └─ mcp_client.call_tool(...)      mcp_client.py:315 / :550 / :1085
 ```
 
-`call_tool` gains a keyword-only `auth_override`; the three implementations
-(streamable_http, sse, stdio) accept it, and **stdio ignores it** — a local
-subprocess's credential comes from its spawned environment, which is per-row
-by construction. A `per_user` stdio server is refused at the admin API.
+Two caveats survive and cannot be settled from the code alone. An upstream
+may bind authorization to the `initialize` handshake rather than to each
+request; and the missing `Mcp-Session-Id` handling is a latent bug that
+per-user auth is exactly the case to expose (a session opened under one
+user's token must never serve another's).
 
-### 4.2 Two caveats I could not resolve from the code
+**Neither caveat is an architectural fork, and that is the answer to the
+worry that opened this section.** If an upstream needs a per-user handshake,
+the fix is a **connection pool keyed by `(server_id, user_id)` living inside
+the single bridge task** — LRU, idle-evicted, hard-capped, in memory only.
+Untouched by that pool: the `agents` registry, ACL rules, `set_modes`, the
+supervisor's row→task reconcile, and the give-up gate in `health.py`.
 
-Both need a test against a real provider before committing to §4.1, and both
-are reasons the estimate could move back toward per-connection:
+The health gate matters most here, and it argues *for* the pool rather than
+merely tolerating it. It is keyed per agent and counts consecutive failures
+toward a hard stop (§15.1 of `bridge-python-code-agents.md`). If per-user
+connections were per-user *agents*, one user's revoked token would be one
+agent's repeated failure — and eight of them would trip the gate and take
+the server down **for everyone**. With a pool, a dead credential is a
+call-level error for one user, exactly as it should be.
 
-  * **`initialize` may bind authorization.** The handshake (`initialize` +
-    `tools/list`) runs once per client with the row's credential. If an
-    upstream ties authorization to the initialized session rather than to
-    each request, per-call headers will not work for that server and it needs
-    a per-user connection after all. The spec permits either.
-  * **Ignoring `Mcp-Session-Id` is a latent bug, and this is where it
-    bites.** It works today because the credential is constant, so no server
-    has had reason to care. Per-user auth is exactly the case where a server
-    would want session affinity — and if we start honoring session ids, a
-    session established under user A's token must not be reused for user B.
-    Sorting out session handling is arguably a prerequisite rather than a
-    caveat.
+So the decision is: per-call override where the upstream allows it, a
+per-user pooled connection where it does not, chosen per server and
+invisible outside the bridge task. It is a pool-sizing question, not a
+question about what an agent is.
 
-### 4.3 The catalogue problem
+### 4.3 The mode set stays operator-wide; the *offered* tool list is per user
 
-`tools/list` needs *a* credential, but the tool catalogue is a property of
-the **server** while credentials are per **user**. Whose token lists the
-tools?
+`tools/list` needs a credential, but the catalogue is a property of the
+server while credentials are per user. Resolution: a `per_user` server keeps
+an operator credential **for the catalogue only** — used for `initialize` +
+`tools/list` and the `tools_cache` write — with per-user credentials used
+exclusively for `tools/call`. One bridge per row, one mode set, unchanged.
 
-Resolution: a `per_user` server keeps an **operator credential for the
-catalogue only** — the existing `auth_value_ref`, used for `initialize` +
-`tools/list` and the `tools_cache` write — and uses per-user credentials
-exclusively for `tools/call`. This keeps the supervisor's one-bridge-per-row
-model intact and keeps `expose_to_llm` / `disabled_tools` / mode
-reconciliation working untouched.
+The obvious objection is that the mode set is then the operator's view: if a
+user's token reaches fewer tools, the agent still advertises the full set and
+the extras fail at call time. An earlier draft accepted that as a declared
+cost. It should not be accepted, because the platform already has the right
+filter point.
 
-The cost is honest and worth writing down: **the mode set is the operator's
-view, not the user's.** If a user's token can reach fewer tools than the
-operator's, the agent still advertises the full set and the extra ones fail
-at call time. Per-user tool lists would require per-user connections (§4.1)
-and per-user `set_modes`, which the router's agent model does not express —
-an agent has one mode set.
+`bp_sdk/peers.py:505` — `PeerAccess.visible(*, for_user_level=None)` already
+filters the destination catalogue **per task**, defaulting to the active
+task's `user_level` and being default-closed when there is none. The
+orchestrator builds its hand-off tool list from exactly that call
+(`orchestrator/agent.py:67`). So a per-user view of what is callable is not a
+new concept needing a new mechanism — it is an existing hook with one more
+input.
+
+Which gives the correct layering:
+
+  * **Mode set** (router, per agent) — every tool the server exposes, from
+    the operator's catalogue credential. Unchanged.
+  * **Offered tool list** (caller, per task) — filtered by whether *this*
+    user has connected *this* server, so an unconnected server's tools are
+    never put in front of the model.
+
+`expose_to_llm` is the existing precedent for the second layer: a per-server
+flag that already decides whether a server's tools reach an LLM at all,
+without touching the mode set. Per-user connection state is the same kind of
+gate with a finer key.
+
+What this does **not** fix, and what stays a declared cost: a user who *has*
+connected but whose token is scoped more narrowly than the operator's still
+sees tools their token cannot reach. Fixing that needs per-user `tools/list`,
+which needs per-user mode sets, which the router's agent model does not
+express — an agent has one mode set. §9's typed error is the answer there,
+not a filter.
+
+### 4.4 The version where the question cannot arise
+
+Everything above is discipline: three layers that must be kept apart by
+convention, in a codebase where nothing structurally prevents mixing them.
+
+Option C of §3.2 removes the question instead of managing it. If the router
+attaches the credential as the call egresses, the bridge has no per-user
+dimension **at all** — no override parameter, no pool, no hand-out endpoint,
+no per-user cache. The bridge agent stays byte-for-byte what it is today, and
+`ctx.llm`'s symmetry becomes literal rather than analogical: the router is
+the thing that holds credentials and talks to third parties, for LLMs and for
+MCP alike.
+
+The cost is real: the router becomes an MCP client, and the transport,
+retry-on-transient, give-up and session logic in `bp_mcp_bridge/mcp_client.py`
+would either be duplicated or extracted to a package both can import (the
+router must not depend on the bridge package). That is a larger change than
+Phase 2, and it is why C is sequenced last rather than first (§10) — but if
+the layering discipline above feels too thin to rely on, C is the answer, and
+this doc should be re-opened rather than worked around.
 
 ## 5. Data model
 
@@ -357,7 +443,10 @@ scheduled job whose failure mode is silent.
 4. Handler passes the token as `auth_override` into `call_tool` (§4.1).
 5. Cache the token in the bridge **in memory only**, keyed by
    `(server_id, user_id)`, until `expires_at` minus a buffer. Never to disk —
-   the state dir is the thing §3.1 is about.
+   the state dir is the thing §3.1 is about. For a server that needs a
+   per-user handshake, this cache is the connection pool of §4.2 rather than
+   a bare token map; either way it is private to the one bridge task and
+   never becomes an agent.
 
 The existing `_call_tool_with_retry` transient-retry policy applies
 unchanged, with one addition: a `401`/`403` from the upstream should
@@ -413,7 +502,8 @@ the not-connected error class.
 
 This is the phase that earns its keep: it exercises the entire per-user
 path — custody, hand-out, override, catalogue split, failure mode — for a
-fraction of the work, and it is the only way to settle §4.2's two caveats
+fraction of the work, and it is the only way to settle §4.2's two upstream
+caveats
 against a real provider. If per-call auth turns out not to work, we learn it
 here, before building an OAuth flow on top of the assumption.
 
@@ -438,6 +528,19 @@ are unchanged; only how the token is *obtained* differs.
 
 ## 12. What not to do
 
+  * **Don't promote a connection to an agent.** §4. An MCP server is one
+    backplane agent and stays one. If an upstream needs a per-user handshake,
+    that is a pooled connection *inside* the single bridge task — never a
+    `mcp_<server>_<user>` agent id, never a per-user row in `agents`, never a
+    per-user ACL rule. Beyond the obvious explosion in the id space and the
+    ACL, it would break the give-up gate in the worst way: the gate counts
+    consecutive failures per agent, so one user's revoked token would trip it
+    and stop the server **for everyone**.
+  * **Don't make the mode set per user.** §4.3. Filter what is *offered* to
+    the model, via the existing per-task `ctx.peers.visible()` hook; leave
+    the agent's registered mode set as the operator's full catalogue. An
+    agent has one mode set — that is a property of the router's agent model,
+    not an inconvenience to route around.
   * **Don't let the bridge hold a refresh token or an OAuth client secret.**
     §3.1–3.2. It holds the invitation-minting service secret and every
     agent's credentials, and it runs operator code with unrestricted egress.

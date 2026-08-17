@@ -30,7 +30,7 @@ a doc's status changes, update it in both places.
 
 | doc | what it covers |
 | --- | --- |
-| [`mcp-per-user-oauth.md`](./mcp-per-user-oauth.md) | A user connecting *their own* account to an MCP server from the webapp, instead of every user's call carrying the operator's one credential. Feasible — `ctx.user_id` already reaches the bridge handler and `security/oidc.py` is already an OAuth2 client — but **blocked on there being no encryption at rest** (§3.3), and the custody question (§3) has to be settled before any code. Ships as a pasted bearer token first (§10), OAuth second. |
+| [`mcp-per-user-oauth.md`](./mcp-per-user-oauth.md) | A user connecting *their own* account to an MCP server from the webapp, instead of every user's call carrying the operator's one credential. Feasible — `ctx.user_id` already reaches the bridge handler and `security/oidc.py` is already an OAuth2 client — but **blocked on there being no encryption at rest** (§3.3). **§4 is the section that matters:** an MCP server is *one* agent, and the feature's failure mode is letting "per-user credential" become "per-user agent". It doesn't have to — `ctx.llm` already resolves a per-user decision per call with no per-user agents, and connections stay pooled inside the one bridge task. Ships as a pasted bearer token first (§10), OAuth second. |
 
 ## Deferred / superseded
 
